@@ -36,10 +36,10 @@ impl Storage for MockStorage {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50051".parse().unwrap();
+    let addr = "0.0.0.0:50051".parse().unwrap();
     let greeter = MockStorage::default();
 
-    println!("GreeterServer listening on {addr}");
+    println!("Server listening on {addr}");
 
     Server::builder()
         .add_service(StorageServer::new(greeter))
