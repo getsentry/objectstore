@@ -5,4 +5,8 @@ edition = "2024"
 
 [dependencies]
 proto-codegen = { path = "../proto-codegen" }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+rusqlite = "0.36.0"
+uuid = { version = "1.17.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"

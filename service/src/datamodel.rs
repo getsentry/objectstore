@@ -1,5 +1,13 @@
 #![allow(unused)]
 
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct StorageId {
+    pub id: Uuid,
+}
+
+#[repr(u8)]
 pub enum Compression {
     None,
     Zstd,
@@ -17,10 +25,11 @@ pub struct BlobPart {
     pub compressed_size: u32,
 
     // Location of the Part
-    pub segment_id: u64,
+    pub segment_id: Uuid,
     pub segment_offset: u32,
 }
 
+#[repr(u8)]
 pub enum StorageLocation {
     /// Segment stored/cached on local disk
     Local,
