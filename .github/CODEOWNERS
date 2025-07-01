@@ -1,5 +1,5 @@
 # Default code owners
-*   @getsentry/team-foundational-storage
+*   @getsentry/foundational-storage
 
 # Legal
-/LICENSE.md  @getsentry/owners-legal  @getsentry/team-foundational-storage
+/LICENSE.md   @getsentry/foundational-storage @getsentry/owners-legal
