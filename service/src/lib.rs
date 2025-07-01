@@ -2,3 +2,5 @@
 //! providing durable access to underlying blobs.
 //!
 //! It is designed as a library crate to be used by the `server`.
+
+mod datamodel;
