@@ -10,3 +10,19 @@ It currently contains the following pieces:
   as well as external clients.
 - `service`: The core blob storage primitives.
 - `stresstest`: A stresstest binary that can run various workloads against a storage backend.
+
+## Development
+
+Ensure `protoc` and the latest stable Rust toolchain are installed on your machine. Then, run the server with:
+
+```sh
+cargo run
+```
+
+To run tests:
+
+```sh
+cargo test --workspace --all-features
+```
+
+We recommend using Rust Analyzer and clippy.
