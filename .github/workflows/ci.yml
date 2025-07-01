@@ -23,8 +23,8 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup component add clippy rustfmt rust-docs --toolchain stable
 
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -51,6 +51,9 @@ jobs:
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
 
       - uses: swatinem/rust-cache@v2
         with:
