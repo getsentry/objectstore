@@ -48,8 +48,7 @@ impl SeaweedClient {
             if payload.len == 0 {
                 return Poll::Ready(None);
             }
-            let mut read_buf = Vec::with_capacity(1024 * 1024);
-            read_buf.resize(1024 * 1024, 0);
+            let mut read_buf = vec![0; 1024 * 1024];
             let read_len = payload.read(&mut read_buf).unwrap();
             read_buf.truncate(read_len);
 
@@ -97,7 +96,7 @@ impl SeaweedClient {
         let mut expected_payload = Vec::new();
         payload.read_to_end(&mut expected_payload).unwrap();
 
-        if file_contents != &expected_payload {
+        if file_contents != expected_payload {
             panic!("readback mismatch?");
         }
     }

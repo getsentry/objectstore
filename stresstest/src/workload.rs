@@ -54,7 +54,7 @@ impl WorkloadBuilder {
 
         let size_distribution = LogNormal::new(mu, sigma).unwrap();
         let action_distribution =
-            WeightedIndex::new(&[self.write_weight, self.read_weight, self.delete_weight]).unwrap();
+            WeightedIndex::new([self.write_weight, self.read_weight, self.delete_weight]).unwrap();
 
         Workload {
             name: self.name,

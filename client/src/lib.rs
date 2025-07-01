@@ -42,12 +42,14 @@ pub struct StorageId {
     id: String,
 }
 impl StorageId {
-    pub fn from_str(id: &str) -> Self {
-        Self { id: id.into() }
+    pub fn new(id: String) -> Self {
+        Self { id }
     }
 }
 
-static MOCK_STORAGE: LazyLock<Mutex<HashMap<(&'static str, StorageScope, StorageId), Arc<[u8]>>>> =
+type StorageKey = (&'static str, StorageScope, StorageId);
+
+static MOCK_STORAGE: LazyLock<Mutex<HashMap<StorageKey, Arc<[u8]>>>> =
     LazyLock::new(Default::default);
 
 pub struct StorageClient {
