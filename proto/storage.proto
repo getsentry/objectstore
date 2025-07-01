@@ -1,0 +1,47 @@
+syntax = "proto3";
+package storage;
+
+service Storage {
+    // TODO
+    rpc PutBlob (AllocateBlobRequest) returns (AllocateBlobResponse);
+}
+
+// TODO: instead of using `string`/`string` here, maybe we want to "compress" the scope down to a single `u64`?
+message Scope {
+    string usecase = 1;
+    string scope = 2;
+}
+
+// This is just an opaque newtype around a string/bytes for now
+message StorageId {
+    bytes id = 1;
+}
+
+// This internal call underlies the `put_blob` and `signed_put_url` client API calls.
+message AllocateBlobRequest {
+    Scope scope = 1;
+    optional StorageId id = 2;
+}
+message AllocateBlobResponse {
+    StorageId id = 1;
+    string signed_put_url = 2;
+}
+
+// This internal call underlies the `get_blob` and `signed_get_url`,
+// as well as `keepalive` client API calls.
+message GetBlobLocationRequest {
+    Scope scope = 1;
+    StorageId id = 2;
+}
+message GetBlobLocationResponse {
+    string signed_get_url = 1;
+}
+
+message AssembleFromPartsRequest {
+    Scope scope = 1;
+    StorageId id = 2;
+    repeated StorageId parts = 3;
+}
+message AssembleFromPartsResponse {
+    string signed_get_url = 1;
+}
