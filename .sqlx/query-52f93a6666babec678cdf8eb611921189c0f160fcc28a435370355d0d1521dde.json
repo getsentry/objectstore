@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO blobs\n        (id, parts)\n        VALUES\n        ($1, $2);",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "52f93a6666babec678cdf8eb611921189c0f160fcc28a435370355d0d1521dde"
+}
