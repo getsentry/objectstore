@@ -112,11 +112,8 @@ impl StorageService {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn stores_in_segments() {
-        let db = crate::db::initialize_db("postgres://postgres@localhost")
-            .await
-            .unwrap();
+    #[sqlx::test]
+    async fn stores_in_segments(db: PgPool) {
         let tempdir = tempfile::tempdir().unwrap();
         let service = StorageService::new(db, tempdir.path());
 
