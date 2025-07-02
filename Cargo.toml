@@ -1,13 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-    "client",
-    "proto-codegen",
-    "server",
-    "service",
-    "stresstest",
-    "migration",
-]
+members = ["client", "proto-codegen", "server", "service", "stresstest"]
 default-members = ["server"]
 
 [profile.dev]

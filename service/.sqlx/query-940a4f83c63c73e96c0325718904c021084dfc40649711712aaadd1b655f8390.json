@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO parts\n        (part_size, compression, compressed_size, segment_id, segment_offset)\n        VALUES\n        ($1, $2, $3, $4, $5)\n        RETURNING id;",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int2",
+        "Int4",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "940a4f83c63c73e96c0325718904c021084dfc40649711712aaadd1b655f8390"
+}

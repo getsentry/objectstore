@@ -8,24 +8,21 @@ use std::io::{Read, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait as _, DatabaseConnection, EntityTrait as _};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-use crate::db::part;
 
 mod db;
 
 pub use db::initialize_db;
 
 pub struct StorageService {
-    db: DatabaseConnection,
+    db: PgPool,
     path: PathBuf,
     current_segment: Mutex<Option<Uuid>>,
 }
 
 impl StorageService {
-    pub fn new(db: DatabaseConnection, path: &Path) -> Self {
+    pub fn new(db: PgPool, path: &Path) -> Self {
         Self {
             path: path.into(),
             db,
@@ -52,22 +49,45 @@ impl StorageService {
         segment_file.sync_data()?;
         drop(segment_file);
 
-        let part = part::ActiveModel {
-            part_size: Set(part_size as i32),
-            compression: Set(part::Compression::None),
-            compressed_size: Set(part_size as i32),
+        let id = sqlx::query!(
+            r#"
+        INSERT INTO parts
+        (part_size, compression, compressed_size, segment_id, segment_offset)
+        VALUES
+        ($1, $2, $3, $4, $5)
+        RETURNING id;"#,
+            part_size as i32,
+            0,
+            part_size as i32,
+            segment,
+            segment_offset as i32,
+        )
+        .fetch_one(&self.db)
+        .await?;
 
-            segment_id: Set(segment),
-            segment_offset: Set(segment_offset as i32),
-            ..Default::default()
-        };
-        let part = part.insert(&self.db).await?;
-
-        Ok(part.id)
+        Ok(id.id)
     }
 
     pub async fn get_part(&self, id: i64) -> anyhow::Result<Option<Arc<[u8]>>> {
-        let Some(part) = part::Entity::find_by_id(id).one(&self.db).await? else {
+        #[allow(unused)]
+        struct Part {
+            part_size: i32,
+            compression: i16,
+            compressed_size: i32,
+            segment_id: Uuid,
+            segment_offset: i32,
+        }
+        let Some(part) = sqlx::query_as!(
+            Part,
+            r#"
+        SELECT
+        part_size, "compression", compressed_size, segment_id, segment_offset
+        FROM parts WHERE id = $1"#,
+            id
+        )
+        .fetch_optional(&self.db)
+        .await?
+        else {
             return Ok(None);
         };
 

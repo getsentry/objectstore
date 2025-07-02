@@ -1,14 +1,9 @@
-use migration::{Migrator, MigratorTrait};
-use sea_orm::{Database, DatabaseConnection};
+use sqlx::PgPool;
 
-pub async fn initialize_db(database_url: &str) -> anyhow::Result<DatabaseConnection> {
-    let connection = Database::connect(database_url).await?;
-    Migrator::up(&connection, None).await?;
+pub async fn initialize_db(database_url: &str) -> anyhow::Result<PgPool> {
+    let db = PgPool::connect(database_url).await?;
 
-    Ok(connection)
+    sqlx::migrate!().run(&db).await?;
+
+    Ok(db)
 }
-
-pub mod prelude;
-
-pub mod blob;
-pub mod part;

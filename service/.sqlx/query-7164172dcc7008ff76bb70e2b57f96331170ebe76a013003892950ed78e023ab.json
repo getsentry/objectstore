@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n        part_size, \"compression\", compressed_size, segment_id, segment_offset\n        FROM parts WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "part_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "compression",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 2,
+        "name": "compressed_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "segment_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "segment_offset",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7164172dcc7008ff76bb70e2b57f96331170ebe76a013003892950ed78e023ab"
+}
