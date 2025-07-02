@@ -1,0 +1,12 @@
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-std = { version = "1", features = ["attributes", "tokio1"] }
+sea-orm-migration = { version = "1.1.0", features = [
+  "sqlx-postgres",
+  "runtime-tokio-rustls",
+] }

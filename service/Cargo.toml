@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
 proto-codegen = { path = "../proto-codegen" }
-rusqlite = "0.36.0"
+migration = { path = "../migration" }
+sea-orm = { version = "1.1.0", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+] }
 uuid = { version = "1.17.0", features = ["v4"] }
+tokio = { version = "1.46.0", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3.20.0"

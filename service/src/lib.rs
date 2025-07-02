@@ -3,54 +3,29 @@
 //!
 //! It is designed as a library crate to be used by the `server`.
 
-#![allow(unused)]
-
 use std::fs::OpenOptions;
 use std::io::{Read, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use sea_orm::ActiveValue::Set;
+use sea_orm::{ActiveModelTrait as _, DatabaseConnection, EntityTrait as _};
 use uuid::Uuid;
 
-use crate::datamodel::{BlobPart, StorageId};
+use crate::db::part;
 
-mod datamodel;
+mod db;
 
-struct StorageService {
+pub use db::initialize_db;
+
+pub struct StorageService {
+    db: DatabaseConnection,
     path: PathBuf,
-    db: Connection,
     current_segment: Mutex<Option<Uuid>>,
 }
 
 impl StorageService {
-    pub fn new(path: &Path) -> Self {
-        let db_path = path.join("db.sqlite");
-        let db = Connection::open(db_path).unwrap();
-        //         db.execute(
-        //             r#"
-        // CREATE TABLE IF NOT EXISTS segments (
-        //     id   INTEGER PRIMARY KEY,
-        //     location INTEGER NOT NULL
-        // )"#,
-        //             (),
-        //         )
-        //         .unwrap();
-        db.execute(
-            r#"
-CREATE TABLE IF NOT EXISTS blobs (
-    id BLOB NOT NULL,
-    compression INTEGER NOT NULL,
-    part_size INTEGER NOT NULL,
-    compressed_size INTEGER NOT NULL,
-
-    segment BLOB NOT NULL,
-    segment_offset INTEGER NOT NULL
-)"#,
-            (),
-        )
-        .unwrap();
-
+    pub fn new(db: DatabaseConnection, path: &Path) -> Self {
         Self {
             path: path.into(),
             db,
@@ -58,69 +33,58 @@ CREATE TABLE IF NOT EXISTS blobs (
         }
     }
 
-    pub fn put_blob(&self, id: StorageId, contents: &[u8]) {
-        let mut segment = self.current_segment.lock().unwrap();
-        let current_segment = segment.get_or_insert_with(Uuid::new_v4);
+    pub async fn put_part(&self, contents: &[u8]) -> anyhow::Result<i64> {
+        let part_size = contents.len();
 
-        let segment_path = self.path.join(format!("{current_segment}.bin"));
+        let segment = {
+            let mut segment = self.current_segment.lock().unwrap();
+            *segment.get_or_insert_with(Uuid::new_v4)
+        };
+
+        let segment_path = self.path.join(format!("{segment}.bin"));
         let mut segment_file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open(segment_path)
-            .unwrap();
+            .open(segment_path)?;
 
-        let part_size = contents.len();
-
-        let segment_offset = segment_file.stream_position().unwrap();
-        segment_file.write_all(contents).unwrap();
-        segment_file.sync_all().unwrap();
+        let segment_offset = segment_file.stream_position()?;
+        segment_file.write_all(contents)?;
+        segment_file.sync_data()?;
         drop(segment_file);
 
-        self.db
-            .execute(
-                "INSERT INTO blobs
-            (id, compression, part_size, compressed_size, segment, segment_offset)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (
-                    id.id.as_bytes(),
-                    0,
-                    part_size,
-                    part_size,
-                    current_segment.as_bytes(),
-                    segment_offset,
-                ),
-            )
-            .unwrap();
+        let part = part::ActiveModel {
+            part_size: Set(part_size as i32),
+            compression: Set(part::Compression::None),
+            compressed_size: Set(part_size as i32),
+
+            segment_id: Set(segment),
+            segment_offset: Set(segment_offset as i32),
+            ..Default::default()
+        };
+        let part = part.insert(&self.db).await?;
+
+        Ok(part.id)
     }
 
-    pub fn get_blob(&self, id: StorageId) -> Arc<[u8]> {
-        let mut stmt = self.db.prepare("SELECT compression, part_size, compressed_size, segment, segment_offset FROM blobs WHERE id = ?1").unwrap();
-        let blob = stmt
-            .query_one([id.id.as_bytes()], |row| {
-                Ok(BlobPart {
-                    compression: datamodel::Compression::None,
-                    part_size: row.get(1)?,
-                    compressed_size: row.get(2)?,
-                    segment_id: Uuid::from_bytes(row.get(3)?),
-                    segment_offset: row.get(4)?,
-                })
-            })
-            .unwrap();
+    pub async fn get_part(&self, id: i64) -> anyhow::Result<Option<Arc<[u8]>>> {
+        let Some(part) = part::Entity::find_by_id(id).one(&self.db).await? else {
+            return Ok(None);
+        };
 
-        let segment_path = self.path.join(format!("{}.bin", blob.segment_id));
+        let segment_path = self.path.join(format!("{}.bin", part.segment_id));
         let mut segment_file = OpenOptions::new().read(true).open(segment_path).unwrap();
 
         segment_file
-            .seek(SeekFrom::Start(blob.segment_offset as u64))
+            .seek(SeekFrom::Start(part.segment_offset as u64))
             .unwrap();
 
-        let mut buf = vec![0; blob.part_size as usize];
+        let mut buf = vec![0; part.part_size as usize];
         segment_file.read_exact(&mut buf).unwrap();
 
         drop(segment_file);
 
         // FIXME: this reallocates. why the hell can’t we read into a `Arc<[MaybeUninit]>`?
-        buf.into()
+        Ok(Some(buf.into()))
     }
 }
 
@@ -128,15 +92,18 @@ CREATE TABLE IF NOT EXISTS blobs (
 mod tests {
     use super::*;
 
-    #[test]
-    fn stores_in_segments() {
+    #[tokio::test]
+    async fn stores_in_segments() {
+        let db = crate::db::initialize_db("postgres://postgres@localhost")
+            .await
+            .unwrap();
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path());
+        let service = StorageService::new(db, tempdir.path());
 
         let blob: &[u8] = b"oh hai!";
-        let id = StorageId { id: Uuid::new_v4() };
-        service.put_blob(id.clone(), blob);
+        let id = service.put_part(blob).await.unwrap();
 
-        assert_eq!(service.get_blob(id).as_ref(), blob);
+        let got_blob = service.get_part(id).await.unwrap();
+        assert_eq!(got_blob.unwrap().as_ref(), blob);
     }
 }
