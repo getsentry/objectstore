@@ -29,7 +29,7 @@ impl Config {
 
         let mut figment = figment::Figment::from(Serialized::defaults(Config::default()));
         if let Some(config_path) = &args.config {
-            figment = figment.merge(Yaml::file(config_path).nested());
+            figment = figment.merge(Yaml::file(config_path));
         }
         let config = figment.merge(Env::prefixed(ENV_PREFIX)).extract()?;
 
