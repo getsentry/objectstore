@@ -19,6 +19,7 @@ use crate::datamodel::{
     Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
 };
 
+#[derive(Debug)]
 pub struct StorageService {
     file_path: PathBuf,
     part_path: PathBuf,
