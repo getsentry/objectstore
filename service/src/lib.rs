@@ -38,30 +38,9 @@ impl StorageService {
         })
     }
 
-    pub fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
-        let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
-
-        let file_metadata = File {
-            magic: FILE_MAGIC,
-            version: FILE_VERSION.into(),
-            num_parts: (parts.len() as u32).into(),
-            file_size: file_size.into(),
-        };
-
-        let file_path = self.file_path.join(format!("{key}.bin"));
-        let file_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(file_path)?;
-
-        let mut writer = BufWriter::new(file_file);
-
-        writer.write_all(file_metadata.as_bytes())?;
-        writer.write_all(parts.as_bytes())?;
-
-        let part_file = writer.into_inner()?;
-        part_file.sync_data()?;
-        drop(part_file);
+    pub fn put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
+        let file_part = self.put_part(contents)?;
+        self.assemble_file_from_parts(key, &[file_part])?;
 
         Ok(())
     }
@@ -99,7 +78,35 @@ impl StorageService {
         Ok(Some(contents))
     }
 
-    pub fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
+    fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
+        let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
+
+        let file_metadata = File {
+            magic: FILE_MAGIC,
+            version: FILE_VERSION.into(),
+            num_parts: (parts.len() as u32).into(),
+            file_size: file_size.into(),
+        };
+
+        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(file_path)?;
+
+        let mut writer = BufWriter::new(file_file);
+
+        writer.write_all(file_metadata.as_bytes())?;
+        writer.write_all(parts.as_bytes())?;
+
+        let part_file = writer.into_inner()?;
+        part_file.sync_data()?;
+        drop(part_file);
+
+        Ok(())
+    }
+
+    fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
         let part_size = contents.len() as u32;
 
         let compressed = zstd::bulk::compress(contents, 0)?;
@@ -136,7 +143,7 @@ impl StorageService {
         })
     }
 
-    pub fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
+    fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
         let part_path = self.part_path.join(format!("{part_uuid}.bin"));
         let part_file = match OpenOptions::new().read(true).open(part_path) {
             Ok(part_file) => part_file,
