@@ -204,6 +204,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "elegant-departure"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "259261d0b72dc618a177af380b2944fa44e22fedbdabb920f7b47edffb1df337"
+dependencies = [
+ "futures",
+ "lazy_static",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1397,6 +1410,7 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "elegant-departure",
  "proto-codegen",
  "service",
  "tokio",
