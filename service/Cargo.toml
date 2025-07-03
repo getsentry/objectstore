@@ -5,18 +5,12 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+pack1 = "1.0.0"
 proto-codegen = { path = "../proto-codegen" }
-sqlx = { version = "0.8", features = [
-    "derive",
-    "macros",
-    "migrate",
-    "postgres",
-    "runtime-tokio",
-    "tls-rustls",
-    "uuid",
-] }
-uuid = { version = "1.17.0", features = ["v4"] }
 tokio = { version = "1.46.0", features = ["full"] }
+uuid = { version = "1.17.0", features = ["v4", "v7"] }
+watto = "0.2.0"
+zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3.20.0"

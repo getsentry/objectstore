@@ -3,143 +3,166 @@
 //!
 //! It is designed as a library crate to be used by the `server`.
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek as _, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+mod datamodel;
 
-use sqlx::PgPool;
+use std::fs::OpenOptions;
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::mem;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 use uuid::Uuid;
 
-mod db;
+use watto::Pod;
 
-pub use db::initialize_db;
-
-#[allow(unused)]
-#[derive(Debug)]
-struct Part {
-    part_size: i32,
-    compression: i16,
-    compressed_size: i32,
-    segment_id: Uuid,
-    segment_offset: i32,
-}
+use crate::datamodel::{
+    Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
+};
 
 pub struct StorageService {
-    db: PgPool,
-    path: PathBuf,
-    current_segment: Mutex<Option<Uuid>>,
+    file_path: PathBuf,
+    part_path: PathBuf,
 }
 
 impl StorageService {
-    pub fn new(db: PgPool, path: &Path) -> Self {
-        Self {
-            path: path.into(),
-            db,
-            current_segment: Default::default(),
-        }
+    pub fn new(path: &Path) -> anyhow::Result<Self> {
+        let file_path = path.join("files");
+        let part_path = path.join("parts");
+
+        std::fs::create_dir_all(&file_path)?;
+        std::fs::create_dir_all(&part_path)?;
+
+        Ok(Self {
+            file_path,
+            part_path,
+        })
     }
 
-    pub async fn assemble_file_from_parts(&self, id: &str, parts: &[i64]) -> anyhow::Result<()> {
-        sqlx::query!(
-            r#"
-        INSERT INTO blobs
-        (id, parts)
-        VALUES
-        ($1, $2);"#,
-            id,
-            parts,
-        )
-        .execute(&self.db)
-        .await?;
+    pub fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
+        let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
+
+        let file_metadata = File {
+            magic: FILE_MAGIC,
+            version: FILE_VERSION.into(),
+            num_parts: (parts.len() as u32).into(),
+            file_size: file_size.into(),
+        };
+
+        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(file_path)?;
+
+        let mut writer = BufWriter::new(file_file);
+
+        writer.write_all(file_metadata.as_bytes())?;
+        writer.write_all(parts.as_bytes())?;
+
+        let part_file = writer.into_inner()?;
+        part_file.sync_data()?;
+        drop(part_file);
 
         Ok(())
     }
 
-    async fn get_file_parts(&self, id: &str) -> anyhow::Result<Vec<Part>> {
-        let parts = sqlx::query_as!(
-            Part,
-            r#"
-            SELECT p.part_size, p."compression", p.compressed_size, p.segment_id, p.segment_offset
-            FROM (SELECT unnest(parts) AS id FROM blobs WHERE id = $1) AS part_id
-            JOIN parts AS p ON p.id = part_id.id;"#,
-            id,
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        Ok(parts)
-    }
-
-    pub async fn put_part(&self, contents: &[u8]) -> anyhow::Result<i64> {
-        let part_size = contents.len();
-
-        let segment = {
-            let mut segment = self.current_segment.lock().unwrap();
-            *segment.get_or_insert_with(Uuid::new_v4)
+    pub fn get_file(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_file = match OpenOptions::new().read(true).open(file_path) {
+            Ok(file_file) => file_file,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            err => err?,
         };
 
-        let segment_path = self.path.join(format!("{segment}.bin"));
-        let mut segment_file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(segment_path)?;
+        let mut reader = BufReader::new(file_file);
 
-        let segment_offset = segment_file.seek(SeekFrom::End(0))?;
-        segment_file.write_all(contents)?;
-        segment_file.sync_data()?;
-        drop(segment_file);
+        let mut metadata_buf = vec![0; mem::size_of::<Part>()];
+        reader.read_exact(&mut metadata_buf)?;
+        let file_metadata = File::ref_from_bytes(&metadata_buf).context("reading File metadata")?;
 
-        let id = sqlx::query!(
-            r#"
-        INSERT INTO parts
-        (part_size, compression, compressed_size, segment_id, segment_offset)
-        VALUES
-        ($1, $2, $3, $4, $5)
-        RETURNING id;"#,
-            part_size as i32,
-            0,
-            part_size as i32,
-            segment,
-            segment_offset as i32,
-        )
-        .fetch_one(&self.db)
-        .await?;
+        let mut parts_buf =
+            vec![0; mem::size_of::<FilePart>() * file_metadata.num_parts.get() as usize];
+        reader.read_exact(&mut parts_buf)?;
+        let parts =
+            FilePart::slice_from_bytes(&parts_buf).context("reading File Parts metadata")?;
 
-        Ok(id.id)
-    }
+        let mut contents = Vec::with_capacity(file_metadata.file_size.get() as usize);
+        for part in parts {
+            let part_contents = self
+                .get_part(Uuid::from_bytes(part.part_uuid))?
+                .context("part not found")?;
+            contents.extend_from_slice(&part_contents);
+        }
 
-    pub async fn get_part(&self, id: i64) -> anyhow::Result<Option<Vec<u8>>> {
-        let Some(part) = sqlx::query_as!(
-            Part,
-            r#"
-        SELECT
-        part_size, "compression", compressed_size, segment_id, segment_offset
-        FROM parts WHERE id = $1"#,
-            id
-        )
-        .fetch_optional(&self.db)
-        .await?
-        else {
-            return Ok(None);
-        };
-
-        let contents = self.get_part_from_storage(&part).await?;
         Ok(Some(contents))
     }
 
-    async fn get_part_from_storage(&self, part: &Part) -> anyhow::Result<Vec<u8>> {
-        let segment_path = self.path.join(format!("{}.bin", part.segment_id));
-        let mut segment_file = OpenOptions::new().read(true).open(segment_path)?;
+    pub fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
+        let part_size = contents.len() as u32;
 
-        segment_file.seek(SeekFrom::Start(part.segment_offset as u64))?;
+        let compressed = zstd::bulk::compress(contents, 0)?;
+        let compressed_size = compressed.len() as u32;
 
-        let mut buf = vec![0; part.part_size as usize];
-        segment_file.read_exact(&mut buf)?;
+        let part_metadata = Part {
+            magic: PART_MAGIC,
+            version: PART_VERSION.into(),
+            part_size: part_size.into(),
+            compression_algorithm: Compression::Zstd as u8,
+            _padding: [0; 3],
+            compressed_size: compressed_size.into(),
+        };
 
-        drop(segment_file);
+        let part_uuid = Uuid::new_v4();
+        let part_path = self.part_path.join(format!("{part_uuid}.bin"));
+        let part_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part_path)?;
 
-        Ok(buf)
+        let mut writer = BufWriter::new(part_file);
+
+        writer.write_all(part_metadata.as_bytes())?;
+        writer.write_all(&compressed)?;
+
+        let part_file = writer.into_inner()?;
+        part_file.sync_data()?;
+        drop(part_file);
+
+        Ok(FilePart {
+            part_size: part_size.into(),
+            part_uuid: part_uuid.into_bytes(),
+        })
+    }
+
+    pub fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
+        let part_path = self.part_path.join(format!("{part_uuid}.bin"));
+        let part_file = match OpenOptions::new().read(true).open(part_path) {
+            Ok(part_file) => part_file,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            err => err?,
+        };
+
+        let mut reader = BufReader::new(part_file);
+
+        let mut metadata_buf = vec![0; mem::size_of::<Part>()];
+        reader.read_exact(&mut metadata_buf)?;
+        let part_metadata = Part::ref_from_bytes(&metadata_buf).context("reading Part metadata")?;
+
+        // TODO: verify magic, version, etc…
+        let contents = match part_metadata.compression_algorithm {
+            1 /* Zstd */ => zstd::decode_all(reader)?,
+            _ => {
+                let mut buf = Vec::with_capacity(part_metadata.part_size.get() as usize);
+                reader.read_to_end(&mut buf)?;
+                buf
+            }
+        };
+
+        Ok(Some(contents))
     }
 }
 
@@ -147,38 +170,35 @@ impl StorageService {
 mod tests {
     use super::*;
 
-    #[sqlx::test]
-    async fn stores_in_segments(db: PgPool) {
+    #[test]
+    fn stores_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(db, tempdir.path());
+        let service = StorageService::new(tempdir.path()).unwrap();
 
-        let blob: &[u8] = b"oh hai!";
-        let id = service.put_part(blob).await.unwrap();
+        let file_part = service.put_part(b"oh hai!").unwrap();
 
-        let got_blob = service.get_part(id).await.unwrap();
-        assert_eq!(got_blob.unwrap(), blob);
-    }
-
-    #[sqlx::test]
-    async fn stores_blob_as_parts(db: PgPool) {
-        let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(db, tempdir.path());
-
-        let part1 = service.put_part(b"oh ").await.unwrap();
-        let part2 = service.put_part(b"hai!").await.unwrap();
-        service
-            .assemble_file_from_parts("some/file/id", &[part1, part2])
-            .await
+        let read_part = service
+            .get_part(Uuid::from_bytes(file_part.part_uuid))
+            .unwrap()
             .unwrap();
 
-        let parts = service.get_file_parts("some/file/id").await.unwrap();
+        assert_eq!(read_part, b"oh hai!");
+    }
 
-        let mut contents = vec![];
-        for part in parts {
-            let part = service.get_part_from_storage(&part).await.unwrap();
-            contents.extend_from_slice(&part);
-        }
+    #[test]
+    fn assembles_file_from_parts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let service = StorageService::new(tempdir.path()).unwrap();
 
-        assert_eq!(contents, b"oh hai!");
+        let part1 = service.put_part(b"oh ").unwrap();
+        let part2 = service.put_part(b"hai!").unwrap();
+
+        service
+            .assemble_file_from_parts("the_file_key", &[part1, part2])
+            .unwrap();
+
+        let file_contents = service.get_file("the_file_key").unwrap().unwrap();
+
+        assert_eq!(file_contents, b"oh hai!");
     }
 }
