@@ -37,7 +37,8 @@ RUN apt-get update \
 
 ENV \
     SERVER_UID=10001 \
-    SERVER_GID=10001
+    SERVER_GID=10001 \
+    FSS_PATH="/data"
 
 # Create a new user and group with fixed uid/gid
 RUN groupadd --system fss --gid $SERVER_GID \
