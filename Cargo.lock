@@ -1549,6 +1549,7 @@ dependencies = [
  "service",
  "tokio",
  "tonic",
+ "uuid",
 ]
 
 [[package]]

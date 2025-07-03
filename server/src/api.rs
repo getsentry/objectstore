@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use api::storage::storage_server::{Storage, StorageServer};
-use api::storage::{AllocateBlobRequest, AllocateBlobResponse};
+use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
 use service::StorageService;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use crate::config::Config;
 
@@ -16,23 +17,22 @@ impl StorageServiceImpl {
         Self { service }
     }
 
-    pub fn put_blob(&self, request: AllocateBlobRequest) -> Result<AllocateBlobResponse> {
-        // Here you would handle the blob upload logic.
-        println!("Received a blob upload request: {:?}", request);
+    pub fn put_blob(&self, request: PutBlobRequest) -> Result<PutBlobResponse> {
+        let scope = request.scope.context("scope is required")?;
+        let key = request.key.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let key = format!("{}/{}/{}", scope.usecase, scope.scope, key);
 
-        let Some(storage_id) = request.id else {
-            anyhow::bail!("storage id is required");
-        };
+        self.service.put_file(&key, &request.contents)?;
 
-        let key = str::from_utf8(&storage_id.id)?;
-        self.service.put_file(key, b"")?;
+        Ok(PutBlobResponse { key })
+    }
 
-        let response = AllocateBlobResponse {
-            id: Some(storage_id),
-            signed_put_url: "https://localhost:5000/mocked-upload".to_owned(),
-        };
+    pub fn get_blob(&self, request: GetBlobRequest) -> Result<GetBlobResponse> {
+        let scope = request.scope.context("scope is required")?;
+        let key = format!("{}/{}/{}", scope.usecase, scope.scope, request.key);
 
-        Ok(response)
+        let contents = self.service.get_file(&key)?.context("not found")?;
+        Ok(GetBlobResponse { contents })
     }
 }
 
@@ -40,9 +40,17 @@ impl StorageServiceImpl {
 impl Storage for StorageServiceImpl {
     async fn put_blob(
         &self,
-        request: Request<AllocateBlobRequest>,
-    ) -> Result<Response<AllocateBlobResponse>, Status> {
+        request: Request<PutBlobRequest>,
+    ) -> Result<Response<PutBlobResponse>, Status> {
         self.put_blob(request.into_inner())
+            .map(Response::new)
+            .map_err(|e| Status::from_error(e.into_boxed_dyn_error()))
+    }
+    async fn get_blob(
+        &self,
+        request: Request<GetBlobRequest>,
+    ) -> Result<Response<GetBlobResponse>, Status> {
+        self.get_blob(request.into_inner())
             .map(Response::new)
             .map_err(|e| Status::from_error(e.into_boxed_dyn_error()))
     }
