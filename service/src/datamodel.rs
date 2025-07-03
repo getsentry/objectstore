@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use pack1::{U16LE, U32LE, U64LE};
 use watto::Pod;
 

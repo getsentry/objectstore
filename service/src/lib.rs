@@ -6,18 +6,13 @@
 mod datamodel;
 
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek as _, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use anyhow::Context;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-mod db;
-
-pub use db::initialize_db;
 use watto::Pod;
 
 use crate::datamodel::{
@@ -30,15 +25,21 @@ pub struct StorageService {
 }
 
 impl StorageService {
-    pub fn new(path: &Path) -> Self {
-        Self {
-            file_path: path.join("files"),
-            part_path: path.join("parts"),
-        }
+    pub fn new(path: &Path) -> anyhow::Result<Self> {
+        let file_path = path.join("files");
+        let part_path = path.join("parts");
+
+        std::fs::create_dir_all(&file_path)?;
+        std::fs::create_dir_all(&part_path)?;
+
+        Ok(Self {
+            file_path,
+            part_path,
+        })
     }
 
     pub fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
-        let file_size = parts.iter().map(|part| part.part_size.get() as u64).sum();
+        let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
 
         let file_metadata = File {
             magic: FILE_MAGIC,
@@ -66,7 +67,36 @@ impl StorageService {
     }
 
     pub fn get_file(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        todo!()
+        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_file = match OpenOptions::new().read(true).open(file_path) {
+            Ok(file_file) => file_file,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            err => err?,
+        };
+
+        let mut reader = BufReader::new(file_file);
+
+        let mut metadata_buf = vec![0; mem::size_of::<Part>()];
+        reader.read_exact(&mut metadata_buf)?;
+        let file_metadata = File::ref_from_bytes(&metadata_buf).context("reading File metadata")?;
+
+        let mut parts_buf =
+            vec![0; mem::size_of::<FilePart>() * file_metadata.num_parts.get() as usize];
+        reader.read_exact(&mut parts_buf)?;
+        let parts =
+            FilePart::slice_from_bytes(&parts_buf).context("reading File Parts metadata")?;
+
+        let mut contents = Vec::with_capacity(file_metadata.file_size.get() as usize);
+        for part in parts {
+            let part_contents = self
+                .get_part(Uuid::from_bytes(part.part_uuid))?
+                .context("part not found")?;
+            contents.extend_from_slice(&part_contents);
+        }
+
+        Ok(Some(contents))
     }
 
     pub fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
@@ -107,7 +137,7 @@ impl StorageService {
     }
 
     pub fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
-        let part_path = self.file_path.join(format!("{part_uuid}.bin"));
+        let part_path = self.part_path.join(format!("{part_uuid}.bin"));
         let part_file = match OpenOptions::new().read(true).open(part_path) {
             Ok(part_file) => part_file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -143,8 +173,7 @@ mod tests {
     #[test]
     fn stores_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-
-        let service = StorageService::new(tempdir.path());
+        let service = StorageService::new(tempdir.path()).unwrap();
 
         let file_part = service.put_part(b"oh hai!").unwrap();
 
@@ -154,5 +183,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(read_part, b"oh hai!");
+    }
+
+    #[test]
+    fn assembles_file_from_parts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let service = StorageService::new(tempdir.path()).unwrap();
+
+        let part1 = service.put_part(b"oh ").unwrap();
+        let part2 = service.put_part(b"hai!").unwrap();
+
+        service
+            .assemble_file_from_parts("the_file_key", &[part1, part2])
+            .unwrap();
+
+        let file_contents = service.get_file("the_file_key").unwrap().unwrap();
+
+        assert_eq!(file_contents, b"oh hai!");
     }
 }
