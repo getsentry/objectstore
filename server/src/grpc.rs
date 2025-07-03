@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use api::storage::storage_server::{Storage, StorageServer};
 use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
 use service::StorageService;
+use tokio::signal::unix::SignalKind;
+use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -9,14 +13,10 @@ use crate::config::Config;
 
 #[derive(Debug)]
 pub struct StorageServiceImpl {
-    service: StorageService,
+    service: Arc<StorageService>,
 }
 
 impl StorageServiceImpl {
-    pub fn new(service: StorageService) -> Self {
-        Self { service }
-    }
-
     pub fn put_blob(&self, request: PutBlobRequest) -> Result<PutBlobResponse> {
         let scope = request.scope.context("scope is required")?;
         let key = request.key.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -56,8 +56,20 @@ impl Storage for StorageServiceImpl {
     }
 }
 
-pub fn service(config: Config) -> Result<StorageServer<StorageServiceImpl>> {
-    let service = StorageService::new(&config.path)?;
-    let server = StorageServer::new(StorageServiceImpl::new(service));
-    Ok(server)
+pub async fn start_server(config: &Config, service: Arc<StorageService>) {
+    let server = StorageServer::new(StorageServiceImpl { service });
+
+    let shutdown = elegant_departure::tokio::depart()
+        .on_termination()
+        .on_sigint()
+        .on_signal(SignalKind::hangup())
+        .on_signal(SignalKind::quit());
+
+    println!("gRPC server listening on {}", config.grpc_addr);
+
+    Server::builder()
+        .add_service(server)
+        .serve_with_shutdown(config.grpc_addr, shutdown)
+        .await
+        .unwrap();
 }
