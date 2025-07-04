@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use service::StorageService;
+use tokio::signal::unix::SignalKind;
 
 use crate::config::Config;
 
@@ -17,13 +18,22 @@ mod http;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::from_env()?;
+    let config = Arc::new(Config::from_env()?);
     let service = Arc::new(StorageService::new(&config.path)?);
 
-    let http_server = http::start_server(&config, Arc::clone(&service));
-    let grpc_server = grpc::start_server(&config, service);
+    tokio::spawn(http::start_server(
+        Arc::clone(&config),
+        Arc::clone(&service),
+    ));
+    tokio::spawn(grpc::start_server(config, service));
 
-    let _ = tokio::join!(http_server, grpc_server);
+    elegant_departure::tokio::depart()
+        .on_termination()
+        .on_sigint()
+        .on_signal(SignalKind::hangup())
+        .on_signal(SignalKind::quit())
+        .await;
+    println!("shutting down");
 
     Ok(())
 }

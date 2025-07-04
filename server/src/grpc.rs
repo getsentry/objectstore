@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use api::storage::storage_server::{Storage, StorageServer};
 use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
 use service::StorageService;
-use tokio::signal::unix::SignalKind;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -56,20 +55,17 @@ impl Storage for StorageServiceImpl {
     }
 }
 
-pub async fn start_server(config: &Config, service: Arc<StorageService>) {
+pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
     let server = StorageServer::new(StorageServiceImpl { service });
 
-    let shutdown = elegant_departure::tokio::depart()
-        .on_termination()
-        .on_sigint()
-        .on_signal(SignalKind::hangup())
-        .on_signal(SignalKind::quit());
-
     println!("gRPC server listening on {}", config.grpc_addr);
-
     Server::builder()
         .add_service(server)
-        .serve_with_shutdown(config.grpc_addr, shutdown)
+        .serve_with_shutdown(
+            config.grpc_addr,
+            elegant_departure::tokio::depart().on_termination(),
+        )
         .await
         .unwrap();
+    println!("gRPC server shut down");
 }
