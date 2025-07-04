@@ -16,21 +16,21 @@ pub struct StorageServiceImpl {
 }
 
 impl StorageServiceImpl {
-    pub fn put_blob(&self, request: PutBlobRequest) -> Result<PutBlobResponse> {
+    pub async fn put_blob(&self, request: PutBlobRequest) -> Result<PutBlobResponse> {
         let scope = request.scope.context("scope is required")?;
         let key = request.key.unwrap_or_else(|| Uuid::new_v4().to_string());
         let key = format!("{}/{}/{}", scope.usecase, scope.scope, key);
 
-        self.service.put_file(&key, &request.contents)?;
+        self.service.put_file(&key, &request.contents).await?;
 
         Ok(PutBlobResponse { key })
     }
 
-    pub fn get_blob(&self, request: GetBlobRequest) -> Result<GetBlobResponse> {
+    pub async fn get_blob(&self, request: GetBlobRequest) -> Result<GetBlobResponse> {
         let scope = request.scope.context("scope is required")?;
         let key = format!("{}/{}/{}", scope.usecase, scope.scope, request.key);
 
-        let contents = self.service.get_file(&key)?.context("not found")?;
+        let contents = self.service.get_file(&key).await?.context("not found")?;
         Ok(GetBlobResponse { contents })
     }
 }
@@ -41,16 +41,16 @@ impl Storage for StorageServiceImpl {
         &self,
         request: Request<PutBlobRequest>,
     ) -> Result<Response<PutBlobResponse>, Status> {
-        self.put_blob(request.into_inner())
-            .map(Response::new)
+        let res = self.put_blob(request.into_inner()).await;
+        res.map(Response::new)
             .map_err(|e| Status::from_error(e.into_boxed_dyn_error()))
     }
     async fn get_blob(
         &self,
         request: Request<GetBlobRequest>,
     ) -> Result<Response<GetBlobResponse>, Status> {
-        self.get_blob(request.into_inner())
-            .map(Response::new)
+        let res = self.get_blob(request.into_inner()).await;
+        res.map(Response::new)
             .map_err(|e| Status::from_error(e.into_boxed_dyn_error()))
     }
 }
