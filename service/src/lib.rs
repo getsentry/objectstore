@@ -90,6 +90,7 @@ impl StorageService {
         };
 
         let file_path = self.file_path.join(format!("{key}.bin"));
+        std::fs::create_dir_all(file_path.parent().unwrap())?;
         let file_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -191,6 +192,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(read_part, b"oh hai!");
+    }
+
+    #[test]
+    fn stores_files() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let service = StorageService::new(tempdir.path()).unwrap();
+
+        service.put_file("the_file_key", b"oh hai!").unwrap();
+
+        let file_contents = service.get_file("the_file_key").unwrap().unwrap();
+
+        assert_eq!(file_contents, b"oh hai!");
     }
 
     #[test]
