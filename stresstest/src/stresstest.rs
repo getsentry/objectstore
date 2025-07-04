@@ -9,11 +9,11 @@ use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
 
-use crate::raw_seaweed::SeaweedClient;
+use crate::http::HttpRemote;
 use crate::workload::{Action, Workload};
 
 pub async fn perform_stresstest(
-    remote: SeaweedClient,
+    remote: HttpRemote,
     workloads: Vec<Workload>,
     duration: Duration,
 ) -> Result<()> {
@@ -68,7 +68,7 @@ pub async fn perform_stresstest(
 }
 
 async fn run_workload(
-    remote: Arc<SeaweedClient>,
+    remote: Arc<HttpRemote>,
     workload: Workload,
     duration: Duration,
 ) -> (Workload, WorkloadMetrics) {
