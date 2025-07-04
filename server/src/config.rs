@@ -10,14 +10,16 @@ const ENV_PREFIX: &str = "FSS_";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub listen_addr: String,
+    pub grpc_addr: SocketAddr,
+    pub http_addr: SocketAddr,
     pub path: PathBuf,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:50051".to_owned(),
+            grpc_addr: "0.0.0.0:50051".parse().unwrap(),
+            http_addr: "0.0.0.0:8888".parse().unwrap(),
             path: PathBuf::from("data"),
         }
     }
@@ -34,10 +36,6 @@ impl Config {
         let config = figment.merge(Env::prefixed(ENV_PREFIX)).extract()?;
 
         Ok(config)
-    }
-
-    pub fn listen_addr(&self) -> SocketAddr {
-        self.listen_addr.parse().expect("Invalid listen address")
     }
 }
 
