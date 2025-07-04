@@ -32,22 +32,14 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates gosu \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ENV \
-    SERVER_UID=10001 \
-    SERVER_GID=10001 \
-    FSS_PATH="/data"
-
-# Create a new user and group with fixed uid/gid
-RUN groupadd --system fss --gid $SERVER_GID \
-    && useradd --system --gid fss --uid $SERVER_UID fss
-
+ENV FSS_PATH="/data"
 VOLUME ["/data"]
-EXPOSE 50051
 
 COPY --from=build-server /work/target/release/server /bin
-COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-ENTRYPOINT ["/bin/bash", "/docker-entrypoint.sh"]
+ENTRYPOINT ["/bin/server"]
+EXPOSE 50051
+EXPOSE 8888
