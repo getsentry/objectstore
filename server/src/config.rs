@@ -12,7 +12,8 @@ const ENV_PREFIX: &str = "FSS_";
 pub struct Config {
     pub grpc_addr: SocketAddr,
     pub http_addr: SocketAddr,
-    pub path: PathBuf,
+    pub data_path: PathBuf,
+    pub gcs_bucket: Option<String>,
 }
 
 impl Default for Config {
@@ -20,7 +21,8 @@ impl Default for Config {
         Self {
             grpc_addr: "0.0.0.0:50051".parse().unwrap(),
             http_addr: "0.0.0.0:8888".parse().unwrap(),
-            path: PathBuf::from("data"),
+            data_path: PathBuf::from("data"),
+            gcs_bucket: None,
         }
     }
 }

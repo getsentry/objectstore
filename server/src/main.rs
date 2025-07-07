@@ -19,12 +19,9 @@ mod http;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Arc::new(Config::from_env()?);
-    let service = Arc::new(StorageService::new(&config.path)?);
+    let service = StorageService::new(&config.data_path, config.gcs_bucket.as_deref()).await?;
 
-    tokio::spawn(http::start_server(
-        Arc::clone(&config),
-        Arc::clone(&service),
-    ));
+    tokio::spawn(http::start_server(Arc::clone(&config), service.clone()));
     tokio::spawn(grpc::start_server(config, service));
 
     elegant_departure::tokio::depart()
