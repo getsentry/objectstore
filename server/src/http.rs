@@ -22,11 +22,15 @@ pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
         .into_make_service();
 
     println!("HTTP server listening on {}", config.http_addr);
+    let _guard = elegant_departure::get_shutdown_guard();
     let listener = tokio::net::TcpListener::bind(config.http_addr)
         .await
         .unwrap();
     axum::serve(listener, app)
-        .with_graceful_shutdown(elegant_departure::tokio::depart().on_termination())
+        .with_graceful_shutdown(async {
+            let guard = elegant_departure::get_shutdown_guard();
+            guard.wait().await;
+        })
         .await
         .unwrap();
     println!("HTTP server shut down");
