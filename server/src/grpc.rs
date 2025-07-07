@@ -1,9 +1,11 @@
+use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use api::storage::storage_server::{Storage, StorageServer};
 use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
 use service::StorageService;
+use tokio_stream::StreamExt as _;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -30,7 +32,18 @@ impl StorageServiceImpl {
         let scope = request.scope.context("scope is required")?;
         let key = format!("{}/{}/{}", scope.usecase, scope.scope, request.key);
 
-        let contents = self.service.get_file(&key).await?.context("not found")?;
+        let stream = self
+            .service
+            .clone()
+            .get_file(&key)
+            .await?
+            .context("not found")?;
+        let mut stream = pin!(stream);
+
+        let mut contents = vec![];
+        while let Some(chunk) = stream.next().await {
+            contents.extend_from_slice(&chunk?);
+        }
         Ok(GetBlobResponse { contents })
     }
 }

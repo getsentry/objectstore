@@ -8,11 +8,14 @@ mod datamodel;
 use std::io::ErrorKind;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
+use bytes::Bytes;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter};
+use tokio_stream::Stream;
 use uuid::Uuid;
 
 use watto::Pod;
@@ -48,7 +51,10 @@ impl StorageService {
         Ok(())
     }
 
-    pub async fn get_file(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get_file(
+        self: Arc<Self>,
+        key: &str,
+    ) -> anyhow::Result<Option<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
         let file_path = self.file_path.join(format!("{key}.bin"));
         let file_file = match OpenOptions::new().read(true).open(file_path).await {
             Ok(file_file) => file_file,
@@ -69,17 +75,20 @@ impl StorageService {
         reader.read_exact(&mut parts_buf).await?;
         let parts =
             FilePart::slice_from_bytes(&parts_buf).context("reading File Parts metadata")?;
+        let parts = parts.to_vec();
 
-        let mut contents = Vec::with_capacity(file_metadata.file_size.get() as usize);
-        for part in parts {
-            let part_contents = self
-                .get_part(Uuid::from_bytes(part.part_uuid))
-                .await?
-                .context("part not found")?;
-            contents.extend_from_slice(&part_contents);
-        }
+        let stream = async_stream::try_stream! {
+            for part in parts {
+                let part_contents = self
+                    .get_part(Uuid::from_bytes(part.part_uuid))
+                    .await?
+                    .context("part not found")?;
 
-        Ok(Some(contents))
+                yield part_contents;
+            }
+        };
+
+        Ok(Some(stream))
     }
 
     async fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
@@ -152,7 +161,7 @@ impl StorageService {
         })
     }
 
-    async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Bytes>> {
         let part_path = self.part_path.join(format!("{part_uuid}.bin"));
         let part_file = match OpenOptions::new().read(true).open(part_path).await {
             Ok(part_file) => part_file,
@@ -181,13 +190,26 @@ impl StorageService {
             }
         };
 
-        Ok(Some(buf))
+        Ok(Some(buf.into()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+
+    use tokio_stream::StreamExt as _;
+
     use super::*;
+
+    async fn collect(s: impl Stream<Item = anyhow::Result<Bytes>>) -> anyhow::Result<Vec<u8>> {
+        let mut output = vec![];
+        let mut s = pin!(s);
+        while let Some(chunk) = s.next().await {
+            output.extend_from_slice(chunk?.as_bytes());
+        }
+        Ok(output)
+    }
 
     #[tokio::test]
     async fn stores_parts() {
@@ -202,17 +224,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(read_part, b"oh hai!");
+        assert_eq!(read_part.as_bytes(), b"oh hai!");
     }
 
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path()).unwrap();
+        let service = Arc::new(StorageService::new(tempdir.path()).unwrap());
 
         service.put_file("the_file_key", b"oh hai!").await.unwrap();
 
         let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = collect(file_contents).await.unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
     }
@@ -220,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn assembles_file_from_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path()).unwrap();
+        let service = Arc::new(StorageService::new(tempdir.path()).unwrap());
 
         let part1 = service.put_part(b"oh ").await.unwrap();
         let part2 = service.put_part(b"hai!").await.unwrap();
@@ -231,6 +254,7 @@ mod tests {
             .unwrap();
 
         let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = collect(file_contents).await.unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
     }

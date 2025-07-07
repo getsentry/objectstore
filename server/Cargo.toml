@@ -13,5 +13,6 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 serde = { version = "1.0.219", features = ["derive"] }
 service = { path = "../service" }
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-stream = "0.1.17"
 tonic = { version = "0.13.1" }
 uuid = { version = "1.17.0", features = ["v4", "v7"] }
