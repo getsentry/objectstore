@@ -5,12 +5,14 @@
 
 mod datamodel;
 
-use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::ErrorKind;
 use std::mem;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use async_compression::tokio::bufread::ZstdDecoder;
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter};
 use uuid::Uuid;
 
 use watto::Pod;
@@ -39,16 +41,16 @@ impl StorageService {
         })
     }
 
-    pub fn put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
-        let file_part = self.put_part(contents)?;
-        self.assemble_file_from_parts(key, &[file_part])?;
+    pub async fn put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
+        let file_part = self.put_part(contents).await?;
+        self.assemble_file_from_parts(key, &[file_part]).await?;
 
         Ok(())
     }
 
-    pub fn get_file(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get_file(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let file_path = self.file_path.join(format!("{key}.bin"));
-        let file_file = match OpenOptions::new().read(true).open(file_path) {
+        let file_file = match OpenOptions::new().read(true).open(file_path).await {
             Ok(file_file) => file_file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 return Ok(None);
@@ -59,19 +61,20 @@ impl StorageService {
         let mut reader = BufReader::new(file_file);
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
-        reader.read_exact(&mut metadata_buf)?;
+        reader.read_exact(&mut metadata_buf).await?;
         let file_metadata = File::ref_from_bytes(&metadata_buf).context("reading File metadata")?;
 
         let mut parts_buf =
             vec![0; mem::size_of::<FilePart>() * file_metadata.num_parts.get() as usize];
-        reader.read_exact(&mut parts_buf)?;
+        reader.read_exact(&mut parts_buf).await?;
         let parts =
             FilePart::slice_from_bytes(&parts_buf).context("reading File Parts metadata")?;
 
         let mut contents = Vec::with_capacity(file_metadata.file_size.get() as usize);
         for part in parts {
             let part_contents = self
-                .get_part(Uuid::from_bytes(part.part_uuid))?
+                .get_part(Uuid::from_bytes(part.part_uuid))
+                .await?
                 .context("part not found")?;
             contents.extend_from_slice(&part_contents);
         }
@@ -79,7 +82,7 @@ impl StorageService {
         Ok(Some(contents))
     }
 
-    fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
+    async fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
         let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
 
         let file_metadata = File {
@@ -90,25 +93,27 @@ impl StorageService {
         };
 
         let file_path = self.file_path.join(format!("{key}.bin"));
-        std::fs::create_dir_all(file_path.parent().unwrap())?;
+        tokio::fs::create_dir_all(file_path.parent().unwrap()).await?;
         let file_file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(file_path)?;
+            .open(file_path)
+            .await?;
 
         let mut writer = BufWriter::new(file_file);
 
-        writer.write_all(file_metadata.as_bytes())?;
-        writer.write_all(parts.as_bytes())?;
+        writer.write_all(file_metadata.as_bytes()).await?;
+        writer.write_all(parts.as_bytes()).await?;
+        writer.flush().await?;
 
-        let part_file = writer.into_inner()?;
-        part_file.sync_data()?;
+        let part_file = writer.into_inner();
+        // part_file.sync_data().await?;
         drop(part_file);
 
         Ok(())
     }
 
-    fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
+    async fn put_part(&self, contents: &[u8]) -> anyhow::Result<FilePart> {
         let part_size = contents.len() as u32;
 
         let compressed = zstd::bulk::compress(contents, 0)?;
@@ -128,15 +133,17 @@ impl StorageService {
         let part_file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(part_path)?;
+            .open(part_path)
+            .await?;
 
         let mut writer = BufWriter::new(part_file);
 
-        writer.write_all(part_metadata.as_bytes())?;
-        writer.write_all(&compressed)?;
+        writer.write_all(part_metadata.as_bytes()).await?;
+        writer.write_all(&compressed).await?;
+        writer.flush().await?;
 
-        let part_file = writer.into_inner()?;
-        part_file.sync_data()?;
+        let part_file = writer.into_inner();
+        // part_file.sync_data().await?;
         drop(part_file);
 
         Ok(FilePart {
@@ -145,9 +152,9 @@ impl StorageService {
         })
     }
 
-    fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Vec<u8>>> {
         let part_path = self.part_path.join(format!("{part_uuid}.bin"));
-        let part_file = match OpenOptions::new().read(true).open(part_path) {
+        let part_file = match OpenOptions::new().read(true).open(part_path).await {
             Ok(part_file) => part_file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 return Ok(None);
@@ -158,20 +165,23 @@ impl StorageService {
         let mut reader = BufReader::new(part_file);
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
-        reader.read_exact(&mut metadata_buf)?;
+        reader.read_exact(&mut metadata_buf).await?;
         let part_metadata = Part::ref_from_bytes(&metadata_buf).context("reading Part metadata")?;
 
         // TODO: verify magic, version, etc…
-        let contents = match part_metadata.compression_algorithm {
-            1 /* Zstd */ => zstd::decode_all(reader)?,
+        let mut buf = Vec::with_capacity(part_metadata.part_size.get() as usize);
+        match part_metadata.compression_algorithm {
+            1 /* Zstd */ =>
+            {
+                let mut reader = ZstdDecoder::new(reader);
+                reader.read_to_end(&mut buf).await?;
+            },
             _ => {
-                let mut buf = Vec::with_capacity(part_metadata.part_size.get() as usize);
-                reader.read_to_end(&mut buf)?;
-                buf
+                reader.read_to_end(&mut buf).await?;
             }
         };
 
-        Ok(Some(contents))
+        Ok(Some(buf))
     }
 }
 
@@ -179,46 +189,48 @@ impl StorageService {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stores_parts() {
+    #[tokio::test]
+    async fn stores_parts() {
         let tempdir = tempfile::tempdir().unwrap();
         let service = StorageService::new(tempdir.path()).unwrap();
 
-        let file_part = service.put_part(b"oh hai!").unwrap();
+        let file_part = service.put_part(b"oh hai!").await.unwrap();
 
         let read_part = service
             .get_part(Uuid::from_bytes(file_part.part_uuid))
+            .await
             .unwrap()
             .unwrap();
 
         assert_eq!(read_part, b"oh hai!");
     }
 
-    #[test]
-    fn stores_files() {
+    #[tokio::test]
+    async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
         let service = StorageService::new(tempdir.path()).unwrap();
 
-        service.put_file("the_file_key", b"oh hai!").unwrap();
+        service.put_file("the_file_key", b"oh hai!").await.unwrap();
 
-        let file_contents = service.get_file("the_file_key").unwrap().unwrap();
+        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
     }
 
-    #[test]
-    fn assembles_file_from_parts() {
+    #[tokio::test]
+    async fn assembles_file_from_parts() {
         let tempdir = tempfile::tempdir().unwrap();
         let service = StorageService::new(tempdir.path()).unwrap();
 
-        let part1 = service.put_part(b"oh ").unwrap();
-        let part2 = service.put_part(b"hai!").unwrap();
+        let part1 = service.put_part(b"oh ").await.unwrap();
+        let part2 = service.put_part(b"hai!").await.unwrap();
 
         service
             .assemble_file_from_parts("the_file_key", &[part1, part2])
+            .await
             .unwrap();
 
-        let file_contents = service.get_file("the_file_key").unwrap().unwrap();
+        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
     }

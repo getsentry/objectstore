@@ -46,7 +46,7 @@ async fn put_blob_no_key(
     let key = format!("{usecase}/{scope}/{key}");
 
     let contents = to_bytes(body, usize::MAX).await?;
-    service.put_file(&key, &contents)?;
+    service.put_file(&key, &contents).await?;
 
     Ok(Json(PutBlobResponse { key }))
 }
@@ -59,7 +59,7 @@ async fn put_blob(
     let key = format!("{usecase}/{scope}/{key}");
 
     let contents = to_bytes(body, usize::MAX).await?;
-    service.put_file(&key, &contents)?;
+    service.put_file(&key, &contents).await?;
 
     Ok(Json(PutBlobResponse { key }))
 }
@@ -70,7 +70,7 @@ async fn get_blob(
 ) -> error::Result<Response> {
     let key = format!("{usecase}/{scope}/{key}");
 
-    let Some(contents) = service.get_file(&key)? else {
+    let Some(contents) = service.get_file(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
