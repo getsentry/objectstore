@@ -63,7 +63,7 @@ pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
         .add_service(server)
         .serve_with_shutdown(
             config.grpc_addr,
-            elegant_departure::tokio::depart().on_termination(),
+            elegant_departure::get_shutdown_guard().wait(),
         )
         .await
         .unwrap();

@@ -26,7 +26,10 @@ pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
         .await
         .unwrap();
     axum::serve(listener, app)
-        .with_graceful_shutdown(elegant_departure::tokio::depart().on_termination())
+        .with_graceful_shutdown(async {
+            let guard = elegant_departure::get_shutdown_guard();
+            guard.wait().await;
+        })
         .await
         .unwrap();
     println!("HTTP server shut down");
