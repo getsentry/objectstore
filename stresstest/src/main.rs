@@ -15,19 +15,18 @@
 
 use std::time::Duration;
 
-use crate::raw_seaweed::SeaweedClient;
+use crate::http::HttpRemote;
 use crate::stresstest::perform_stresstest;
 use crate::workload::Workload;
 
-mod raw_seaweed;
+mod http;
 mod stresstest;
 mod workload;
 
 #[tokio::main]
 async fn main() {
-    // docker run -p9333:9333 -p8080:8080 --rm -it chrislusf/seaweedfs server
-    let remote = SeaweedClient {
-        master_url: "http://localhost:9333".into(),
+    let remote = HttpRemote {
+        master_url: "http://localhost:8888".into(),
         client: reqwest::Client::new(),
     };
     let workload = Workload::builder("testing")
