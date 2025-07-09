@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::put;
 use axum::{Json, Router};
+use axum_extra::middleware::option_layer;
+use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
 use service::StorageService;
 use uuid::Uuid;
@@ -15,9 +17,16 @@ use uuid::Uuid;
 use crate::config::Config;
 
 pub async fn start_server(config: Arc<Config>, service: StorageService) {
+    let sentry_tower_service = config.sentry_dsn.as_ref().map(|_| {
+        tower::ServiceBuilder::new()
+            .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
+            .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
+    });
+
     let app = Router::new()
         .route("/{usecase}/{scope}", put(put_blob_no_key))
         .route("/{usecase}/{scope}/{*key}", put(put_blob).get(get_blob))
+        .layer(option_layer(sentry_tower_service))
         .with_state(service)
         .into_make_service();
 
@@ -41,6 +50,7 @@ struct PutBlobResponse {
     key: String,
 }
 
+#[tracing::instrument(skip(service))]
 async fn put_blob_no_key(
     State(service): State<StorageService>,
     Path((usecase, scope)): Path<(String, String)>,
@@ -55,6 +65,7 @@ async fn put_blob_no_key(
     Ok(Json(PutBlobResponse { key }))
 }
 
+#[tracing::instrument(skip(service))]
 async fn put_blob(
     State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
@@ -68,6 +79,7 @@ async fn put_blob(
     Ok(Json(PutBlobResponse { key }))
 }
 
+#[tracing::instrument(skip(service))]
 async fn get_blob(
     State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
