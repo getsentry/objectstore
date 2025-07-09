@@ -3,6 +3,7 @@
 //!
 //! It is designed as a library crate to be used by the `server`.
 
+mod backend;
 mod datamodel;
 
 use std::io::ErrorKind;
