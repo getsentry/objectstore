@@ -12,9 +12,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
-#[derive(Debug)]
 pub struct StorageServiceImpl {
-    service: Arc<StorageService>,
+    service: StorageService,
 }
 
 impl StorageServiceImpl {
@@ -68,7 +67,7 @@ impl Storage for StorageServiceImpl {
     }
 }
 
-pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
+pub async fn start_server(config: Arc<Config>, service: StorageService) {
     let server = StorageServer::new(StorageServiceImpl { service });
 
     println!("gRPC server listening on {}", config.grpc_addr);

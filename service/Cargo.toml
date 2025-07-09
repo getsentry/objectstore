@@ -10,7 +10,9 @@ async-compression = { version = "0.4.25", features = ["tokio", "zstd"] }
 async-stream = "0.3.6"
 bytes = "1.10.1"
 futures-core = "0.3.31"
+gcp_auth = "0.12.3"
 pack1 = "1.0.0"
+reqwest = "0.12.22"
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = "0.1.17"
 tokio-util = "0.7.15"

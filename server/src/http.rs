@@ -14,11 +14,11 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
-pub async fn start_server(config: Arc<Config>, service: Arc<StorageService>) {
+pub async fn start_server(config: Arc<Config>, service: StorageService) {
     let app = Router::new()
         .route("/{usecase}/{scope}", put(put_blob_no_key))
         .route("/{usecase}/{scope}/{*key}", put(put_blob).get(get_blob))
-        .with_state(Arc::clone(&service))
+        .with_state(service)
         .into_make_service();
 
     println!("HTTP server listening on {}", config.http_addr);
@@ -42,7 +42,7 @@ struct PutBlobResponse {
 }
 
 async fn put_blob_no_key(
-    State(service): State<Arc<StorageService>>,
+    State(service): State<StorageService>,
     Path((usecase, scope)): Path<(String, String)>,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
@@ -56,7 +56,7 @@ async fn put_blob_no_key(
 }
 
 async fn put_blob(
-    State(service): State<Arc<StorageService>>,
+    State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
@@ -69,7 +69,7 @@ async fn put_blob(
 }
 
 async fn get_blob(
-    State(service): State<Arc<StorageService>>,
+    State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
 ) -> error::Result<Response> {
     let key = format!("{usecase}/{scope}/{key}");

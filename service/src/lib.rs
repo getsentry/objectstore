@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::Bytes;
+use gcp_auth::{Token, TokenProvider};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter};
 use tokio_stream::Stream;
@@ -24,24 +25,59 @@ use crate::datamodel::{
     Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
 };
 
-#[derive(Debug)]
-pub struct StorageService {
+#[derive(Clone)]
+pub struct StorageService(Arc<StorageServiceInner>);
+
+pub struct StorageServiceInner {
     file_path: PathBuf,
     part_path: PathBuf,
+
+    gcs_backend: Option<GcsBackend>,
+}
+
+struct GcsBackend {
+    client: reqwest::Client,
+    gcs_token_provider: Arc<dyn TokenProvider>,
+    gcs_bucket: String,
+}
+
+impl GcsBackend {
+    pub async fn gcs_token(&self) -> anyhow::Result<Arc<Token>> {
+        let token = self
+            .gcs_token_provider
+            .token(&["https://www.googleapis.com/auth/devstorage.read_write"])
+            .await?;
+        Ok(token)
+    }
 }
 
 impl StorageService {
-    pub fn new(path: &Path) -> anyhow::Result<Self> {
+    pub async fn new(path: &Path, bucket: Option<&str>) -> anyhow::Result<Self> {
         let file_path = path.join("files");
         let part_path = path.join("parts");
 
-        std::fs::create_dir_all(&file_path)?;
-        std::fs::create_dir_all(&part_path)?;
+        tokio::fs::create_dir_all(&file_path).await?;
+        tokio::fs::create_dir_all(&part_path).await?;
 
-        Ok(Self {
+        let gcs_backend = if let Some(bucket) = bucket {
+            let gcs_token_provider = gcp_auth::provider().await?;
+            Some(GcsBackend {
+                client: reqwest::Client::new(),
+                gcs_token_provider,
+                gcs_bucket: bucket.into(),
+            })
+        } else {
+            None
+        };
+
+        let inner = StorageServiceInner {
             file_path,
             part_path,
-        })
+
+            gcs_backend,
+        };
+
+        Ok(Self(Arc::new(inner)))
     }
 
     pub async fn put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
@@ -52,10 +88,34 @@ impl StorageService {
     }
 
     pub async fn get_file(
-        self: Arc<Self>,
+        &self,
         key: &str,
     ) -> anyhow::Result<Option<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
-        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_path = self.0.file_path.join(format!("{key}.bin"));
+
+        if let Some(gcs_backend) = &self.0.gcs_backend {
+            let file_get_url = format!(
+                "https://storage.googleapis.com/{}/{}",
+                gcs_backend.gcs_bucket,
+                file_path.display(),
+            );
+            let token = gcs_backend.gcs_token().await?;
+            let response = gcs_backend
+                .client
+                .get(file_get_url)
+                .bearer_auth(token.as_str())
+                .send()
+                .await?;
+
+            let file_buf = response.bytes().await?;
+            let (_file_metadata, rest) =
+                File::ref_from_prefix(&file_buf).context("reading File metadata")?;
+
+            let parts = FilePart::slice_from_bytes(rest).context("reading File Parts metadata")?;
+
+            return Ok(Some(self.clone().make_part_stream(parts.to_vec())));
+        }
+
         let file_file = match OpenOptions::new().read(true).open(file_path).await {
             Ok(file_file) => file_file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -75,9 +135,15 @@ impl StorageService {
         reader.read_exact(&mut parts_buf).await?;
         let parts =
             FilePart::slice_from_bytes(&parts_buf).context("reading File Parts metadata")?;
-        let parts = parts.to_vec();
 
-        let stream = async_stream::try_stream! {
+        Ok(Some(self.clone().make_part_stream(parts.to_vec())))
+    }
+
+    fn make_part_stream(
+        self,
+        parts: Vec<FilePart>,
+    ) -> impl Stream<Item = anyhow::Result<Bytes>> + use<> {
+        async_stream::try_stream! {
             for part in parts {
                 let part_contents = self
                     .get_part(Uuid::from_bytes(part.part_uuid))
@@ -86,9 +152,7 @@ impl StorageService {
 
                 yield part_contents;
             }
-        };
-
-        Ok(Some(stream))
+        }
     }
 
     async fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
@@ -101,7 +165,29 @@ impl StorageService {
             file_size: file_size.into(),
         };
 
-        let file_path = self.file_path.join(format!("{key}.bin"));
+        let file_path = self.0.file_path.join(format!("{key}.bin"));
+
+        if let Some(gcs_backend) = &self.0.gcs_backend {
+            let mut file_contents = file_metadata.as_bytes().to_owned();
+            file_contents.extend_from_slice(parts.as_bytes());
+
+            let file_put_url = format!(
+                "https://storage.googleapis.com/{}/{}",
+                gcs_backend.gcs_bucket,
+                file_path.display(),
+            );
+            let token = gcs_backend.gcs_token().await?;
+            let _response = gcs_backend
+                .client
+                .put(file_put_url)
+                .bearer_auth(token.as_str())
+                .body(file_contents)
+                .send()
+                .await?;
+
+            return Ok(());
+        }
+
         tokio::fs::create_dir_all(file_path.parent().unwrap()).await?;
         let file_file = OpenOptions::new()
             .write(true)
@@ -138,7 +224,32 @@ impl StorageService {
         };
 
         let part_uuid = Uuid::new_v4();
-        let part_path = self.part_path.join(format!("{part_uuid}.bin"));
+        let part_path = self.0.part_path.join(format!("{part_uuid}.bin"));
+
+        if let Some(gcs_backend) = &self.0.gcs_backend {
+            let mut part_contents = part_metadata.as_bytes().to_owned();
+            part_contents.extend_from_slice(&compressed);
+
+            let part_put_url = format!(
+                "https://storage.googleapis.com/{}/{}",
+                gcs_backend.gcs_bucket,
+                part_path.display(),
+            );
+            let token = gcs_backend.gcs_token().await?;
+            let _response = gcs_backend
+                .client
+                .put(part_put_url)
+                .bearer_auth(token.as_str())
+                .body(part_contents)
+                .send()
+                .await?;
+
+            return Ok(FilePart {
+                part_size: part_size.into(),
+                part_uuid: part_uuid.into_bytes(),
+            });
+        }
+
         let part_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -162,7 +273,39 @@ impl StorageService {
     }
 
     async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Bytes>> {
-        let part_path = self.part_path.join(format!("{part_uuid}.bin"));
+        let part_path = self.0.part_path.join(format!("{part_uuid}.bin"));
+
+        if let Some(gcs_backend) = &self.0.gcs_backend {
+            let part_get_url = format!(
+                "https://storage.googleapis.com/{}/{}",
+                gcs_backend.gcs_bucket,
+                part_path.display(),
+            );
+            let token = gcs_backend.gcs_token().await?;
+            let response = gcs_backend
+                .client
+                .get(part_get_url)
+                .bearer_auth(token.as_str())
+                .send()
+                .await?;
+
+            let part_buf = response.bytes().await?;
+            let (part_metadata, rest) =
+                Part::ref_from_prefix(&part_buf).context("reading Part metadata")?;
+
+            let contents = match part_metadata.compression_algorithm {
+                1 /* Zstd */ =>
+                {
+                    zstd::bulk::decompress(rest,part_metadata.part_size.get() as usize)?.into()
+                },
+                _ => {
+                    Bytes::copy_from_slice(rest)
+                }
+            };
+
+            return Ok(Some(contents));
+        }
+
         let part_file = match OpenOptions::new().read(true).open(part_path).await {
             Ok(part_file) => part_file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -214,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn stores_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path()).unwrap();
+        let service = StorageService::new(tempdir.path(), None).await.unwrap();
 
         let file_part = service.put_part(b"oh hai!").await.unwrap();
 
@@ -230,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = Arc::new(StorageService::new(tempdir.path()).unwrap());
+        let service = StorageService::new(tempdir.path(), None).await.unwrap();
 
         service.put_file("the_file_key", b"oh hai!").await.unwrap();
 
@@ -243,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn assembles_file_from_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = Arc::new(StorageService::new(tempdir.path()).unwrap());
+        let service = StorageService::new(tempdir.path(), None).await.unwrap();
 
         let part1 = service.put_part(b"oh ").await.unwrap();
         let part2 = service.put_part(b"hai!").await.unwrap();
@@ -252,6 +395,21 @@ mod tests {
             .assemble_file_from_parts("the_file_key", &[part1, part2])
             .await
             .unwrap();
+
+        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = collect(file_contents).await.unwrap();
+
+        assert_eq!(file_contents, b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn works_with_gcs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let service = StorageService::new(tempdir.path(), Some("sbx-warp-benchmark-bucket"))
+            .await
+            .unwrap();
+
+        service.put_file("the_file_key", b"oh hai!").await.unwrap();
 
         let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
         let file_contents = collect(file_contents).await.unwrap();
