@@ -212,8 +212,6 @@ impl StorageService {
 mod tests {
     use std::pin::pin;
 
-    use tokio_stream::StreamExt as _;
-
     use super::*;
 
     async fn collect(s: impl Stream<Item = anyhow::Result<Bytes>>) -> anyhow::Result<Vec<u8>> {
@@ -273,6 +271,7 @@ mod tests {
         assert_eq!(file_contents, b"oh hai!");
     }
 
+    #[ignore = "gcs credentials are not yet set up in CI"]
     #[tokio::test]
     async fn works_with_gcs() {
         let tempdir = tempfile::tempdir().unwrap();

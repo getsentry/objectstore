@@ -4,7 +4,6 @@ use std::pin::pin;
 
 use bytes::Bytes;
 use futures_core::Stream;
-use futures_util::StreamExt as _;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncWriteExt as _, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -60,7 +59,7 @@ impl Backend for LocalFs {
             err => err?,
         };
 
-        let stream = ReaderStream::new(file).map(|res| Ok(res?));
+        let stream = ReaderStream::new(file);
         Ok(Some(stream))
     }
 }
