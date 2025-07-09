@@ -1,6 +1,9 @@
 mod gcs;
 mod local_fs;
 
+pub use gcs::Gcs;
+pub use local_fs::LocalFs;
+
 use bytes::Bytes;
 use futures_core::Stream;
 use std::io;

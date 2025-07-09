@@ -6,22 +6,23 @@
 mod backend;
 mod datamodel;
 
-use std::io::ErrorKind;
+use std::io::{self};
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::Bytes;
-use gcp_auth::{Token, TokenProvider};
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter};
+use futures_util::StreamExt as _;
+use tokio::io::{AsyncReadExt as _, BufReader};
 use tokio_stream::Stream;
+use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
 use watto::Pod;
 
+use crate::backend::Backend;
 use crate::datamodel::{
     Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
 };
@@ -29,53 +30,52 @@ use crate::datamodel::{
 #[derive(Clone)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
-pub struct StorageServiceInner {
-    file_path: PathBuf,
-    part_path: PathBuf,
-
-    gcs_backend: Option<GcsBackend>,
+enum StorageServiceInner {
+    Fs(backend::LocalFs),
+    Gcs(backend::Gcs),
 }
 
-struct GcsBackend {
-    client: reqwest::Client,
-    gcs_token_provider: Arc<dyn TokenProvider>,
-    gcs_bucket: String,
-}
+impl backend::Backend for StorageServiceInner {
+    async fn put_file(
+        &self,
+        path: &str,
+        stream: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+    ) -> anyhow::Result<()> {
+        match self {
+            StorageServiceInner::Fs(local_fs) => local_fs.put_file(path, stream).await,
+            StorageServiceInner::Gcs(gcs) => gcs.put_file(path, stream).await,
+        }
+    }
 
-impl GcsBackend {
-    pub async fn gcs_token(&self) -> anyhow::Result<Arc<Token>> {
-        let token = self
-            .gcs_token_provider
-            .token(&["https://www.googleapis.com/auth/devstorage.read_write"])
-            .await?;
-        Ok(token)
+    async fn get_file(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<impl Stream<Item = std::io::Result<Bytes>> + 'static>> {
+        match self {
+            StorageServiceInner::Fs(local_fs) => {
+                let Some(stream) = local_fs.get_file(path).await? else {
+                    return Ok(None);
+                };
+                Ok(Some(stream.boxed()))
+            }
+            StorageServiceInner::Gcs(gcs) => {
+                let Some(stream) = gcs.get_file(path).await? else {
+                    return Ok(None);
+                };
+                Ok(Some(stream.boxed()))
+            }
+        }
     }
 }
 
 impl StorageService {
     pub async fn new(path: &Path, bucket: Option<&str>) -> anyhow::Result<Self> {
-        let file_path = path.join("files");
-        let part_path = path.join("parts");
-
-        tokio::fs::create_dir_all(&file_path).await?;
-        tokio::fs::create_dir_all(&part_path).await?;
-
-        let gcs_backend = if let Some(bucket) = bucket {
-            let gcs_token_provider = gcp_auth::provider().await?;
-            Some(GcsBackend {
-                client: reqwest::Client::new(),
-                gcs_token_provider,
-                gcs_bucket: bucket.into(),
-            })
+        let inner = if let Some(bucket) = bucket {
+            let gcs = backend::Gcs::new(bucket).await?;
+            StorageServiceInner::Gcs(gcs)
         } else {
-            None
-        };
-
-        let inner = StorageServiceInner {
-            file_path,
-            part_path,
-
-            gcs_backend,
+            let fs = backend::LocalFs::new(path);
+            StorageServiceInner::Fs(fs)
         };
 
         Ok(Self(Arc::new(inner)))
@@ -92,40 +92,13 @@ impl StorageService {
         &self,
         key: &str,
     ) -> anyhow::Result<Option<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
-        let file_path = self.0.file_path.join(format!("{key}.bin"));
+        let file_path = format!("files/{key}.bin");
 
-        if let Some(gcs_backend) = &self.0.gcs_backend {
-            let file_get_url = format!(
-                "https://storage.googleapis.com/{}/{}",
-                gcs_backend.gcs_bucket,
-                file_path.display(),
-            );
-            let token = gcs_backend.gcs_token().await?;
-            let response = gcs_backend
-                .client
-                .get(file_get_url)
-                .bearer_auth(token.as_str())
-                .send()
-                .await?;
-
-            let file_buf = response.bytes().await?;
-            let (_file_metadata, rest) =
-                File::ref_from_prefix(&file_buf).context("reading File metadata")?;
-
-            let parts = FilePart::slice_from_bytes(rest).context("reading File Parts metadata")?;
-
-            return Ok(Some(self.clone().make_part_stream(parts.to_vec())));
-        }
-
-        let file_file = match OpenOptions::new().read(true).open(file_path).await {
-            Ok(file_file) => file_file,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            err => err?,
+        let Some(reader) = self.0.get_file(&file_path).await? else {
+            return Ok(None);
         };
 
-        let mut reader = BufReader::new(file_file);
+        let mut reader = BufReader::new(StreamReader::new(reader));
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
         reader.read_exact(&mut metadata_buf).await?;
@@ -158,7 +131,6 @@ impl StorageService {
 
     async fn assemble_file_from_parts(&self, key: &str, parts: &[FilePart]) -> anyhow::Result<()> {
         let file_size: u64 = parts.iter().map(|part| part.part_size.get() as u64).sum();
-
         let file_metadata = File {
             magic: FILE_MAGIC,
             version: FILE_VERSION.into(),
@@ -166,45 +138,12 @@ impl StorageService {
             file_size: file_size.into(),
         };
 
-        let file_path = self.0.file_path.join(format!("{key}.bin"));
+        let mut buffer = file_metadata.as_bytes().to_owned();
+        buffer.extend_from_slice(parts.as_bytes());
 
-        if let Some(gcs_backend) = &self.0.gcs_backend {
-            let mut file_contents = file_metadata.as_bytes().to_owned();
-            file_contents.extend_from_slice(parts.as_bytes());
-
-            let file_put_url = format!(
-                "https://storage.googleapis.com/{}/{}",
-                gcs_backend.gcs_bucket,
-                file_path.display(),
-            );
-            let token = gcs_backend.gcs_token().await?;
-            let _response = gcs_backend
-                .client
-                .put(file_put_url)
-                .bearer_auth(token.as_str())
-                .body(file_contents)
-                .send()
-                .await?;
-
-            return Ok(());
-        }
-
-        tokio::fs::create_dir_all(file_path.parent().unwrap()).await?;
-        let file_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(file_path)
-            .await?;
-
-        let mut writer = BufWriter::new(file_file);
-
-        writer.write_all(file_metadata.as_bytes()).await?;
-        writer.write_all(parts.as_bytes()).await?;
-        writer.flush().await?;
-
-        let part_file = writer.into_inner();
-        // part_file.sync_data().await?;
-        drop(part_file);
+        let file_path = format!("files/{key}.bin");
+        let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
+        self.0.put_file(&file_path, stream).await?;
 
         Ok(())
     }
@@ -225,47 +164,13 @@ impl StorageService {
         };
 
         let part_uuid = Uuid::new_v4();
-        let part_path = self.0.part_path.join(format!("{part_uuid}.bin"));
 
-        if let Some(gcs_backend) = &self.0.gcs_backend {
-            let mut part_contents = part_metadata.as_bytes().to_owned();
-            part_contents.extend_from_slice(&compressed);
+        let mut buffer = part_metadata.as_bytes().to_owned();
+        buffer.extend_from_slice(&compressed);
 
-            let part_put_url = format!(
-                "https://storage.googleapis.com/{}/{}",
-                gcs_backend.gcs_bucket,
-                part_path.display(),
-            );
-            let token = gcs_backend.gcs_token().await?;
-            let _response = gcs_backend
-                .client
-                .put(part_put_url)
-                .bearer_auth(token.as_str())
-                .body(part_contents)
-                .send()
-                .await?;
-
-            return Ok(FilePart {
-                part_size: part_size.into(),
-                part_uuid: part_uuid.into_bytes(),
-            });
-        }
-
-        let part_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(part_path)
-            .await?;
-
-        let mut writer = BufWriter::new(part_file);
-
-        writer.write_all(part_metadata.as_bytes()).await?;
-        writer.write_all(&compressed).await?;
-        writer.flush().await?;
-
-        let part_file = writer.into_inner();
-        // part_file.sync_data().await?;
-        drop(part_file);
+        let part_path = format!("parts/{part_uuid}.bin");
+        let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
+        self.0.put_file(&part_path, stream).await?;
 
         Ok(FilePart {
             part_size: part_size.into(),
@@ -274,48 +179,13 @@ impl StorageService {
     }
 
     async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Bytes>> {
-        let part_path = self.0.part_path.join(format!("{part_uuid}.bin"));
+        let part_path = format!("parts/{part_uuid}.bin");
 
-        if let Some(gcs_backend) = &self.0.gcs_backend {
-            let part_get_url = format!(
-                "https://storage.googleapis.com/{}/{}",
-                gcs_backend.gcs_bucket,
-                part_path.display(),
-            );
-            let token = gcs_backend.gcs_token().await?;
-            let response = gcs_backend
-                .client
-                .get(part_get_url)
-                .bearer_auth(token.as_str())
-                .send()
-                .await?;
-
-            let part_buf = response.bytes().await?;
-            let (part_metadata, rest) =
-                Part::ref_from_prefix(&part_buf).context("reading Part metadata")?;
-
-            let contents = match part_metadata.compression_algorithm {
-                1 /* Zstd */ =>
-                {
-                    zstd::bulk::decompress(rest,part_metadata.part_size.get() as usize)?.into()
-                },
-                _ => {
-                    Bytes::copy_from_slice(rest)
-                }
-            };
-
-            return Ok(Some(contents));
-        }
-
-        let part_file = match OpenOptions::new().read(true).open(part_path).await {
-            Ok(part_file) => part_file,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            err => err?,
+        let Some(reader) = self.0.get_file(&part_path).await? else {
+            return Ok(None);
         };
 
-        let mut reader = BufReader::new(part_file);
+        let mut reader = BufReader::new(StreamReader::new(reader));
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
         reader.read_exact(&mut metadata_buf).await?;
