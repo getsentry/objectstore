@@ -78,7 +78,7 @@ async fn get_blob(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    Ok(contents.into_response())
+    Ok(Body::from_stream(contents).into_response())
 }
 
 mod error {

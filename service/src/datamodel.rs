@@ -40,7 +40,7 @@ pub struct File {
 unsafe impl Pod for File {}
 
 /// The (uncompressed) size and UUID of the file part.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct FilePart {
     pub part_size: U32LE,

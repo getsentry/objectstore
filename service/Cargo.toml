@@ -7,8 +7,13 @@ edition = "2024"
 anyhow = "1.0.98"
 api = { path = "../api" }
 async-compression = { version = "0.4.25", features = ["tokio", "zstd"] }
+async-stream = "0.3.6"
+bytes = "1.10.1"
+futures-core = "0.3.31"
 pack1 = "1.0.0"
 tokio = { version = "1.46.0", features = ["full"] }
+tokio-stream = "0.1.17"
+tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4", "v7"] }
 watto = "0.2.0"
 zstd = "0.13.3"
