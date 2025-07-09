@@ -9,7 +9,7 @@ pub trait Backend {
     async fn put_file(
         &self,
         path: &str,
-        stream: impl Stream<Item = io::Result<Bytes>>,
+        stream: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
     ) -> anyhow::Result<()>;
     async fn get_file(
         &self,
