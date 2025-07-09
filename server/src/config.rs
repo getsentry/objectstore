@@ -14,6 +14,7 @@ pub struct Config {
     pub http_addr: SocketAddr,
     pub data_path: PathBuf,
     pub gcs_bucket: Option<String>,
+    pub sentry_dsn: Option<String>,
 }
 
 impl Default for Config {
@@ -23,6 +24,7 @@ impl Default for Config {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
             data_path: PathBuf::from("data"),
             gcs_bucket: None,
+            sentry_dsn: None,
         }
     }
 }

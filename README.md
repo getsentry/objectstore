@@ -18,6 +18,11 @@ Ensure `protoc` and the latest stable Rust toolchain are installed on your machi
 cargo run
 ```
 
+Run the stress test binary against the running server with:
+```sh
+cargo run -p stresstest
+```
+
 To run tests:
 
 ```sh
