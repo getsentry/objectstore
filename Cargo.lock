@@ -2365,6 +2365,7 @@ dependencies = [
  "axum-extra",
  "elegant-departure",
  "figment",
+ "futures-util",
  "sentry",
  "serde",
  "serde_json",
