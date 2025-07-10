@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::Bytes;
+use futures_core::stream::BoxStream;
 use futures_util::StreamExt as _;
 use tokio::io::{AsyncReadExt as _, BufReader};
 use tokio_stream::Stream;
@@ -39,7 +40,7 @@ impl backend::Backend for StorageServiceInner {
     async fn put_file(
         &self,
         path: &str,
-        stream: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+        stream: BoxStream<'static, io::Result<Bytes>>,
     ) -> anyhow::Result<()> {
         match self {
             StorageServiceInner::Fs(local_fs) => local_fs.put_file(path, stream).await,
@@ -50,20 +51,10 @@ impl backend::Backend for StorageServiceInner {
     async fn get_file(
         &self,
         path: &str,
-    ) -> anyhow::Result<Option<impl Stream<Item = std::io::Result<Bytes>> + 'static>> {
+    ) -> anyhow::Result<Option<BoxStream<'static, io::Result<Bytes>>>> {
         match self {
-            StorageServiceInner::Fs(local_fs) => {
-                let Some(stream) = local_fs.get_file(path).await? else {
-                    return Ok(None);
-                };
-                Ok(Some(stream.boxed()))
-            }
-            StorageServiceInner::Gcs(gcs) => {
-                let Some(stream) = gcs.get_file(path).await? else {
-                    return Ok(None);
-                };
-                Ok(Some(stream.boxed()))
-            }
+            StorageServiceInner::Fs(local_fs) => local_fs.get_file(path).await,
+            StorageServiceInner::Gcs(gcs) => gcs.get_file(path).await,
         }
     }
 }
@@ -143,7 +134,7 @@ impl StorageService {
 
         let file_path = format!("files/{key}.bin");
         let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
-        self.0.put_file(&file_path, stream).await?;
+        self.0.put_file(&file_path, stream.boxed()).await?;
 
         Ok(())
     }
@@ -170,7 +161,7 @@ impl StorageService {
 
         let part_path = format!("parts/{part_uuid}.bin");
         let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
-        self.0.put_file(&part_path, stream).await?;
+        self.0.put_file(&part_path, stream.boxed()).await?;
 
         Ok(FilePart {
             part_size: part_size.into(),

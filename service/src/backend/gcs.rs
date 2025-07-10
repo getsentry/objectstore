@@ -1,9 +1,9 @@
-use std::io::{self};
+use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_core::Stream;
-use futures_util::TryStreamExt;
+use futures_core::stream::BoxStream;
+use futures_util::{StreamExt as _, TryStreamExt};
 use gcp_auth::{Token, TokenProvider};
 use reqwest::{Body, StatusCode};
 
@@ -40,7 +40,7 @@ impl Backend for Gcs {
     async fn put_file(
         &self,
         path: &str,
-        stream: impl Stream<Item = io::Result<Bytes>> + Send + 'static,
+        stream: BoxStream<'static, io::Result<Bytes>>,
     ) -> anyhow::Result<()> {
         let put_url = format!("https://storage.googleapis.com/{}/{path}", self.gcs_bucket,);
         let token = self.gcs_token().await?;
@@ -59,7 +59,7 @@ impl Backend for Gcs {
     async fn get_file(
         &self,
         path: &str,
-    ) -> anyhow::Result<Option<impl Stream<Item = io::Result<Bytes>> + 'static>> {
+    ) -> anyhow::Result<Option<BoxStream<'static, io::Result<Bytes>>>> {
         let get_url = format!("https://storage.googleapis.com/{}/{path}", self.gcs_bucket,);
         let token = self.gcs_token().await?;
         let response = self
@@ -74,7 +74,6 @@ impl Backend for Gcs {
         }
 
         let stream = response.bytes_stream().map_err(io::Error::other);
-
-        Ok(Some(stream))
+        Ok(Some(stream.boxed()))
     }
 }
