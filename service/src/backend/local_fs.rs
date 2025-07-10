@@ -21,6 +21,7 @@ impl LocalFs {
     }
 }
 
+#[async_trait::async_trait]
 impl Backend for LocalFs {
     async fn put_file(
         &self,

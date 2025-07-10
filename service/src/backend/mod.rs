@@ -8,6 +8,9 @@ pub use local_fs::LocalFs;
 use bytes::Bytes;
 use std::io;
 
+pub type BoxedBackend = Box<dyn Backend + Send + Sync + 'static>;
+
+#[async_trait::async_trait]
 pub trait Backend {
     async fn put_file(
         &self,

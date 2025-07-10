@@ -36,6 +36,7 @@ impl Gcs {
     }
 }
 
+#[async_trait::async_trait]
 impl Backend for Gcs {
     async fn put_file(
         &self,
