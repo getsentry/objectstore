@@ -76,7 +76,7 @@ jobs:
           docker tag server:amd64 ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64
           docker push ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64
 
-          docker tag taskbroker:arm64 ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
+          docker tag server:arm64 ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
           docker push ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
 
           docker manifest create \
