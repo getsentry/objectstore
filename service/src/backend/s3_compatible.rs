@@ -1,11 +1,7 @@
-use std::io;
-
-use bytes::Bytes;
-use futures_core::stream::BoxStream;
-use futures_util::{StreamExt as _, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Body, StatusCode};
 
-use crate::backend::Backend;
+use super::{Backend, BackendStream};
 
 pub trait Token: Send + Sync {
     fn as_str(&self) -> &str;
@@ -62,11 +58,7 @@ impl S3Compatible<NoToken> {
 
 #[async_trait::async_trait]
 impl<T: TokenProvider> Backend for S3Compatible<T> {
-    async fn put_file(
-        &self,
-        path: &str,
-        stream: BoxStream<'static, io::Result<Bytes>>,
-    ) -> anyhow::Result<()> {
+    async fn put_file(&self, path: &str, stream: BackendStream) -> anyhow::Result<()> {
         let put_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.put(put_url);
@@ -78,10 +70,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         Ok(())
     }
 
-    async fn get_file(
-        &self,
-        path: &str,
-    ) -> anyhow::Result<Option<BoxStream<'static, io::Result<Bytes>>>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Option<BackendStream>> {
         let get_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.get(get_url);
@@ -94,7 +83,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
             return Ok(None);
         }
 
-        let stream = response.bytes_stream().map_err(io::Error::other);
+        let stream = response.bytes_stream().map_err(anyhow::Error::from);
         Ok(Some(stream.boxed()))
     }
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use api::storage::storage_server::{Storage, StorageServer};
 use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
+use futures_util::StreamExt;
 use service::StorageService;
-use tokio_stream::StreamExt as _;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -22,7 +22,8 @@ impl StorageServiceImpl {
         let key = request.key.unwrap_or_else(|| Uuid::new_v4().to_string());
         let key = format!("{}/{}/{}", scope.usecase, scope.scope, key);
 
-        self.service.put_file(&key, &request.contents).await?;
+        let stream = tokio_stream::once(Ok(request.contents.into())).boxed();
+        self.service.put_file(&key, stream).await?;
 
         Ok(PutBlobResponse { key })
     }

@@ -1,15 +1,13 @@
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
-use bytes::Bytes;
-use futures_core::stream::BoxStream;
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt, TryStreamExt};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncWriteExt as _, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::Backend;
+use super::{Backend, BackendStream};
 
 pub struct LocalFs {
     path: PathBuf,
@@ -23,11 +21,7 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl Backend for LocalFs {
-    async fn put_file(
-        &self,
-        path: &str,
-        stream: BoxStream<'static, io::Result<Bytes>>,
-    ) -> anyhow::Result<()> {
+    async fn put_file(&self, path: &str, stream: BackendStream) -> anyhow::Result<()> {
         let path = self.path.join(path);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
@@ -36,6 +30,7 @@ impl Backend for LocalFs {
             .open(path)
             .await?;
 
+        let stream = stream.map_err(std::io::Error::other);
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
@@ -48,10 +43,7 @@ impl Backend for LocalFs {
         Ok(())
     }
 
-    async fn get_file(
-        &self,
-        path: &str,
-    ) -> anyhow::Result<Option<BoxStream<'static, io::Result<Bytes>>>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Option<BackendStream>> {
         let path = self.path.join(path);
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
@@ -61,7 +53,7 @@ impl Backend for LocalFs {
             err => err?,
         };
 
-        let stream = ReaderStream::new(file);
+        let stream = ReaderStream::new(file).map_err(anyhow::Error::from);
         Ok(Some(stream.boxed()))
     }
 }

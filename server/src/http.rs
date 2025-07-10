@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::put;
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
+use futures_util::{StreamExt, TryStreamExt};
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
 use service::StorageService;
@@ -58,9 +59,8 @@ async fn put_blob_no_key(
     let key = Uuid::new_v4();
     let key = format!("{usecase}/{scope}/{key}");
 
-    let contents = to_bytes(body, usize::MAX).await?;
-    service.put_file(&key, &contents).await?;
-
+    let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
+    service.put_file(&key, stream).await?;
     Ok(Json(PutBlobResponse { key }))
 }
 
@@ -72,9 +72,8 @@ async fn put_blob(
 ) -> error::Result<impl IntoResponse> {
     let key = format!("{usecase}/{scope}/{key}");
 
-    let contents = to_bytes(body, usize::MAX).await?;
-    service.put_file(&key, &contents).await?;
-
+    let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
+    service.put_file(&key, stream).await?;
     Ok(Json(PutBlobResponse { key }))
 }
 
