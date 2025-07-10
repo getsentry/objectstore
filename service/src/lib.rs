@@ -34,14 +34,30 @@ struct StorageServiceInner {
     backend: BoxedBackend,
 }
 
+pub enum StorageConfig<'a> {
+    FileSystem {
+        path: &'a Path,
+    },
+    S3Compatible {
+        endpoint: Option<&'a str>,
+        bucket: &'a str,
+    },
+}
+
 impl StorageService {
-    pub async fn new(path: &Path, bucket: Option<&str>) -> anyhow::Result<Self> {
-        let backend: BoxedBackend = if let Some(bucket) = bucket {
-            let gcs = backend::Gcs::new(bucket).await?;
-            Box::new(gcs)
-        } else {
-            let fs = backend::LocalFs::new(path);
-            Box::new(fs)
+    pub async fn new(config: StorageConfig<'_>) -> anyhow::Result<Self> {
+        let backend = match config {
+            StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
+            StorageConfig::S3Compatible {
+                endpoint,
+                bucket,
+            } => {
+                if let Some(endpoint) = endpoint {
+                    Box::new(backend::S3Compatible::without_token(endpoint, bucket))
+                } else {
+                    backend::gcs(bucket).await?
+                }
+            }
         };
 
         let inner = StorageServiceInner { backend };
@@ -193,7 +209,10 @@ mod tests {
     #[tokio::test]
     async fn stores_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path(), None).await.unwrap();
+        let config = StorageConfig::FileSystem {
+            path: tempdir.path(),
+        };
+        let service = StorageService::new(config).await.unwrap();
 
         let file_part = service.put_part(b"oh hai!").await.unwrap();
 
@@ -209,7 +228,10 @@ mod tests {
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path(), None).await.unwrap();
+        let config = StorageConfig::FileSystem {
+            path: tempdir.path(),
+        };
+        let service = StorageService::new(config).await.unwrap();
 
         service.put_file("the_file_key", b"oh hai!").await.unwrap();
 
@@ -222,7 +244,10 @@ mod tests {
     #[tokio::test]
     async fn assembles_file_from_parts() {
         let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path(), None).await.unwrap();
+        let config = StorageConfig::FileSystem {
+            path: tempdir.path(),
+        };
+        let service = StorageService::new(config).await.unwrap();
 
         let part1 = service.put_part(b"oh ").await.unwrap();
         let part2 = service.put_part(b"hai!").await.unwrap();
@@ -241,10 +266,28 @@ mod tests {
     #[ignore = "gcs credentials are not yet set up in CI"]
     #[tokio::test]
     async fn works_with_gcs() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let service = StorageService::new(tempdir.path(), Some("sbx-warp-benchmark-bucket"))
-            .await
-            .unwrap();
+        let config = StorageConfig::S3Compatible {
+            endpoint: None,
+            bucket: "sbx-warp-benchmark-bucket",
+        };
+        let service = StorageService::new(config).await.unwrap();
+
+        service.put_file("the_file_key", b"oh hai!").await.unwrap();
+
+        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = collect(file_contents).await.unwrap();
+
+        assert_eq!(file_contents, b"oh hai!");
+    }
+
+    #[ignore = "gcs credentials are not yet set up in CI"]
+    #[tokio::test]
+    async fn works_with_seaweed() {
+        let config = StorageConfig::S3Compatible {
+            endpoint: Some("http://localhost:8333"),
+            bucket: "whatever",
+        };
+        let service = StorageService::new(config).await.unwrap();
 
         service.put_file("the_file_key", b"oh hai!").await.unwrap();
 

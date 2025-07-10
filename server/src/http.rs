@@ -30,7 +30,7 @@ pub async fn start_server(config: Arc<Config>, service: StorageService) {
         .with_state(service)
         .into_make_service();
 
-    println!("HTTP server listening on {}", config.http_addr);
+    tracing::info!("HTTP server listening on {}", config.http_addr);
     let _guard = elegant_departure::get_shutdown_guard();
     let listener = tokio::net::TcpListener::bind(config.http_addr)
         .await
@@ -42,7 +42,6 @@ pub async fn start_server(config: Arc<Config>, service: StorageService) {
         })
         .await
         .unwrap();
-    println!("HTTP server shut down");
 }
 
 #[derive(Debug, Serialize)]
