@@ -2361,6 +2361,7 @@ dependencies = [
  "api",
  "async-compression",
  "async-stream",
+ "async-trait",
  "bytes",
  "futures-core",
  "futures-util",

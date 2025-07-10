@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use watto::Pod;
 
-use crate::backend::Backend;
+use crate::backend::BoxedBackend;
 use crate::datamodel::{
     Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
 };
@@ -30,54 +30,21 @@ use crate::datamodel::{
 #[derive(Clone)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
-enum StorageServiceInner {
-    Fs(backend::LocalFs),
-    Gcs(backend::Gcs),
-}
-
-impl backend::Backend for StorageServiceInner {
-    async fn put_file(
-        &self,
-        path: &str,
-        stream: impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
-    ) -> anyhow::Result<()> {
-        match self {
-            StorageServiceInner::Fs(local_fs) => local_fs.put_file(path, stream).await,
-            StorageServiceInner::Gcs(gcs) => gcs.put_file(path, stream).await,
-        }
-    }
-
-    async fn get_file(
-        &self,
-        path: &str,
-    ) -> anyhow::Result<Option<impl Stream<Item = std::io::Result<Bytes>> + 'static>> {
-        match self {
-            StorageServiceInner::Fs(local_fs) => {
-                let Some(stream) = local_fs.get_file(path).await? else {
-                    return Ok(None);
-                };
-                Ok(Some(stream.boxed()))
-            }
-            StorageServiceInner::Gcs(gcs) => {
-                let Some(stream) = gcs.get_file(path).await? else {
-                    return Ok(None);
-                };
-                Ok(Some(stream.boxed()))
-            }
-        }
-    }
+struct StorageServiceInner {
+    backend: BoxedBackend,
 }
 
 impl StorageService {
     pub async fn new(path: &Path, bucket: Option<&str>) -> anyhow::Result<Self> {
-        let inner = if let Some(bucket) = bucket {
+        let backend: BoxedBackend = if let Some(bucket) = bucket {
             let gcs = backend::Gcs::new(bucket).await?;
-            StorageServiceInner::Gcs(gcs)
+            Box::new(gcs)
         } else {
             let fs = backend::LocalFs::new(path);
-            StorageServiceInner::Fs(fs)
+            Box::new(fs)
         };
 
+        let inner = StorageServiceInner { backend };
         Ok(Self(Arc::new(inner)))
     }
 
@@ -94,7 +61,7 @@ impl StorageService {
     ) -> anyhow::Result<Option<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
         let file_path = format!("files/{key}.bin");
 
-        let Some(reader) = self.0.get_file(&file_path).await? else {
+        let Some(reader) = self.0.backend.get_file(&file_path).await? else {
             return Ok(None);
         };
 
@@ -143,7 +110,7 @@ impl StorageService {
 
         let file_path = format!("files/{key}.bin");
         let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
-        self.0.put_file(&file_path, stream).await?;
+        self.0.backend.put_file(&file_path, stream.boxed()).await?;
 
         Ok(())
     }
@@ -170,7 +137,7 @@ impl StorageService {
 
         let part_path = format!("parts/{part_uuid}.bin");
         let stream = tokio_stream::once(io::Result::Ok(buffer.into()));
-        self.0.put_file(&part_path, stream).await?;
+        self.0.backend.put_file(&part_path, stream.boxed()).await?;
 
         Ok(FilePart {
             part_size: part_size.into(),
@@ -181,7 +148,7 @@ impl StorageService {
     async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Bytes>> {
         let part_path = format!("parts/{part_uuid}.bin");
 
-        let Some(reader) = self.0.get_file(&part_path).await? else {
+        let Some(reader) = self.0.backend.get_file(&part_path).await? else {
             return Ok(None);
         };
 
