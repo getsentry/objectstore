@@ -1,9 +1,11 @@
 mod gcs;
 mod local_fs;
+mod s3_compatible;
 
 use futures_core::stream::BoxStream;
-pub use gcs::Gcs;
+pub use gcs::gcs;
 pub use local_fs::LocalFs;
+pub use s3_compatible::S3Compatible;
 
 use bytes::Bytes;
 use std::io;

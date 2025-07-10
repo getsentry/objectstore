@@ -70,7 +70,7 @@ impl Storage for StorageServiceImpl {
 pub async fn start_server(config: Arc<Config>, service: StorageService) {
     let server = StorageServer::new(StorageServiceImpl { service });
 
-    println!("gRPC server listening on {}", config.grpc_addr);
+    tracing::info!("gRPC server listening on {}", config.grpc_addr);
     Server::builder()
         .add_service(server)
         .serve_with_shutdown(
@@ -79,5 +79,4 @@ pub async fn start_server(config: Arc<Config>, service: StorageService) {
         )
         .await
         .unwrap();
-    println!("gRPC server shut down");
 }

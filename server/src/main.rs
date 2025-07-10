@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use sentry::integrations::tracing as sentry_tracing;
-use service::StorageService;
+use service::{StorageConfig, StorageService};
 use tokio::signal::unix::SignalKind;
 use tracing::Level;
-use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, prelude::*};
 
-use crate::config::Config;
+use crate::config::{Config, Storage};
 
 mod config;
 mod grpc;
@@ -45,16 +45,27 @@ fn initialize_tracing(config: &Arc<Config>) {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(sentry_layer)
+        .with(EnvFilter::from_default_env())
         .init();
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Arc::new(Config::from_env()?);
-    let service = StorageService::new(&config.data_path, config.gcs_bucket.as_deref()).await?;
 
     let _sentry_guard = maybe_initialize_sentry(&config);
     initialize_tracing(&config);
+
+    tracing::debug!(?config, "Starting service");
+
+    let storage_config = match &config.storage {
+        Storage::FileSystem { path } => StorageConfig::FileSystem { path },
+        Storage::S3Compatible { endpoint, bucket } => StorageConfig::S3Compatible {
+            endpoint: endpoint.as_deref(),
+            bucket,
+        },
+    };
+    let service = StorageService::new(storage_config).await?;
 
     tokio::spawn(http::start_server(Arc::clone(&config), service.clone()));
     tokio::spawn(grpc::start_server(config, service));
@@ -65,7 +76,8 @@ async fn main() -> Result<()> {
         .on_signal(SignalKind::hangup())
         .on_signal(SignalKind::quit())
         .await;
-    println!("shutting down");
+
+    tracing::info!("shutting down");
 
     Ok(())
 }
