@@ -77,6 +77,8 @@ pub struct Args {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -87,9 +89,40 @@ mod tests {
             jail.set_env("fss_storage__bucket", "whatever");
 
             let config = Config::from_args(Args::default()).unwrap();
-            dbg!(config);
+
+            let Storage::S3Compatible { endpoint, bucket } = dbg!(config).storage else {
+                panic!("expected s3 storage");
+            };
+            assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
+            assert_eq!(bucket, "whatever");
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn configurable_via_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            storage:
+                type: s3compatible
+                endpoint: http://localhost:8888
+                bucket: whatever
+            "#,
+            )
+            .unwrap();
+
+        let args = Args {
+            config: Some(tempfile.path().into()),
+        };
+        let config = Config::from_args(args).unwrap();
+
+        let Storage::S3Compatible { endpoint, bucket } = dbg!(config).storage else {
+            panic!("expected s3 storage");
+        };
+        assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
+        assert_eq!(bucket, "whatever");
     }
 }
