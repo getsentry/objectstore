@@ -68,6 +68,10 @@ impl StorageService {
         self.0.backend.get_file(key).await
     }
 
+    pub async fn delete_file(&self, key: &str) -> anyhow::Result<()> {
+        self.0.backend.delete_file(key).await
+    }
+
     pub async fn _put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
         let file_part = self.put_part(contents).await?;
         self.assemble_file_from_parts(key, &[file_part]).await?;

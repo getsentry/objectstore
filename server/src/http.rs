@@ -26,7 +26,10 @@ pub async fn start_server(config: Arc<Config>, service: StorageService) {
 
     let app = Router::new()
         .route("/{usecase}/{scope}", put(put_blob_no_key))
-        .route("/{usecase}/{scope}/{*key}", put(put_blob).get(get_blob))
+        .route(
+            "/{usecase}/{scope}/{*key}",
+            put(put_blob).get(get_blob).delete(delete_blob),
+        )
         .layer(option_layer(sentry_tower_service))
         .with_state(service)
         .into_make_service();
@@ -50,7 +53,7 @@ struct PutBlobResponse {
     key: String,
 }
 
-#[tracing::instrument(skip(service))]
+#[tracing::instrument(skip_all, fields(usecase, scope))]
 async fn put_blob_no_key(
     State(service): State<StorageService>,
     Path((usecase, scope)): Path<(String, String)>,
@@ -64,7 +67,7 @@ async fn put_blob_no_key(
     Ok(Json(PutBlobResponse { key }))
 }
 
-#[tracing::instrument(skip(service))]
+#[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn put_blob(
     State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
@@ -77,7 +80,7 @@ async fn put_blob(
     Ok(Json(PutBlobResponse { key }))
 }
 
-#[tracing::instrument(skip(service))]
+#[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn get_blob(
     State(service): State<StorageService>,
     Path((usecase, scope, key)): Path<(String, String, String)>,
@@ -89,6 +92,18 @@ async fn get_blob(
     };
 
     Ok(Body::from_stream(contents).into_response())
+}
+
+#[tracing::instrument(skip_all, fields(usecase, scope, key))]
+async fn delete_blob(
+    State(service): State<StorageService>,
+    Path((usecase, scope, key)): Path<(String, String, String)>,
+) -> error::Result<impl IntoResponse> {
+    let key = format!("{usecase}/{scope}/{key}");
+
+    service.delete_file(&key).await?;
+
+    Ok(())
 }
 
 mod error {
