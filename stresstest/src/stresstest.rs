@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use bytesize::ByteSize;
+use futures::StreamExt;
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -29,7 +30,7 @@ pub async fn perform_stresstest(
 
     let finished_tasks = futures::future::join_all(tasks).await;
 
-    for task in finished_tasks {
+    let workloads = finished_tasks.into_iter().map(|task| {
         let (workload, metrics) = task.unwrap();
 
         println!();
@@ -62,7 +63,43 @@ pub async fn perform_stresstest(
             println!();
             print_percentiles(&metrics.delete_timing, Duration::from_secs_f64);
         }
-    }
+
+        workload
+    });
+
+    let workloads: Vec<_> = workloads.collect();
+    let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
+    let files_to_cleanup = workloads.into_iter().flat_map(|mut w| w.external_files());
+
+    let start = Instant::now();
+    let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
+    futures::stream::iter(files_to_cleanup)
+        .for_each_concurrent(max_concurrency, |external_id| {
+            let remote = remote.clone();
+            let cleanup_timing = cleanup_timing.clone();
+            async move {
+                let start = Instant::now();
+                remote.delete(external_id).await;
+                cleanup_timing
+                    .lock()
+                    .unwrap()
+                    .add(start.elapsed().as_secs_f64());
+            }
+        })
+        .await;
+    let cleanup_duration = start.elapsed();
+    let cleanup_timing = cleanup_timing.lock().unwrap();
+
+    println!();
+    println!(
+        "{} ({} files, concurrency: {})",
+        "## CLEANUP".bold(),
+        cleanup_timing.count().blue(),
+        max_concurrency.bold()
+    );
+    print_ops(&cleanup_timing, cleanup_duration);
+    println!();
+    print_percentiles(&cleanup_timing, Duration::from_secs_f64);
 
     Ok(())
 }
@@ -161,7 +198,7 @@ fn print_percentiles<T: fmt::Debug>(sketch: &DDSketch, map: impl Fn(f64) -> T) {
 
 fn print_ops(sketch: &DDSketch, duration: Duration) {
     let ops = sketch.count();
-    let ops_ps = ops as f32 / duration.as_secs() as f32;
+    let ops_ps = ops as f64 / duration.as_secs_f64();
     print!("  {:.2} operations/s", ops_ps.bold());
 }
 

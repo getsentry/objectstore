@@ -13,29 +13,55 @@
 //! *Read* or *delete* actions are using a *zipfian* distribution, meaning that
 //! more recently written blobs are the ones that will be read/deleted.
 
-use std::time::Duration;
+use std::path::PathBuf;
 
+use anyhow::Context;
+use argh::FromArgs;
+
+use crate::config::Config;
 use crate::http::HttpRemote;
 use crate::stresstest::perform_stresstest;
 use crate::workload::Workload;
 
+mod config;
 mod http;
 mod stresstest;
 mod workload;
 
+/// Stresstester for our foundational storage service
+#[derive(Debug, FromArgs)]
+pub struct Args {
+    /// path to the yaml configuration file
+    #[argh(option, short = 'c')]
+    pub config: PathBuf,
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
+    let args: Args = argh::from_env();
+
+    let config_file = std::fs::File::open(args.config).context("failed to open config file")?;
+    let config: Config =
+        serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
+
     let remote = HttpRemote {
-        master_url: "http://localhost:8888".into(),
+        remote: config.remote,
+        prefix: config.prefix,
         client: reqwest::Client::new(),
     };
-    let workload = Workload::builder("testing")
-        .concurrency(32)
-        .size_distribution(16 * 1024, 1024 * 1024) // p50 = 16K, p99 = 1M
-        .action_weights(98, 2, 0)
-        .build();
+    let workloads = config
+        .workloads
+        .into_iter()
+        .map(|w| {
+            Workload::builder(w.name)
+                .concurrency(w.concurrency)
+                .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
+                .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
+                .build()
+        })
+        .collect();
 
-    perform_stresstest(remote, vec![workload], Duration::from_secs(2))
-        .await
-        .unwrap();
+    perform_stresstest(remote, workloads, config.duration).await?;
+
+    Ok(())
 }
