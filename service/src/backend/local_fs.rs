@@ -56,4 +56,9 @@ impl Backend for LocalFs {
         let stream = ReaderStream::new(file).map_err(anyhow::Error::from);
         Ok(Some(stream.boxed()))
     }
+
+    async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+        let path = self.path.join(path);
+        Ok(tokio::fs::remove_file(path).await?)
+    }
 }

@@ -86,4 +86,16 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         let stream = response.bytes_stream().map_err(anyhow::Error::from);
         Ok(Some(stream.boxed()))
     }
+
+    async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+        let delete_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
+
+        let mut builder = self.client.delete(delete_url);
+        if let Some(provider) = &self.token_provider {
+            builder = builder.bearer_auth(provider.get_token().await?.as_str());
+        }
+        let _response = builder.send().await?;
+
+        Ok(())
+    }
 }
