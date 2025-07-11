@@ -8,7 +8,8 @@ use serde::Deserialize;
 use crate::workload::Payload;
 
 pub struct HttpRemote {
-    pub master_url: String,
+    pub remote: String,
+    pub prefix: String,
     pub client: reqwest::Client,
 }
 
@@ -30,7 +31,7 @@ impl HttpRemote {
             Poll::Ready(Some(Ok::<_, Infallible>(read_buf)))
         });
 
-        let put_url = format!("{}/foo/bar", self.master_url);
+        let put_url = format!("{}/{}", self.remote, self.prefix);
         let response = self
             .client
             .put(put_url)
@@ -44,7 +45,7 @@ impl HttpRemote {
     }
 
     pub async fn read(&self, id: &str, mut payload: Payload) {
-        let get_url = format!("{}/{id}", self.master_url);
+        let get_url = format!("{}/{id}", self.remote);
         let file_contents = self
             .client
             .get(get_url)
@@ -64,7 +65,7 @@ impl HttpRemote {
     }
 
     pub async fn delete(&self, id: String) {
-        let delete_url = format!("{}/{id}", self.master_url);
+        let delete_url = format!("{}/{id}", self.remote);
         self.client.delete(delete_url).send().await.unwrap();
     }
 }

@@ -7,7 +7,7 @@ use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Distribution, LogNormal, Zipf};
 
 pub struct WorkloadBuilder {
-    name: &'static str,
+    name: String,
     concurrency: usize,
     seed: u64,
 
@@ -70,7 +70,7 @@ impl WorkloadBuilder {
 }
 
 pub struct Workload {
-    pub name: &'static str,
+    pub name: String,
     pub concurrency: usize,
 
     /// The RNG driving all our distributions.
@@ -85,9 +85,9 @@ pub struct Workload {
 }
 
 impl Workload {
-    pub fn builder(name: &'static str) -> WorkloadBuilder {
+    pub fn builder(name: impl Into<String>) -> WorkloadBuilder {
         WorkloadBuilder {
-            name,
+            name: name.into(),
             concurrency: available_parallelism().unwrap().get(),
             seed: rand::random(),
 
@@ -149,6 +149,12 @@ impl Workload {
     /// (Files currently being read will not be concurrently deleted)
     pub fn push_file(&mut self, internal: InternalId, external: ExternalId) {
         self.existing_files.push((internal, external))
+    }
+
+    pub fn external_files(&mut self) -> impl Iterator<Item = ExternalId> + use<> {
+        std::mem::take(&mut self.existing_files)
+            .into_iter()
+            .map(|(_internal, external)| external)
     }
 }
 

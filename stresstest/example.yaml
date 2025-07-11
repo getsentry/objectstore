@@ -1,0 +1,15 @@
+remote: http://localhost:8888
+prefix: some/bucket
+
+duration: 2s
+
+workloads:
+  - name: example
+    concurrency: 32
+    file_sizes:
+      p50: 16 KiB
+      p99: 1 MiB
+    actions:
+      writes: 98
+      reads: 2
+      deletes: 0

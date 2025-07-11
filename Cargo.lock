@@ -449,6 +449,9 @@ name = "bytesize"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3c8f83209414aacf0eeae3cf730b18d6981697fba62f200fcfb92b9f082acba"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bytestring"
@@ -1003,6 +1006,22 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humantime"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
+
+[[package]]
+name = "humantime-serde"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
+dependencies = [
+ "humantime",
+ "serde",
+]
 
 [[package]]
 name = "hyper"
@@ -2478,15 +2497,18 @@ name = "stresstest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argh",
  "bytes",
  "bytesize",
  "futures",
  "futures-util",
+ "humantime-serde",
  "rand",
  "rand_distr",
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sketches-ddsketch",
  "tokio",
  "yansi",
