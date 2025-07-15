@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::thread::available_parallelism;
-use std::{io, task};
+use std::{fmt, io, task};
 
 use rand::rngs::SmallRng;
 use rand::{Rng, RngCore, SeedableRng};
@@ -160,8 +160,14 @@ impl Workload {
     }
 }
 
-#[derive(Eq, Hash, PartialEq)]
+#[derive(Eq, Hash, PartialEq, Clone, Copy)]
 pub struct InternalId(u64);
+
+impl fmt::Display for InternalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 pub type ExternalId = String;
 
