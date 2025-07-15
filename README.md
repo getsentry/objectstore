@@ -5,7 +5,7 @@ data at Sentry. It comprises a service with an RPC interface that internally
 manages multiple backends, client libraries for easy integration, and a set of
 utilities to manage stored data.
 
-<img width="797" height="1075" alt="overview" src="https://github.com/user-attachments/assets/e9a4df55-591c-495f-b2a6-60d76d49958e" />
+<img width="531" height="716" alt="overview" src="https://github.com/user-attachments/assets/e9a4df55-591c-495f-b2a6-60d76d49958e" />
 
 ## Internals
 
