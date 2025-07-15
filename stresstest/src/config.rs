@@ -19,6 +19,7 @@ pub struct Workload {
     pub name: String,
     pub concurrency: usize,
     pub file_sizes: FileSizes,
+    #[serde(default)]
     pub actions: Actions,
 }
 
@@ -33,4 +34,14 @@ pub struct Actions {
     pub writes: u8,
     pub reads: u8,
     pub deletes: u8,
+}
+
+impl Default for Actions {
+    fn default() -> Self {
+        Self {
+            writes: 97,
+            reads: 2,
+            deletes: 1,
+        }
+    }
 }
