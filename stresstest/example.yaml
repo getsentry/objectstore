@@ -1,15 +1,26 @@
 remote: http://localhost:8888
 prefix: some/bucket
 
-duration: 2s
+duration: 5s
 
 workloads:
-  - name: example
+  - name: attachments
+    concurrency: 8
+    file_sizes:
+      p50: 50 KiB
+      p99: 200 KiB
+  - name: profiling
+    concurrency: 8
+    file_sizes:
+      p50: 15 KiB
+      p99: 100 KiB
+  - name: replays
+    concurrency: 16
+    file_sizes:
+      p50: 25 KiB
+      p99: 400 KiB
+  - name: nodestore
     concurrency: 32
     file_sizes:
-      p50: 16 KiB
-      p99: 1 MiB
-    actions:
-      writes: 98
-      reads: 2
-      deletes: 0
+      p50: 5 KiB
+      p99: 20 KiB

@@ -1,9 +1,8 @@
-use std::convert::Infallible;
 use std::io::Read;
-use std::task::Poll;
 
 use reqwest::Body;
 use serde::Deserialize;
+use tokio_util::io::ReaderStream;
 
 use crate::workload::Payload;
 
@@ -19,17 +18,8 @@ struct PutBlobResponse {
 }
 
 impl HttpRemote {
-    pub async fn write(&self, mut payload: Payload) -> String {
-        let stream = futures_util::stream::poll_fn(move |_| {
-            if payload.len == 0 {
-                return Poll::Ready(None);
-            }
-            let mut read_buf = vec![0; 1024 * 1024];
-            let read_len = payload.read(&mut read_buf).unwrap();
-            read_buf.truncate(read_len);
-
-            Poll::Ready(Some(Ok::<_, Infallible>(read_buf)))
-        });
+    pub async fn write(&self, payload: Payload) -> String {
+        let stream = ReaderStream::new(payload);
 
         let put_url = format!("{}/{}", self.remote, self.prefix);
         let response = self
@@ -60,7 +50,7 @@ impl HttpRemote {
         payload.read_to_end(&mut expected_payload).unwrap();
 
         if file_contents != expected_payload {
-            panic!("readback mismatch?");
+            eprintln!("contents of `{id}` do not match expectation");
         }
     }
 

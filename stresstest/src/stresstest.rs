@@ -30,6 +30,7 @@ pub async fn perform_stresstest(
 
     let finished_tasks = futures::future::join_all(tasks).await;
 
+    let mut total_metrics = WorkloadMetrics::default();
     let workloads = finished_tasks.into_iter().map(|task| {
         let (workload, metrics) = task.unwrap();
 
@@ -40,29 +41,23 @@ pub async fn perform_stresstest(
             workload.name.bold().blue(),
             workload.concurrency.bold()
         );
-        println!("{}", "WRITE:".bold().green());
-        let sketch = metrics.file_sizes;
-        let avg = ByteSize::b((sketch.sum().unwrap() / sketch.count() as f64) as u64);
-        let p50 = ByteSize::b(sketch.quantile(0.5).unwrap().unwrap() as u64);
-        let p90 = ByteSize::b(sketch.quantile(0.9).unwrap().unwrap() as u64);
-        let p99 = ByteSize::b(sketch.quantile(0.99).unwrap().unwrap() as u64);
-        println!(
-            "  size avg: {}; p50: {p50:.2}; p90: {p90:.2}; p99: {p99:.2}",
-            avg.bold()
-        );
-        print_ops(&metrics.write_timing, duration);
-        print_throughput(metrics.bytes_written, duration);
-        print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
-        println!("{}", "READ:".bold().green());
-        print_ops(&metrics.read_timing, duration);
-        print_throughput(metrics.bytes_read, duration);
-        print_percentiles(&metrics.read_timing, Duration::from_secs_f64);
-        if metrics.delete_timing.count() > 0 {
-            println!("{}", "DELETE:".bold().green());
-            print_ops(&metrics.delete_timing, duration);
-            println!();
-            print_percentiles(&metrics.delete_timing, Duration::from_secs_f64);
-        }
+        print_metrics(&metrics, duration);
+
+        total_metrics.file_sizes.merge(&metrics.file_sizes).unwrap();
+        total_metrics.bytes_written += metrics.bytes_written;
+        total_metrics.bytes_read += metrics.bytes_read;
+        total_metrics
+            .write_timing
+            .merge(&metrics.write_timing)
+            .unwrap();
+        total_metrics
+            .read_timing
+            .merge(&metrics.read_timing)
+            .unwrap();
+        total_metrics
+            .delete_timing
+            .merge(&metrics.delete_timing)
+            .unwrap();
 
         workload
     });
@@ -70,6 +65,10 @@ pub async fn perform_stresstest(
     let workloads: Vec<_> = workloads.collect();
     let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
     let files_to_cleanup = workloads.into_iter().flat_map(|mut w| w.external_files());
+
+    println!();
+    println!("{}", "## TOTALS".bold());
+    print_metrics(&total_metrics, duration);
 
     let start = Instant::now();
     let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
@@ -97,9 +96,11 @@ pub async fn perform_stresstest(
         cleanup_timing.count().blue(),
         max_concurrency.bold()
     );
-    print_ops(&cleanup_timing, cleanup_duration);
-    println!();
-    print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+    if cleanup_timing.count() > 0 {
+        print_ops(&cleanup_timing, cleanup_duration);
+        println!();
+        print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+    }
 
     Ok(())
 }
@@ -182,6 +183,49 @@ async fn run_workload(
         .unwrap();
 
     (workload, metrics)
+}
+
+fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
+    let sketch = &metrics.file_sizes;
+    if sketch.count() > 0 {
+        println!(
+            "{} ({} ops)",
+            "WRITE:".bold().green(),
+            sketch.count().bold()
+        );
+        let avg = ByteSize::b((sketch.sum().unwrap() / sketch.count() as f64) as u64);
+        let p50 = ByteSize::b(sketch.quantile(0.5).unwrap().unwrap() as u64);
+        let p90 = ByteSize::b(sketch.quantile(0.9).unwrap().unwrap() as u64);
+        let p99 = ByteSize::b(sketch.quantile(0.99).unwrap().unwrap() as u64);
+        println!(
+            "  size avg: {}; p50: {p50:.2}; p90: {p90:.2}; p99: {p99:.2}",
+            avg.bold()
+        );
+
+        print_ops(&metrics.write_timing, duration);
+        print_throughput(metrics.bytes_written, duration);
+        print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
+    }
+    if metrics.read_timing.count() > 0 {
+        println!(
+            "{} ({} ops)",
+            "READ:".bold().green(),
+            metrics.read_timing.count().bold()
+        );
+        print_ops(&metrics.read_timing, duration);
+        print_throughput(metrics.bytes_read, duration);
+        print_percentiles(&metrics.read_timing, Duration::from_secs_f64);
+    }
+    if metrics.delete_timing.count() > 0 {
+        println!(
+            "{} ({} ops)",
+            "DELETE:".bold().green(),
+            metrics.delete_timing.count().bold()
+        );
+        print_ops(&metrics.delete_timing, duration);
+        println!();
+        print_percentiles(&metrics.delete_timing, Duration::from_secs_f64);
+    }
 }
 
 fn print_percentiles<T: fmt::Debug>(sketch: &DDSketch, map: impl Fn(f64) -> T) {

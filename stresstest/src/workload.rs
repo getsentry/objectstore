@@ -1,10 +1,12 @@
-use std::io;
+use std::pin::Pin;
 use std::thread::available_parallelism;
+use std::{io, task};
 
 use rand::rngs::SmallRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Distribution, LogNormal, Zipf};
+use tokio::io::{AsyncRead, ReadBuf};
 
 pub struct WorkloadBuilder {
     name: String,
@@ -183,6 +185,24 @@ impl io::Read for Payload {
 
         self.len -= len_to_fill as u64;
         Ok(len_to_fill)
+    }
+}
+
+impl AsyncRead for Payload {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> task::Poll<io::Result<()>> {
+        let len_to_fill = (buf.remaining() as u64).min(self.len) as usize;
+
+        let fill_buf = buf.initialize_unfilled_to(len_to_fill);
+        self.rng.fill_bytes(fill_buf);
+
+        self.len -= len_to_fill as u64;
+        buf.advance(len_to_fill);
+
+        task::Poll::Ready(Ok(()))
     }
 }
 
