@@ -23,7 +23,6 @@ pub enum Storage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     // server addr config
-    pub grpc_addr: SocketAddr,
     pub http_addr: SocketAddr,
 
     // storage config
@@ -36,7 +35,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            grpc_addr: "0.0.0.0:50051".parse().unwrap(),
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
             storage: Storage::FileSystem {
