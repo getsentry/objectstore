@@ -1,9 +1,8 @@
-/target
 /data
+/target
 recipe.json
 profile.json.gz
 .envrc.private
 
 # vim swap files
 .*.sw*
-
