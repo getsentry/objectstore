@@ -77,6 +77,11 @@ jobs:
       - name: Install Rust Toolchain
         run: rustup toolchain install stable --profile minimal --component rust-docs --no-self-update
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: swatinem/rust-cache@v2
         with:
           key: ${{ github.job }}
