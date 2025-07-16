@@ -1,11 +1,6 @@
 syntax = "proto3";
 package storage;
 
-service Storage {
-    rpc PutBlob (PutBlobRequest) returns (PutBlobResponse);
-    rpc GetBlob (GetBlobRequest) returns (GetBlobResponse);
-}
-
 message Scope {
     string usecase = 1;
     string scope = 2;

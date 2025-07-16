@@ -41,5 +41,4 @@ VOLUME ["/data"]
 COPY --from=build-server /work/target/release/objectstore /bin
 
 ENTRYPOINT ["/bin/objectstore"]
-EXPOSE 50051
 EXPOSE 8888

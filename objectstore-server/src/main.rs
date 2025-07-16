@@ -1,8 +1,7 @@
 //! The storage server component.
 //!
 //! This builds on top of the [`objectstore-service`], and exposes the underlying storage layer as
-//! both a `gRPC` service for use by the `client`, as well as an `HTTP` layer which can serve files
-//! directly to *external clients*.
+//! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
 
 use std::sync::Arc;
 
@@ -16,7 +15,6 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 use crate::config::{Config, Storage};
 
 mod config;
-mod grpc;
 mod http;
 
 fn maybe_initialize_sentry(config: &Arc<Config>) -> Option<sentry::ClientInitGuard> {
@@ -68,7 +66,6 @@ async fn main() -> Result<()> {
     let service = StorageService::new(storage_config).await?;
 
     tokio::spawn(http::start_server(Arc::clone(&config), service.clone()));
-    tokio::spawn(grpc::start_server(config, service));
 
     elegant_departure::tokio::depart()
         .on_termination()
