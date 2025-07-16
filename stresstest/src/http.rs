@@ -1,10 +1,10 @@
 use std::io::Read;
 
 use reqwest::Body;
-use serde::Deserialize;
+// use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
-use crate::workload::Payload;
+use crate::workload::{InternalId, Payload};
 
 pub struct HttpRemote {
     pub remote: String,
@@ -12,24 +12,25 @@ pub struct HttpRemote {
     pub client: reqwest::Client,
 }
 
-#[derive(Debug, Deserialize)]
-struct PutBlobResponse {
-    key: String,
-}
+// #[derive(Debug, Deserialize)]
+// struct PutBlobResponse {
+//     key: String,
+// }
 
 impl HttpRemote {
-    pub async fn write(&self, payload: Payload) -> String {
+    pub async fn write(&self, id: InternalId, payload: Payload) -> String {
         let stream = ReaderStream::new(payload);
 
-        let put_url = format!("{}/{}", self.remote, self.prefix);
-        let response = self
+        let key = format!("{}/{id}", self.prefix);
+        let put_url = format!("{}/{}", self.remote, key);
+        let _response = self
             .client
             .put(put_url)
             .body(Body::wrap_stream(stream))
             .send()
             .await
             .unwrap();
-        let PutBlobResponse { key } = response.json().await.unwrap();
+        // let response = response.json().await.unwrap();
 
         key
     }

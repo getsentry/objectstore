@@ -137,7 +137,7 @@ async fn run_workload(
                     match action {
                         Action::Write(internal_id, payload) => {
                             let file_size = payload.len;
-                            let external_id = remote.write(payload).await;
+                            let external_id = remote.write(internal_id, payload).await;
                             workload.lock().unwrap().push_file(internal_id, external_id);
                             let mut metrics = metrics.lock().unwrap();
                             metrics.write_timing.add(start.elapsed().as_secs_f64());
