@@ -3,5 +3,5 @@
 //! It essentially just encapsulates the build steps, and exports generated types.
 
 pub mod storage {
-    tonic::include_proto!("storage");
+    include!(concat!(env!("OUT_DIR"), "/storage.rs"));
 }
