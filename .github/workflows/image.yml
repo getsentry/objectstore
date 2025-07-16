@@ -32,20 +32,20 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          cache-from: ghcr.io/getsentry/foundational-storage:latest
+          cache-from: ghcr.io/getsentry/objectstore:latest
           cache-to: type=inline
           platforms: linux/${{ matrix.platform }}
-          tags: server:${{ matrix.platform }}
-          outputs: type=docker,dest=/tmp/server-${{ matrix.platform }}.tar
+          tags: objectstore:${{ matrix.platform }}
+          outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
 
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: server-${{ matrix.platform }}
-          path: /tmp/server-${{ matrix.platform }}.tar
+          name: objectstore-${{ matrix.platform }}
+          path: /tmp/objectstore-${{ matrix.platform }}.tar
 
-  assemble-server-image:
+  assemble-image:
     name: Publish
     runs-on: ubuntu-latest
     needs: [build]
@@ -66,46 +66,39 @@ jobs:
       - name: Download amd64 Image
         uses: actions/download-artifact@v4
         with:
-          name: server-amd64
+          name: objectstore-amd64
           path: /tmp
 
       - name: Load amd64 Image
-        run: docker load --input /tmp/server-amd64.tar
+        run: docker load --input /tmp/objectstore-amd64.tar
 
       - name: Download arm64 Image
         uses: actions/download-artifact@v4
         with:
-          name: server-arm64
+          name: objectstore-arm64
           path: /tmp
 
       - name: Load arm64 Image
-        run: docker load --input /tmp/server-arm64.tar
+        run: docker load --input /tmp/objectstore-arm64.tar
 
       - name: Push to GitHub Container Registry
         run: |
-          docker tag server:amd64 ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64
-          docker push ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64
+          docker tag amd64 ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64
+          docker push ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64
 
-          docker tag server:arm64 ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
-          docker push ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
-
-          docker manifest create \
-            ghcr.io/getsentry/foundational-storage:${{ github.sha }} \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64 \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
-
-          docker manifest push ghcr.io/getsentry/foundational-storage:${{ github.sha }}
+          docker tag arm64 ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
+          docker push ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
 
           docker manifest create \
-            ghcr.io/getsentry/foundational-storage:latest \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64 \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
+            ghcr.io/getsentry/objectstore:${{ github.sha }} \
+            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64 \
+            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
 
-          docker manifest push ghcr.io/getsentry/foundational-storage:latest
+          docker manifest push ghcr.io/getsentry/objectstore:${{ github.sha }}
 
           docker manifest create \
-            ghcr.io/getsentry/foundational-storage:nightly \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-amd64 \
-            --amend ghcr.io/getsentry/foundational-storage:${{ github.sha }}-arm64
+            ghcr.io/getsentry/objectstore:latest \
+            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64 \
+            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
 
-          docker manifest push ghcr.io/getsentry/foundational-storage:nightly
+          docker manifest push ghcr.io/getsentry/objectstore:latest
