@@ -6,7 +6,7 @@ RUN cargo install cargo-chef --locked
 FROM build-chef AS build-planner
 
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json --bin server
+RUN cargo chef prepare --recipe-path recipe.json --bin objectstore
 
 FROM build-chef AS build-server
 
@@ -26,7 +26,7 @@ COPY . .
 
 # NOTE: Simplified build that leaves debug info in the binary. As the binary grows, we will want to
 # move this out and instead upload it directly to the registry and Sentry.
-RUN cargo build --release --features=${CARGO_FEATURES} --bin server
+RUN cargo build --release --features=${CARGO_FEATURES} --bin objectstore
 
 FROM debian:bookworm-slim
 
@@ -38,8 +38,8 @@ RUN apt-get update \
 ENV FSS_PATH="/data"
 VOLUME ["/data"]
 
-COPY --from=build-server /work/target/release/server /bin
+COPY --from=build-server /work/target/release/objectstore /bin
 
-ENTRYPOINT ["/bin/server"]
+ENTRYPOINT ["/bin/objectstore"]
 EXPOSE 50051
 EXPOSE 8888

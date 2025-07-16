@@ -1,14 +1,14 @@
 //! The storage server component.
 //!
-//! This builds on top of the [`service`], and exposes the underlying
-//! storage layer as both a `gRPC` service for use by the `client`, as well as
-//! an `HTTP` layer which can serve files directly to *external clients*.
+//! This builds on top of the [`objectstore-service`], and exposes the underlying storage layer as
+//! both a `gRPC` service for use by the `client`, as well as an `HTTP` layer which can serve files
+//! directly to *external clients*.
 
 use std::sync::Arc;
 
 use anyhow::Result;
+use objectstore_service::{StorageConfig, StorageService};
 use sentry::integrations::tracing as sentry_tracing;
-use service::{StorageConfig, StorageService};
 use tokio::signal::unix::SignalKind;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, prelude::*};

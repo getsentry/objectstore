@@ -11,23 +11,34 @@ utilities to manage stored data.
 
 The platform is split into the following core components:
 
-- `api`: Contains protobuf definitions for the `client` <-> `server` protocol
+- `objectstore-api`: Contains protobuf definitions for the `client` <-> `server` protocol
   and generated code.
-- `client`: The Rust client library SDK, which exposes high-performance blob
+- `objectstore-client`: The Rust client library SDK, which exposes high-performance blob
   storage access. A Python library is planned but not yet available.
-- `server`: An `HTTP` server that exposes blob storage and calls functionality
-  from the internal services.
-- `service`: The core object storage logic.
+- `objectstore-server`: An `HTTP` server that exposes blob storage and calls
+  functionality from the internal services. This crate creates the `objectstore`
+  binary.
+- `objectstore-service`: The core object storage logic.
 
 Additionally, it contains a number of utilities:
 
 - `stresstest`: A stresstest binary that can run various workloads against
   storage backends.
 
-## Development
+## Building
 
 Ensure `protoc` and the latest stable Rust toolchain are installed on your
-machine. Then, run the server with:
+machine. A release build can be created with:
+
+```sh
+cargo build --release
+```
+
+The server binary will be located at `target/release/objectstore`.
+
+## Development
+
+You can run a development build of the server with this command:
 
 ```sh
 cargo run
@@ -39,12 +50,21 @@ To run tests:
 cargo test --workspace --all-features
 ```
 
-We recommend using Rust Analyzer and clippy.
+We recommend using Rust Analyzer and clippy, which will apply formatting and
+warn about lints during development. To do this manually, run:
+
+```sh
+# Check and fix formatting
+cargo fmt
+
+# Lint all features
+cargo clippy --workspace --all-features
+```
 
 ## Utilities
 
 Run the stress test binary against the running server with:
 
 ```sh
-cargo run -p stresstest
+cargo run --release -p stresstest
 ```
