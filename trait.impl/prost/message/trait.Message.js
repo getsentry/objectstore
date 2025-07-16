@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["objectstore_api",[["impl <a class=\"trait\" href=\"https://docs.rs/prost/0.14.1/prost/message/trait.Message.html\" title=\"trait prost::message::Message\">Message</a> for <a class=\"struct\" href=\"objectstore_api/storage/struct.GetBlobRequest.html\" title=\"struct objectstore_api::storage::GetBlobRequest\">GetBlobRequest</a>"],["impl <a class=\"trait\" href=\"https://docs.rs/prost/0.14.1/prost/message/trait.Message.html\" title=\"trait prost::message::Message\">Message</a> for <a class=\"struct\" href=\"objectstore_api/storage/struct.GetBlobResponse.html\" title=\"struct objectstore_api::storage::GetBlobResponse\">GetBlobResponse</a>"],["impl <a class=\"trait\" href=\"https://docs.rs/prost/0.14.1/prost/message/trait.Message.html\" title=\"trait prost::message::Message\">Message</a> for <a class=\"struct\" href=\"objectstore_api/storage/struct.PutBlobRequest.html\" title=\"struct objectstore_api::storage::PutBlobRequest\">PutBlobRequest</a>"],["impl <a class=\"trait\" href=\"https://docs.rs/prost/0.14.1/prost/message/trait.Message.html\" title=\"trait prost::message::Message\">Message</a> for <a class=\"struct\" href=\"objectstore_api/storage/struct.PutBlobResponse.html\" title=\"struct objectstore_api::storage::PutBlobResponse\">PutBlobResponse</a>"],["impl <a class=\"trait\" href=\"https://docs.rs/prost/0.14.1/prost/message/trait.Message.html\" title=\"trait prost::message::Message\">Message</a> for <a class=\"struct\" href=\"objectstore_api/storage/struct.Scope.html\" title=\"struct objectstore_api::storage::Scope\">Scope</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1560]}

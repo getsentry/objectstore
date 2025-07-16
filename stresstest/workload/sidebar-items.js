@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Action"],"struct":["InternalId","Payload","Workload","WorkloadBuilder"],"type":["ExternalId"]};

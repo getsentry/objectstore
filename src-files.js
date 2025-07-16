@@ -1,0 +1,3 @@
+var srcIndex = new Map(JSON.parse('[["objectstore",["",[],["config.rs","http.rs","main.rs"]]],["objectstore_api",["",[],["lib.rs"]]],["objectstore_client",["",[],["lib.rs"]]],["objectstore_service",["",[["backend",[],["gcs.rs","local_fs.rs","mod.rs","s3_compatible.rs"]]],["datamodel.rs","lib.rs"]]],["stresstest",["",[],["config.rs","http.rs","main.rs","stresstest.rs","workload.rs"]]]]'));
+createSrcSidebar();
+//{"start":36,"fragment_lengths":[57,39,42,125,87]}
