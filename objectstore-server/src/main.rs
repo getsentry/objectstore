@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use objectstore_service::{StorageConfig, StorageService};
 use sentry::integrations::tracing as sentry_tracing;
-use service::{StorageConfig, StorageService};
 use tokio::signal::unix::SignalKind;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, prelude::*};

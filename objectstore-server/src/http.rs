@@ -10,9 +10,9 @@ use axum::routing::put;
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
+use objectstore_service::StorageService;
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
-use service::StorageService;
 use uuid::Uuid;
 
 use crate::config::Config;

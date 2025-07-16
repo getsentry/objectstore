@@ -2,10 +2,10 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use api::storage::storage_server::{Storage, StorageServer};
-use api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
 use futures_util::StreamExt;
-use service::StorageService;
+use objectstore_api::storage::storage_server::{Storage, StorageServer};
+use objectstore_api::storage::{GetBlobRequest, GetBlobResponse, PutBlobRequest, PutBlobResponse};
+use objectstore_service::StorageService;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;

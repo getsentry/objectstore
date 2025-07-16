@@ -200,15 +200,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
-name = "api"
-version = "0.1.0"
-dependencies = [
- "prost",
- "tonic",
- "tonic-build",
-]
-
-[[package]]
 name = "argh"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,14 +483,6 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
-]
-
-[[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "api",
- "uuid",
 ]
 
 [[package]]
@@ -1517,6 +1500,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectstore-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "objectstore-client"
+version = "0.1.0"
+dependencies = [
+ "objectstore-api",
+ "uuid",
+]
+
+[[package]]
+name = "objectstore-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argh",
+ "axum",
+ "axum-extra",
+ "elegant-departure",
+ "figment",
+ "futures-util",
+ "objectstore-api",
+ "objectstore-service",
+ "sentry",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "objectstore-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "gcp_auth",
+ "objectstore-api",
+ "pack1",
+ "reqwest",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "uuid",
+ "watto",
+ "zstd",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2371,56 +2421,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "api",
- "argh",
- "axum",
- "axum-extra",
- "elegant-departure",
- "figment",
- "futures-util",
- "sentry",
- "serde",
- "serde_json",
- "service",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "api",
- "async-compression",
- "async-stream",
- "async-trait",
- "bytes",
- "futures-core",
- "futures-util",
- "gcp_auth",
- "pack1",
- "reqwest",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "uuid",
- "watto",
- "zstd",
 ]
 
 [[package]]

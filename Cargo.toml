@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["api", "client", "server", "service", "stresstest"]
-default-members = ["server"]
+members = ["objectstore-*", "stresstest"]
+default-members = ["objectstore-server"]
 
 [profile.release]
 # In release, however, we do want full debug information to report
