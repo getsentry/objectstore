@@ -35,7 +35,7 @@ jobs:
           cache-from: ghcr.io/getsentry/objectstore:latest
           cache-to: type=inline
           platforms: linux/${{ matrix.platform }}
-          tags: objectstore:${{ matrix.platform }}
+          tags: ${{ matrix.platform }}
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
 
