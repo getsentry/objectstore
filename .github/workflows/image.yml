@@ -51,7 +51,7 @@ jobs:
     needs: [build]
 
     # Intentionally never publish on pull requests
-    if: ${{ github.event_name != 'pull_request' }}
+    # if: ${{ github.event_name != 'pull_request' }}
 
     steps:
       - uses: actions/checkout@v4
