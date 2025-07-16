@@ -96,7 +96,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-      - run: echo '<meta http-equiv="refresh" content="0; url=objectstore-server/" />Redirecting to <a href="objectstore-server/">objectstore-server</a>' > target/doc/index.html
+      - run: echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
