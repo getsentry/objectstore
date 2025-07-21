@@ -66,3 +66,46 @@ jobs:
 
       - name: Run Tests
         run: cargo test --workspace --all-features
+
+  docs:
+    name: Cargo Docs
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        run: rustup toolchain install stable --profile minimal --component rust-docs --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ github.job }}
+
+      - name: Build Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+
+      - run: echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "target/doc"
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
+        if: github.ref == 'refs/heads/main'
