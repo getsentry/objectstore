@@ -10,11 +10,12 @@ use axum::routing::put;
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::StorageService;
+use objectstore_service::{ObjectKey, StorageService};
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::authentication::{Claim, ExtractScope};
 use crate::config::Config;
 
 pub async fn start_server(config: Arc<Config>, service: StorageService) {
@@ -25,11 +26,8 @@ pub async fn start_server(config: Arc<Config>, service: StorageService) {
     });
 
     let app = Router::new()
-        .route("/{usecase}/{scope}", put(put_blob_no_key))
-        .route(
-            "/{usecase}/{scope}/{*key}",
-            put(put_blob).get(get_blob).delete(delete_blob),
-        )
+        .route("/", put(put_blob_no_key))
+        .route("/{*key}", put(put_blob).get(get_blob).delete(delete_blob))
         .layer(option_layer(sentry_tower_service))
         .with_state(service)
         .into_make_service();
@@ -53,39 +51,52 @@ struct PutBlobResponse {
     key: String,
 }
 
+impl Claim {
+    fn into_key(self, key: String) -> ObjectKey {
+        ObjectKey {
+            usecase: self.usecase,
+            scope: self.scope,
+            key,
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, fields(usecase, scope))]
 async fn put_blob_no_key(
     State(service): State<StorageService>,
-    Path((usecase, scope)): Path<(String, String)>,
+    ExtractScope(claim): ExtractScope,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
-    let key = Uuid::new_v4();
-    let key = format!("{usecase}/{scope}/{key}");
+    let key = claim.into_key(Uuid::new_v4().to_string());
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
     service.put_file(&key, stream).await?;
-    Ok(Json(PutBlobResponse { key }))
+
+    Ok(Json(PutBlobResponse { key: key.key }))
 }
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn put_blob(
     State(service): State<StorageService>,
-    Path((usecase, scope, key)): Path<(String, String, String)>,
+    ExtractScope(claim): ExtractScope,
+    Path(key): Path<String>,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
-    let key = format!("{usecase}/{scope}/{key}");
+    let key = claim.into_key(key);
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
     service.put_file(&key, stream).await?;
-    Ok(Json(PutBlobResponse { key }))
+
+    Ok(Json(PutBlobResponse { key: key.key }))
 }
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn get_blob(
     State(service): State<StorageService>,
-    Path((usecase, scope, key)): Path<(String, String, String)>,
+    ExtractScope(claim): ExtractScope,
+    Path(key): Path<String>,
 ) -> error::Result<Response> {
-    let key = format!("{usecase}/{scope}/{key}");
+    let key = claim.into_key(key);
 
     let Some(contents) = service.get_file(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -97,9 +108,10 @@ async fn get_blob(
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn delete_blob(
     State(service): State<StorageService>,
-    Path((usecase, scope, key)): Path<(String, String, String)>,
+    ExtractScope(claim): ExtractScope,
+    Path(key): Path<String>,
 ) -> error::Result<impl IntoResponse> {
-    let key = format!("{usecase}/{scope}/{key}");
+    let key = claim.into_key(key);
 
     service.delete_file(&key).await?;
 

@@ -16,6 +16,7 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::config::{Config, Storage};
 
+mod authentication;
 mod config;
 mod http;
 
