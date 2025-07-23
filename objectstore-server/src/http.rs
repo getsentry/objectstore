@@ -17,26 +17,26 @@ use uuid::Uuid;
 
 use crate::authentication::{Claim, ExtractScope};
 use crate::config::Config;
+use crate::state::ServiceState;
 
-pub async fn start_server(config: Arc<Config>, service: StorageService) {
-    let sentry_tower_service = config.sentry_dsn.as_ref().map(|_| {
+pub async fn start_server(state: ServiceState) {
+    let sentry_tower_service = state.config.sentry_dsn.as_ref().map(|_| {
         tower::ServiceBuilder::new()
             .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
             .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
     });
+    let http_addr = state.config.http_addr;
 
     let app = Router::new()
         .route("/", put(put_blob_no_key))
         .route("/{*key}", put(put_blob).get(get_blob).delete(delete_blob))
         .layer(option_layer(sentry_tower_service))
-        .with_state(service)
+        .with_state(state)
         .into_make_service();
 
-    tracing::info!("HTTP server listening on {}", config.http_addr);
+    tracing::info!("HTTP server listening on {http_addr}");
     let _guard = elegant_departure::get_shutdown_guard();
-    let listener = tokio::net::TcpListener::bind(config.http_addr)
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let guard = elegant_departure::get_shutdown_guard();
@@ -51,33 +51,23 @@ struct PutBlobResponse {
     key: String,
 }
 
-impl Claim {
-    fn into_key(self, key: String) -> ObjectKey {
-        ObjectKey {
-            usecase: self.usecase,
-            scope: self.scope,
-            key,
-        }
-    }
-}
-
 #[tracing::instrument(skip_all, fields(usecase, scope))]
 async fn put_blob_no_key(
-    State(service): State<StorageService>,
+    State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
     let key = claim.into_key(Uuid::new_v4().to_string());
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
-    service.put_file(&key, stream).await?;
+    state.service.put_file(&key, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn put_blob(
-    State(service): State<StorageService>,
+    State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
     body: Body,
@@ -85,20 +75,20 @@ async fn put_blob(
     let key = claim.into_key(key);
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
-    service.put_file(&key, stream).await?;
+    state.service.put_file(&key, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn get_blob(
-    State(service): State<StorageService>,
+    State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
 ) -> error::Result<Response> {
     let key = claim.into_key(key);
 
-    let Some(contents) = service.get_file(&key).await? else {
+    let Some(contents) = state.service.get_file(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -107,13 +97,13 @@ async fn get_blob(
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]
 async fn delete_blob(
-    State(service): State<StorageService>,
+    State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
 ) -> error::Result<impl IntoResponse> {
     let key = claim.into_key(key);
 
-    service.delete_file(&key).await?;
+    state.service.delete_file(&key).await?;
 
     Ok(())
 }

@@ -5,22 +5,21 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-use std::sync::Arc;
-
 use anyhow::Result;
-use objectstore_service::{StorageConfig, StorageService};
 use sentry::integrations::tracing as sentry_tracing;
 use tokio::signal::unix::SignalKind;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-use crate::config::{Config, Storage};
+use crate::config::Config;
+use crate::state::State;
 
 mod authentication;
 mod config;
 mod http;
+mod state;
 
-fn maybe_initialize_sentry(config: &Arc<Config>) -> Option<sentry::ClientInitGuard> {
+fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     config.sentry_dsn.as_ref().map(|sentry_dsn| {
         sentry::init(sentry::ClientOptions {
             dsn: sentry_dsn.parse().ok(),
@@ -32,7 +31,7 @@ fn maybe_initialize_sentry(config: &Arc<Config>) -> Option<sentry::ClientInitGua
     })
 }
 
-fn initialize_tracing(config: &Arc<Config>) {
+fn initialize_tracing(config: &Config) {
     let sentry_layer = config.sentry_dsn.as_ref().map(|_| {
         sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
             Level::ERROR | Level::WARN => {
@@ -52,23 +51,14 @@ fn initialize_tracing(config: &Arc<Config>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Arc::new(Config::from_env()?);
+    let config = Config::from_env()?;
 
     let _sentry_guard = maybe_initialize_sentry(&config);
     initialize_tracing(&config);
 
     tracing::debug!(?config, "Starting service");
-
-    let storage_config = match &config.storage {
-        Storage::FileSystem { path } => StorageConfig::FileSystem { path },
-        Storage::S3Compatible { endpoint, bucket } => StorageConfig::S3Compatible {
-            endpoint: endpoint.as_deref(),
-            bucket,
-        },
-    };
-    let service = StorageService::new(storage_config).await?;
-
-    tokio::spawn(http::start_server(Arc::clone(&config), service.clone()));
+    let state = State::new(config).await?;
+    tokio::spawn(http::start_server(state));
 
     elegant_departure::tokio::depart()
         .on_termination()

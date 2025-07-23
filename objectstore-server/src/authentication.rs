@@ -3,8 +3,10 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use jsonwebtoken::errors::Result as JwtResult;
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use objectstore_service::{Scope, Usecase};
+use objectstore_service::{ObjectKey, Scope, Usecase};
 use serde::Deserialize;
+
+use crate::state::ServiceState;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Claim {
@@ -12,8 +14,18 @@ pub struct Claim {
     pub scope: Scope,
 }
 
-pub fn decode_auth_header(token: &str) -> JwtResult<Claim> {
-    let key = DecodingKey::from_secret(b"TODO");
+impl Claim {
+    pub fn into_key(self, key: String) -> ObjectKey {
+        ObjectKey {
+            usecase: self.usecase,
+            scope: self.scope,
+            key,
+        }
+    }
+}
+
+pub fn decode_auth_header(token: &str, secret: &[u8]) -> JwtResult<Claim> {
+    let key = DecodingKey::from_secret(secret);
     let validation = Validation::default();
 
     let token = decode::<Claim>(token, &key, &validation)?;
@@ -22,13 +34,13 @@ pub fn decode_auth_header(token: &str) -> JwtResult<Claim> {
 
 pub struct ExtractScope(pub Claim);
 
-impl<S> FromRequestParts<S> for ExtractScope
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<ServiceState> for ExtractScope {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServiceState,
+    ) -> Result<Self, Self::Rejection> {
         let auth_header = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -37,7 +49,7 @@ where
             .to_str()
             .map_err(|_err| (StatusCode::BAD_REQUEST, "malformed `Authorization` header"))?;
 
-        let scope = decode_auth_header(token)
+        let scope = decode_auth_header(token, &state.config.jwt_secret)
             .map_err(|_err| (StatusCode::UNAUTHORIZED, "invalid `Authorization`"))?;
         Ok(ExtractScope(scope))
     }
@@ -60,10 +72,12 @@ mod tests {
         });
 
         let header = Header::default();
-        let key = EncodingKey::from_secret(b"TODO");
+        let key = EncodingKey::from_secret(b"KEY");
 
         let token = encode(&header, &claims, &key).unwrap();
-        let claims = decode_auth_header(&token).unwrap();
+
+        assert!(decode_auth_header(&token, b"WRONG").is_err());
+        let claims = decode_auth_header(&token, b"KEY").unwrap();
 
         assert_eq!(
             claims,
@@ -85,10 +99,10 @@ mod tests {
         });
 
         let header = Header::default();
-        let key = EncodingKey::from_secret(b"TODO");
+        let key = EncodingKey::from_secret(b"KEY");
 
         let token = encode(&header, &claims, &key).unwrap();
 
-        assert!(decode_auth_header(&token).is_err());
+        assert!(decode_auth_header(&token, b"KEY").is_err());
     }
 }
