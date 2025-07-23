@@ -9,6 +9,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use super::{Backend, BackendStream};
 
+#[derive(Debug)]
 pub struct LocalFs {
     path: PathBuf,
 }

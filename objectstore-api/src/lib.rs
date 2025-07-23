@@ -1,7 +1,5 @@
-//! This crate just abstracts the automated `protobuf` codegen.
-//!
-//! It essentially just encapsulates the build steps, and exports generated types.
+//! Generated types for the objectstore protobuf API.
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
 
-pub mod storage {
-    include!(concat!(env!("OUT_DIR"), "/storage.rs"));
-}
+include!(concat!(env!("OUT_DIR"), "/objectstore.rs"));
