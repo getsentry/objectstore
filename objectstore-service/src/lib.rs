@@ -2,6 +2,8 @@
 //! providing durable access to underlying blobs.
 //!
 //! It is designed as a library crate to be used by the `server`.
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
 
 mod backend;
 mod datamodel;
@@ -18,7 +20,6 @@ use tokio::io::{AsyncReadExt, BufReader};
 use tokio_stream::Stream;
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
-
 use watto::Pod;
 
 use crate::backend::{BackendStream, BoxedBackend};
@@ -26,24 +27,34 @@ use crate::datamodel::{
     Compression, FILE_MAGIC, FILE_VERSION, File, FilePart, PART_MAGIC, PART_VERSION, Part,
 };
 
-#[derive(Clone)]
+/// High-level asynchronous service for storing and retrieving objects.
+#[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
+#[derive(Debug)]
 struct StorageServiceInner {
     backend: BoxedBackend,
 }
 
+/// Configuration to initialize a [`StorageService`].
+#[derive(Debug)]
 pub enum StorageConfig<'a> {
+    /// Use a local filesystem as the storage backend.
     FileSystem {
+        /// The path to the directory where files will be stored.
         path: &'a Path,
     },
+    /// Use an S3-compatible storage backend.
     S3Compatible {
+        /// Optional endpoint URL for the S3-compatible storage.
         endpoint: Option<&'a str>,
+        /// The name of the bucket to use.
         bucket: &'a str,
     },
 }
 
 impl StorageService {
+    /// Creates a new `StorageService` with the specified configuration.
     pub async fn new(config: StorageConfig<'_>) -> anyhow::Result<Self> {
         let backend = match config {
             StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
@@ -60,18 +71,22 @@ impl StorageService {
         Ok(Self(Arc::new(inner)))
     }
 
+    /// Stores or overwrites an object at the given key.
     pub async fn put_file(&self, key: &str, stream: BackendStream) -> anyhow::Result<()> {
         self.0.backend.put_file(key, stream).await
     }
 
+    /// Streams the contents of an object stored at the given key.
     pub async fn get_file(&self, key: &str) -> anyhow::Result<Option<BackendStream>> {
         self.0.backend.get_file(key).await
     }
 
+    /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_file(&self, key: &str) -> anyhow::Result<()> {
         self.0.backend.delete_file(key).await
     }
 
+    #[doc(hidden)]
     pub async fn _put_file(&self, key: &str, contents: &[u8]) -> anyhow::Result<()> {
         let file_part = self.put_part(contents).await?;
         self.assemble_file_from_parts(key, &[file_part]).await?;
@@ -79,6 +94,7 @@ impl StorageService {
         Ok(())
     }
 
+    #[doc(hidden)]
     pub async fn _get_file(
         &self,
         key: &str,

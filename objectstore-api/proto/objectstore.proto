@@ -1,0 +1,49 @@
+syntax = "proto3";
+package objectstore;
+
+// A descriptor containing the use case and request scoping.
+message Scope {
+    // The use case that this file belongs to.
+    string usecase = 1;
+    // The entity that this object is associated to, such as an organization or project.
+    string scope = 2;
+}
+
+// Creates a new object in the store.
+message PutBlobRequest {
+    // The entity that this object is associated to, such as an organization or project.
+    Scope scope = 1;
+
+    // Fully qualified key including the use case and the internal identifier of the object.
+    //
+    // This key is optional. Objectstore will assign a key if omitted. If an object at the key
+    // exists, it is overwritten.
+    optional string key = 2;
+
+    // Raw binary payload of the object.
+    bytes contents = 3;
+}
+
+// Reponse of `PutBlobRequest`.
+message PutBlobResponse {
+    // The specified or assigned key of the written object.
+    string key = 1;
+}
+
+// Requests contents of a stored object.
+message GetBlobRequest {
+    // The scope that the object identified by `key` should match.
+    //
+    // This is used for validation purposes. If the scope does not match, the object is not
+    // returned.
+    Scope scope = 1;
+
+    // Fully qualified key including the use case and internal identifier of the object.
+    string key = 2;
+}
+
+// Response of `GetBlobRequest`.
+message GetBlobResponse {
+    // Raw binary payload of the object.
+    bytes contents = 1;
+}
