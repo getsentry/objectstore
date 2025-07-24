@@ -11,8 +11,6 @@ utilities to manage stored data.
 
 The platform is split into the following core components:
 
-- `objectstore-api`: Contains protobuf definitions for the `client` <-> `server` protocol
-  and generated code.
 - `objectstore-client`: The Rust client library SDK, which exposes high-performance blob
   storage access. A Python library is planned but not yet available.
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
@@ -27,8 +25,8 @@ Additionally, it contains a number of utilities:
 
 ## Building
 
-Ensure `protoc` and the latest stable Rust toolchain are installed on your
-machine. A release build can be created with:
+Ensure the latest stable Rust toolchain is installed on your machine. A release
+build can be created with:
 
 ```sh
 cargo build --release

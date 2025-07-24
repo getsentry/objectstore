@@ -12,7 +12,6 @@ elegant-departure = { version = "0.3.1", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = "0.3.31"
 jsonwebtoken = "9.3.1"
-objectstore-api = { path = "../objectstore-api" }
 objectstore-service = { path = "../objectstore-service" }
 sentry = { version = "0.41.0", features = [
     "tower-axum-matched-path",
