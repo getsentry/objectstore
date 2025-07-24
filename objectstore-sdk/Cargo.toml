@@ -4,5 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-objectstore-api = { path = "../objectstore-api" }
 uuid = { version = "1.17.0", features = ["v4"] }

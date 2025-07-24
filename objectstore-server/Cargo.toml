@@ -11,7 +11,6 @@ axum-extra = "0.10.1"
 elegant-departure = { version = "0.3.1", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = "0.3.31"
-objectstore-api = { path = "../objectstore-api" }
 objectstore-service = { path = "../objectstore-service" }
 sentry = { version = "0.41.0", features = [
     "tower-axum-matched-path",
