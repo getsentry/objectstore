@@ -13,7 +13,10 @@ use std::time::Duration;
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct Scope {
+    /// The organization ID
     pub organization: u64,
+
+    /// The project ID, if we have a project scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<u64>,
 }
@@ -43,7 +46,10 @@ pub struct ObjectKey {
 /// garbage-collected automatically. It essentially lives forever until manually deleted.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExpirationPolicy {
+    /// Manual expiration, meaning no automatic cleanup.
     Manual,
+    /// Time to live, with expiration after the specified duration.
     TimeToLive(Duration),
+    /// Time to idle, with expiration once the object has not been accessed within the specified duration.
     TimeToIdle(Duration),
 }
