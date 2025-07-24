@@ -6,7 +6,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub remote: String,
-    pub prefix: String,
+    pub jwt_secret: String,
 
     #[serde(with = "humantime_serde")]
     pub duration: Duration,

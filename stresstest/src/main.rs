@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     let remote = HttpRemote {
         remote: config.remote,
-        prefix: config.prefix,
+        jwt_secret: config.jwt_secret,
         client: reqwest::Client::new(),
     };
     let workloads = config
