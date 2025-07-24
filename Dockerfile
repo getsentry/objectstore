@@ -15,7 +15,7 @@ ENV CARGO_FEATURES=${CARGO_FEATURES}
 
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends protobuf-compiler libssl-dev pkg-config \
+    && apt-get install -y --no-install-recommends libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build-planner /work/recipe.json recipe.json
