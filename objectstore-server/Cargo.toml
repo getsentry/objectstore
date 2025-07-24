@@ -11,6 +11,7 @@ axum-extra = "0.10.1"
 elegant-departure = { version = "0.3.1", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = "0.3.31"
+jsonwebtoken = "9.3.1"
 objectstore-service = { path = "../objectstore-service" }
 sentry = { version = "0.41.0", features = [
     "tower-axum-matched-path",
@@ -27,6 +28,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uuid = { version = "1.17.0", features = ["v4", "v7"] }
 
 [dev-dependencies]
+serde_json = "1.0.140"
 tempfile = "3.20.0"
 
 [[bin]]

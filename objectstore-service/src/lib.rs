@@ -7,6 +7,9 @@
 
 mod backend;
 mod datamodel;
+mod metadata;
+
+pub use metadata::*;
 
 use std::mem;
 use std::path::Path;
@@ -72,18 +75,18 @@ impl StorageService {
     }
 
     /// Stores or overwrites an object at the given key.
-    pub async fn put_file(&self, key: &str, stream: BackendStream) -> anyhow::Result<()> {
-        self.0.backend.put_file(key, stream).await
+    pub async fn put_file(&self, key: &ObjectKey, stream: BackendStream) -> anyhow::Result<()> {
+        self.0.backend.put_file(&key.key, stream).await
     }
 
     /// Streams the contents of an object stored at the given key.
-    pub async fn get_file(&self, key: &str) -> anyhow::Result<Option<BackendStream>> {
-        self.0.backend.get_file(key).await
+    pub async fn get_file(&self, key: &ObjectKey) -> anyhow::Result<Option<BackendStream>> {
+        self.0.backend.get_file(&key.key).await
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_file(&self, key: &str) -> anyhow::Result<()> {
-        self.0.backend.delete_file(key).await
+    pub async fn delete_file(&self, key: &ObjectKey) -> anyhow::Result<()> {
+        self.0.backend.delete_file(&key.key).await
     }
 
     #[doc(hidden)]
@@ -257,6 +260,17 @@ mod tests {
         assert_eq!(read_part.as_bytes(), b"oh hai!");
     }
 
+    fn make_key(key: &str) -> ObjectKey {
+        ObjectKey {
+            usecase: "foo".into(),
+            scope: Scope {
+                organization: 1234,
+                project: None,
+            },
+            key: key.into(),
+        }
+    }
+
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -264,13 +278,14 @@ mod tests {
             path: tempdir.path(),
         };
         let service = StorageService::new(config).await.unwrap();
+        let key = make_key("the_file_key");
 
         service
-            .put_file("the_file_key", make_stream(b"oh hai!"))
+            .put_file(&key, make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = service.get_file(&key).await.unwrap().unwrap();
         let file_contents = collect(file_contents).await.unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
@@ -306,13 +321,14 @@ mod tests {
             bucket: "sbx-warp-benchmark-bucket",
         };
         let service = StorageService::new(config).await.unwrap();
+        let key = make_key("the_file_key");
 
         service
-            .put_file("the_file_key", make_stream(b"oh hai!"))
+            .put_file(&key, make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = service.get_file(&key).await.unwrap().unwrap();
         let file_contents = collect(file_contents).await.unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
@@ -326,13 +342,14 @@ mod tests {
             bucket: "whatever",
         };
         let service = StorageService::new(config).await.unwrap();
+        let key = make_key("the_file_key");
 
         service
-            .put_file("the_file_key", make_stream(b"oh hai!"))
+            .put_file(&key, make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let file_contents = service.get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents = service.get_file(&key).await.unwrap().unwrap();
         let file_contents = collect(file_contents).await.unwrap();
 
         assert_eq!(file_contents, b"oh hai!");
