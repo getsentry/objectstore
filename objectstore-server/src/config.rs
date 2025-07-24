@@ -29,7 +29,7 @@ pub struct Config {
     pub storage: Storage,
 
     // authentication config
-    pub jwt_secret: Vec<u8>,
+    pub jwt_secret: String,
 
     // others
     pub sentry_dsn: Option<String>,
@@ -44,7 +44,7 @@ impl Default for Config {
                 path: PathBuf::from("data"),
             },
 
-            jwt_secret: vec![],
+            jwt_secret: String::new(),
 
             sentry_dsn: None,
         }

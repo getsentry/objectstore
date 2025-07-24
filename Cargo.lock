@@ -2432,6 +2432,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime-serde",
+ "jsonwebtoken",
  "rand",
  "rand_distr",
  "reqwest",

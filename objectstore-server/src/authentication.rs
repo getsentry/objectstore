@@ -73,7 +73,7 @@ impl FromRequestParts<ServiceState> for ExtractScope {
             .to_str()
             .map_err(|_err| (StatusCode::BAD_REQUEST, "malformed `Authorization` header"))?;
 
-        let scope = decode_auth_header(token, &state.config.jwt_secret)
+        let scope = decode_auth_header(token, state.config.jwt_secret.as_bytes())
             .map_err(|_err| (StatusCode::UNAUTHORIZED, "invalid `Authorization`"))?;
         Ok(ExtractScope(scope))
     }
