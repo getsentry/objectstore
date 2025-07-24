@@ -1,17 +1,29 @@
+use std::collections::BTreeSet;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use jsonwebtoken::errors::Result as JwtResult;
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use objectstore_service::{ObjectKey, Scope, Usecase};
+use objectstore_service::{ObjectKey, Scope};
 use serde::Deserialize;
 
 use crate::state::ServiceState;
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Permission {
+    Read,
+    Write,
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Claim {
-    pub usecase: Usecase,
+    pub usecase: String,
     pub scope: Scope,
+    // TODO: a bitfield or something else would surely be more efficient
+    pub permissions: BTreeSet<Permission>,
 }
 
 impl Claim {
@@ -21,6 +33,18 @@ impl Claim {
             scope: self.scope,
             key,
         }
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn ensure_permission(&self, permission: Permission) -> Result<(), Response> {
+        if !self.permissions.contains(&permission) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "no permission to perform this action",
+            )
+                .into_response());
+        }
+        Ok(())
     }
 }
 
@@ -69,6 +93,7 @@ mod tests {
             "scope": {
                 "organization": 12345,
             },
+            "permissions": ["read"],
         });
 
         let header = Header::default();
@@ -82,8 +107,12 @@ mod tests {
         assert_eq!(
             claims,
             Claim {
-                usecase: Usecase::Attachments,
-                scope: Scope::Organization(12345)
+                usecase: "attachments".into(),
+                scope: Scope {
+                    organization: 12345,
+                    project: None
+                },
+                permissions: [Permission::Read].into()
             }
         );
     }
@@ -96,6 +125,7 @@ mod tests {
             "scope": {
                 "project": 23456,
             },
+            "permissions": ["write"],
         });
 
         let header = Header::default();

@@ -262,8 +262,11 @@ mod tests {
 
     fn make_key(key: &str) -> ObjectKey {
         ObjectKey {
-            usecase: Usecase::Attachments,
-            scope: Scope::Organization(1234),
+            usecase: "foo".into(),
+            scope: Scope {
+                organization: 1234,
+                project: None,
+            },
             key: key.into(),
         }
     }
