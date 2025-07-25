@@ -19,16 +19,12 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use argh::FromArgs;
+use stresstest::Workload;
+use stresstest::http::HttpRemote;
 
 use crate::config::Config;
-use crate::http::HttpRemote;
-use crate::stresstest::perform_stresstest;
-use crate::workload::Workload;
 
 mod config;
-mod http;
-mod stresstest;
-mod workload;
 
 /// Stresstester for our foundational storage service
 #[derive(Debug, FromArgs)]
@@ -46,11 +42,8 @@ async fn main() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
-    let remote = HttpRemote {
-        remote: config.remote,
-        jwt_secret: config.jwt_secret,
-        client: reqwest::Client::new(),
-    };
+    let remote = HttpRemote::new(config.remote).with_secret(config.jwt_secret);
+
     let workloads = config
         .workloads
         .into_iter()
@@ -63,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect();
 
-    perform_stresstest(remote, workloads, config.duration).await?;
+    stresstest::run(remote, workloads, config.duration).await?;
 
     Ok(())
 }

@@ -13,6 +13,7 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = "0.3.31"
 jsonwebtoken = "9.3.1"
 objectstore-service = { path = "../objectstore-service" }
+rand = { version = "0.9.1" }
 sentry = { version = "0.41.0", features = [
     "tower-axum-matched-path",
     "tracing",
@@ -28,7 +29,9 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uuid = { version = "1.17.0", features = ["v4", "v7"] }
 
 [dev-dependencies]
+nix = { version = "0.30.1", features = ["signal"] }
 serde_json = "1.0.140"
+stresstest = { path = "../stresstest" }
 tempfile = "3.20.0"
 
 [[bin]]
