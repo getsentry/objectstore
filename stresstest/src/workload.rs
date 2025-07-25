@@ -1,3 +1,5 @@
+//! A module for defining a [`Workload`] that can be used to stress test remote storage services.
+
 use std::pin::Pin;
 use std::thread::available_parallelism;
 use std::{fmt, io, task};
@@ -8,6 +10,8 @@ use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Distribution, LogNormal, Zipf};
 use tokio::io::{AsyncRead, ReadBuf};
 
+/// A builder for creating a [`Workload`].
+#[derive(Debug)]
 pub struct WorkloadBuilder {
     name: String,
     concurrency: usize,
@@ -22,22 +26,20 @@ pub struct WorkloadBuilder {
 }
 
 impl WorkloadBuilder {
-    // pub fn seed(mut self, seed: u64) -> Self {
-    //     self.seed = seed;
-    //     self
-    // }
-
+    /// The maximum number of concurrent operations that can be performed within this workload.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency;
         self
     }
 
+    /// Distribution of file sizes for the `write` action.
     pub fn size_distribution(mut self, p50: u64, p99: u64) -> Self {
         self.p50_size = p50;
         self.p99_size = p99;
         self
     }
 
+    /// The ratio between writes, reads and deletes.
     pub fn action_weights(mut self, writes: u8, reads: u8, deletes: u8) -> Self {
         self.write_weight = writes;
         self.read_weight = reads;
@@ -45,6 +47,7 @@ impl WorkloadBuilder {
         self
     }
 
+    /// Creates the workload instance.
     pub fn build(self) -> Workload {
         let rng = SmallRng::seed_from_u64(self.seed);
 
@@ -71,9 +74,13 @@ impl WorkloadBuilder {
     }
 }
 
+/// Specification of a stresstest that can be run against a remote storage service.
+#[derive(Debug)]
 pub struct Workload {
-    pub name: String,
-    pub concurrency: usize,
+    /// Name of the workload for identification in logs and metrics.
+    pub(crate) name: String,
+    /// The maximum number of concurrent operations that can be performed within this workload.
+    pub(crate) concurrency: usize,
 
     /// The RNG driving all our distributions.
     rng: SmallRng,
@@ -87,6 +94,7 @@ pub struct Workload {
 }
 
 impl Workload {
+    /// Constructs a new workload builder with the given name.
     pub fn builder(name: impl Into<String>) -> WorkloadBuilder {
         WorkloadBuilder {
             name: name.into(),
@@ -120,7 +128,7 @@ impl Workload {
         Some(self.existing_files.remove(idx))
     }
 
-    pub fn next_action(&mut self) -> Action {
+    pub(crate) fn next_action(&mut self) -> Action {
         loop {
             match self.action_distribution.sample(&mut self.rng) {
                 0 => {
@@ -149,18 +157,21 @@ impl Workload {
     ///
     /// This function has to be called for files when a write or read has completed.
     /// (Files currently being read will not be concurrently deleted)
-    pub fn push_file(&mut self, internal: InternalId, external: ExternalId) {
+    pub(crate) fn push_file(&mut self, internal: InternalId, external: ExternalId) {
         self.existing_files.push((internal, external))
     }
 
-    pub fn external_files(&mut self) -> impl Iterator<Item = ExternalId> + use<> {
+    pub(crate) fn external_files(&mut self) -> impl Iterator<Item = ExternalId> + use<> {
         std::mem::take(&mut self.existing_files)
             .into_iter()
             .map(|(_internal, external)| external)
     }
 }
 
-#[derive(Eq, Hash, PartialEq, Clone, Copy)]
+/// Unique identifier for an object in the stresstest.
+///
+/// Objectstore assigns this an [`ExternalId`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InternalId(u64);
 
 impl fmt::Display for InternalId {
@@ -169,16 +180,31 @@ impl fmt::Display for InternalId {
     }
 }
 
+/// Unique identifier for an object in the remote storage.
+///
+/// These identifiers map to [`InternalId`]s.
 pub type ExternalId = String;
 
+/// An action that can be performed by the workload.
+#[derive(Debug)]
 pub enum Action {
+    /// Write an object with the given internal ID and payload, returning an [`ExternalId`].
     Write(InternalId, Payload),
+    /// Read an object with the given ID and expect the payload to match.
     Read(InternalId, ExternalId, Payload),
+    /// Permanently delete an object with the given ID.
     Delete(ExternalId),
 }
 
+/// Randomized contents of an object.
+///
+/// Clone this instance to reuse it with deterministic contents across multiple reads.
+/// Alternatively, the payload can be constructed from an [`InternalId`].
+#[derive(Debug, Clone)]
 pub struct Payload {
+    /// The length of the payload in bytes.
     pub len: u64,
+    /// The RNG used to fill the payload with random bytes.
     pub rng: SmallRng,
 }
 

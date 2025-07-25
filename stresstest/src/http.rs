@@ -1,3 +1,5 @@
+//! Contains a remote implementation using HTTP to interact with objectstore.
+
 use std::io::Read;
 
 use jsonwebtoken::{EncodingKey, Header};
@@ -6,13 +8,35 @@ use tokio_util::io::ReaderStream;
 
 use crate::workload::{InternalId, Payload};
 
+/// A remote implementation using HTTP to interact with objectstore.
+#[derive(Debug)]
 pub struct HttpRemote {
+    /// The URL at which the objectstore is reachable.
     pub remote: String,
+    /// The JWT secret used to sign the authorization tokens.
     pub jwt_secret: String,
+    /// The HTTP client used to make requests to the objectstore.
     pub client: reqwest::Client,
 }
 
 impl HttpRemote {
+    /// Creates a new `HttpRemote` instance with the given remote URL and a default client.
+    ///
+    /// The JWT secret is empty and can be changed with `with_secret`.
+    pub fn new(remote: String) -> Self {
+        Self {
+            remote,
+            jwt_secret: String::new(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Sets the JWT secret to use for authorization.
+    pub fn with_secret(mut self, jwt_secret: impl Into<String>) -> Self {
+        self.jwt_secret = jwt_secret.into();
+        self
+    }
+
     fn make_authorization(&self, permission: &str) -> String {
         let claims = serde_json::json!({
             "exp": jsonwebtoken::get_current_timestamp() + 30,
@@ -29,7 +53,7 @@ impl HttpRemote {
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
-    pub async fn write(&self, id: InternalId, payload: Payload) -> String {
+    pub(crate) async fn write(&self, id: InternalId, payload: Payload) -> String {
         let stream = ReaderStream::new(payload);
 
         let key = id.to_string();
@@ -46,7 +70,7 @@ impl HttpRemote {
         key
     }
 
-    pub async fn read(&self, key: &str, mut payload: Payload) {
+    pub(crate) async fn read(&self, key: &str, mut payload: Payload) {
         let get_url = format!("{}/{key}", self.remote);
         let file_contents = self
             .client
@@ -67,7 +91,7 @@ impl HttpRemote {
         }
     }
 
-    pub async fn delete(&self, key: String) {
+    pub(crate) async fn delete(&self, key: String) {
         let delete_url = format!("{}/{key}", self.remote);
         self.client
             .delete(delete_url)

@@ -1,3 +1,5 @@
+//! Run workloads concurrently against a remote storage service and print metrics.
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,11 +15,11 @@ use yansi::Paint;
 use crate::http::HttpRemote;
 use crate::workload::{Action, Workload};
 
-pub async fn perform_stresstest(
-    remote: HttpRemote,
-    workloads: Vec<Workload>,
-    duration: Duration,
-) -> Result<()> {
+/// Runs the given workloads concurrently against the remote.
+///
+/// The function runs all workloads concurrently, then prints metrics and finally deletes all
+/// objects from the remote.
+pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duration) -> Result<()> {
     let remote = Arc::new(remote);
     // run the workloads concurrently
     let tasks: Vec<_> = workloads
