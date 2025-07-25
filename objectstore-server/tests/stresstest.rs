@@ -10,11 +10,9 @@ const OBJECTSTORE_EXE: &str = env!("CARGO_BIN_EXE_objectstore");
 const JWT_SECRET: &str = "secret";
 
 fn assert_clean_shutdown(mut child: Child) {
-    // Send SIGINT to the child process
     let pid = Pid::from_raw(child.id() as i32);
     signal::kill(pid, Signal::SIGINT).expect("Failed to send SIGINT");
 
-    // Wait for the process to exit and retrieve its exit code
     let output = child.wait().expect("Failed to wait on child process");
 
     assert!(
@@ -26,7 +24,6 @@ fn assert_clean_shutdown(mut child: Child) {
 
 #[tokio::test]
 async fn test_basic() {
-    // generate a random number between 10k and 20k as port number for the server
     let port = 10000 + rand::random::<u16>() % 10000;
     let addr = format!("127.0.0.1:{port}");
 
@@ -38,7 +35,7 @@ async fn test_basic() {
         .spawn()
         .expect("Failed to spawn subprocess");
 
-    // Give the server time to start.
+    // Give the server time to start, or else stresstest might fail to connect.
     std::thread::sleep(Duration::from_secs(1));
 
     let remote = HttpRemote::new(format!("http://{addr}")).with_secret(JWT_SECRET);
