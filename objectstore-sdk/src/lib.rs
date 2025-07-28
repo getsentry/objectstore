@@ -21,6 +21,9 @@ use reqwest::{Body, header};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+#[cfg(test)]
+mod tests;
+
 /// The compression algorithm of an object to upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {

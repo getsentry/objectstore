@@ -1513,12 +1513,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
+ "axum",
  "bytes",
  "futures-core",
  "futures-util",
  "jsonwebtoken",
  "reqwest",
  "serde",
+ "tokio",
  "tokio-util",
  "uuid",
 ]
