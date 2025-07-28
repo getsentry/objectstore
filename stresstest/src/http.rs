@@ -40,7 +40,8 @@ impl HttpRemote {
     }
 
     pub(crate) async fn read(&self, key: &str, mut payload: Payload) {
-        let stream = self.client.get(key).await.unwrap().unwrap();
+        let (stream, _compression) = self.client.get(key, &[]).await.unwrap();
+        let stream = stream.unwrap();
         let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
 
         // TODO: both of these are currently buffering in-memory. we should use streaming here as well.

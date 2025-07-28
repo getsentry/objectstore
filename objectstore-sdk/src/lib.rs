@@ -9,9 +9,10 @@
 use std::fmt;
 use std::io::Cursor;
 use std::marker::PhantomData;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use async_compression::tokio::bufread::ZstdEncoder;
+use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 /// The compression algorithm of an object to upload.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
     Zstd,
@@ -31,6 +32,18 @@ pub enum Compression {
     Lz4,
     /// The payload is uncompressible.
     Uncompressible,
+}
+impl FromStr for Compression {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "zstd" => Compression::Zstd,
+            "gzip" => Compression::Gzip,
+            "lz4" => Compression::Lz4,
+            _ => anyhow::bail!("unknown compression algorithm"),
+        })
+    }
 }
 
 // TODO: this is currently duplicated with the service,
@@ -88,7 +101,13 @@ impl StorageService {
     /// In order to get or put objects, one has to create a [`StorageClient`] using the
     /// [`for_organization`](Self::for_organization) function.
     pub fn new(service_url: &str, jwt_secret: &str, usecase: &str) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder().build()?;
+        let client = reqwest::Client::builder()
+            // we are dealing with de/compression ourselves:
+            .no_brotli()
+            .no_deflate()
+            .no_gzip()
+            .no_zstd()
+            .build()?;
         let jwt_key = EncodingKey::from_secret(jwt_secret.as_bytes());
 
         Ok(Self {
@@ -195,21 +214,58 @@ impl StorageClient {
     pub async fn get(
         &self,
         id: &str,
-        // TODO: accept_compression: &[Compression],
-    ) -> anyhow::Result<Option<ClientStream>> {
+        accept_compression: &[Compression],
+    ) -> anyhow::Result<(Option<ClientStream>, Option<Compression>)> {
         let get_url = format!("{}/{id}", self.service_url);
         let authorization = self.make_authorization("read")?;
 
-        let response = self
+        let mut builder = self
             .client
             .get(get_url)
-            .header(header::AUTHORIZATION, authorization)
-            .send()
-            .await?;
+            .header(header::AUTHORIZATION, authorization);
 
-        let stream = response.bytes_stream().map_err(anyhow::Error::from);
+        let mut accept_encoding = String::new();
+        for compression in accept_compression {
+            let s = match compression {
+                Compression::Zstd => "zstd",
+                Compression::Gzip => "gzip",
+                Compression::Lz4 => "lz4",
+                _ => continue,
+            };
+            accept_encoding.push_str(s);
+            accept_encoding.push(',');
+        }
+        if !accept_encoding.is_empty() {
+            builder = builder.header(header::ACCEPT_ENCODING, accept_encoding);
+        }
 
-        Ok(Some(stream.boxed()))
+        let response = builder.send().await?;
+        let compression = if let Some(compression) = response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|h| h.to_str())
+        {
+            Some(Compression::from_str(compression?)?)
+        } else {
+            None
+        };
+
+        let stream = response.bytes_stream();
+        if let Some(compression) = compression
+            && !accept_compression.contains(&compression)
+        {
+            if compression != Compression::Zstd {
+                anyhow::bail!("Transparent decoding of anything buf `zstd` is not implemented yet");
+            }
+
+            let stream = StreamReader::new(stream.map_err(std::io::Error::other));
+            let decoder = ZstdDecoder::new(stream);
+            let stream = ReaderStream::new(decoder).map_err(anyhow::Error::from);
+            return Ok((Some(stream.boxed()), None));
+        }
+
+        let stream = stream.map_err(anyhow::Error::from);
+        Ok((Some(stream.boxed()), compression))
     }
 
     /// Deletes the object with the given `id`.
