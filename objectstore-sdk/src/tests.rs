@@ -29,9 +29,10 @@ async fn stores_uncompressed() {
         .unwrap();
     assert_eq!(stored_id, "foo");
 
-    let (stream, compression) = client.get("foo", &[]).await.unwrap();
-    let stream = stream.unwrap();
-
+    let GetResult {
+        stream,
+        compression,
+    } = client.get("foo", &[]).await.unwrap().unwrap();
     let received = collect(stream).await.unwrap();
 
     assert_eq!(compression, None);
@@ -50,8 +51,14 @@ async fn uses_zstd_by_default() {
     assert_eq!(stored_id, "foo");
 
     // when the user indicates that it can deal with zstd, it gets zstd
-    let (stream, compression) = client.get("foo", &[Compression::Zstd]).await.unwrap();
-    let stream = stream.unwrap();
+    let GetResult {
+        stream,
+        compression,
+    } = client
+        .get("foo", &[Compression::Zstd])
+        .await
+        .unwrap()
+        .unwrap();
     let received_compressed = collect(stream).await.unwrap();
     let decompressed = zstd::bulk::decompress(&received_compressed, usize::MAX).unwrap();
 
@@ -59,8 +66,10 @@ async fn uses_zstd_by_default() {
     assert_eq!(&decompressed, b"oh hai!");
 
     // otherwise, the client does the decompression
-    let (stream, compression) = client.get("foo", &[]).await.unwrap();
-    let stream = stream.unwrap();
+    let GetResult {
+        stream,
+        compression,
+    } = client.get("foo", &[]).await.unwrap().unwrap();
     let received = collect(stream).await.unwrap();
 
     assert_eq!(compression, None);
@@ -86,20 +95,45 @@ async fn stores_compressed_zstd() {
     assert_eq!(stored_id, "foo");
 
     // when the user indicates that it can deal with zstd, it gets zstd
-    let (stream, compression) = client.get("foo", &[Compression::Zstd]).await.unwrap();
-    let stream = stream.unwrap();
+    let GetResult {
+        stream,
+        compression,
+    } = client
+        .get("foo", &[Compression::Zstd])
+        .await
+        .unwrap()
+        .unwrap();
     let received_compressed = collect(stream).await.unwrap();
 
     assert_eq!(compression, Some(Compression::Zstd));
     assert_eq!(received_compressed, compressed);
 
     // otherwise, the client does the decompression
-    let (stream, compression) = client.get("foo", &[]).await.unwrap();
-    let stream = stream.unwrap();
+    let GetResult {
+        stream,
+        compression,
+    } = client.get("foo", &[]).await.unwrap().unwrap();
     let received = collect(stream).await.unwrap();
 
     assert_eq!(compression, None);
     assert_eq!(received, b"oh hai!");
+}
+
+#[tokio::test]
+async fn deletes_stores_stuff() {
+    let server = TestServer::new();
+    let client = StorageService::new(&server.url("/"), "TEST", "test")
+        .unwrap()
+        .for_organization(12345);
+
+    let body = "oh hai!";
+    let stored_id = client.put("foo").buffer(body).send().await.unwrap();
+    assert_eq!(stored_id, "foo");
+
+    client.delete(&stored_id).await.unwrap();
+
+    let response = client.get("foo", &[Compression::Zstd]).await.unwrap();
+    assert!(response.is_none());
 }
 
 async fn collect<E>(s: impl Stream<Item = Result<Bytes, E>>) -> anyhow::Result<Vec<u8>>

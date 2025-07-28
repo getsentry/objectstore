@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures_core::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use jsonwebtoken::{EncodingKey, Header};
-use reqwest::{Body, header};
+use reqwest::{Body, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -114,7 +114,7 @@ impl StorageService {
         let jwt_key = EncodingKey::from_secret(jwt_secret.as_bytes());
 
         Ok(Self {
-            service_url: service_url.into(),
+            service_url: service_url.trim_end_matches('/').into(),
             client,
 
             jwt_key,
@@ -188,6 +188,24 @@ impl fmt::Debug for StorageClient {
 /// The type of [`Stream`](futures_core::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, anyhow::Result<Bytes>>;
 
+/// The result from a successful [`get()``](StorageClient::get) call.
+///
+/// This carries the response as a stream, plus the compression algorithm of the data.
+pub struct GetResult {
+    /// The response stream.
+    pub stream: ClientStream,
+    /// The compression algorithm of the response data.
+    pub compression: Option<Compression>,
+}
+impl fmt::Debug for GetResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GetResult")
+            .field("stream", &format_args!("[Stream]"))
+            .field("compression", &self.compression)
+            .finish()
+    }
+}
+
 impl StorageClient {
     fn make_authorization(&self, permission: &str) -> anyhow::Result<String> {
         let claims = Claims {
@@ -218,7 +236,7 @@ impl StorageClient {
         &self,
         id: &str,
         accept_compression: &[Compression],
-    ) -> anyhow::Result<(Option<ClientStream>, Option<Compression>)> {
+    ) -> anyhow::Result<Option<GetResult>> {
         let get_url = format!("{}/{id}", self.service_url);
         let authorization = self.make_authorization("read")?;
 
@@ -243,6 +261,12 @@ impl StorageClient {
         }
 
         let response = builder.send().await?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response.error_for_status()?;
+
         let compression = if let Some(compression) = response
             .headers()
             .get(header::CONTENT_ENCODING)
@@ -263,12 +287,20 @@ impl StorageClient {
 
             let stream = StreamReader::new(stream.map_err(std::io::Error::other));
             let decoder = ZstdDecoder::new(stream);
-            let stream = ReaderStream::new(decoder).map_err(anyhow::Error::from);
-            return Ok((Some(stream.boxed()), None));
+            let stream = ReaderStream::new(decoder)
+                .map_err(anyhow::Error::from)
+                .boxed();
+            return Ok(Some(GetResult {
+                stream,
+                compression: None,
+            }));
         }
 
-        let stream = stream.map_err(anyhow::Error::from);
-        Ok((Some(stream.boxed()), compression))
+        let stream = stream.map_err(anyhow::Error::from).boxed();
+        Ok(Some(GetResult {
+            stream,
+            compression,
+        }))
     }
 
     /// Deletes the object with the given `id`.

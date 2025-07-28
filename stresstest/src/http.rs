@@ -1,7 +1,7 @@
 //! Contains a remote implementation using HTTP to interact with objectstore.
 
 use futures::{StreamExt, TryStreamExt};
-use objectstore_client::{Compression, StorageClient, StorageService};
+use objectstore_client::{Compression, GetResult, StorageClient, StorageService};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -40,8 +40,7 @@ impl HttpRemote {
     }
 
     pub(crate) async fn read(&self, key: &str, mut payload: Payload) {
-        let (stream, _compression) = self.client.get(key, &[]).await.unwrap();
-        let stream = stream.unwrap();
+        let GetResult { stream, .. } = self.client.get(key, &[]).await.unwrap().unwrap();
         let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
 
         // TODO: both of these are currently buffering in-memory. we should use streaming here as well.
