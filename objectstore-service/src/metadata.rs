@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// The storage scope for each object
@@ -10,7 +10,7 @@ use std::time::Duration;
 /// The organization / project scope defined here is hierarchical in the sense that
 /// analytical aggregations on an organzation level take into account all the project-level objects.
 /// However, accessing an object requires supplying both of these original values in order to retrieve it.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct Scope {
     /// The organization ID

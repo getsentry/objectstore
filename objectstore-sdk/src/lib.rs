@@ -3,140 +3,287 @@
 //! This Client SDK can be used to put/get blobs.
 //! It internally deals with chunking and compression of uploads and downloads,
 //! making sure that it is done as efficiently as possible.
-//!
-//! The Client SDK is built primarily as a Rust library,
-//! and can be exposed to Python through PyO3 as well.
-#![warn(missing_docs)]
-#![warn(missing_debug_implementations)]
+// #![warn(missing_docs)]
+// #![warn(missing_debug_implementations)]
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::io::Cursor;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-use uuid::Uuid;
+use async_compression::tokio::bufread::ZstdEncoder;
+use bytes::Bytes;
+use futures_core::stream::BoxStream;
+use futures_util::{StreamExt, TryStreamExt};
+use jsonwebtoken::{EncodingKey, Header};
+use reqwest::{Body, header};
+use serde::{Deserialize, Serialize};
+use tokio_util::io::{ReaderStream, StreamReader};
 
-/// The storage scope of an object.
-///
-/// This is used to identify the entity that the object is associated with, such as the organization
-/// or project. In requests, the scope is used to prevent unauthorized access to objects.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct StorageScope {
-    /// The object belongs to this organization.
-    org_id: u64,
+pub enum Compression {
+    Zstd,
+    Gzip,
+    Lz4,
+    Uncompressible,
 }
 
-impl StorageScope {
-    /// Creates a new storage scope for the given organization ID.
-    pub fn for_organization(org_id: u64) -> Self {
-        Self { org_id }
-    }
+// TODO: this is currently duplicated with the service,
+// we should move that out into a shared crate that has these definitions
+/// The storage scope for each object
+///
+/// Each object is stored within a scope. The scope is used for access control, as well as the ability
+/// to quickly run queries on all the objects associated with a scope.
+/// The scope could also be used as a sharding/routing key in the future.
+///
+/// The organization / project scope defined here is hierarchical in the sense that
+/// analytical aggregations on an organzation level take into account all the project-level objects.
+/// However, accessing an object requires supplying both of these original values in order to retrieve it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct Scope {
+    /// The organization ID
+    pub organization: u64,
+
+    /// The project ID, if we have a project scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<u64>,
 }
 
 /// Service for storing and retrieving objects.
 ///
-/// Services connect to an objectstore for a specific use case. To access individual objects, use
-/// the `with_scope` method to create a client with the desired scope. It is not possible to access
-/// objects across different scopes.
-#[derive(Debug)]
+/// The Service contains the base configuration to connect to a service.
+/// It has to be further initialized with credentials using the
+/// [`for_organization`](Self::for_organization) and
+/// [`for_project`](Self::for_project) functions.
 pub struct StorageService {
-    usecase: &'static str,
+    client: reqwest::Client,
+    service_url: Arc<str>,
+    usecase: Arc<str>,
+    jwt_secret: String,
 }
 
 impl StorageService {
-    /// Creates a new storage service for the given use case.
-    pub const fn for_usecase(usecase: &'static str) -> Self {
-        Self { usecase }
+    pub fn new(usecase: &str, service_url: &str, jwt_secret: &str) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder().build()?;
+        Ok(Self {
+            client,
+            service_url: service_url.into(),
+
+            usecase: usecase.into(),
+            jwt_secret: jwt_secret.into(),
+        })
     }
 
-    /// Creates a new storage client with the given scope.
-    pub fn with_scope(&self, scope: StorageScope) -> StorageClient {
+    fn make_client(&self, scope: Scope) -> StorageClient {
+        let jwt_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
+
         StorageClient {
-            usecase: self.usecase,
+            service_url: self.service_url.clone(),
+            client: self.client.clone(),
+            jwt_key,
+
+            usecase: self.usecase.clone(),
             scope,
         }
     }
-}
 
-/// The fully qualified key of a stored object.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct StorageId {
-    id: String,
-}
-
-impl StorageId {
-    /// Creates a new storage ID with the given string.
-    ///
-    /// It must include the use case and the internal identifier of the object.
-    pub fn new(id: String) -> Self {
-        Self { id }
+    pub fn for_organization(&self, organization_id: u64) -> StorageClient {
+        self.make_client(Scope {
+            organization: organization_id,
+            project: None,
+        })
+    }
+    pub fn for_project(&self, organization_id: u64, project_id: u64) -> StorageClient {
+        self.make_client(Scope {
+            organization: organization_id,
+            project: Some(project_id),
+        })
     }
 }
 
-type StorageKey = (&'static str, StorageScope, StorageId);
+#[derive(Debug, Deserialize)]
+struct PutResponse {
+    key: String,
+}
 
-static MOCK_STORAGE: LazyLock<Mutex<HashMap<StorageKey, Arc<[u8]>>>> =
-    LazyLock::new(Default::default);
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+struct Claims<'a> {
+    exp: u64,
+    usecase: &'a str,
+    scope: &'a Scope,
+    permissions: &'a [&'a str],
+}
 
 /// A scoped objectstore client that can access objects in a specific use case and scope.
-#[derive(Debug)]
 pub struct StorageClient {
-    usecase: &'static str,
-    scope: StorageScope,
+    client: reqwest::Client,
+    service_url: Arc<str>,
+    jwt_key: EncodingKey,
+
+    usecase: Arc<str>,
+    scope: Scope,
 }
 
-// TODO: all this should be async
+pub type ClientStream = BoxStream<'static, anyhow::Result<Bytes>>;
+
 impl StorageClient {
-    /// Stores a new object.
-    ///
-    /// Overwrites an existing object if the ID is already in use.
-    pub fn put_blob(&self, id: Option<StorageId>, contents: &[u8]) -> StorageId {
-        let id = id.unwrap_or_else(|| StorageId {
-            id: Uuid::new_v4().to_string(),
-        });
-        let key = (self.usecase, self.scope.clone(), id.clone());
-        let contents = contents.into();
+    fn make_authorization(&self, permission: &str) -> anyhow::Result<String> {
+        let claims = Claims {
+            exp: jsonwebtoken::get_current_timestamp(),
+            usecase: &self.usecase,
+            scope: &self.scope,
+            permissions: &[permission],
+        };
+        let header = Header::default();
 
-        let mut storage = MOCK_STORAGE.lock().unwrap();
-        storage.insert(key, contents);
-        id
+        let token = jsonwebtoken::encode(&header, &claims, &self.jwt_key)?;
+        Ok(token)
     }
 
-    /// Retrieves an object by its ID.
-    ///
-    /// Returns `None` if the object does not exist or the scope does not match.
-    pub fn get_blob(&self, id: StorageId) -> Option<Arc<[u8]>> {
-        let key = (self.usecase, self.scope.clone(), id.clone());
-
-        let storage = MOCK_STORAGE.lock().unwrap();
-        storage.get(&key).cloned()
+    pub fn put<'a>(&'a self, id: Option<&'a str>) -> PutBuilder<'a, ()> {
+        PutBuilder {
+            client: self,
+            id,
+            compression: None,
+            body: PutBody::None,
+            marker: PhantomData,
+        }
     }
 
-    /// Deletes an object by its ID.
-    pub fn delete_blob(&self, id: StorageId) {
-        let key = (self.usecase, self.scope.clone(), id.clone());
+    pub async fn get(
+        &self,
+        id: &str,
+        // TODO: accept_compression: &[Compression],
+    ) -> anyhow::Result<Option<ClientStream>> {
+        let get_url = format!("{}/{id}", self.service_url);
+        let authorization = self.make_authorization("read")?;
 
-        let mut storage = MOCK_STORAGE.lock().unwrap();
-        storage.remove(&key);
+        let response = self
+            .client
+            .get(get_url)
+            .header(header::AUTHORIZATION, authorization)
+            .send()
+            .await?;
+
+        let stream = response.bytes_stream().map_err(anyhow::Error::from);
+
+        Ok(Some(stream.boxed()))
+    }
+
+    pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let delete_url = format!("{}/{id}", self.service_url);
+        let authorization = self.make_authorization("write")?;
+
+        let _response = self
+            .client
+            .delete(delete_url)
+            .header(header::AUTHORIZATION, authorization)
+            .send()
+            .await?;
+
+        Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct PutBuilder<'a, Body> {
+    client: &'a StorageClient,
+    id: Option<&'a str>,
+    compression: Option<Compression>,
 
-    #[test]
-    fn api_is_usable() {
-        static ATTACHMENTS: StorageService = StorageService::for_usecase("attachments");
+    body: PutBody,
+    marker: PhantomData<Body>,
+}
 
-        let scope = StorageScope::for_organization(12345);
-        let client = ATTACHMENTS.with_scope(scope);
+pub enum HasBodyMarker {}
 
-        let blob: &[u8] = b"oh hai!";
-        let allocated_id = client.put_blob(None, blob);
+enum PutBody {
+    None,
+    Buffer(Bytes),
+    Stream(ClientStream),
+}
 
-        let stored_blob = client.get_blob(allocated_id.clone());
-        assert_eq!(stored_blob.unwrap().as_ref(), blob);
+impl<'a, B> PutBuilder<'a, B> {
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
+        self
+    }
 
-        client.delete_blob(allocated_id.clone());
-        assert!(client.get_blob(allocated_id).is_none());
+    pub fn buffer(self, buffer: impl Into<Bytes>) -> PutBuilder<'a, HasBodyMarker> {
+        PutBuilder {
+            client: self.client,
+            id: self.id,
+            compression: self.compression,
+            body: PutBody::Buffer(buffer.into()),
+            marker: PhantomData,
+        }
+    }
+
+    pub fn stream(self, stream: ClientStream) -> PutBuilder<'a, HasBodyMarker> {
+        PutBuilder {
+            client: self.client,
+            id: self.id,
+            compression: self.compression,
+            body: PutBody::Stream(stream),
+            marker: PhantomData,
+        }
+    }
+}
+impl<'a> PutBuilder<'a, HasBodyMarker> {
+    pub async fn send(self) -> anyhow::Result<String> {
+        let put_url = format!(
+            "{}/{}",
+            self.client.service_url,
+            self.id.unwrap_or_default()
+        );
+        let authorization = self.client.make_authorization("write")?;
+
+        let mut builder = self
+            .client
+            .client
+            .put(put_url)
+            .header(header::AUTHORIZATION, authorization);
+
+        let (body, content_encoding) = match self.compression {
+            None => {
+                let body = match self.body {
+                    PutBody::None => unreachable!(),
+                    PutBody::Buffer(bytes) => {
+                        let cursor = Cursor::new(bytes);
+                        let encoder = ZstdEncoder::new(cursor);
+                        let stream = ReaderStream::new(encoder);
+                        Body::wrap_stream(stream)
+                    }
+                    PutBody::Stream(stream) => {
+                        let stream = StreamReader::new(stream.map_err(std::io::Error::other));
+                        let encoder = ZstdEncoder::new(stream);
+                        let stream = ReaderStream::new(encoder);
+                        Body::wrap_stream(stream)
+                    }
+                };
+                (body, Some("zstd"))
+            }
+            Some(compression) => {
+                let body = match self.body {
+                    PutBody::None => unreachable!(),
+                    PutBody::Buffer(bytes) => bytes.into(),
+                    PutBody::Stream(stream) => Body::wrap_stream(stream),
+                };
+                let encoding = match compression {
+                    Compression::Zstd => Some("zstd"),
+                    Compression::Gzip => Some("gzip"),
+                    Compression::Lz4 => Some("lz4"),
+                    Compression::Uncompressible => None,
+                };
+                (body, encoding)
+            }
+        };
+        if let Some(content_encoding) = content_encoding {
+            builder = builder.header(header::CONTENT_ENCODING, content_encoding);
+        }
+
+        let response = builder.body(body).send().await?;
+
+        let PutResponse { key } = response.json().await?;
+        Ok(key)
     }
 }
