@@ -3,9 +3,10 @@
 //! This Client SDK can be used to put/get blobs.
 //! It internally deals with chunking and compression of uploads and downloads,
 //! making sure that it is done as efficiently as possible.
-// #![warn(missing_docs)]
-// #![warn(missing_debug_implementations)]
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
 
+use std::fmt;
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -19,10 +20,16 @@ use reqwest::{Body, header};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+/// The compression algorithm of an object to upload.
+#[derive(Debug)]
 pub enum Compression {
+    /// Compressed using `zstd`.
     Zstd,
+    /// Compressed using `gzip`.
     Gzip,
+    /// Compressed using `lz4`.
     Lz4,
+    /// The payload is uncompressible.
     Uncompressible,
 }
 
@@ -55,43 +62,64 @@ pub struct Scope {
 /// [`for_organization`](Self::for_organization) and
 /// [`for_project`](Self::for_project) functions.
 pub struct StorageService {
-    client: reqwest::Client,
     service_url: Arc<str>,
+    client: reqwest::Client,
+    jwt_key: EncodingKey,
     usecase: Arc<str>,
-    jwt_secret: String,
+}
+impl fmt::Debug for StorageService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageService")
+            .field("service_url", &self.service_url)
+            .field("client", &self.client)
+            .field("jwt_key", &format_args!("[JWT Key]"))
+            .field("usecase", &self.usecase)
+            .finish()
+    }
 }
 
 impl StorageService {
-    pub fn new(usecase: &str, service_url: &str, jwt_secret: &str) -> anyhow::Result<Self> {
+    /// Creates a new [`StorageService`].
+    ///
+    /// This service instance is configured to target the given `service_url`, using the `jwt_secret`
+    /// for authentication.
+    /// It is also scoped for the given `usecase`.
+    ///
+    /// In order to get or put objects, one has to create a [`StorageClient`] using the
+    /// [`for_organization`](Self::for_organization) function.
+    pub fn new(service_url: &str, jwt_secret: &str, usecase: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder().build()?;
-        Ok(Self {
-            client,
-            service_url: service_url.into(),
+        let jwt_key = EncodingKey::from_secret(jwt_secret.as_bytes());
 
+        Ok(Self {
+            service_url: service_url.into(),
+            client,
+
+            jwt_key,
             usecase: usecase.into(),
-            jwt_secret: jwt_secret.into(),
         })
     }
 
     fn make_client(&self, scope: Scope) -> StorageClient {
-        let jwt_key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-
         StorageClient {
             service_url: self.service_url.clone(),
             client: self.client.clone(),
-            jwt_key,
+            jwt_key: self.jwt_key.clone(),
 
             usecase: self.usecase.clone(),
             scope,
         }
     }
 
+    /// Create a new [`StorageClient`] scoped to the given organization.
     pub fn for_organization(&self, organization_id: u64) -> StorageClient {
         self.make_client(Scope {
             organization: organization_id,
             project: None,
         })
     }
+
+    /// Create a new [`StorageClient`] scoped to the given organization/project.
     pub fn for_project(&self, organization_id: u64, project_id: u64) -> StorageClient {
         self.make_client(Scope {
             organization: organization_id,
@@ -123,7 +151,19 @@ pub struct StorageClient {
     usecase: Arc<str>,
     scope: Scope,
 }
+impl fmt::Debug for StorageClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageClient")
+            .field("client", &self.client)
+            .field("service_url", &self.service_url)
+            .field("jwt_key", &format_args!("[JWT Key]"))
+            .field("usecase", &self.usecase)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
 
+/// The type of [`Stream`](futures_core::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, anyhow::Result<Bytes>>;
 
 impl StorageClient {
@@ -140,16 +180,18 @@ impl StorageClient {
         Ok(token)
     }
 
-    pub fn put<'a>(&'a self, id: Option<&'a str>) -> PutBuilder<'a, ()> {
+    /// Creates a PUT request using the optional `id`.
+    pub fn put<'a>(&'a self, id: impl Into<Option<&'a str>>) -> PutBuilder<'a, ()> {
         PutBuilder {
             client: self,
-            id,
+            id: id.into(),
             compression: None,
             body: PutBody::None,
             marker: PhantomData,
         }
     }
 
+    /// Requests the object with the given `id`.
     pub async fn get(
         &self,
         id: &str,
@@ -170,6 +212,7 @@ impl StorageClient {
         Ok(Some(stream.boxed()))
     }
 
+    /// Deletes the object with the given `id`.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{id}", self.service_url);
         let authorization = self.make_authorization("write")?;
@@ -185,6 +228,7 @@ impl StorageClient {
     }
 }
 
+/// A PUT request builder.
 pub struct PutBuilder<'a, Body> {
     client: &'a StorageClient,
     id: Option<&'a str>,
@@ -194,6 +238,19 @@ pub struct PutBuilder<'a, Body> {
     marker: PhantomData<Body>,
 }
 
+impl<'a, Body> fmt::Debug for PutBuilder<'a, Body> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PutBuilder")
+            .field("client", &self.client)
+            .field("id", &self.id)
+            .field("compression", &self.compression)
+            .field("body", &format_args!("[Body]"))
+            .finish()
+    }
+}
+
+/// A typestate marker to denote put requests that have a body and can thus be sent.
+#[derive(Debug)]
 pub enum HasBodyMarker {}
 
 enum PutBody {
@@ -203,11 +260,13 @@ enum PutBody {
 }
 
 impl<'a, B> PutBuilder<'a, B> {
+    /// Sets the compression of the payload to be uploaded.
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = Some(compression);
         self
     }
 
+    /// Uploads an in-memory buffer.
     pub fn buffer(self, buffer: impl Into<Bytes>) -> PutBuilder<'a, HasBodyMarker> {
         PutBuilder {
             client: self.client,
@@ -218,6 +277,7 @@ impl<'a, B> PutBuilder<'a, B> {
         }
     }
 
+    /// Uploads an async `Stream`.
     pub fn stream(self, stream: ClientStream) -> PutBuilder<'a, HasBodyMarker> {
         PutBuilder {
             client: self.client,
@@ -229,6 +289,7 @@ impl<'a, B> PutBuilder<'a, B> {
     }
 }
 impl<'a> PutBuilder<'a, HasBodyMarker> {
+    /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<String> {
         let put_url = format!(
             "{}/{}",

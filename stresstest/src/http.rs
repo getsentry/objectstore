@@ -8,6 +8,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::workload::{InternalId, Payload};
 
 /// A remote implementation using HTTP to interact with objectstore.
+#[derive(Debug)]
 pub struct HttpRemote {
     /// The Storage Client used to talk to our service.
     pub client: StorageClient,
@@ -18,7 +19,7 @@ impl HttpRemote {
     ///
     /// The JWT secret is empty and can be changed with `with_secret`.
     pub fn new(remote: &str, jwt_secret: &str) -> Self {
-        let client = StorageService::new("stresstest", remote, jwt_secret)
+        let client = StorageService::new(remote, jwt_secret, "stresstest")
             .unwrap()
             .for_organization(12345);
         Self { client }
@@ -30,7 +31,7 @@ impl HttpRemote {
             .boxed();
 
         self.client
-            .put(Some(&id.to_string()))
+            .put(id.to_string().as_str())
             .compression(Compression::Uncompressible)
             .stream(stream)
             .send()
