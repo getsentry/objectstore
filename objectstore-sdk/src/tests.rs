@@ -60,7 +60,7 @@ async fn uses_zstd_by_default() {
         .unwrap()
         .unwrap();
     let received_compressed = collect(stream).await.unwrap();
-    let decompressed = zstd::bulk::decompress(&received_compressed, usize::MAX).unwrap();
+    let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
 
     assert_eq!(compression, Some(Compression::Zstd));
     assert_eq!(&decompressed, b"oh hai!");
