@@ -12,6 +12,7 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 humantime-serde = "1.1.1"
 jsonwebtoken = "9.3.1"
+objectstore-client = { version = "0.1.0", path = "../objectstore-sdk" }
 rand = { version = "0.9.1", features = ["small_rng"] }
 rand_distr = "0.5.1"
 reqwest = { version = "0.12.20", features = ["json", "stream", "multipart"] }

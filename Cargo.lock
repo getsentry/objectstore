@@ -2473,6 +2473,7 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "jsonwebtoken",
+ "objectstore-client",
  "rand",
  "rand_distr",
  "reqwest",

@@ -12,8 +12,8 @@
 //!
 //! *Read* or *delete* actions are using a *zipfian* distribution, meaning that
 //! more recently written blobs are the ones that will be read/deleted.
-#![warn(missing_docs)]
-#![warn(missing_debug_implementations)]
+// #![warn(missing_docs)]
+// #![warn(missing_debug_implementations)]
 
 pub mod http;
 pub mod stresstest;
