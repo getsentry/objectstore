@@ -13,20 +13,92 @@ use reqwest::StatusCode;
 use super::*;
 
 #[tokio::test]
-async fn stores_and_compresses() {
+async fn stores_uncompressed() {
     let server = TestServer::new();
     let client = StorageService::new(&server.url("/"), "TEST", "test")
         .unwrap()
         .for_organization(12345);
 
     let body = "oh hai!";
-    let _stored = client.put("foo").buffer(body).send().await.unwrap();
+    let stored_id = client
+        .put("foo")
+        .compression(Compression::Uncompressible)
+        .buffer(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored_id, "foo");
 
-    let (stream, _compression) = client.get("foo", &[]).await.unwrap();
+    let (stream, compression) = client.get("foo", &[]).await.unwrap();
     let stream = stream.unwrap();
 
     let received = collect(stream).await.unwrap();
 
+    assert_eq!(compression, None);
+    assert_eq!(received, b"oh hai!");
+}
+
+#[tokio::test]
+async fn uses_zstd_by_default() {
+    let server = TestServer::new();
+    let client = StorageService::new(&server.url("/"), "TEST", "test")
+        .unwrap()
+        .for_organization(12345);
+
+    let body = "oh hai!";
+    let stored_id = client.put("foo").buffer(body).send().await.unwrap();
+    assert_eq!(stored_id, "foo");
+
+    // when the user indicates that it can deal with zstd, it gets zstd
+    let (stream, compression) = client.get("foo", &[Compression::Zstd]).await.unwrap();
+    let stream = stream.unwrap();
+    let received_compressed = collect(stream).await.unwrap();
+    let decompressed = zstd::bulk::decompress(&received_compressed, usize::MAX).unwrap();
+
+    assert_eq!(compression, Some(Compression::Zstd));
+    assert_eq!(&decompressed, b"oh hai!");
+
+    // otherwise, the client does the decompression
+    let (stream, compression) = client.get("foo", &[]).await.unwrap();
+    let stream = stream.unwrap();
+    let received = collect(stream).await.unwrap();
+
+    assert_eq!(compression, None);
+    assert_eq!(received, b"oh hai!");
+}
+
+#[tokio::test]
+async fn stores_compressed_zstd() {
+    let server = TestServer::new();
+    let client = StorageService::new(&server.url("/"), "TEST", "test")
+        .unwrap()
+        .for_organization(12345);
+
+    let body = "oh hai!";
+    let compressed = zstd::bulk::compress(body.as_bytes(), 0).unwrap();
+    let stored_id = client
+        .put("foo")
+        .compression(Compression::Zstd)
+        .buffer(compressed.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored_id, "foo");
+
+    // when the user indicates that it can deal with zstd, it gets zstd
+    let (stream, compression) = client.get("foo", &[Compression::Zstd]).await.unwrap();
+    let stream = stream.unwrap();
+    let received_compressed = collect(stream).await.unwrap();
+
+    assert_eq!(compression, Some(Compression::Zstd));
+    assert_eq!(received_compressed, compressed);
+
+    // otherwise, the client does the decompression
+    let (stream, compression) = client.get("foo", &[]).await.unwrap();
+    let stream = stream.unwrap();
+    let received = collect(stream).await.unwrap();
+
+    assert_eq!(compression, None);
     assert_eq!(received, b"oh hai!");
 }
 
