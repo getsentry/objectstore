@@ -18,9 +18,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::Bytes;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio_stream::Stream;
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 use watto::Pod;
@@ -222,21 +221,10 @@ impl StorageService {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::pin;
+    use bytes::BytesMut;
 
     use super::*;
 
-    async fn collect<E>(s: impl Stream<Item = Result<Bytes, E>>) -> anyhow::Result<Vec<u8>>
-    where
-        anyhow::Error: From<E>,
-    {
-        let mut output = vec![];
-        let mut s = pin!(s);
-        while let Some(chunk) = s.next().await {
-            output.extend_from_slice(chunk?.as_bytes());
-        }
-        Ok(output)
-    }
     fn make_stream(contents: &[u8]) -> BackendStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
@@ -285,10 +273,10 @@ mod tests {
             .await
             .unwrap();
 
-        let file_contents = service.get_file(&key).await.unwrap().unwrap();
-        let file_contents = collect(file_contents).await.unwrap();
+        let stream = service.get_file(&key).await.unwrap().unwrap();
+        let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(file_contents, b"oh hai!");
+        assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
     #[tokio::test]
@@ -307,10 +295,10 @@ mod tests {
             .await
             .unwrap();
 
-        let file_contents = service._get_file("the_file_key").await.unwrap().unwrap();
-        let file_contents = collect(file_contents).await.unwrap();
+        let stream = service._get_file("the_file_key").await.unwrap().unwrap();
+        let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(file_contents, b"oh hai!");
+        assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
     #[ignore = "gcs credentials are not yet set up in CI"]
@@ -328,10 +316,10 @@ mod tests {
             .await
             .unwrap();
 
-        let file_contents = service.get_file(&key).await.unwrap().unwrap();
-        let file_contents = collect(file_contents).await.unwrap();
+        let stream = service.get_file(&key).await.unwrap().unwrap();
+        let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(file_contents, b"oh hai!");
+        assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
     #[ignore = "seadweedfs is not yet set up in CI"]
@@ -349,9 +337,9 @@ mod tests {
             .await
             .unwrap();
 
-        let file_contents = service.get_file(&key).await.unwrap().unwrap();
-        let file_contents = collect(file_contents).await.unwrap();
+        let stream = service.get_file(&key).await.unwrap().unwrap();
+        let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(file_contents, b"oh hai!");
+        assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 }

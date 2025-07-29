@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
-use std::pin::pin;
 use std::sync::Mutex;
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing};
-use futures_core::Stream;
+use bytes::BytesMut;
 use reqwest::StatusCode;
 
 use super::*;
@@ -33,10 +32,10 @@ async fn stores_uncompressed() {
         stream,
         compression,
     } = client.get("foo", &[]).await.unwrap().unwrap();
-    let received = collect(stream).await.unwrap();
+    let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, None);
-    assert_eq!(received, b"oh hai!");
+    assert_eq!(received.as_ref(), b"oh hai!");
 }
 
 #[tokio::test]
@@ -59,7 +58,7 @@ async fn uses_zstd_by_default() {
         .await
         .unwrap()
         .unwrap();
-    let received_compressed = collect(stream).await.unwrap();
+    let received_compressed: BytesMut = stream.try_collect().await.unwrap();
     let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
 
     assert_eq!(compression, Some(Compression::Zstd));
@@ -70,10 +69,10 @@ async fn uses_zstd_by_default() {
         stream,
         compression,
     } = client.get("foo", &[]).await.unwrap().unwrap();
-    let received = collect(stream).await.unwrap();
+    let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, None);
-    assert_eq!(received, b"oh hai!");
+    assert_eq!(received.as_ref(), b"oh hai!");
 }
 
 #[tokio::test]
@@ -103,7 +102,7 @@ async fn stores_compressed_zstd() {
         .await
         .unwrap()
         .unwrap();
-    let received_compressed = collect(stream).await.unwrap();
+    let received_compressed: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, Some(Compression::Zstd));
     assert_eq!(received_compressed, compressed);
@@ -113,10 +112,10 @@ async fn stores_compressed_zstd() {
         stream,
         compression,
     } = client.get("foo", &[]).await.unwrap().unwrap();
-    let received = collect(stream).await.unwrap();
+    let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, None);
-    assert_eq!(received, b"oh hai!");
+    assert_eq!(received.as_ref(), b"oh hai!");
 }
 
 #[tokio::test]
@@ -134,18 +133,6 @@ async fn deletes_stores_stuff() {
 
     let response = client.get("foo", &[Compression::Zstd]).await.unwrap();
     assert!(response.is_none());
-}
-
-async fn collect<E>(s: impl Stream<Item = Result<Bytes, E>>) -> anyhow::Result<Vec<u8>>
-where
-    anyhow::Error: From<E>,
-{
-    let mut output = vec![];
-    let mut s = pin!(s);
-    while let Some(chunk) = s.next().await {
-        output.extend_from_slice(&chunk?);
-    }
-    Ok(output)
 }
 
 #[derive(Debug)]

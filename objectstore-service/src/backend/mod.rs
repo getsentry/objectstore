@@ -1,15 +1,14 @@
+use std::fmt::Debug;
+
+use bytes::Bytes;
+use futures_util::stream::BoxStream;
+
 mod gcs;
 mod local_fs;
 mod s3_compatible;
-
-use std::fmt::Debug;
-
-use futures_core::stream::BoxStream;
 pub use gcs::gcs;
 pub use local_fs::LocalFs;
 pub use s3_compatible::S3Compatible;
-
-use bytes::Bytes;
 
 pub type BoxedBackend = Box<dyn Backend>;
 pub type BackendStream = BoxStream<'static, anyhow::Result<Bytes>>;

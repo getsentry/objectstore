@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use bytes::Bytes;
-use futures_core::stream::BoxStream;
+use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use jsonwebtoken::{EncodingKey, Header};
 use reqwest::{Body, StatusCode, header};
@@ -185,7 +185,7 @@ impl fmt::Debug for StorageClient {
     }
 }
 
-/// The type of [`Stream`](futures_core::Stream) to be used for a PUT request.
+/// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, anyhow::Result<Bytes>>;
 
 /// The result from a successful [`get()``](StorageClient::get) call.

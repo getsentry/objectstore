@@ -7,7 +7,6 @@ edition = "2024"
 anyhow = "1.0.98"
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
 bytes = "1.10.1"
-futures-core = "0.3.31"
 futures-util = "0.3.31"
 jsonwebtoken = "9.3.1"
 reqwest = { version = "0.12.22", features = ["stream", "json"] }
