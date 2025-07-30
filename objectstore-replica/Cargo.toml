@@ -1,0 +1,19 @@
+[package]
+name = "objectstore-replica"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = { version = "2.0.1", features = ["serde"] }
+fjall = "2.11.2"
+openraft = { version = "0.9.21", features = [
+    "generic-snapshot-data",
+    "serde",
+    "storage-v2",
+] }
+pack1 = "1.0.0"
+serde = { version = "1.0.219", features = ["derive"] }
+watto = "0.2.0"
+
+[dev-dependencies]
+tempfile = "3.20.0"
