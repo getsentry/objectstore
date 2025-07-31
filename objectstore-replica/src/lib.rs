@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use openraft::{RaftNetwork, RaftNetworkFactory};
 use serde::{Deserialize, Serialize};
 

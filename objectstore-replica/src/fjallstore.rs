@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{self, Cursor, Write};
+use std::io::{self, Write};
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -308,17 +308,6 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
         }))
     }
 
-    #[doc = " Install a snapshot which has finished streaming from the leader."]
-    #[doc = ""]
-    #[doc = " Before this method returns:"]
-    #[doc = " - The state machine should be replaced with the new contents of the snapshot,"]
-    #[doc = " - the input snapshot should be saved, i.e., [`Self::get_current_snapshot`] should return it."]
-    #[doc = " - and all other snapshots should be deleted at this point."]
-    #[doc = ""]
-    #[doc = " ### snapshot"]
-    #[doc = ""]
-    #[doc = " A snapshot created from an earlier call to `begin_receiving_snapshot` which provided the"]
-    #[doc = " snapshot."]
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<NodeId, Node>,
@@ -326,9 +315,6 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
     ) -> Result<(), StorageError<NodeId>> {
         self.db.delete_partition(self.state.clone()).unwrap();
         self.db.delete_partition(self.log.clone()).unwrap();
-
-        // meta.last_log_id;
-        // meta.last_membership;
 
         self.state
             .ingest(snapshot.state.iter().map(|(k, v)| (k.clone(), v.clone())))
