@@ -21,6 +21,7 @@ openraft::declare_raft_types!(
    pub TypeConfig:
        D            = Request,
        R            = Response,
+       SnapshotData = fjallstore::StoreSnapshot,
 );
 
 // struct Network {}

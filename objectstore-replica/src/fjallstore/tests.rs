@@ -3,6 +3,8 @@ use std::sync::Arc;
 use openraft::StorageError;
 use openraft::testing::StoreBuilder;
 use tempfile::TempDir;
+use tracing::subscriber;
+use tracing_subscriber::fmt;
 
 use crate::TypeConfig;
 
@@ -22,5 +24,6 @@ impl StoreBuilder<TypeConfig, Arc<FjallStore>, Arc<FjallStore>, TempDir> for Fja
 
 #[test]
 fn passes_openraft_suite() {
+    let _guard = subscriber::set_default(fmt().with_test_writer().finish());
     openraft::testing::Suite::test_all(FjallBuilder {}).unwrap();
 }

@@ -1931,6 +1931,8 @@ dependencies = [
  "pack1",
  "serde",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "watto",
 ]
 

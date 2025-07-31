@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::io::{self, Cursor, Write};
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use fjall::{Config, Keyspace, Partition, PartitionCreateOptions};
+use fjall::{Config, Keyspace, Partition, PartitionCreateOptions, Slice};
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine};
 use openraft::{
     EntryPayload, LeaderId, LogId, LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot,
@@ -27,6 +28,7 @@ struct FjallStore {
     db: Keyspace,
     state: Partition,
     log: Partition,
+    snapshot: Mutex<Option<Snapshot<TypeConfig>>>,
 }
 impl FjallStore {
     pub fn new(path: &Path) -> Self {
@@ -38,8 +40,19 @@ impl FjallStore {
             .open_partition("log", PartitionCreateOptions::default())
             .unwrap();
 
-        Self { db, state, log }
+        Self {
+            db,
+            state,
+            log,
+            snapshot: Default::default(),
+        }
     }
+}
+
+#[derive(Clone)]
+pub struct StoreSnapshot {
+    state: BTreeMap<Slice, Slice>,
+    log: BTreeMap<Slice, Slice>,
 }
 
 #[repr(C)]
@@ -67,20 +80,11 @@ impl RaftLogReader<TypeConfig> for Arc<FjallStore> {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry>, StorageError<NodeId>> {
-        let Bound::Included(start) = range.start_bound() else {
-            unreachable!()
-        };
-        let end = match range.end_bound() {
-            Bound::Included(end) => end + 1,
-            Bound::Excluded(end) => *end,
-            Bound::Unbounded => todo!(),
-        };
-        let start = start.to_be_bytes();
-        let end = end.to_be_bytes();
-
+        let start = range.start_bound().map(|i| i.to_be_bytes());
+        let end = range.end_bound().map(|i| i.to_be_bytes());
         let deserialized_log = self
             .log
-            .range(start..end)
+            .range((start, end))
             .map(|res| {
                 let (_k, v) = res.unwrap();
                 let (log_id, rest) = deserialize_logid(&v);
@@ -94,32 +98,24 @@ impl RaftLogReader<TypeConfig> for Arc<FjallStore> {
     }
 }
 
-// struct SnapshotBuilder {
-//     state: fjall::Snapshot,
-//     log: fjall::Snapshot,
-// }
-
 impl RaftSnapshotBuilder<TypeConfig> for Arc<FjallStore> {
-    #[doc = " Build snapshot"]
-    #[doc = ""]
-    #[doc = " A snapshot has to contain state of all applied log, including membership. Usually it is just"]
-    #[doc = " a serialized state machine."]
-    #[doc = ""]
-    #[doc = " Building snapshot can be done by:"]
-    #[doc = " - Performing log compaction, e.g. merge log entries that operates on the same key, like a"]
-    #[doc = "   LSM-tree does,"]
-    #[doc = " - or by fetching a snapshot from the state machine."]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
         let state = self.applied_state().await?;
 
-        Ok(Snapshot {
+        let snapshot = Snapshot {
             meta: SnapshotMeta {
                 last_log_id: state.0,
                 last_membership: state.1,
                 snapshot_id: "".into(),
             },
-            snapshot: Box::new(Cursor::new(vec![])),
-        })
+            snapshot: Box::new(StoreSnapshot {
+                state: self.state.iter().map(|res| res.unwrap()).collect(),
+                log: self.state.iter().map(|res| res.unwrap()).collect(),
+            }),
+        };
+        *self.snapshot.lock().unwrap() = Some(snapshot.clone());
+
+        Ok(snapshot)
     }
 }
 
@@ -127,12 +123,20 @@ impl RaftLogStorage<TypeConfig> for Arc<FjallStore> {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<NodeId>> {
-        let last_purged_log_id = self.state.get("last_purged_log_id").unwrap();
-        let last_log_id = self.log.last_key_value().unwrap();
+        let last_purged_log_id = self
+            .state
+            .get("last_purged_log_id")
+            .unwrap()
+            .map(|v| deserialize_logid(&v).0);
+        let last_log_id = self
+            .log
+            .last_key_value()
+            .unwrap()
+            .map(|(_k, v)| deserialize_logid(&v).0);
 
         Ok(LogState {
-            last_purged_log_id: last_purged_log_id.map(|v| deserialize_logid(&v).0),
-            last_log_id: last_log_id.map(|(_k, v)| deserialize_logid(&v).0),
+            last_purged_log_id,
+            last_log_id: last_log_id.or(last_purged_log_id),
         })
     }
 
@@ -209,6 +213,14 @@ impl RaftLogStorage<TypeConfig> for Arc<FjallStore> {
                 self.log.remove(key).unwrap();
             }
         }
+        let last_purged_log_id = SerializedLogId {
+            term: log_id.leader_id.term.into(),
+            node_id: log_id.leader_id.node_id.into(),
+            index: log_id.index.into(),
+        };
+        self.state
+            .insert("last_purged_log_id", last_purged_log_id.as_bytes())
+            .unwrap();
         Ok(())
     }
 }
@@ -283,34 +295,17 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
         Ok(res)
     }
 
-    #[doc = " Get the snapshot builder for the state machine."]
-    #[doc = ""]
-    #[doc = " Usually it returns a snapshot view of the state machine(i.e., subsequent changes to the"]
-    #[doc = " state machine won\'t affect the return snapshot view), or just a copy of the entire state"]
-    #[doc = " machine."]
-    #[doc = ""]
-    #[doc = " The method is intentionally async to give the implementation a chance to use"]
-    #[doc = " asynchronous sync primitives to serialize access to the common internal object, if"]
-    #[doc = " needed."]
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         self.clone()
-        // SnapshotBuilder {
-        //     state: self.state.snapshot(),
-        //     log: self.log.snapshot(),
-        // }
     }
 
-    #[doc = " Create a new blank snapshot, returning a writable handle to the snapshot object."]
-    #[doc = ""]
-    #[doc = " Openraft will use this handle to receive snapshot data."]
-    #[doc = ""]
-    #[doc = " See the [storage chapter of the guide][sto] for details on log compaction / snapshotting."]
-    #[doc = ""]
-    #[doc = " [sto]: crate::docs::getting_started#3-implement-raftlogstorage-and-raftstatemachine"]
     async fn begin_receiving_snapshot(
         &mut self,
     ) -> Result<Box<SnapshotData>, StorageError<NodeId>> {
-        todo!()
+        Ok(Box::new(StoreSnapshot {
+            state: Default::default(),
+            log: Default::default(),
+        }))
     }
 
     #[doc = " Install a snapshot which has finished streaming from the leader."]
@@ -329,25 +324,30 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
         meta: &SnapshotMeta<NodeId, Node>,
         snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
-        todo!()
+        self.db.delete_partition(self.state.clone()).unwrap();
+        self.db.delete_partition(self.log.clone()).unwrap();
+
+        // meta.last_log_id;
+        // meta.last_membership;
+
+        self.state
+            .ingest(snapshot.state.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .unwrap();
+        self.log
+            .ingest(snapshot.log.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .unwrap();
+
+        *self.snapshot.lock().unwrap() = Some(Snapshot {
+            meta: meta.clone(),
+            snapshot,
+        });
+
+        Ok(())
     }
 
-    #[doc = " Get a readable handle to the current snapshot."]
-    #[doc = ""]
-    #[doc = " ### implementation algorithm"]
-    #[doc = ""]
-    #[doc = " Implementing this method should be straightforward. Check the configured snapshot"]
-    #[doc = " directory for any snapshot files. A proper implementation will only ever have one"]
-    #[doc = " active snapshot, though another may exist while it is being created. As such, it is"]
-    #[doc = " recommended to use a file naming pattern which will allow for easily distinguishing between"]
-    #[doc = " the current live snapshot, and any new snapshot which is being created."]
-    #[doc = ""]
-    #[doc = " A proper snapshot implementation will store last-applied-log-id and the"]
-    #[doc = " last-applied-membership config as part of the snapshot, which should be decoded for"]
-    #[doc = " creating this method\'s response data."]
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        Ok(None)
+        Ok(self.snapshot.lock().unwrap().clone())
     }
 }
