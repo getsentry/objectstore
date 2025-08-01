@@ -1517,6 +1517,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "jsonwebtoken",
+ "objectstore-types",
  "reqwest",
  "serde",
  "tokio",
@@ -1539,6 +1540,7 @@ dependencies = [
  "jsonwebtoken",
  "nix",
  "objectstore-service",
+ "objectstore-types",
  "rand",
  "sentry",
  "serde",
@@ -1564,6 +1566,8 @@ dependencies = [
  "bytes",
  "futures-util",
  "gcp_auth",
+ "humantime",
+ "objectstore-types",
  "pack1",
  "reqwest",
  "serde",
@@ -1579,6 +1583,11 @@ dependencies = [
 [[package]]
 name = "objectstore-types"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "humantime",
+ "serde",
+]
 
 [[package]]
 name = "once_cell"

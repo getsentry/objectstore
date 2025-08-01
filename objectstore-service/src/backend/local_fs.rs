@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::pin;
 
 use futures_util::{StreamExt, TryStreamExt};
+use objectstore_types::Metadata;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -22,7 +23,12 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl Backend for LocalFs {
-    async fn put_file(&self, path: &str, stream: BackendStream) -> anyhow::Result<()> {
+    async fn put_file(
+        &self,
+        path: &str,
+        _metadata: &Metadata,
+        stream: BackendStream,
+    ) -> anyhow::Result<()> {
         let path = self.path.join(path);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
@@ -44,7 +50,7 @@ impl Backend for LocalFs {
         Ok(())
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Option<BackendStream>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let path = self.path.join(path);
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
@@ -55,7 +61,7 @@ impl Backend for LocalFs {
         };
 
         let stream = ReaderStream::new(file).map_err(anyhow::Error::from);
-        Ok(Some(stream.boxed()))
+        Ok(Some((Default::default(), stream.boxed())))
     }
 
     async fn delete_file(&self, path: &str) -> anyhow::Result<()> {

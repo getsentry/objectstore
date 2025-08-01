@@ -17,59 +17,15 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use jsonwebtoken::{EncodingKey, Header};
+use objectstore_types::{HEADER_EXPIRATION, Scope};
 use reqwest::{Body, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+pub use objectstore_types::{Compression, ExpirationPolicy};
+
 #[cfg(test)]
 mod tests;
-
-/// The compression algorithm of an object to upload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compression {
-    /// Compressed using `zstd`.
-    Zstd,
-    /// Compressed using `gzip`.
-    Gzip,
-    /// Compressed using `lz4`.
-    Lz4,
-    /// The payload is uncompressible.
-    Uncompressible,
-}
-impl FromStr for Compression {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "zstd" => Compression::Zstd,
-            "gzip" => Compression::Gzip,
-            "lz4" => Compression::Lz4,
-            _ => anyhow::bail!("unknown compression algorithm"),
-        })
-    }
-}
-
-// TODO: this is currently duplicated with the service,
-// we should move that out into a shared crate that has these definitions
-/// The storage scope for each object
-///
-/// Each object is stored within a scope. The scope is used for access control, as well as the ability
-/// to quickly run queries on all the objects associated with a scope.
-/// The scope could also be used as a sharding/routing key in the future.
-///
-/// The organization / project scope defined here is hierarchical in the sense that
-/// analytical aggregations on an organzation level take into account all the project-level objects.
-/// However, accessing an object requires supplying both of these original values in order to retrieve it.
-#[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct Scope {
-    /// The organization ID
-    pub organization: u64,
-
-    /// The project ID, if we have a project scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<u64>,
-}
 
 /// Service for storing and retrieving objects.
 ///
@@ -225,7 +181,10 @@ impl StorageClient {
         PutBuilder {
             client: self,
             id: id.into(),
-            compression: None,
+
+            compression: Compression::None,
+            expiration_policy: ExpirationPolicy::Manual,
+
             body: PutBody::None,
             marker: PhantomData,
         }
@@ -272,7 +231,7 @@ impl StorageClient {
             .get(header::CONTENT_ENCODING)
             .map(|h| h.to_str())
         {
-            Some(Compression::from_str(compression?)?)
+            Some(Compression::from_str(compression?).map_err(anyhow::Error::msg)?)
         } else {
             None
         };
@@ -323,7 +282,9 @@ impl StorageClient {
 pub struct PutBuilder<'a, Body> {
     client: &'a StorageClient,
     id: Option<&'a str>,
-    compression: Option<Compression>,
+
+    compression: Compression,
+    expiration_policy: ExpirationPolicy,
 
     body: PutBody,
     marker: PhantomData<Body>,
@@ -335,6 +296,7 @@ impl<'a, Body> fmt::Debug for PutBuilder<'a, Body> {
             .field("client", &self.client)
             .field("id", &self.id)
             .field("compression", &self.compression)
+            .field("expiration_policy", &self.expiration_policy)
             .field("body", &format_args!("[Body]"))
             .finish()
     }
@@ -353,32 +315,40 @@ enum PutBody {
 impl<'a, B> PutBuilder<'a, B> {
     /// Sets the compression of the payload to be uploaded.
     pub fn compression(mut self, compression: Compression) -> Self {
-        self.compression = Some(compression);
+        self.compression = compression;
         self
+    }
+
+    /// Sets the expiration policy of the object to be uploaded.
+    pub fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
+        self.expiration_policy = expiration_policy;
+        self
+    }
+
+    fn with_body(self, body: PutBody) -> PutBuilder<'a, HasBodyMarker> {
+        PutBuilder {
+            client: self.client,
+            id: self.id,
+
+            compression: self.compression,
+            expiration_policy: self.expiration_policy,
+
+            body,
+            marker: PhantomData,
+        }
     }
 
     /// Uploads an in-memory buffer.
     pub fn buffer(self, buffer: impl Into<Bytes>) -> PutBuilder<'a, HasBodyMarker> {
-        PutBuilder {
-            client: self.client,
-            id: self.id,
-            compression: self.compression,
-            body: PutBody::Buffer(buffer.into()),
-            marker: PhantomData,
-        }
+        self.with_body(PutBody::Buffer(buffer.into()))
     }
 
     /// Uploads an async `Stream`.
     pub fn stream(self, stream: ClientStream) -> PutBuilder<'a, HasBodyMarker> {
-        PutBuilder {
-            client: self.client,
-            id: self.id,
-            compression: self.compression,
-            body: PutBody::Stream(stream),
-            marker: PhantomData,
-        }
+        self.with_body(PutBody::Stream(stream))
     }
 }
+
 impl<'a> PutBuilder<'a, HasBodyMarker> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<String> {
@@ -396,7 +366,7 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
             .header(header::AUTHORIZATION, authorization);
 
         let (body, content_encoding) = match self.compression {
-            None => {
+            Compression::None => {
                 let body = match self.body {
                     PutBody::None => unreachable!(),
                     PutBody::Buffer(bytes) => {
@@ -414,7 +384,7 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
                 };
                 (body, Some("zstd"))
             }
-            Some(compression) => {
+            compression => {
                 let body = match self.body {
                     PutBody::None => unreachable!(),
                     PutBody::Buffer(bytes) => bytes.into(),
@@ -424,13 +394,16 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
                     Compression::Zstd => Some("zstd"),
                     Compression::Gzip => Some("gzip"),
                     Compression::Lz4 => Some("lz4"),
-                    Compression::Uncompressible => None,
+                    _ => None,
                 };
                 (body, encoding)
             }
         };
         if let Some(content_encoding) = content_encoding {
             builder = builder.header(header::CONTENT_ENCODING, content_encoding);
+        }
+        if self.expiration_policy != ExpirationPolicy::Manual {
+            builder = builder.header(HEADER_EXPIRATION, self.expiration_policy.to_string());
         }
 
         let response = builder.body(body).send().await?;

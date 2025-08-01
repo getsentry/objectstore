@@ -1,7 +1,12 @@
 use std::fmt;
+use std::str::FromStr;
+use std::time::SystemTime;
 
 use futures_util::{StreamExt, TryStreamExt};
-use reqwest::{Body, StatusCode};
+use humantime::format_rfc3339_seconds;
+use objectstore_types::{Compression, ExpirationPolicy, HEADER_EXPIRATION, Metadata};
+use reqwest::header::HeaderValue;
+use reqwest::{Body, StatusCode, header};
 
 use super::{Backend, BackendStream};
 
@@ -72,19 +77,34 @@ impl S3Compatible<NoToken> {
 
 #[async_trait::async_trait]
 impl<T: TokenProvider> Backend for S3Compatible<T> {
-    async fn put_file(&self, path: &str, stream: BackendStream) -> anyhow::Result<()> {
+    async fn put_file(
+        &self,
+        path: &str,
+        metadata: &Metadata,
+        stream: BackendStream,
+    ) -> anyhow::Result<()> {
         let put_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.put(put_url);
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
         }
+        if metadata.compression != Compression::Uncompressible {
+            builder = builder.header(header::CONTENT_ENCODING, metadata.compression.to_string());
+        }
+        if metadata.expiration_policy != ExpirationPolicy::Manual {
+            builder = builder.header(HEADER_EXPIRATION, metadata.expiration_policy.to_string());
+            let expires_in = metadata.expiration_policy.expires_in();
+            let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
+            builder = builder.header("Custom-Time", expires_at.to_string());
+        }
+
         let _response = builder.body(Body::wrap_stream(stream)).send().await?;
 
         Ok(())
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Option<BackendStream>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let get_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.get(get_url);
@@ -97,8 +117,26 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
             return Ok(None);
         }
 
+        let headers = response.headers();
+        let mut metadata = Metadata::default();
+        if let Some(compression) = headers
+            .get(header::CONTENT_ENCODING)
+            .map(HeaderValue::to_str)
+            .transpose()?
+        {
+            metadata.compression = Compression::from_str(compression)?;
+        }
+        if let Some(expiration_policy) = headers
+            .get(HEADER_EXPIRATION)
+            .map(HeaderValue::to_str)
+            .transpose()?
+        {
+            metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
+        }
+        // TODO: the object *GET* should probably also contain the expiration time
+
         let stream = response.bytes_stream().map_err(anyhow::Error::from);
-        Ok(Some(stream.boxed()))
+        Ok(Some((metadata, stream.boxed())))
     }
 
     async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
