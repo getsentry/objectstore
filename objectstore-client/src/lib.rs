@@ -1,8 +1,8 @@
-//! The Storage Client SDK
+//! The Storage Client
 //!
-//! This Client SDK can be used to put/get blobs.
-//! It internally deals with chunking and compression of uploads and downloads,
-//! making sure that it is done as efficiently as possible.
+//! The Client is used to interface with the objectstore backend.
+//! It handles responsibilities like transparent compression, and making sure that
+//! uploads and downloads are done as efficiently as possible.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
