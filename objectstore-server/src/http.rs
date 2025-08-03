@@ -35,13 +35,10 @@ pub async fn start_server(state: ServiceState) {
         .into_make_service();
 
     tracing::info!("HTTP server listening on {http_addr}");
-    let _guard = elegant_departure::get_shutdown_guard();
+    let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
     let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let guard = elegant_departure::get_shutdown_guard();
-            guard.wait().await;
-        })
+        .with_graceful_shutdown(guard.wait_owned())
         .await
         .unwrap();
 }
