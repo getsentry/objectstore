@@ -609,12 +609,11 @@ dependencies = [
 
 [[package]]
 name = "elegant-departure"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "259261d0b72dc618a177af380b2944fa44e22fedbdabb920f7b47edffb1df337"
+checksum = "dd2dc636be64a7402771c4c26324d9fe6c6a36a3d718bc33047aaee981e0fa13"
 dependencies = [
- "futures",
- "lazy_static",
+ "futures-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",
