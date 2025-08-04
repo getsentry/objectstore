@@ -38,7 +38,7 @@ async fn test_basic() {
     // Give the server time to start, or else stresstest might fail to connect.
     std::thread::sleep(Duration::from_secs(1));
 
-    let remote = HttpRemote::new(format!("http://{addr}")).with_secret(JWT_SECRET);
+    let remote = HttpRemote::new(&format!("http://{addr}"), JWT_SECRET);
     let workload = Workload::builder("test")
         .concurrency(10)
         .size_distribution(1000, 10_000)

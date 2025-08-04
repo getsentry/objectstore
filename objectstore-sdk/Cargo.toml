@@ -1,7 +1,0 @@
-[package]
-name = "objectstore-client"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-uuid = { version = "1.17.0", features = ["v4"] }

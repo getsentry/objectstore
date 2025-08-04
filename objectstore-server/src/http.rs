@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Path, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::put;
 use axum::{Json, Router};
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::authentication::{Claim, ExtractScope, Permission};
 use crate::config::Config;
+use crate::metadata::extract_metadata_from_headers;
 use crate::state::ServiceState;
 
 pub async fn start_server(state: ServiceState) {
@@ -52,13 +53,15 @@ struct PutBlobResponse {
 async fn put_blob_no_key(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
+    headers: HeaderMap,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(Uuid::new_v4().to_string());
+    let metadata = extract_metadata_from_headers(&headers)?;
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
-    state.service.put_file(&key, stream).await?;
+    state.service.put_file(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
@@ -68,13 +71,15 @@ async fn put_blob(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(key);
+    let metadata = extract_metadata_from_headers(&headers)?;
 
     let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
-    state.service.put_file(&key, stream).await?;
+    state.service.put_file(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
@@ -88,11 +93,11 @@ async fn get_blob(
     claim.ensure_permission(Permission::Read)?;
     let key = claim.into_key(key);
 
-    let Some(contents) = state.service.get_file(&key).await? else {
+    let Some((metadata, stream)) = state.service.get_file(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    Ok(Body::from_stream(contents).into_response())
+    Ok(Body::from_stream(stream).into_response())
 }
 
 #[tracing::instrument(skip_all, fields(usecase, scope, key))]

@@ -1,0 +1,21 @@
+[package]
+name = "objectstore-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
+bytes = "1.10.1"
+futures-util = "0.3.31"
+jsonwebtoken = "9.3.1"
+objectstore-types = { version = "0.1.0", path = "../objectstore-types" }
+reqwest = { version = "0.12.22", features = ["stream", "json"] }
+serde = { version = "1.0.219", features = ["derive"] }
+tokio-util = { version = "0.7.15", features = ["io"] }
+uuid = { version = "1.17.0", features = ["v4"] }
+
+[dev-dependencies]
+axum = "0.8.4"
+tokio = { version = "1.47.0", features = ["macros", "full"] }
+zstd = "0.13.3"
