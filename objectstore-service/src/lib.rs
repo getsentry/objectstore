@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
@@ -116,7 +116,6 @@ impl StorageService {
             return Ok(None);
         };
 
-        let stream = stream.map_err(std::io::Error::other);
         let mut reader = BufReader::new(StreamReader::new(stream));
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
@@ -210,7 +209,6 @@ impl StorageService {
             return Ok(None);
         };
 
-        let stream = stream.map_err(std::io::Error::other);
         let mut reader = BufReader::new(StreamReader::new(stream));
 
         let mut metadata_buf = vec![0; mem::size_of::<Part>()];
@@ -237,6 +235,7 @@ impl StorageService {
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
+    use futures_util::TryStreamExt;
     use objectstore_types::Scope;
 
     use super::*;

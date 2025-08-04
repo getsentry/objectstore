@@ -6,11 +6,11 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-use std::fmt;
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{fmt, io};
 
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
 use bytes::Bytes;
@@ -20,6 +20,7 @@ use jsonwebtoken::{EncodingKey, Header};
 use objectstore_types::{HEADER_EXPIRATION, Scope};
 use reqwest::{Body, StatusCode, header};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
@@ -33,15 +34,15 @@ mod tests;
 /// It has to be further initialized with credentials using the
 /// [`for_organization`](Self::for_organization) and
 /// [`for_project`](Self::for_project) functions.
-pub struct StorageService {
+pub struct ClientBuilder {
     service_url: Arc<str>,
     client: reqwest::Client,
     jwt_key: EncodingKey,
     usecase: Arc<str>,
 }
-impl fmt::Debug for StorageService {
+impl fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StorageService")
+        f.debug_struct("ClientBuilder")
             .field("service_url", &self.service_url)
             .field("client", &self.client)
             .field("jwt_key", &format_args!("[JWT Key]"))
@@ -50,14 +51,14 @@ impl fmt::Debug for StorageService {
     }
 }
 
-impl StorageService {
-    /// Creates a new [`StorageService`].
+impl ClientBuilder {
+    /// Creates a new [`ClientBuilder`].
     ///
     /// This service instance is configured to target the given `service_url`, using the `jwt_secret`
     /// for authentication.
     /// It is also scoped for the given `usecase`.
     ///
-    /// In order to get or put objects, one has to create a [`StorageClient`] using the
+    /// In order to get or put objects, one has to create a [`Client`] using the
     /// [`for_organization`](Self::for_organization) function.
     pub fn new(service_url: &str, jwt_secret: &str, usecase: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
@@ -78,8 +79,8 @@ impl StorageService {
         })
     }
 
-    fn make_client(&self, scope: Scope) -> StorageClient {
-        StorageClient {
+    fn make_client(&self, scope: Scope) -> Client {
+        Client {
             service_url: self.service_url.clone(),
             client: self.client.clone(),
             jwt_key: self.jwt_key.clone(),
@@ -89,16 +90,16 @@ impl StorageService {
         }
     }
 
-    /// Create a new [`StorageClient`] scoped to the given organization.
-    pub fn for_organization(&self, organization_id: u64) -> StorageClient {
+    /// Create a new [`Client`] scoped to the given organization.
+    pub fn for_organization(&self, organization_id: u64) -> Client {
         self.make_client(Scope {
             organization: organization_id,
             project: None,
         })
     }
 
-    /// Create a new [`StorageClient`] scoped to the given organization/project.
-    pub fn for_project(&self, organization_id: u64, project_id: u64) -> StorageClient {
+    /// Create a new [`Client`] scoped to the given organization/project.
+    pub fn for_project(&self, organization_id: u64, project_id: u64) -> Client {
         self.make_client(Scope {
             organization: organization_id,
             project: Some(project_id),
@@ -106,9 +107,11 @@ impl StorageService {
     }
 }
 
+/// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
-struct PutResponse {
-    key: String,
+pub struct PutResponse {
+    /// The key of the object, as stored.
+    pub key: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -121,7 +124,7 @@ struct Claims<'a> {
 }
 
 /// A scoped objectstore client that can access objects in a specific use case and scope.
-pub struct StorageClient {
+pub struct Client {
     client: reqwest::Client,
     service_url: Arc<str>,
     jwt_key: EncodingKey,
@@ -129,9 +132,9 @@ pub struct StorageClient {
     usecase: Arc<str>,
     scope: Scope,
 }
-impl fmt::Debug for StorageClient {
+impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StorageClient")
+        f.debug_struct("Client")
             .field("client", &self.client)
             .field("service_url", &self.service_url)
             .field("jwt_key", &format_args!("[JWT Key]"))
@@ -142,9 +145,9 @@ impl fmt::Debug for StorageClient {
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
-pub type ClientStream = BoxStream<'static, anyhow::Result<Bytes>>;
+pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
-/// The result from a successful [`get()``](StorageClient::get) call.
+/// The result from a successful [`get()`](Client::get) call.
 ///
 /// This carries the response as a stream, plus the compression algorithm of the data.
 pub struct GetResult {
@@ -162,7 +165,7 @@ impl fmt::Debug for GetResult {
     }
 }
 
-impl StorageClient {
+impl Client {
     fn make_authorization(&self, permission: &str) -> anyhow::Result<String> {
         let claims = Claims {
             exp: jsonwebtoken::get_current_timestamp(),
@@ -236,7 +239,7 @@ impl StorageClient {
             None
         };
 
-        let stream = response.bytes_stream();
+        let stream = response.bytes_stream().map_err(io::Error::other);
         if let Some(compression) = compression
             && !accept_compression.contains(&compression)
         {
@@ -244,18 +247,15 @@ impl StorageClient {
                 anyhow::bail!("Transparent decoding of anything but `zstd` is not implemented yet");
             }
 
-            let stream = StreamReader::new(stream.map_err(std::io::Error::other));
-            let decoder = ZstdDecoder::new(stream);
-            let stream = ReaderStream::new(decoder)
-                .map_err(anyhow::Error::from)
-                .boxed();
+            let decoder = ZstdDecoder::new(StreamReader::new(stream));
+            let stream = ReaderStream::new(decoder).boxed();
             return Ok(Some(GetResult {
                 stream,
                 compression: None,
             }));
         }
 
-        let stream = stream.map_err(anyhow::Error::from).boxed();
+        let stream = stream.boxed();
         Ok(Some(GetResult {
             stream,
             compression,
@@ -280,7 +280,7 @@ impl StorageClient {
 
 /// A PUT request builder.
 pub struct PutBuilder<'a, Body> {
-    client: &'a StorageClient,
+    client: &'a Client,
     id: Option<&'a str>,
 
     compression: Compression,
@@ -347,11 +347,20 @@ impl<'a, B> PutBuilder<'a, B> {
     pub fn stream(self, stream: ClientStream) -> PutBuilder<'a, HasBodyMarker> {
         self.with_body(PutBody::Stream(stream))
     }
+
+    /// Uploads an [`AsyncRead`], such as a [`File`](tokio::fs::File).
+    pub fn read<R>(self, reader: R) -> PutBuilder<'a, HasBodyMarker>
+    where
+        R: AsyncRead + Send + Sync + 'static,
+    {
+        let stream = ReaderStream::new(reader).boxed();
+        self.with_body(PutBody::Stream(stream))
+    }
 }
 
 impl<'a> PutBuilder<'a, HasBodyMarker> {
     /// Sends the built PUT request to the upstream service.
-    pub async fn send(self) -> anyhow::Result<String> {
+    pub async fn send(self) -> anyhow::Result<PutResponse> {
         let put_url = format!(
             "{}/{}",
             self.client.service_url,
@@ -376,7 +385,7 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
                         Body::wrap_stream(stream)
                     }
                     PutBody::Stream(stream) => {
-                        let stream = StreamReader::new(stream.map_err(std::io::Error::other));
+                        let stream = StreamReader::new(stream);
                         let encoder = ZstdEncoder::new(stream);
                         let stream = ReaderStream::new(encoder);
                         Body::wrap_stream(stream)
@@ -407,8 +416,6 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
         }
 
         let response = builder.body(body).send().await?;
-
-        let PutResponse { key } = response.json().await?;
-        Ok(key)
+        Ok(response.json().await?)
     }
 }

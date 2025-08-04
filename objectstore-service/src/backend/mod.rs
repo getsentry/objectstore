@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::io;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
@@ -12,7 +13,7 @@ use objectstore_types::Metadata;
 pub use s3_compatible::S3Compatible;
 
 pub type BoxedBackend = Box<dyn Backend>;
-pub type BackendStream = BoxStream<'static, anyhow::Result<Bytes>>;
+pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {

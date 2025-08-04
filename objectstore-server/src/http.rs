@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use std::io;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
@@ -60,7 +61,7 @@ async fn put_blob_no_key(
     let key = claim.into_key(Uuid::new_v4().to_string());
     let metadata = extract_metadata_from_headers(&headers)?;
 
-    let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
+    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     state.service.put_file(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
@@ -78,7 +79,7 @@ async fn put_blob(
     let key = claim.into_key(key);
     let metadata = extract_metadata_from_headers(&headers)?;
 
-    let stream = body.into_data_stream().map_err(anyhow::Error::from).boxed();
+    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     state.service.put_file(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))

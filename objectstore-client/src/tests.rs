@@ -14,7 +14,7 @@ use super::*;
 #[tokio::test]
 async fn stores_uncompressed() {
     let server = TestServer::new();
-    let client = StorageService::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
         .unwrap()
         .for_organization(12345);
 
@@ -25,7 +25,8 @@ async fn stores_uncompressed() {
         .buffer(body)
         .send()
         .await
-        .unwrap();
+        .unwrap()
+        .key;
     assert_eq!(stored_id, "foo");
 
     let GetResult {
@@ -41,12 +42,12 @@ async fn stores_uncompressed() {
 #[tokio::test]
 async fn uses_zstd_by_default() {
     let server = TestServer::new();
-    let client = StorageService::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
         .unwrap()
         .for_organization(12345);
 
     let body = "oh hai!";
-    let stored_id = client.put("foo").buffer(body).send().await.unwrap();
+    let stored_id = client.put("foo").buffer(body).send().await.unwrap().key;
     assert_eq!(stored_id, "foo");
 
     // when the user indicates that it can deal with zstd, it gets zstd
@@ -78,7 +79,7 @@ async fn uses_zstd_by_default() {
 #[tokio::test]
 async fn stores_compressed_zstd() {
     let server = TestServer::new();
-    let client = StorageService::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
         .unwrap()
         .for_organization(12345);
 
@@ -90,7 +91,8 @@ async fn stores_compressed_zstd() {
         .buffer(compressed.clone())
         .send()
         .await
-        .unwrap();
+        .unwrap()
+        .key;
     assert_eq!(stored_id, "foo");
 
     // when the user indicates that it can deal with zstd, it gets zstd
@@ -121,12 +123,12 @@ async fn stores_compressed_zstd() {
 #[tokio::test]
 async fn deletes_stores_stuff() {
     let server = TestServer::new();
-    let client = StorageService::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
         .unwrap()
         .for_organization(12345);
 
     let body = "oh hai!";
-    let stored_id = client.put("foo").buffer(body).send().await.unwrap();
+    let stored_id = client.put("foo").buffer(body).send().await.unwrap().key;
     assert_eq!(stored_id, "foo");
 
     client.delete(&stored_id).await.unwrap();
