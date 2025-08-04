@@ -6,7 +6,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::errors::Result as JwtResult;
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use objectstore_service::{ObjectKey, Scope};
+use objectstore_service::ObjectKey;
+use objectstore_types::Scope;
 use serde::Deserialize;
 
 use crate::state::ServiceState;

@@ -18,6 +18,7 @@ use crate::state::State;
 mod authentication;
 mod config;
 mod http;
+mod metadata;
 mod state;
 
 fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
