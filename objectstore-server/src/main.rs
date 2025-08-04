@@ -9,6 +9,7 @@ use anyhow::Result;
 use sentry::integrations::tracing as sentry_tracing;
 use tokio::signal::unix::SignalKind;
 use tracing::Level;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::config::Config;
@@ -43,7 +44,7 @@ fn initialize_tracing(config: &Config) {
     });
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::ENTER))
         .with(sentry_layer)
         .with(EnvFilter::from_default_env())
         .init();
