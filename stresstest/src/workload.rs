@@ -208,18 +208,6 @@ pub struct Payload {
     pub rng: SmallRng,
 }
 
-// impl io::Read for Payload {
-//     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-//         let len_to_fill = (buf.len() as u64).min(self.len) as usize;
-
-//         let fill_buf = &mut buf[..len_to_fill];
-//         self.rng.fill_bytes(fill_buf);
-
-//         self.len -= len_to_fill as u64;
-//         Ok(len_to_fill)
-//     }
-// }
-
 impl AsyncRead for Payload {
     fn poll_read(
         mut self: Pin<&mut Self>,

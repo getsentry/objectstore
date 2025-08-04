@@ -1,6 +1,6 @@
-use std::fmt;
 use std::str::FromStr;
 use std::time::SystemTime;
+use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use humantime::format_rfc3339_seconds;
@@ -135,7 +135,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         }
         // TODO: the object *GET* should probably also contain the expiration time
 
-        let stream = response.bytes_stream().map_err(anyhow::Error::from);
+        let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))
     }
 

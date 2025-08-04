@@ -1,7 +1,7 @@
 //! Contains a remote implementation using HTTP to interact with objectstore.
 
-use futures::{StreamExt, TryStreamExt};
-use objectstore_client::{Compression, GetResult, StorageClient, StorageService};
+use futures::StreamExt;
+use objectstore_client::{Client, ClientBuilder, Compression, GetResult};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -11,7 +11,7 @@ use crate::workload::{InternalId, Payload};
 #[derive(Debug)]
 pub struct HttpRemote {
     /// The Storage Client used to talk to our service.
-    pub client: StorageClient,
+    pub client: Client,
 }
 
 impl HttpRemote {
@@ -19,16 +19,14 @@ impl HttpRemote {
     ///
     /// The JWT secret is empty and can be changed with `with_secret`.
     pub fn new(remote: &str, jwt_secret: &str) -> Self {
-        let client = StorageService::new(remote, jwt_secret, "stresstest")
+        let client = ClientBuilder::new(remote, jwt_secret, "stresstest")
             .unwrap()
             .for_organization(12345);
         Self { client }
     }
 
     pub(crate) async fn write(&self, id: InternalId, payload: Payload) -> String {
-        let stream = ReaderStream::new(payload)
-            .map_err(anyhow::Error::new)
-            .boxed();
+        let stream = ReaderStream::new(payload).boxed();
 
         self.client
             .put(id.to_string().as_str())
@@ -37,11 +35,12 @@ impl HttpRemote {
             .send()
             .await
             .unwrap()
+            .key
     }
 
     pub(crate) async fn read(&self, key: &str, mut payload: Payload) {
         let GetResult { stream, .. } = self.client.get(key, &[]).await.unwrap().unwrap();
-        let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
+        let mut reader = StreamReader::new(stream);
 
         // TODO: both of these are currently buffering in-memory. we should use streaming here as well.
         let mut read_contents = Vec::new();

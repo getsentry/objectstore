@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use objectstore_types::Metadata;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -37,7 +37,6 @@ impl Backend for LocalFs {
             .open(path)
             .await?;
 
-        let stream = stream.map_err(std::io::Error::other);
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
@@ -60,7 +59,7 @@ impl Backend for LocalFs {
             err => err?,
         };
 
-        let stream = ReaderStream::new(file).map_err(anyhow::Error::from);
+        let stream = ReaderStream::new(file);
         Ok(Some((Default::default(), stream.boxed())))
     }
 
