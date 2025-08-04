@@ -241,7 +241,7 @@ impl StorageClient {
             && !accept_compression.contains(&compression)
         {
             if compression != Compression::Zstd {
-                anyhow::bail!("Transparent decoding of anything buf `zstd` is not implemented yet");
+                anyhow::bail!("Transparent decoding of anything but `zstd` is not implemented yet");
             }
 
             let stream = StreamReader::new(stream.map_err(std::io::Error::other));
