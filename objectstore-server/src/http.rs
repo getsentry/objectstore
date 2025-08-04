@@ -49,7 +49,7 @@ struct PutBlobResponse {
     key: String,
 }
 
-#[tracing::instrument(skip_all, fields(usecase, scope))]
+#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_blob_no_key(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
@@ -66,7 +66,7 @@ async fn put_blob_no_key(
     Ok(Json(PutBlobResponse { key: key.key }))
 }
 
-#[tracing::instrument(skip_all, fields(usecase, scope, key))]
+#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_blob(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
@@ -84,7 +84,7 @@ async fn put_blob(
     Ok(Json(PutBlobResponse { key: key.key }))
 }
 
-#[tracing::instrument(skip_all, fields(usecase, scope, key))]
+#[tracing::instrument(level = "trace", skip(state))]
 async fn get_blob(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
@@ -100,7 +100,7 @@ async fn get_blob(
     Ok(Body::from_stream(stream).into_response())
 }
 
-#[tracing::instrument(skip_all, fields(usecase, scope, key))]
+#[tracing::instrument(level = "trace", skip_all, fields(usecase, scope, key))]
 async fn delete_blob(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,

@@ -30,6 +30,7 @@ async fn test_basic() {
     let child = Command::new(OBJECTSTORE_EXE)
         .env("FSS_HTTP_ADDR", &addr)
         .env("FSS_JWT_SECRET", JWT_SECRET)
+        .env("RUST_LOG", "debug")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
