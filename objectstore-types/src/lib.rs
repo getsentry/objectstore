@@ -85,35 +85,22 @@ impl FromStr for ExpirationPolicy {
 }
 
 /// The compression algorithm of an object to upload.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
-    /// The payload is not compressed.
-    #[default]
-    None,
-    /// The payload is uncompressible.
-    Uncompressible,
     /// Compressed using `zstd`.
     Zstd,
-    /// Compressed using `gzip`.
-    Gzip,
-    /// Compressed using `lz4`.
-    Lz4,
+    // /// Compressed using `gzip`.
+    // Gzip,
+    // /// Compressed using `lz4`.
+    // Lz4,
 }
 impl Compression {
-    /// Returns whether the payload is compressed at all.
-    pub fn is_compressed(&self) -> bool {
-        !matches!(self, Compression::None | Compression::Uncompressible)
-    }
-}
-impl fmt::Display for Compression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Compression::None => "none",
-            Compression::Uncompressible => "uncompressible",
+    pub fn as_str(&self) -> &str {
+        match self {
             Compression::Zstd => "zstd",
-            Compression::Gzip => "gzip",
-            Compression::Lz4 => "lz4",
-        })
+            // Compression::Gzip => "gzip",
+            // Compression::Lz4 => "lz4",
+        }
     }
 }
 impl FromStr for Compression {
@@ -122,8 +109,8 @@ impl FromStr for Compression {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "zstd" => Compression::Zstd,
-            "gzip" => Compression::Gzip,
-            "lz4" => Compression::Lz4,
+            // "gzip" => Compression::Gzip,
+            // "lz4" => Compression::Lz4,
             _ => anyhow::bail!("unknown compression algorithm"),
         })
     }
@@ -138,8 +125,8 @@ pub struct Metadata {
     // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
-    // #[serde(skip_serializing_if = "Compression::is_uncompressible")]
-    pub compression: Compression,
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<Compression>,
 
     /// Some arbitrary user-provided metadata.
     pub custom: BTreeMap<String, String>,
