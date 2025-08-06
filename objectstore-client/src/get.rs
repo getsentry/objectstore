@@ -1,8 +1,8 @@
-use std::str::FromStr;
 use std::{fmt, io};
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use futures_util::{StreamExt, TryStreamExt};
+use objectstore_types::Metadata;
 use reqwest::{StatusCode, header};
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -14,16 +14,16 @@ use crate::{Client, ClientStream};
 ///
 /// This carries the response as a stream, plus the compression algorithm of the data.
 pub struct GetResult {
+    /// The metadata attached to this object, including the compression algorithm used for the payload.
+    pub metadata: Metadata,
     /// The response stream.
     pub stream: ClientStream,
-    /// The compression algorithm of the response data.
-    pub compression: Option<Compression>,
 }
 impl fmt::Debug for GetResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GetResult")
+            .field("metadata", &self.metadata)
             .field("stream", &format_args!("[Stream]"))
-            .field("compression", &self.compression)
             .finish()
     }
 }
@@ -68,36 +68,22 @@ impl GetBuilder<'_> {
             .header(header::AUTHORIZATION, authorization);
 
         let response = builder.send().await?;
-
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let response = response.error_for_status()?;
 
-        let compression = if let Some(compression) = response
-            .headers()
-            .get(header::CONTENT_ENCODING)
-            .map(|h| h.to_str())
-        {
-            Some(Compression::from_str(compression?).map_err(anyhow::Error::msg)?)
-        } else {
-            None
-        };
+        let mut metadata = Metadata::from_headers(response.headers(), "")?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
-        let (stream, compression) = match (compression, self.decompress) {
+        let stream = match (metadata.compression, self.decompress) {
             (Some(Compression::Zstd), true) => {
-                let decoder = ZstdDecoder::new(StreamReader::new(stream));
-                let stream = ReaderStream::new(decoder).boxed();
-
-                (stream, None)
+                metadata.compression = None;
+                ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
             }
-            _ => (stream.boxed(), compression),
+            _ => stream.boxed(),
         };
 
-        Ok(Some(GetResult {
-            stream,
-            compression,
-        }))
+        Ok(Some(GetResult { metadata, stream }))
     }
 }

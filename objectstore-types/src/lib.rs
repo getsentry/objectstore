@@ -1,13 +1,24 @@
+//! This is a collection of types shared among various objectstore crates.
+//!
+//! It primarily includes metadata-related structures being used by both the client and server/service
+//! components.
+
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use humantime::{format_duration, parse_duration};
+use humantime::{format_duration, format_rfc3339_seconds, parse_duration};
+use reqwest::header::{self, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
 
-/// The custom HTTP header that contains the serialized [`ExpirationPolicy`]
-pub const HEADER_EXPIRATION: &str = "X-Sn-Expiration";
+/// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
+pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
+/// The prefix for custom HTTP headers containing custom per-object metadata.
+pub const HEADER_META_PREFIX: &str = "x-snme-";
 
 /// The storage scope for each object
 ///
@@ -95,6 +106,7 @@ pub enum Compression {
     // Lz4,
 }
 impl Compression {
+    /// Returns a string representation of the compression algorithm.
     pub fn as_str(&self) -> &str {
         match self {
             Compression::Zstd => "zstd",
@@ -122,12 +134,68 @@ impl FromStr for Compression {
 /// as well as arbitrary user-provided metadata.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
+    /// The expiration policy of the object.
     // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
+    /// The compression algorithm used for this object, if any.
     // #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
     /// Some arbitrary user-provided metadata.
     pub custom: BTreeMap<String, String>,
+}
+impl Metadata {
+    /// Extracts metadata from the given [`HeaderMap`].
+    ///
+    /// A prefix can be also be provided which is being stripped from custom non-standard headers.
+    pub fn from_headers(headers: &HeaderMap, prefix: &str) -> anyhow::Result<Self> {
+        let mut metadata = Metadata::default();
+
+        for (name, value) in headers {
+            if name == header::CONTENT_ENCODING {
+                let compression = value.to_str()?;
+                metadata.compression = Some(Compression::from_str(compression)?);
+            } else if let Some(name) = name.as_str().strip_prefix(prefix) {
+                if name == HEADER_EXPIRATION {
+                    let expiration_policy = value.to_str()?;
+                    metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
+                } else if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
+                    let value = value.to_str()?;
+                    metadata.custom.insert(name.into(), value.into());
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    /// Turns the metadata into a [`HeaderMap`].
+    ///
+    /// It will prefix any non-standard headers with the given `prefix`.
+    /// If the `with_expiration` parameter is set, it will additionally resolve the expiration policy
+    /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
+    pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> anyhow::Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+
+        if let Some(compression) = self.compression {
+            headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
+        }
+        if self.expiration_policy != ExpirationPolicy::Manual {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
+            headers.append(name, self.expiration_policy.to_string().parse()?);
+            if with_expiration {
+                let expires_in = self.expiration_policy.expires_in();
+                let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
+                headers.append("Custom-Time", expires_at.to_string().parse()?);
+            }
+        }
+
+        for (key, value) in &self.custom {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_META_PREFIX}{key}"))?;
+            headers.append(name, value.parse()?);
+        }
+
+        Ok(headers)
+    }
 }

@@ -32,13 +32,10 @@ async fn stores_uncompressed() {
         .key;
     assert_eq!(stored_id, "foo");
 
-    let GetResult {
-        stream,
-        compression,
-    } = client.get("foo").send().await.unwrap().unwrap();
+    let GetResult { metadata, stream } = client.get("foo").send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
-    assert_eq!(compression, None);
+    assert_eq!(metadata.compression, None);
     assert_eq!(received.as_ref(), b"oh hai!");
 }
 
@@ -54,10 +51,7 @@ async fn uses_zstd_by_default() {
     assert_eq!(stored_id, "foo");
 
     // when the user indicates that it can deal with zstd, it gets zstd
-    let GetResult {
-        stream,
-        compression,
-    } = client
+    let GetResult { metadata, stream } = client
         .get("foo")
         .decompress(false)
         .send()
@@ -67,17 +61,14 @@ async fn uses_zstd_by_default() {
     let received_compressed: BytesMut = stream.try_collect().await.unwrap();
     let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
 
-    assert_eq!(compression, Some(Compression::Zstd));
+    assert_eq!(metadata.compression, Some(Compression::Zstd));
     assert_eq!(&decompressed, b"oh hai!");
 
     // otherwise, the client does the decompression
-    let GetResult {
-        stream,
-        compression,
-    } = client.get("foo").send().await.unwrap().unwrap();
+    let GetResult { metadata, stream } = client.get("foo").send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
-    assert_eq!(compression, None);
+    assert_eq!(metadata.compression, None);
     assert_eq!(received.as_ref(), b"oh hai!");
 }
 

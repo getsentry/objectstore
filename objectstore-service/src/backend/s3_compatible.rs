@@ -1,12 +1,8 @@
-use std::str::FromStr;
-use std::time::SystemTime;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use humantime::format_rfc3339_seconds;
-use objectstore_types::{Compression, ExpirationPolicy, HEADER_EXPIRATION, Metadata};
-use reqwest::header::HeaderValue;
-use reqwest::{Body, StatusCode, header};
+use objectstore_types::Metadata;
+use reqwest::{Body, StatusCode};
 
 use super::{Backend, BackendStream};
 
@@ -77,7 +73,7 @@ impl S3Compatible<NoToken> {
 
 #[async_trait::async_trait]
 impl<T: TokenProvider> Backend for S3Compatible<T> {
-    async fn put_file(
+    async fn put_object(
         &self,
         path: &str,
         metadata: &Metadata,
@@ -89,57 +85,36 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
         }
-        if let Some(compression) = metadata.compression {
-            builder = builder.header(header::CONTENT_ENCODING, compression.as_str());
-        }
-        if metadata.expiration_policy != ExpirationPolicy::Manual {
-            builder = builder.header(HEADER_EXPIRATION, metadata.expiration_policy.to_string());
-            let expires_in = metadata.expiration_policy.expires_in();
-            let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
-            builder = builder.header("Custom-Time", expires_at.to_string());
-        }
+
+        builder = builder.headers(metadata.to_headers("x-goog-meta-", true)?);
 
         let _response = builder.body(Body::wrap_stream(stream)).send().await?;
 
         Ok(())
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let get_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.get(get_url);
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
         }
-        let response = builder.send().await?;
 
+        let response = builder.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
+        let response = response.error_for_status()?;
 
-        let headers = response.headers();
-        let mut metadata = Metadata::default();
-        if let Some(compression) = headers
-            .get(header::CONTENT_ENCODING)
-            .map(HeaderValue::to_str)
-            .transpose()?
-        {
-            metadata.compression = Some(Compression::from_str(compression)?);
-        }
-        if let Some(expiration_policy) = headers
-            .get(HEADER_EXPIRATION)
-            .map(HeaderValue::to_str)
-            .transpose()?
-        {
-            metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
-        }
-        // TODO: the object *GET* should probably also contain the expiration time
+        let metadata = Metadata::from_headers(response.headers(), "x-goog-meta-")?;
+        // TODO: the object *GET* should probably also contain the expiration time?
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+    async fn delete_object(&self, path: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
 
         let mut builder = self.client.delete(delete_url);

@@ -17,12 +17,12 @@ pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {
-    async fn put_file(
+    async fn put_object(
         &self,
         path: &str,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()>;
-    async fn get_file(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>>;
-    async fn delete_file(&self, path: &str) -> anyhow::Result<()>;
+    async fn get_object(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>>;
+    async fn delete_object(&self, path: &str) -> anyhow::Result<()>;
 }

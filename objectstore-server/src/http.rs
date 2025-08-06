@@ -12,13 +12,13 @@ use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::{ObjectKey, StorageService};
+use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::authentication::{Claim, ExtractScope, Permission};
 use crate::config::Config;
-use crate::metadata::extract_metadata_from_headers;
 use crate::state::ServiceState;
 
 pub async fn start_server(state: ServiceState) {
@@ -59,10 +59,10 @@ async fn put_blob_no_key(
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(Uuid::new_v4().to_string());
-    let metadata = extract_metadata_from_headers(&headers)?;
+    let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    state.service.put_file(&key, &metadata, stream).await?;
+    state.service.put_object(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
@@ -77,10 +77,10 @@ async fn put_blob(
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(key);
-    let metadata = extract_metadata_from_headers(&headers)?;
+    let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    state.service.put_file(&key, &metadata, stream).await?;
+    state.service.put_object(&key, &metadata, stream).await?;
 
     Ok(Json(PutBlobResponse { key: key.key }))
 }
@@ -94,7 +94,7 @@ async fn get_blob(
     claim.ensure_permission(Permission::Read)?;
     let key = claim.into_key(key);
 
-    let Some((metadata, stream)) = state.service.get_file(&key).await? else {
+    let Some((metadata, stream)) = state.service.get_object(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -110,7 +110,7 @@ async fn delete_blob(
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(key);
 
-    state.service.delete_file(&key).await?;
+    state.service.delete_object(&key).await?;
 
     Ok(())
 }

@@ -75,26 +75,26 @@ impl StorageService {
     }
 
     /// Stores or overwrites an object at the given key.
-    pub async fn put_file(
+    pub async fn put_object(
         &self,
         key: &ObjectKey,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()> {
-        self.0.backend.put_file(&key.key, metadata, stream).await
+        self.0.backend.put_object(&key.key, metadata, stream).await
     }
 
     /// Streams the contents of an object stored at the given key.
-    pub async fn get_file(
+    pub async fn get_object(
         &self,
         key: &ObjectKey,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        self.0.backend.get_file(&key.key).await
+        self.0.backend.get_object(&key.key).await
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_file(&self, key: &ObjectKey) -> anyhow::Result<()> {
-        self.0.backend.delete_file(&key.key).await
+    pub async fn delete_object(&self, key: &ObjectKey) -> anyhow::Result<()> {
+        self.0.backend.delete_object(&key.key).await
     }
 
     #[doc(hidden)]
@@ -112,7 +112,7 @@ impl StorageService {
     ) -> anyhow::Result<Option<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
         let file_path = format!("files/{key}.bin");
 
-        let Some((_metadata, stream)) = self.0.backend.get_file(&file_path).await? else {
+        let Some((_metadata, stream)) = self.0.backend.get_object(&file_path).await? else {
             return Ok(None);
         };
 
@@ -163,7 +163,7 @@ impl StorageService {
         let stream = tokio_stream::once(Ok(buffer.into()));
         self.0
             .backend
-            .put_file(&file_path, &Default::default(), stream.boxed())
+            .put_object(&file_path, &Default::default(), stream.boxed())
             .await?;
 
         Ok(())
@@ -193,7 +193,7 @@ impl StorageService {
         let stream = tokio_stream::once(Ok(buffer.into()));
         self.0
             .backend
-            .put_file(&part_path, &Default::default(), stream.boxed())
+            .put_object(&part_path, &Default::default(), stream.boxed())
             .await?;
 
         Ok(FilePart {
@@ -205,7 +205,7 @@ impl StorageService {
     async fn get_part(&self, part_uuid: Uuid) -> anyhow::Result<Option<Bytes>> {
         let part_path = format!("parts/{part_uuid}.bin");
 
-        let Some((_metadata, stream)) = self.0.backend.get_file(&part_path).await? else {
+        let Some((_metadata, stream)) = self.0.backend.get_object(&part_path).await? else {
             return Ok(None);
         };
 
@@ -284,11 +284,11 @@ mod tests {
         let key = make_key("the_file_key");
 
         service
-            .put_file(&key, &Default::default(), make_stream(b"oh hai!"))
+            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_file(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -327,11 +327,11 @@ mod tests {
         let key = make_key("the_file_key");
 
         service
-            .put_file(&key, &Default::default(), make_stream(b"oh hai!"))
+            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_file(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -348,11 +348,11 @@ mod tests {
         let key = make_key("the_file_key");
 
         service
-            .put_file(&key, &Default::default(), make_stream(b"oh hai!"))
+            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_file(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
