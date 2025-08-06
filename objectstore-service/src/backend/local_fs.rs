@@ -23,7 +23,7 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl Backend for LocalFs {
-    async fn put_file(
+    async fn put_object(
         &self,
         path: &str,
         _metadata: &Metadata,
@@ -49,7 +49,7 @@ impl Backend for LocalFs {
         Ok(())
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let path = self.path.join(path);
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
@@ -63,7 +63,7 @@ impl Backend for LocalFs {
         Ok(Some((Default::default(), stream.boxed())))
     }
 
-    async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+    async fn delete_object(&self, path: &str) -> anyhow::Result<()> {
         let path = self.path.join(path);
         Ok(tokio::fs::remove_file(path).await?)
     }
