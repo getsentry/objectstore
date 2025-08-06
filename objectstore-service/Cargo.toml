@@ -5,23 +5,18 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
-async-compression = { version = "0.4.25", features = ["tokio", "zstd"] }
-async-stream = "0.3.6"
 async-trait = "0.1.88"
+bincode = { version = "2.0.1", features = ["serde"] }
 bytes = "1.10.1"
 futures-util = "0.3.31"
 gcp_auth = "0.12.3"
-humantime = "2.2.0"
 objectstore-types = { path = "../objectstore-types" }
-pack1 = "1.0.0"
 reqwest = { version = "0.12.22", features = ["stream"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.46.0", features = ["full"] }
-tokio-stream = "0.1.17"
 tokio-util = "0.7.15"
-uuid = { version = "1.17.0", features = ["v4", "v7"] }
-watto = "0.2.0"
 zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3.20.0"
+tokio-stream = "0.1.17"
