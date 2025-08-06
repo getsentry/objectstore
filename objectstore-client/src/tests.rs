@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing};
-use bytes::BytesMut;
-use reqwest::StatusCode;
+use bytes::{Bytes, BytesMut};
+use futures_util::TryStreamExt;
+use reqwest::{StatusCode, header};
+
+use crate::get::GetResult;
 
 use super::*;
 
@@ -21,7 +24,7 @@ async fn stores_uncompressed() {
     let body = "oh hai!";
     let stored_id = client
         .put("foo")
-        .compression(Compression::Uncompressible)
+        .compression(None)
         .buffer(body)
         .send()
         .await
@@ -32,7 +35,7 @@ async fn stores_uncompressed() {
     let GetResult {
         stream,
         compression,
-    } = client.get("foo", &[]).await.unwrap().unwrap();
+    } = client.get("foo").send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, None);
@@ -55,7 +58,9 @@ async fn uses_zstd_by_default() {
         stream,
         compression,
     } = client
-        .get("foo", &[Compression::Zstd])
+        .get("foo")
+        .decompress(false)
+        .send()
         .await
         .unwrap()
         .unwrap();
@@ -69,51 +74,7 @@ async fn uses_zstd_by_default() {
     let GetResult {
         stream,
         compression,
-    } = client.get("foo", &[]).await.unwrap().unwrap();
-    let received: BytesMut = stream.try_collect().await.unwrap();
-
-    assert_eq!(compression, None);
-    assert_eq!(received.as_ref(), b"oh hai!");
-}
-
-#[tokio::test]
-async fn stores_compressed_zstd() {
-    let server = TestServer::new();
-    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
-        .unwrap()
-        .for_organization(12345);
-
-    let body = "oh hai!";
-    let compressed = zstd::bulk::compress(body.as_bytes(), 0).unwrap();
-    let stored_id = client
-        .put("foo")
-        .compression(Compression::Zstd)
-        .buffer(compressed.clone())
-        .send()
-        .await
-        .unwrap()
-        .key;
-    assert_eq!(stored_id, "foo");
-
-    // when the user indicates that it can deal with zstd, it gets zstd
-    let GetResult {
-        stream,
-        compression,
-    } = client
-        .get("foo", &[Compression::Zstd])
-        .await
-        .unwrap()
-        .unwrap();
-    let received_compressed: BytesMut = stream.try_collect().await.unwrap();
-
-    assert_eq!(compression, Some(Compression::Zstd));
-    assert_eq!(received_compressed, compressed);
-
-    // otherwise, the client does the decompression
-    let GetResult {
-        stream,
-        compression,
-    } = client.get("foo", &[]).await.unwrap().unwrap();
+    } = client.get("foo").send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(compression, None);
@@ -133,7 +94,7 @@ async fn deletes_stores_stuff() {
 
     client.delete(&stored_id).await.unwrap();
 
-    let response = client.get("foo", &[Compression::Zstd]).await.unwrap();
+    let response = client.get("foo").send().await.unwrap();
     assert!(response.is_none());
 }
 

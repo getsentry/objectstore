@@ -10,7 +10,7 @@ pub fn extract_metadata_from_headers(headers: &HeaderMap) -> anyhow::Result<Meta
         .map(HeaderValue::to_str)
         .transpose()?
     {
-        metadata.compression = Compression::from_str(compression)?;
+        metadata.compression = Some(Compression::from_str(compression)?);
     }
     if let Some(expiration_policy) = headers
         .get(HEADER_EXPIRATION)

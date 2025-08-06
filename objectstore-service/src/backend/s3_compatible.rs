@@ -89,8 +89,8 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
         }
-        if metadata.compression != Compression::Uncompressible {
-            builder = builder.header(header::CONTENT_ENCODING, metadata.compression.to_string());
+        if let Some(compression) = metadata.compression {
+            builder = builder.header(header::CONTENT_ENCODING, compression.as_str());
         }
         if metadata.expiration_policy != ExpirationPolicy::Manual {
             builder = builder.header(HEADER_EXPIRATION, metadata.expiration_policy.to_string());
@@ -124,7 +124,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
             .map(HeaderValue::to_str)
             .transpose()?
         {
-            metadata.compression = Compression::from_str(compression)?;
+            metadata.compression = Some(Compression::from_str(compression)?);
         }
         if let Some(expiration_policy) = headers
             .get(HEADER_EXPIRATION)
