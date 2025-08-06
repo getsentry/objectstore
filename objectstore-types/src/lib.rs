@@ -45,7 +45,7 @@ pub struct Scope {
 /// We support automatic time-to-live and time-to-idle policies.
 /// Setting this to `Manual` means that the object has no automatic policy, and will not be
 /// garbage-collected automatically. It essentially lives forever until manually deleted.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpirationPolicy {
     /// Manual expiration, meaning no automatic cleanup.
     #[default]
@@ -96,7 +96,7 @@ impl FromStr for ExpirationPolicy {
 }
 
 /// The compression algorithm of an object to upload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
     Zstd,
@@ -132,7 +132,7 @@ impl FromStr for Compression {
 ///
 /// This includes special metadata like the expiration policy and compression used,
 /// as well as arbitrary user-provided metadata.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Metadata {
     /// The expiration policy of the object.
     // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]

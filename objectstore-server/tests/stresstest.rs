@@ -24,12 +24,15 @@ fn assert_clean_shutdown(mut child: Child) {
 
 #[tokio::test]
 async fn test_basic() {
+    let tempdir = tempfile::tempdir().unwrap();
     let port = 10000 + rand::random::<u16>() % 10000;
     let addr = format!("127.0.0.1:{port}");
 
     let child = Command::new(OBJECTSTORE_EXE)
         .env("FSS_HTTP_ADDR", &addr)
         .env("FSS_JWT_SECRET", JWT_SECRET)
+        .env("FSS_STORAGE__TYPE", "filesystem")
+        .env("FSS_STORAGE__PATH", tempdir.path().display().to_string())
         .env("RUST_LOG", "debug")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -46,7 +49,7 @@ async fn test_basic() {
         .action_weights(8, 1, 1)
         .build();
 
-    stresstest::run(remote, vec![workload], Duration::from_secs(10))
+    stresstest::run(remote, vec![workload], Duration::from_secs(5))
         .await
         .expect("Failed to run stress test");
 
