@@ -1,0 +1,39 @@
+# Ignored by docker compose, used by devservices
+x-sentry-service-config:
+  version: 0.1
+  service_name: objectstore
+  dependencies:
+    objectstore:
+      description: Objectstore server
+  modes:
+    default: []
+    containerized: [objectstore]
+
+x-programs:
+  objectstore:
+    command: cargo run
+
+services:
+  objectstore:
+    image: ghcr.io/getsentry/objectstore:latest
+    environment:
+      FSS_STORAGE__TYPE: "filesystem"
+      FSS_STORAGE__PATH: "/data"
+      RUST_LOG: "debug"
+    ports:
+      - 127.0.0.1:8888:8888
+    volumes:
+      - objectstore-data:/data
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
+
+networks:
+  devservices:
+    name: devservices
+    external: true
+
+volumes:
+  objectstore-data:
