@@ -63,7 +63,7 @@ impl GetBuilder<'_> {
 
         let builder = self
             .client
-            .client
+            .http
             .get(get_url)
             .header(header::AUTHORIZATION, authorization);
 
