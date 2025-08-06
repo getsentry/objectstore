@@ -150,7 +150,7 @@ impl<'a> PutBuilder<'a, HasBodyMarker> {
 
         let mut builder = self
             .client
-            .client
+            .http
             .put(put_url)
             .header(header::AUTHORIZATION, authorization);
 

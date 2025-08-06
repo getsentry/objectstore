@@ -6,6 +6,8 @@ use reqwest::{Body, StatusCode};
 
 use super::{Backend, BackendStream};
 
+const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
+
 pub trait Token: Send + Sync {
     fn as_str(&self) -> &str;
 }
@@ -86,7 +88,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
         }
 
-        builder = builder.headers(metadata.to_headers("x-goog-meta-", true)?);
+        builder = builder.headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?);
 
         let _response = builder.body(Body::wrap_stream(stream)).send().await?;
 
@@ -107,7 +109,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         }
         let response = response.error_for_status()?;
 
-        let metadata = Metadata::from_headers(response.headers(), "x-goog-meta-")?;
+        let metadata = Metadata::from_headers(response.headers(), GCS_CUSTOM_PREFIX)?;
         // TODO: the object *GET* should probably also contain the expiration time?
 
         let stream = response.bytes_stream().map_err(io::Error::other);

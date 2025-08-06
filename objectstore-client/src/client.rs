@@ -74,7 +74,7 @@ impl ClientBuilder {
     fn make_client(&self, scope: Scope) -> Client {
         Client {
             service_url: self.service_url.clone(),
-            client: self.client.clone(),
+            http: self.client.clone(),
             jwt_key: self.jwt_key.clone(),
 
             usecase: self.usecase.clone(),
@@ -111,7 +111,7 @@ struct Claims<'a> {
 
 /// A scoped objectstore client that can access objects in a specific use case and scope.
 pub struct Client {
-    pub(crate) client: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     pub(crate) service_url: Arc<str>,
     jwt_key: EncodingKey,
 
@@ -122,7 +122,7 @@ pub struct Client {
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client")
-            .field("client", &self.client)
+            .field("http", &self.http)
             .field("service_url", &self.service_url)
             .field("jwt_key", &format_args!("[JWT Key]"))
             .field("usecase", &self.usecase)
@@ -155,7 +155,7 @@ impl Client {
         let authorization = self.make_authorization("write")?;
 
         let _response = self
-            .client
+            .http
             .delete(delete_url)
             .header(header::AUTHORIZATION, authorization)
             .send()
