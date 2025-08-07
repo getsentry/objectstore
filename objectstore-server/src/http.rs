@@ -98,7 +98,8 @@ async fn get_blob(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    Ok(Body::from_stream(stream).into_response())
+    let headers = metadata.to_headers("", false)?;
+    Ok((headers, Body::from_stream(stream)).into_response())
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(usecase, scope, key))]
