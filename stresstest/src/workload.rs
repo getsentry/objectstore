@@ -2,33 +2,58 @@
 
 use std::pin::Pin;
 use std::thread::available_parallelism;
+use std::time::Instant;
 use std::{fmt, io, task};
 
 use rand::rngs::SmallRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Distribution, LogNormal, Zipf};
+use serde::Deserialize;
 use tokio::io::{AsyncRead, ReadBuf};
+
+/// Defines how the workload schedules its operations.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadMode {
+    /// The workload runs with fixed concurrency as fast as possible.
+    ///
+    /// Actions are used to determine the distribution of writes, reads and deletes.
+    #[default]
+    Weighted,
+
+    /// The workload runs with fixed ops per second.
+    ///
+    /// Actions are used to determine the ops per second for each operation.
+    Throughput,
+}
 
 /// A builder for creating a [`Workload`].
 #[derive(Debug)]
 pub struct WorkloadBuilder {
     name: String,
     concurrency: usize,
+    mode: WorkloadMode,
     seed: u64,
 
     p50_size: u64,
     p99_size: u64,
 
-    write_weight: u8,
-    read_weight: u8,
-    delete_weight: u8,
+    write_weight: usize,
+    read_weight: usize,
+    delete_weight: usize,
 }
 
 impl WorkloadBuilder {
     /// The maximum number of concurrent operations that can be performed within this workload.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency;
+        self
+    }
+
+    /// The mode of the workload, either `weighted` or `throughput`.
+    pub fn mode(mut self, mode: WorkloadMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -40,7 +65,7 @@ impl WorkloadBuilder {
     }
 
     /// The ratio between writes, reads and deletes.
-    pub fn action_weights(mut self, writes: u8, reads: u8, deletes: u8) -> Self {
+    pub fn action_weights(mut self, writes: usize, reads: usize, deletes: usize) -> Self {
         self.write_weight = writes;
         self.read_weight = reads;
         self.delete_weight = deletes;
@@ -64,14 +89,25 @@ impl WorkloadBuilder {
         Workload {
             name: self.name,
             concurrency: self.concurrency,
+            mode: self.mode,
 
             rng,
             size_distribution,
             action_distribution,
 
+            start_time: None,
+            totals: Totals::default(),
+
             existing_files: Default::default(),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct Totals {
+    writes: usize,
+    reads: usize,
+    deletes: usize,
 }
 
 /// Specification of a stresstest that can be run against a remote storage service.
@@ -81,13 +117,18 @@ pub struct Workload {
     pub(crate) name: String,
     /// The maximum number of concurrent operations that can be performed within this workload.
     pub(crate) concurrency: usize,
+    /// The target throughput for the workload, in bytes per second. Overrides concurrency.
+    pub(crate) mode: WorkloadMode,
 
     /// The RNG driving all our distributions.
     rng: SmallRng,
     /// A distribution that generates payload sizes for the `write` action.
     size_distribution: LogNormal<f64>,
     /// A distribution that generates actions, such as write/read/delete.
-    action_distribution: WeightedIndex<u8>,
+    action_distribution: WeightedIndex<usize>,
+
+    start_time: Option<Instant>,
+    totals: Totals,
 
     /// All the written files that we can then read or delete.
     existing_files: Vec<(InternalId, ExternalId)>,
@@ -99,6 +140,7 @@ impl Workload {
         WorkloadBuilder {
             name: name.into(),
             concurrency: available_parallelism().unwrap().get(),
+            mode: WorkloadMode::default(),
             seed: rand::random(),
 
             p50_size: 16 * 1024,
@@ -128,28 +170,66 @@ impl Workload {
         Some(self.existing_files.remove(idx))
     }
 
-    pub(crate) fn next_action(&mut self) -> Action {
+    fn next_action_throughput(&mut self) -> Option<Action> {
+        let write_throughput = self.action_distribution.weight(0).unwrap();
+        let read_throughput = self.action_distribution.weight(1).unwrap();
+        let delete_throughput = self.action_distribution.weight(2).unwrap();
+
+        let elapsed = self.start_time.get_or_insert_with(Instant::now).elapsed();
+
+        // Prioritize writes to create readback.
+        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * (write_throughput as f64)) {
+            self.totals.writes += 1;
+            let seed = self.rng.next_u64();
+            return Some(Action::Write(InternalId(seed), self.get_payload(seed)));
+        }
+
+        if (self.totals.reads as f64) < elapsed.as_secs_f64() * (read_throughput as f64) {
+            if let Some((internal, external)) = self.sample_readback() {
+                self.totals.reads += 1;
+                return Some(Action::Read(
+                    internal,
+                    external,
+                    self.get_payload(internal.0),
+                ));
+            };
+        }
+
+        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * (delete_throughput as f64) {
+            if let Some((_internal, external)) = self.sample_readback() {
+                self.totals.deletes += 1;
+                return Some(Action::Delete(external));
+            };
+        }
+
+        None
+    }
+
+    fn next_action_weighted(&mut self) -> Action {
         loop {
             match self.action_distribution.sample(&mut self.rng) {
                 0 => {
                     let seed = self.rng.next_u64();
-                    let payload = self.get_payload(seed);
-                    return Action::Write(InternalId(seed), payload);
+                    return Action::Write(InternalId(seed), self.get_payload(seed));
                 }
                 1 => {
-                    let Some((internal, external)) = self.sample_readback() else {
-                        continue;
+                    if let Some((internal, external)) = self.sample_readback() {
+                        return Action::Read(internal, external, self.get_payload(internal.0));
                     };
-                    let payload = self.get_payload(internal.0);
-                    return Action::Read(internal, external, payload);
                 }
                 _ => {
-                    let Some((_internal, external)) = self.sample_readback() else {
-                        continue;
+                    if let Some((_internal, external)) = self.sample_readback() {
+                        return Action::Delete(external);
                     };
-                    return Action::Delete(external);
                 }
             }
+        }
+    }
+
+    pub(crate) fn next_action(&mut self) -> Option<Action> {
+        match self.mode {
+            WorkloadMode::Weighted => Some(self.next_action_weighted()),
+            WorkloadMode::Throughput => self.next_action_throughput(),
         }
     }
 
