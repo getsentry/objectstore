@@ -35,8 +35,9 @@ impl Backend for LocalFs {
         let path = self.path.join(path);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
+            .create(true)
             .write(true)
-            .create_new(true)
+            .truncate(true)
             .open(path)
             .await?;
 
