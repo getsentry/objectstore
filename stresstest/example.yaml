@@ -1,14 +1,18 @@
 remote: http://localhost:8888
-jwt_secret: TODO
+jwt_secret: ""
 
 duration: 5s
 
 workloads:
   - name: attachments
-    concurrency: 8
+    mode: throughput
     file_sizes:
       p50: 50 KiB
       p99: 200 KiB
+    actions:
+      writes: 10
+      reads: 0
+      deletes: 0
   - name: profiling
     concurrency: 8
     file_sizes:

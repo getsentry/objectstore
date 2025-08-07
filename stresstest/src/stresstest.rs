@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
-use crate::workload::{Action, Workload};
+use crate::workload::{Action, Workload, WorkloadMode};
 
 /// Runs the given workloads concurrently against the remote.
 ///
@@ -38,9 +38,10 @@ pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duratio
 
         println!();
         println!(
-            "{} {} (concurrency: {})",
+            "{} {} (mode: {:?}, concurrency: {})",
             "## Workload".bold(),
             workload.name.bold().blue(),
+            workload.mode,
             workload.concurrency.bold()
         );
         print_metrics(&metrics, duration);
@@ -112,7 +113,12 @@ async fn run_workload(
     workload: Workload,
     duration: Duration,
 ) -> (Workload, WorkloadMetrics) {
-    let concurrency = workload.concurrency;
+    // In throughput mode, allow for a high concurrency value.
+    let concurrency = match workload.mode {
+        WorkloadMode::Weighted => workload.concurrency,
+        WorkloadMode::Throughput => 100,
+    };
+
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let deadline = tokio::time::Instant::now() + duration;
 
@@ -133,9 +139,16 @@ async fn run_workload(
                 let remote = Arc::clone(&remote);
                 let metrics = Arc::clone(&metrics);
 
+                let action = loop {
+                    if let Some(action) = workload.lock().unwrap().next_action() {
+                        break action;
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
+
                 let task = async move {
                     let start = Instant::now();
-                    let action = workload.lock().unwrap().next_action();
                     match action {
                         Action::Write(internal_id, payload) => {
                             let file_size = payload.len;

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
+use stresstest::workload::WorkloadMode;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -17,7 +18,10 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Workload {
     pub name: String,
+    #[serde(default)]
     pub concurrency: usize,
+    #[serde(default)]
+    pub mode: WorkloadMode,
     pub file_sizes: FileSizes,
     #[serde(default)]
     pub actions: Actions,
@@ -31,9 +35,9 @@ pub struct FileSizes {
 
 #[derive(Debug, Deserialize)]
 pub struct Actions {
-    pub writes: u8,
-    pub reads: u8,
-    pub deletes: u8,
+    pub writes: usize,
+    pub reads: usize,
+    pub deletes: usize,
 }
 
 impl Default for Actions {
