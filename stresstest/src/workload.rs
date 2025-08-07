@@ -178,28 +178,28 @@ impl Workload {
         let elapsed = self.start_time.get_or_insert_with(Instant::now).elapsed();
 
         // Prioritize writes to create readback.
-        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * (write_throughput as f64)) {
+        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * write_throughput as f64) {
             self.totals.writes += 1;
             let seed = self.rng.next_u64();
             return Some(Action::Write(InternalId(seed), self.get_payload(seed)));
         }
 
-        if (self.totals.reads as f64) < elapsed.as_secs_f64() * (read_throughput as f64) {
-            if let Some((internal, external)) = self.sample_readback() {
-                self.totals.reads += 1;
-                return Some(Action::Read(
-                    internal,
-                    external,
-                    self.get_payload(internal.0),
-                ));
-            };
+        if (self.totals.reads as f64) < elapsed.as_secs_f64() * read_throughput as f64
+            && let Some((internal, external)) = self.sample_readback()
+        {
+            self.totals.reads += 1;
+            return Some(Action::Read(
+                internal,
+                external,
+                self.get_payload(internal.0),
+            ));
         }
 
-        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * (delete_throughput as f64) {
-            if let Some((_internal, external)) = self.sample_readback() {
-                self.totals.deletes += 1;
-                return Some(Action::Delete(external));
-            };
+        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * delete_throughput as f64
+            && let Some((_internal, external)) = self.sample_readback()
+        {
+            self.totals.deletes += 1;
+            return Some(Action::Delete(external));
         }
 
         None
