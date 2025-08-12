@@ -10,8 +10,8 @@ x-sentry-service-config:
     containerized: [objectstore]
 
 x-programs:
-  objectstore:
-    command: cargo run
+  devserver:
+    command: cargo run --
 
 services:
   objectstore:
