@@ -22,17 +22,9 @@ async fn stores_uncompressed() {
         .for_organization(12345);
 
     let body = "oh hai!";
-    let stored_id = client
-        .put("foo")
-        .compression(None)
-        .buffer(body)
-        .send()
-        .await
-        .unwrap()
-        .key;
-    assert_eq!(stored_id, "foo");
+    let stored_id = client.put(body).compression(None).send().await.unwrap().key;
 
-    let GetResult { metadata, stream } = client.get("foo").send().await.unwrap().unwrap();
+    let GetResult { metadata, stream } = client.get(&stored_id).send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(metadata.compression, None);
@@ -47,8 +39,7 @@ async fn uses_zstd_by_default() {
         .for_organization(12345);
 
     let body = "oh hai!";
-    let stored_id = client.put("foo").buffer(body).send().await.unwrap().key;
-    assert_eq!(stored_id, "foo");
+    let stored_id = client.put(body).send().await.unwrap().key;
 
     // when the user indicates that it can deal with zstd, it gets zstd
     let GetResult { metadata, stream } = client
@@ -65,7 +56,7 @@ async fn uses_zstd_by_default() {
     assert_eq!(&decompressed, b"oh hai!");
 
     // otherwise, the client does the decompression
-    let GetResult { metadata, stream } = client.get("foo").send().await.unwrap().unwrap();
+    let GetResult { metadata, stream } = client.get(&stored_id).send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(metadata.compression, None);
@@ -80,12 +71,11 @@ async fn deletes_stores_stuff() {
         .for_organization(12345);
 
     let body = "oh hai!";
-    let stored_id = client.put("foo").buffer(body).send().await.unwrap().key;
-    assert_eq!(stored_id, "foo");
+    let stored_id = client.put(body).send().await.unwrap().key;
 
     client.delete(&stored_id).await.unwrap();
 
-    let response = client.get("foo").send().await.unwrap();
+    let response = client.get(&stored_id).send().await.unwrap();
     assert!(response.is_none());
 }
 
