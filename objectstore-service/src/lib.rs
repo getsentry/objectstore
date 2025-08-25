@@ -9,7 +9,7 @@ mod backend;
 mod metadata;
 
 pub use metadata::*;
-use objectstore_types::Metadata;
+use objectstore_types::{Metadata, Scope};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -63,24 +63,33 @@ impl StorageService {
     /// Stores or overwrites an object at the given key.
     pub async fn put_object(
         &self,
-        key: &ObjectKey,
+        usecase: String,
+        scope: Scope,
         metadata: &Metadata,
         stream: BackendStream,
-    ) -> anyhow::Result<()> {
-        self.0.backend.put_object(&key.key, metadata, stream).await
+    ) -> anyhow::Result<ScopedKey> {
+        let key = ObjectKey::for_backend(1);
+        let key = ScopedKey {
+            usecase,
+            scope,
+            key,
+        };
+
+        self.0.backend.put_object(&key, metadata, stream).await?;
+        Ok(key)
     }
 
     /// Streams the contents of an object stored at the given key.
     pub async fn get_object(
         &self,
-        key: &ObjectKey,
+        key: &ScopedKey,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        self.0.backend.get_object(&key.key).await
+        self.0.backend.get_object(key).await
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, key: &ObjectKey) -> anyhow::Result<()> {
-        self.0.backend.delete_object(&key.key).await
+    pub async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
+        self.0.backend.delete_object(key).await
     }
 }
 
@@ -96,17 +105,6 @@ mod tests {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    fn make_key(key: &str) -> ObjectKey {
-        ObjectKey {
-            usecase: "foo".into(),
-            scope: Scope {
-                organization: 1234,
-                project: None,
-            },
-            key: key.into(),
-        }
-    }
-
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -114,10 +112,17 @@ mod tests {
             path: tempdir.path(),
         };
         let service = StorageService::new(config).await.unwrap();
-        let key = make_key("the_file_key");
 
-        service
-            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
+        let key = service
+            .put_object(
+                "testing".into(),
+                Scope {
+                    organization: 1234,
+                    project: None,
+                },
+                &Default::default(),
+                make_stream(b"oh hai!"),
+            )
             .await
             .unwrap();
 
@@ -135,10 +140,17 @@ mod tests {
             bucket: "sbx-warp-benchmark-bucket",
         };
         let service = StorageService::new(config).await.unwrap();
-        let key = make_key("the_file_key");
 
-        service
-            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
+        let key = service
+            .put_object(
+                "testing".into(),
+                Scope {
+                    organization: 1234,
+                    project: None,
+                },
+                &Default::default(),
+                make_stream(b"oh hai!"),
+            )
             .await
             .unwrap();
 
@@ -156,10 +168,17 @@ mod tests {
             bucket: "whatever",
         };
         let service = StorageService::new(config).await.unwrap();
-        let key = make_key("the_file_key");
 
-        service
-            .put_object(&key, &Default::default(), make_stream(b"oh hai!"))
+        let key = service
+            .put_object(
+                "testing".into(),
+                Scope {
+                    organization: 1234,
+                    project: None,
+                },
+                &Default::default(),
+                make_stream(b"oh hai!"),
+            )
             .await
             .unwrap();
 
