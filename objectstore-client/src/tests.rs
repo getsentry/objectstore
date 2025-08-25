@@ -9,6 +9,7 @@ use axum::{Router, routing};
 use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use reqwest::{StatusCode, header};
+use uuid::Uuid;
 
 use crate::get::GetResult;
 
@@ -43,7 +44,7 @@ async fn uses_zstd_by_default() {
 
     // when the user indicates that it can deal with zstd, it gets zstd
     let GetResult { metadata, stream } = client
-        .get("foo")
+        .get(&stored_id)
         .decompress(false)
         .send()
         .await
@@ -92,15 +93,11 @@ impl TestServer {
         type TestState = Arc<Mutex<HashMap<String, (Option<String>, Bytes)>>>;
         let state: TestState = Default::default();
 
-        async fn put(
-            State(state): State<TestState>,
-            Path(key): Path<String>,
-            headers: HeaderMap,
-            body: Bytes,
-        ) -> Response {
+        async fn put(State(state): State<TestState>, headers: HeaderMap, body: Bytes) -> Response {
             let content_encoding = headers
                 .get(header::CONTENT_ENCODING)
                 .and_then(|h| h.to_str().ok().map(ToString::to_string));
+            let key = Uuid::now_v7().to_string();
 
             let mut state = state.lock().unwrap();
             state.insert(key.clone(), (content_encoding, body));
@@ -127,7 +124,8 @@ impl TestServer {
         }
 
         let router = Router::new()
-            .route("/{*key}", routing::put(put).get(get).delete(delete))
+            .route("/", routing::put(put))
+            .route("/{*key}", routing::get(get).delete(delete))
             .with_state(state);
         Self::with_router(router)
     }
