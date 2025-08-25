@@ -7,7 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::put;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
@@ -30,8 +30,8 @@ pub async fn start_server(state: ServiceState) {
     let http_addr = state.config.http_addr;
 
     let app = Router::new()
-        .route("/", put(put_blob_no_key))
-        .route("/{*key}", put(put_blob).get(get_blob).delete(delete_blob))
+        .route("/", put(put_blob))
+        .route("/{*key}", get(get_blob).delete(delete_blob))
         .layer(option_layer(sentry_tower_service))
         .with_state(state)
         .into_make_service();
@@ -51,7 +51,7 @@ struct PutBlobResponse {
 }
 
 #[tracing::instrument(level = "trace", skip(state, body))]
-async fn put_blob_no_key(
+async fn put_blob(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     headers: HeaderMap,
@@ -59,24 +59,6 @@ async fn put_blob_no_key(
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
     let key = claim.into_key(Uuid::new_v4().to_string());
-    let metadata = Metadata::from_headers(&headers, "")?;
-
-    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    state.service.put_object(&key, &metadata, stream).await?;
-
-    Ok(Json(PutBlobResponse { key: key.key }))
-}
-
-#[tracing::instrument(level = "trace", skip(state, body))]
-async fn put_blob(
-    State(state): State<ServiceState>,
-    ExtractScope(claim): ExtractScope,
-    Path(key): Path<String>,
-    headers: HeaderMap,
-    body: Body,
-) -> error::Result<impl IntoResponse> {
-    claim.ensure_permission(Permission::Write)?;
-    let key = claim.into_key(key);
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();

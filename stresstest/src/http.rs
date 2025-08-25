@@ -5,7 +5,7 @@ use objectstore_client::{Client, ClientBuilder, GetResult};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::workload::{InternalId, Payload};
+use crate::workload::Payload;
 
 /// A remote implementation using HTTP to interact with objectstore.
 #[derive(Debug)]
@@ -25,13 +25,12 @@ impl HttpRemote {
         Self { client }
     }
 
-    pub(crate) async fn write(&self, id: InternalId, payload: Payload) -> String {
+    pub(crate) async fn write(&self, payload: Payload) -> String {
         let stream = ReaderStream::new(payload).boxed();
 
         self.client
-            .put(id.to_string().as_str())
+            .put_stream(stream)
             .compression(None)
-            .stream(stream)
             .send()
             .await
             .unwrap()
