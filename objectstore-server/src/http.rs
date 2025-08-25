@@ -14,7 +14,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::{ObjectKey, StorageService};
+use objectstore_service::{ScopedKey, StorageService};
 use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
@@ -39,8 +39,8 @@ fn make_app(state: ServiceState) -> axum::Router {
         .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
 
     let routes = Router::new()
-        .route("/", put(put_blob))
-        .route("/{*key}", get(get_blob).delete(delete_blob));
+        .route("/", put(put_object))
+        .route("/{*key}", get(get_object).delete(delete_object));
 
     routes.layer(middleware).with_state(state)
 }
@@ -101,30 +101,34 @@ struct PutBlobResponse {
 }
 
 #[tracing::instrument(level = "trace", skip(state, body))]
-async fn put_blob(
+async fn put_object(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     headers: HeaderMap,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
-    let key = claim.into_key(Uuid::new_v4().to_string());
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    state.service.put_object(&key, &metadata, stream).await?;
+    let key = state
+        .service
+        .put_object(claim.usecase, claim.scope, &metadata, stream)
+        .await?;
 
-    Ok(Json(PutBlobResponse { key: key.key }))
+    Ok(Json(PutBlobResponse {
+        key: key.key.to_string(),
+    }))
 }
 
 #[tracing::instrument(level = "trace", skip(state))]
-async fn get_blob(
+async fn get_object(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
 ) -> error::Result<Response> {
     claim.ensure_permission(Permission::Read)?;
-    let key = claim.into_key(key);
+    let key = claim.into_key(key)?;
 
     let Some((metadata, stream)) = state.service.get_object(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -134,14 +138,14 @@ async fn get_blob(
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
-#[tracing::instrument(level = "trace", skip_all, fields(usecase, scope, key))]
-async fn delete_blob(
+#[tracing::instrument(level = "trace", skip(state))]
+async fn delete_object(
     State(state): State<ServiceState>,
     ExtractScope(claim): ExtractScope,
     Path(key): Path<String>,
 ) -> error::Result<impl IntoResponse> {
     claim.ensure_permission(Permission::Write)?;
-    let key = claim.into_key(key);
+    let key = claim.into_key(key)?;
 
     state.service.delete_object(&key).await?;
 
