@@ -9,6 +9,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::ScopedKey;
+
 use super::{Backend, BackendStream};
 
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
@@ -28,10 +30,11 @@ impl LocalFs {
 impl Backend for LocalFs {
     async fn put_object(
         &self,
-        path: &str,
+        key: &ScopedKey,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()> {
+        let path = key.as_path().to_string();
         let path = self.path.join(path);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
@@ -56,7 +59,11 @@ impl Backend for LocalFs {
         Ok(())
     }
 
-    async fn get_object(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(
+        &self,
+        key: &ScopedKey,
+    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+        let path = key.as_path().to_string();
         let path = self.path.join(path);
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
@@ -101,7 +108,8 @@ impl Backend for LocalFs {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_object(&self, path: &str) -> anyhow::Result<()> {
+    async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
+        let path = key.as_path().to_string();
         let path = self.path.join(path);
         Ok(tokio::fs::remove_file(path).await?)
     }
@@ -113,7 +121,9 @@ mod tests {
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
-    use objectstore_types::{Compression, ExpirationPolicy};
+    use objectstore_types::{Compression, ExpirationPolicy, Scope};
+
+    use crate::ObjectKey;
 
     use super::*;
 
@@ -126,17 +136,25 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFs::new(tempdir.path());
 
+        let key = ScopedKey {
+            usecase: "testing".into(),
+            scope: Scope {
+                organization: 1234,
+                project: Some(1234),
+            },
+            key: ObjectKey::for_backend(0),
+        };
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
         };
         backend
-            .put_object("foo/bar", &metadata, make_stream(b"oh hai!"))
+            .put_object(&key, &metadata, make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let (read_metadata, stream) = backend.get_object("foo/bar").await.unwrap().unwrap();
+        let (read_metadata, stream) = backend.get_object(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(read_metadata, metadata);
