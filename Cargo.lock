@@ -535,6 +535,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-encoding"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a2330da5de22e8a3cb63252ce2abb30116bf5265e89c0e01bc17015ce30a476"
+
+[[package]]
 name = "debugid"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1560,6 +1566,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
+ "data-encoding",
  "futures-util",
  "gcp_auth",
  "objectstore-types",
@@ -1569,6 +1576,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "uuid",
+ "watto",
  "zstd",
 ]
 
@@ -3105,6 +3114,12 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
 ]
+
+[[package]]
+name = "watto"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfbc1480663d640f8c9f7a1ac70922eea60ac16fea79df883177df3bc7bb8b49"
 
 [[package]]
 name = "web-sys"

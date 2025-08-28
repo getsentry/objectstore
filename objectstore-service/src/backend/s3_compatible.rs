@@ -4,6 +4,8 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
 use reqwest::{Body, StatusCode};
 
+use crate::ScopedKey;
+
 use super::{Backend, BackendStream};
 
 const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
@@ -77,11 +79,11 @@ impl S3Compatible<NoToken> {
 impl<T: TokenProvider> Backend for S3Compatible<T> {
     async fn put_object(
         &self,
-        path: &str,
+        key: &ScopedKey,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()> {
-        let put_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
+        let put_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
 
         let mut builder = self.client.put(put_url);
         if let Some(provider) = &self.token_provider {
@@ -95,8 +97,11 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         Ok(())
     }
 
-    async fn get_object(&self, path: &str) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        let get_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
+    async fn get_object(
+        &self,
+        key: &ScopedKey,
+    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+        let get_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
 
         let mut builder = self.client.get(get_url);
         if let Some(provider) = &self.token_provider {
@@ -116,8 +121,8 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_object(&self, path: &str) -> anyhow::Result<()> {
-        let delete_url = format!("{}/{}/{path}", self.endpoint, self.bucket);
+    async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
+        let delete_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
 
         let mut builder = self.client.delete(delete_url);
         if let Some(provider) = &self.token_provider {

@@ -8,6 +8,7 @@ anyhow = "1.0.98"
 async-trait = "0.1.88"
 bincode = { version = "2.0.1", features = ["serde"] }
 bytes = "1.10.1"
+data-encoding = "2.9.0"
 futures-util = "0.3.31"
 gcp_auth = "0.12.3"
 objectstore-types = { path = "../objectstore-types" }
@@ -15,6 +16,8 @@ reqwest = { version = "0.12.22", features = ["stream"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-util = "0.7.15"
+uuid = { version = "1.18.0", features = ["v7"] }
+watto = "0.2.0"
 zstd = "0.13.3"
 
 [dev-dependencies]
