@@ -18,4 +18,5 @@ tokio-util = { version = "0.7.15", features = ["io"] }
 [dev-dependencies]
 axum = "0.8.4"
 tokio = { version = "1.47.0", features = ["macros", "full"] }
+uuid = { version = "1.18.0", features = ["v7"] }
 zstd = "0.13.3"

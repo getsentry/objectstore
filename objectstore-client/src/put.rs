@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
-use std::marker::PhantomData;
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
@@ -17,8 +16,7 @@ pub use objectstore_types::{Compression, ExpirationPolicy};
 use crate::{Client, ClientStream};
 
 impl Client {
-    /// Creates a PUT request using the optional `id`.
-    pub fn put<'a>(&'a self, id: impl Into<Option<&'a str>>) -> PutBuilder<'a, ()> {
+    fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
         let metadata = Metadata {
             compression: Some(self.default_compression),
             ..Default::default()
@@ -26,49 +24,50 @@ impl Client {
 
         PutBuilder {
             client: self,
-            id: id.into(),
-
             metadata,
-
-            body: PutBody::None,
-            marker: PhantomData,
+            body,
         }
+    }
+
+    /// Creates a PUT request for a [`Bytes`]-like type.
+    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder<'_> {
+        self.put_body(PutBody::Buffer(body.into()))
+    }
+
+    /// Creates a PUT request with a stream.
+    pub fn put_stream(&self, body: ClientStream) -> PutBuilder<'_> {
+        self.put_body(PutBody::Stream(body))
+    }
+
+    /// Creates a PUT request with an [`AsyncRead`] type.
+    pub fn put_read<R>(&self, body: R) -> PutBuilder<'_>
+    where
+        R: AsyncRead + Send + Sync + 'static,
+    {
+        let stream = ReaderStream::new(body).boxed();
+        self.put_body(PutBody::Stream(stream))
     }
 }
 
 /// A PUT request builder.
-pub struct PutBuilder<'a, Body> {
-    pub(crate) client: &'a Client,
-    pub(crate) id: Option<&'a str>,
-
-    pub(crate) metadata: Metadata,
-
-    pub(crate) body: PutBody,
-    pub(crate) marker: PhantomData<Body>,
-}
-
-impl<'a, Body> fmt::Debug for PutBuilder<'a, Body> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PutBuilder")
-            .field("client", &self.client)
-            .field("id", &self.id)
-            .field("metadata", &self.metadata)
-            .field("body", &format_args!("[Body]"))
-            .finish()
-    }
-}
-
-/// A typestate marker to denote put requests that have a body and can thus be sent.
 #[derive(Debug)]
-pub enum HasBodyMarker {}
+pub struct PutBuilder<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) metadata: Metadata,
+    pub(crate) body: PutBody,
+}
 
 pub(crate) enum PutBody {
-    None,
     Buffer(Bytes),
     Stream(ClientStream),
 }
+impl fmt::Debug for PutBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PutBody").finish_non_exhaustive()
+    }
+}
 
-impl<'a, B> PutBuilder<'a, B> {
+impl PutBuilder<'_> {
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
     /// [`None`] should be used if no compression should be performed by the client,
@@ -98,37 +97,6 @@ impl<'a, B> PutBuilder<'a, B> {
         self.metadata.custom.insert(key.into(), value.into());
         self
     }
-
-    fn with_body(self, body: PutBody) -> PutBuilder<'a, HasBodyMarker> {
-        PutBuilder {
-            client: self.client,
-            id: self.id,
-
-            metadata: self.metadata,
-
-            body,
-            marker: PhantomData,
-        }
-    }
-
-    /// Uploads an in-memory buffer.
-    pub fn buffer(self, buffer: impl Into<Bytes>) -> PutBuilder<'a, HasBodyMarker> {
-        self.with_body(PutBody::Buffer(buffer.into()))
-    }
-
-    /// Uploads an async `Stream`.
-    pub fn stream(self, stream: ClientStream) -> PutBuilder<'a, HasBodyMarker> {
-        self.with_body(PutBody::Stream(stream))
-    }
-
-    /// Uploads an [`AsyncRead`], such as a [`File`](tokio::fs::File).
-    pub fn read<R>(self, reader: R) -> PutBuilder<'a, HasBodyMarker>
-    where
-        R: AsyncRead + Send + Sync + 'static,
-    {
-        let stream = ReaderStream::new(reader).boxed();
-        self.with_body(PutBody::Stream(stream))
-    }
 }
 
 /// The response returned from the service after uploading an object.
@@ -138,24 +106,20 @@ pub struct PutResponse {
     pub key: String,
 }
 
-impl<'a> PutBuilder<'a, HasBodyMarker> {
+// TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
+// However, `IntoFuture` needs to define the resulting future as an associated type,
+// and "impl trait in associated type position" is not yet stable :-(
+impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<PutResponse> {
-        let put_url = format!(
-            "{}/{}",
-            self.client.service_url,
-            self.id.unwrap_or_default()
-        );
         let authorization = self.client.make_authorization("write")?;
-
         let mut builder = self
             .client
             .http
-            .put(put_url)
+            .put(self.client.service_url.as_ref())
             .header(header::AUTHORIZATION, authorization);
 
         let body = match (self.metadata.compression, self.body) {
-            (_, PutBody::None) => unreachable!(),
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
                 let cursor = Cursor::new(bytes);
                 let encoder = ZstdEncoder::new(cursor);
