@@ -14,7 +14,7 @@ use objectstore_types::Metadata;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::backend::{BackendStream, BoxedBackend};
+use crate::backend::{BackendStream, BigTableConfig, BoxedBackend};
 
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
@@ -40,6 +40,8 @@ pub enum StorageConfig<'a> {
         /// The name of the bucket to use.
         bucket: &'a str,
     },
+    /// Use BigTable as storage backend.
+    BigTable(BigTableConfig),
 }
 
 impl StorageService {
@@ -53,6 +55,9 @@ impl StorageService {
                 } else {
                     backend::gcs(bucket).await?
                 }
+            }
+            StorageConfig::BigTable(config) => {
+                Box::new(backend::BigTableBackend::new(config).await?)
             }
         };
 
