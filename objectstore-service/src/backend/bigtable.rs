@@ -132,7 +132,8 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let response = self.client.mutate_row(request).await?;
+        let mut client = self.client.clone();
+        let response = client.mutate_row(request).await?;
         Ok(response.into_inner())
     }
 }
@@ -203,7 +204,8 @@ impl Backend for BigTableBackend {
             ..Default::default()
         };
 
-        let response = self.client.read_rows(request).await?;
+        let mut client = self.client.clone();
+        let response = client.read_rows(request).await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((key, cells)) = response.into_iter().next() else {
