@@ -3,14 +3,21 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bigtable_rs::bigtable::{BigTable as BigTableClient, BigTableConnection};
+use bigtable_rs::google::bigtable::v2::mutation::{DeleteFromRow, Mutation, SetCell};
+use bigtable_rs::google::bigtable::v2::{self, MutateRowResponse};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use google_cloud_bigtable_admin_v2::client::BigtableTableAdmin;
-use google_cloud_bigtable_admin_v2::model::{ColumnFamily, GcRule, Table};
+use google_cloud_bigtable_admin_v2::model::{ColumnFamily, Table};
 use objectstore_types::Metadata;
 use tokio::runtime::Handle;
 
 use crate::backend::{Backend, BackendStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
+const PAYLOAD_COLUMN: &[u8] = b"p";
+const METADATA_COLUMN: &[u8] = b"m";
 
 #[derive(Debug)]
 pub struct BigTableConfig {
@@ -83,18 +90,20 @@ impl BigTableBackend {
         }
 
         // TODO: Make automatic expiry configurable.
+        //
         // With automatic expiry, we set a GC rule to automatically delete rows
         // with an age of 0. This sounds odd, but when we write rows, we write
         // them with a future timestamp as long as a TTL is set during write. By
         // doing this, we are effectively writing rows into the future, and they
         // will be deleted due to TTL when their timestamp is passed.
-        let gc_rule = GcRule::new().set_max_age(Box::new(Duration::from_millis(1).try_into()?));
+        //
+        // let gc_rule = GcRule::new().set_max_age(Box::new(Duration::from_millis(1).try_into()?));
 
         let table = Table::new()
             .set_name(self.table_path.clone())
             .set_column_families(vec![(
                 self.config.column_family.clone(),
-                ColumnFamily::new().set_gc_rule(gc_rule),
+                ColumnFamily::new(), //.set_gc_rule(gc_rule),
             )]);
 
         let created_table = self
@@ -107,6 +116,24 @@ impl BigTableBackend {
             .await?;
 
         Ok(created_table)
+    }
+
+    async fn mutate<I>(&self, path: &str, mutations: I) -> Result<MutateRowResponse>
+    where
+        I: IntoIterator<Item = Mutation>,
+    {
+        let request = v2::MutateRowRequest {
+            table_name: self.table_path.clone(),
+            row_key: path.as_bytes().to_vec(),
+            mutations: mutations
+                .into_iter()
+                .map(|m| v2::Mutation { mutation: Some(m) })
+                .collect(),
+            ..Default::default()
+        };
+
+        let response = self.client.mutate_row(request).await?;
+        Ok(response.into_inner())
     }
 }
 
@@ -130,17 +157,85 @@ impl Backend for BigTableBackend {
         &self,
         path: &str,
         metadata: &Metadata,
-        stream: BackendStream,
+        mut stream: BackendStream,
     ) -> Result<()> {
-        todo!()
+        // TODO: Support TTL
+        let timestamp_micros = -1; // Use server time
+
+        let mut payload = Vec::new();
+        while let Some(chunk) = stream.try_next().await? {
+            payload.extend(&chunk);
+        }
+
+        let mutations = [
+            // NB: We explicitly delete the row to clear metadata on overwrite.
+            Mutation::DeleteFromRow(DeleteFromRow {}),
+            Mutation::SetCell(SetCell {
+                family_name: self.config.column_family.clone(),
+                column_qualifier: PAYLOAD_COLUMN.to_owned(),
+                timestamp_micros,
+                value: payload,
+            }),
+            Mutation::SetCell(SetCell {
+                family_name: self.config.column_family.clone(),
+                column_qualifier: METADATA_COLUMN.to_owned(),
+                timestamp_micros,
+                // TODO: Do we really want bincode here?
+                value: bincode::serde::encode_to_vec(metadata, BC_CONFIG)?,
+            }),
+        ];
+
+        self.mutate(path, mutations).await?;
+
+        Ok(())
     }
 
     async fn get_object(&self, path: &str) -> Result<Option<(Metadata, BackendStream)>> {
-        todo!()
+        let rows = v2::RowSet {
+            row_keys: vec![path.as_bytes().to_vec()],
+            row_ranges: vec![],
+        };
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(rows),
+            rows_limit: 1,
+            ..Default::default()
+        };
+
+        let response = self.client.read_rows(request).await?;
+        debug_assert!(response.len() <= 1, "Expected at most one row");
+
+        let Some((key, cells)) = response.into_iter().next() else {
+            return Ok(None);
+        };
+
+        debug_assert!(key == path.as_bytes(), "Row key mismatch");
+        let mut value = Vec::new();
+        let mut metadata = Metadata::default();
+
+        for cell in cells {
+            match cell.qualifier.as_ref() {
+                self::PAYLOAD_COLUMN => {
+                    value = cell.value;
+                }
+                self::METADATA_COLUMN => {
+                    metadata = bincode::serde::decode_from_slice(&cell.value, BC_CONFIG)?.0;
+                }
+                _ => {
+                    // TODO: Log unknown column
+                }
+            }
+        }
+
+        let stream = stream::once(async { Ok(value.into()) }).boxed();
+        Ok(Some((metadata, stream)))
     }
 
     async fn delete_object(&self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})])
+            .await?;
+        Ok(())
     }
 }
 
