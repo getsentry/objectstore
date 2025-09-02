@@ -132,7 +132,7 @@ impl FromStr for Compression {
 ///
 /// This includes special metadata like the expiration policy and compression used,
 /// as well as arbitrary user-provided metadata.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Metadata {
     /// The expiration policy of the object.
     // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
@@ -145,6 +145,7 @@ pub struct Metadata {
     /// Some arbitrary user-provided metadata.
     pub custom: BTreeMap<String, String>,
 }
+
 impl Metadata {
     /// Extracts metadata from the given [`HeaderMap`].
     ///

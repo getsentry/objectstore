@@ -1,35 +1,44 @@
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigtable_rs::bigtable::{BigTable as BigTableClient, BigTableConnection};
 use bigtable_rs::google::bigtable::v2::mutation::{DeleteFromRow, Mutation, SetCell};
 use bigtable_rs::google::bigtable::v2::{self, MutateRowResponse};
+use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use google_cloud_bigtable_admin_v2::client::BigtableTableAdmin;
-use google_cloud_bigtable_admin_v2::model::{ColumnFamily, Table};
-use objectstore_types::Metadata;
+use google_cloud_bigtable_admin_v2::model::{ColumnFamily, GcRule, Table};
+use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
 use crate::backend::{Backend, BackendStream};
 
+/// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Config for bincode encoding and decoding.
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
+/// Number of microseconds to debounce bumping an object with configured TTI.
+const TTI_DEBOUNCE_MICROS: i64 = 24 * 3600 * 1_000_000; // 1 day
 
-const PAYLOAD_COLUMN: &[u8] = b"p";
-const METADATA_COLUMN: &[u8] = b"m";
+/// Column that stores the raw payload (compressed).
+const COLUMN_PAYLOAD: &[u8] = b"p";
+/// Column that stores metadata in bincode.
+const COLUMN_METADATA: &[u8] = b"m";
+/// Column family that uses timestamp-based garbage collection.
+const FAMILY_GC: &str = "fg";
+/// Column family that uses manual garbage collection.
+const FAMILY_MANUAL: &str = "fm";
 
 #[derive(Debug)]
 pub struct BigTableConfig {
     project_id: String,
     instance_name: String,
     table_name: String,
-    column_family: String,
 }
 
 pub struct BigTableBackend {
     config: BigTableConfig,
-    connection: BigTableConnection,
     client: BigTableClient,
     admin: BigtableTableAdmin,
     instance_path: String,
@@ -64,7 +73,6 @@ impl BigTableBackend {
 
         let backend = Self {
             config,
-            connection,
             client,
             admin,
             instance_path,
@@ -89,22 +97,23 @@ impl BigTableBackend {
             return Ok(table);
         }
 
-        // TODO: Make automatic expiry configurable.
-        //
         // With automatic expiry, we set a GC rule to automatically delete rows
         // with an age of 0. This sounds odd, but when we write rows, we write
         // them with a future timestamp as long as a TTL is set during write. By
         // doing this, we are effectively writing rows into the future, and they
         // will be deleted due to TTL when their timestamp is passed.
-        //
-        // let gc_rule = GcRule::new().set_max_age(Box::new(Duration::from_millis(1).try_into()?));
+        // See: https://cloud.google.com/bigtable/docs/gc-cell-level
+        let gc_rule = GcRule::new().set_max_age(Box::new(Duration::from_secs(1).try_into()?));
 
         let table = Table::new()
             .set_name(self.table_path.clone())
-            .set_column_families(vec![(
-                self.config.column_family.clone(),
-                ColumnFamily::new(), //.set_gc_rule(gc_rule),
-            )]);
+            .set_column_families(vec![
+                (FAMILY_MANUAL.to_string(), ColumnFamily::new()),
+                (
+                    FAMILY_GC.to_string(),
+                    ColumnFamily::new().set_gc_rule(gc_rule),
+                ),
+            ]);
 
         let created_table = self
             .admin
@@ -160,8 +169,17 @@ impl Backend for BigTableBackend {
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> Result<()> {
-        // TODO: Support TTL
-        let timestamp_micros = -1; // Use server time
+        let (family, timestamp_micros) = match metadata.expiration_policy {
+            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
+            ExpirationPolicy::TimeToLive(ttl) => (
+                FAMILY_GC,
+                ttl_to_micros(ttl, None).context("TTL out of range")?,
+            ),
+            ExpirationPolicy::TimeToIdle(tti) => (
+                FAMILY_GC,
+                ttl_to_micros(tti, None).context("TTL out of range")?,
+            ),
+        };
 
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
@@ -172,14 +190,14 @@ impl Backend for BigTableBackend {
             // NB: We explicitly delete the row to clear metadata on overwrite.
             Mutation::DeleteFromRow(DeleteFromRow {}),
             Mutation::SetCell(SetCell {
-                family_name: self.config.column_family.clone(),
-                column_qualifier: PAYLOAD_COLUMN.to_owned(),
+                family_name: family.to_owned(),
+                column_qualifier: COLUMN_PAYLOAD.to_owned(),
                 timestamp_micros,
                 value: payload,
             }),
             Mutation::SetCell(SetCell {
-                family_name: self.config.column_family.clone(),
-                column_qualifier: METADATA_COLUMN.to_owned(),
+                family_name: family.to_owned(),
+                column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
                 // TODO: Do we really want bincode here?
                 value: bincode::serde::encode_to_vec(metadata, BC_CONFIG)?,
@@ -213,15 +231,17 @@ impl Backend for BigTableBackend {
         };
 
         debug_assert!(key == path.as_bytes(), "Row key mismatch");
-        let mut value = Vec::new();
+        let mut value = Bytes::new();
         let mut metadata = Metadata::default();
+        let mut deadline = -1;
 
         for cell in cells {
             match cell.qualifier.as_ref() {
-                self::PAYLOAD_COLUMN => {
-                    value = cell.value;
+                self::COLUMN_PAYLOAD => {
+                    value = cell.value.into();
+                    deadline = cell.timestamp_micros;
                 }
-                self::METADATA_COLUMN => {
+                self::COLUMN_METADATA => {
                     metadata = bincode::serde::decode_from_slice(&cell.value, BC_CONFIG)?.0;
                 }
                 _ => {
@@ -230,7 +250,18 @@ impl Backend for BigTableBackend {
             }
         }
 
-        let stream = stream::once(async { Ok(value.into()) }).boxed();
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
+            let new_deadline = ttl_to_micros(tti, None).context("TTL out of range")?;
+            if new_deadline - deadline > TTI_DEBOUNCE_MICROS {
+                let value = value.clone();
+                let stream = stream::once(async { Ok(value) }).boxed();
+                // TODO: Avoid the serialize roundtrip for metadata
+                self.put_object(path, &metadata, stream).await?;
+            }
+        }
+
+        let stream = stream::once(async { Ok(value) }).boxed();
         Ok(Some((metadata, stream)))
     }
 
@@ -239,6 +270,18 @@ impl Backend for BigTableBackend {
             .await?;
         Ok(())
     }
+}
+
+/// Converts the given TTL duration to a microsecond-precision unix timestamp.
+///
+/// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`.
+fn ttl_to_micros(ttl: Duration, from: Option<SystemTime>) -> Option<i64> {
+    let deadline = from.unwrap_or_else(SystemTime::now).checked_add(ttl)?;
+    let micros = deadline
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_micros();
+    micros.try_into().ok()
 }
 
 #[cfg(test)]
