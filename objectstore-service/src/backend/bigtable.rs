@@ -317,14 +317,16 @@ impl Backend for BigTableBackend {
 
 /// Converts the given TTL duration to a microsecond-precision unix timestamp.
 ///
-/// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`.
+/// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
+/// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
+/// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Option<i64> {
     let deadline = from.checked_add(ttl)?;
-    let micros = deadline
+    let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()?
-        .as_micros();
-    micros.try_into().ok()
+        .as_millis();
+    (millis * 1000).try_into().ok()
 }
 
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.
@@ -336,6 +338,8 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     // NB: Not run any of these tests, you need to have a BigTable emulator running and
@@ -366,10 +370,96 @@ mod tests {
         Ok(payload)
     }
 
+    fn make_path() -> String {
+        format!("usecase1/4711/{}", uuid::Uuid::new_v4())
+    }
+
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
         let backend = create_test_backend().await?;
 
+        let path = make_path();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
+        backend.delete_object(&path).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello"))
+            .await?;
+
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_after_delete() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
@@ -377,14 +467,61 @@ mod tests {
         };
 
         backend
-            .put_object("uc1/4711/AAAA", &metadata, make_stream(b"hello, world"))
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let (_meta, stream) = backend.get_object("uc1/4711/AAAA").await?.unwrap();
+        backend.delete_object(&path).await?;
 
-        let payload = read_to_vec(stream).await?;
-        let str_payload = str::from_utf8(&payload).unwrap();
-        assert_eq!(str_payload, "hello, world");
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ttl_immediate() -> Result<()> {
+        // NB: We create a TTL that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            compression: None,
+            custom: Default::default(),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_immediate() -> Result<()> {
+        // NB: We create a TTI that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend().await?;
+
+        let path = make_path();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            compression: None,
+            custom: Default::default(),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
 
         Ok(())
     }
