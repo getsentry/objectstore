@@ -10,7 +10,7 @@ x-sentry-service-config:
   modes:
     default: []
     containerized: [objectstore]
-    bigtable: [bigtable]
+    full: [bigtable]
 
 x-programs:
   devserver:

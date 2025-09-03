@@ -315,11 +315,14 @@ fn ttl_to_micros(ttl: Duration, from: Option<SystemTime>) -> Option<i64> {
 mod tests {
     use super::*;
 
+    // NB: Not run any of these tests, you need to have a BigTable emulator running and
+    // `BIGTABLE_EMULATOR_HOST` set to the address where it is listening. This is done automatically
+    // in CI.
+    //
+    // Refer to the readme for how to set up the emulator.
+
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
-        // NB: Temporary hack to ensure we're using the emulator in tests.
-        unsafe { std::env::set_var("BIGTABLE_EMULATOR_HOST", "localhost:8086") };
-
         let config = BigTableConfig {
             project_id: String::from("my-project"),
             instance_name: String::from("my-instance"),
