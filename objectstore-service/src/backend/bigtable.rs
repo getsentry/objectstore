@@ -344,35 +344,47 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    #[tokio::test]
-    async fn test_roundtrip() -> Result<()> {
+    async fn create_test_backend() -> Result<BigTableBackend> {
         let config = BigTableConfig {
             project_id: String::from("my-project"),
             instance_name: String::from("my-instance"),
             table_name: String::from("my-table"),
         };
-        let backend = BigTableBackend::new(config).await?;
+
+        BigTableBackend::new(config).await
+    }
+
+    fn make_stream(contents: &[u8]) -> BackendStream {
+        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
+    }
+
+    async fn read_to_vec(mut stream: BackendStream) -> Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        while let Some(chunk) = stream.try_next().await? {
+            payload.extend(&chunk);
+        }
+        Ok(payload)
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip() -> Result<()> {
+        let backend = create_test_backend().await?;
 
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: Default::default(),
         };
-        let stream = stream::once(async { Ok("hello, world".into()) }).boxed();
+
         backend
-            .put_object("uc1/4711/AAAA", &metadata, stream)
+            .put_object("uc1/4711/AAAA", &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let (meta, mut ret_stream) = backend.get_object("uc1/4711/AAAA").await?.unwrap();
-        dbg!(meta);
+        let (_meta, stream) = backend.get_object("uc1/4711/AAAA").await?.unwrap();
 
-        let mut payload = Vec::<u8>::new();
-        while let Some(chunk) = ret_stream.try_next().await? {
-            payload.extend(&chunk);
-        }
-
+        let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
-        assert_eq!(dbg!(str_payload), "hello, world");
+        assert_eq!(str_payload, "hello, world");
 
         Ok(())
     }
