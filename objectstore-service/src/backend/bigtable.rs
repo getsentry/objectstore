@@ -1,14 +1,19 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use bigtable_rs::bigtable::{BigTable as BigTableClient, BigTableConnection};
+use bigtable_rs::bigtable::BigTableConnection;
+use bigtable_rs::bigtable_table_admin::BigTableTableAdminConnection;
+use bigtable_rs::google::bigtable::table_admin::v2::gc_rule::Rule;
+use bigtable_rs::google::bigtable::table_admin::v2::table::{TimestampGranularity, View};
+use bigtable_rs::google::bigtable::table_admin::v2::{
+    ColumnFamily, CreateTableRequest, GcRule, GetTableRequest, Table,
+};
 use bigtable_rs::google::bigtable::v2::mutation::{DeleteFromRow, Mutation, SetCell};
 use bigtable_rs::google::bigtable::v2::{self, MutateRowResponse};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
-use google_cloud_bigtable_admin_v2::client::BigtableTableAdmin;
-use google_cloud_bigtable_admin_v2::model::{ColumnFamily, GcRule, Table};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
@@ -39,8 +44,8 @@ pub struct BigTableConfig {
 
 pub struct BigTableBackend {
     config: BigTableConfig,
-    client: BigTableClient,
-    admin: BigtableTableAdmin,
+    bigtable: BigTableConnection,
+    admin: BigTableTableAdminConnection,
     instance_path: String,
     table_path: String,
 }
@@ -52,7 +57,7 @@ impl BigTableBackend {
 
         // NB: Defaults to gcp_auth::provider() internally, but first checks the
         // BIGTABLE_EMULATOR_HOST environment variable for local dev & tests.
-        let connection = BigTableConnection::new(
+        let bigtable = BigTableConnection::new(
             &config.project_id,
             &config.instance_name,
             false,             // is_read_only
@@ -61,19 +66,24 @@ impl BigTableBackend {
         )
         .await?;
 
-        let client = connection.client();
+        let client = bigtable.client();
         let instance_path = format!(
             "projects/{}/instances/{}",
             config.project_id, config.instance_name
         );
         let table_path = client.get_full_table_name(&config.table_name);
 
-        // TODO: Connect to emulator..?
-        let admin = BigtableTableAdmin::builder().build().await?;
+        let admin = BigTableTableAdminConnection::new(
+            &config.project_id,
+            &config.instance_name,
+            2 * tokio_workers, // channel_size
+            Some(CONNECT_TIMEOUT),
+        )
+        .await?;
 
         let backend = Self {
             config,
-            client,
+            bigtable,
             admin,
             instance_path,
             table_path,
@@ -86,13 +96,14 @@ impl BigTableBackend {
 
 impl BigTableBackend {
     async fn ensure_table(&self) -> Result<Table> {
-        let result = self
-            .admin
-            .get_table()
-            .set_name(self.table_path.clone())
-            .send()
-            .await;
+        let mut admin = self.admin.client();
 
+        let request = GetTableRequest {
+            name: self.table_path.clone(),
+            view: View::Unspecified as i32,
+        };
+
+        let result = admin.get_table(request).await;
         if let Ok(table) = result {
             return Ok(table);
         }
@@ -103,26 +114,42 @@ impl BigTableBackend {
         // doing this, we are effectively writing rows into the future, and they
         // will be deleted due to TTL when their timestamp is passed.
         // See: https://cloud.google.com/bigtable/docs/gc-cell-level
-        let gc_rule = GcRule::new().set_max_age(Box::new(Duration::from_secs(1).try_into()?));
+        let gc_rule = GcRule {
+            rule: Some(Rule::MaxAge(Duration::from_secs(1).try_into()?)),
+        };
 
-        let table = Table::new()
-            .set_name(self.table_path.clone())
-            .set_column_families(vec![
-                (FAMILY_MANUAL.to_string(), ColumnFamily::new()),
-                (
-                    FAMILY_GC.to_string(),
-                    ColumnFamily::new().set_gc_rule(gc_rule),
-                ),
-            ]);
+        let request = CreateTableRequest {
+            parent: self.instance_path.clone(),
+            table_id: self.config.table_name.clone(), // name without full path
+            table: Some(Table {
+                name: self.table_path.clone(),
+                cluster_states: Default::default(),
+                column_families: HashMap::from_iter([
+                    (
+                        FAMILY_MANUAL.to_owned(),
+                        ColumnFamily {
+                            gc_rule: None,
+                            value_type: None,
+                        },
+                    ),
+                    (
+                        FAMILY_GC.to_owned(),
+                        ColumnFamily {
+                            gc_rule: Some(gc_rule),
+                            value_type: None,
+                        },
+                    ),
+                ]),
+                granularity: TimestampGranularity::Unspecified as i32,
+                restore_info: None,
+                change_stream_config: None,
+                deletion_protection: false,
+                automated_backup_config: None,
+            }),
+            initial_splits: vec![],
+        };
 
-        let created_table = self
-            .admin
-            .create_table()
-            .set_parent(self.instance_path.clone())
-            .set_table_id(self.config.table_name.clone())
-            .set_table(table)
-            .send()
-            .await?;
+        let created_table = admin.create_table(request).await?;
 
         Ok(created_table)
     }
@@ -141,7 +168,7 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let mut client = self.client.clone();
+        let mut client = self.bigtable.client();
         let response = client.mutate_row(request).await?;
         Ok(response.into_inner())
     }
@@ -153,7 +180,7 @@ impl fmt::Debug for BigTableBackend {
             .field("config", &self.config)
             .field("connection", &format_args!("BigTableConnection {{ ... }}"))
             .field("client", &format_args!("BigTableClient {{ ... }}"))
-            .field("admin", &self.admin)
+            // .field("admin", &self.admin)
             .field("table_name", &self.table_path)
             .finish_non_exhaustive()
     }
@@ -222,7 +249,7 @@ impl Backend for BigTableBackend {
             ..Default::default()
         };
 
-        let mut client = self.client.clone();
+        let mut client = self.bigtable.client();
         let response = client.read_rows(request).await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
@@ -286,5 +313,41 @@ fn ttl_to_micros(ttl: Duration, from: Option<SystemTime>) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    // todo
+    use super::*;
+
+    #[tokio::test]
+    async fn test_roundtrip() -> Result<()> {
+        // NB: Temporary hack to ensure we're using the emulator in tests.
+        unsafe { std::env::set_var("BIGTABLE_EMULATOR_HOST", "localhost:8086") };
+
+        let config = BigTableConfig {
+            project_id: String::from("my-project"),
+            instance_name: String::from("my-instance"),
+            table_name: String::from("my-table"),
+        };
+        let backend = BigTableBackend::new(config).await?;
+
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: Default::default(),
+        };
+        let stream = stream::once(async { Ok("hello, world".into()) }).boxed();
+        backend
+            .put_object("uc1/4711/AAAA", &metadata, stream)
+            .await?;
+
+        let (meta, mut ret_stream) = backend.get_object("uc1/4711/AAAA").await?.unwrap();
+        dbg!(meta);
+
+        let mut payload = Vec::<u8>::new();
+        while let Some(chunk) = ret_stream.try_next().await? {
+            payload.extend(&chunk);
+        }
+
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(dbg!(str_payload), "hello, world");
+
+        Ok(())
+    }
 }

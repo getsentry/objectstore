@@ -8,3 +8,6 @@ default-members = ["objectstore-server"]
 # panic and error stack traces to Sentry.
 debug = "line-tables-only"
 lto = "thin"
+
+# [patch.crates-io]
+# bigtable_rs = { path = "../bigtable_rs/bigtable_rs" }
