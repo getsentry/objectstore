@@ -23,8 +23,8 @@ use crate::backend::{Backend, BackendStream};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Config for bincode encoding and decoding.
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
-/// Number of microseconds to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE_MICROS: i64 = 24 * 3600 * 1_000_000; // 1 day
+/// Time to debounce bumping an object with configured TTI.
+const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
@@ -196,15 +196,18 @@ impl Backend for BigTableBackend {
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> Result<()> {
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
             ExpirationPolicy::TimeToLive(ttl) => (
                 FAMILY_GC,
-                ttl_to_micros(ttl, None).context("TTL out of range")?,
+                ttl_to_micros(ttl, access_time).context("TTL out of range")?,
             ),
             ExpirationPolicy::TimeToIdle(tti) => (
                 FAMILY_GC,
-                ttl_to_micros(tti, None).context("TTL out of range")?,
+                ttl_to_micros(tti, access_time).context("TTL out of range")?,
             ),
         };
 
@@ -260,13 +263,14 @@ impl Backend for BigTableBackend {
         debug_assert!(key == path.as_bytes(), "Row key mismatch");
         let mut value = Bytes::new();
         let mut metadata = Metadata::default();
-        let mut deadline = -1;
+        let mut deadline = None;
 
         for cell in cells {
             match cell.qualifier.as_ref() {
                 self::COLUMN_PAYLOAD => {
                     value = cell.value.into();
-                    deadline = cell.timestamp_micros;
+                    deadline = micros_to_time(cell.timestamp_micros);
+                    // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
                     metadata = bincode::serde::decode_from_slice(&cell.value, BC_CONFIG)?.0;
@@ -277,11 +281,23 @@ impl Backend for BigTableBackend {
             }
         }
 
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
+        if matches!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToIdle(_) | ExpirationPolicy::TimeToLive(_)
+        ) && deadline.is_some_and(|ts| ts < access_time)
+        {
+            // Leave the stored row to garbage collection
+            return Ok(None);
+        }
+
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            let new_deadline = ttl_to_micros(tti, None).context("TTL out of range")?;
-            if new_deadline - deadline > TTI_DEBOUNCE_MICROS {
-                let value = value.clone();
+            // Only bump if the difference in deadlines meets a minimum threshold
+            if deadline.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE) {
+                let value = Bytes::clone(&value);
                 let stream = stream::once(async { Ok(value) }).boxed();
                 // TODO: Avoid the serialize roundtrip for metadata
                 self.put_object(path, &metadata, stream).await?;
@@ -302,13 +318,20 @@ impl Backend for BigTableBackend {
 /// Converts the given TTL duration to a microsecond-precision unix timestamp.
 ///
 /// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`.
-fn ttl_to_micros(ttl: Duration, from: Option<SystemTime>) -> Option<i64> {
-    let deadline = from.unwrap_or_else(SystemTime::now).checked_add(ttl)?;
+fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Option<i64> {
+    let deadline = from.checked_add(ttl)?;
     let micros = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()?
         .as_micros();
     micros.try_into().ok()
+}
+
+/// Converts a microsecond-precision unix timestamp to a `SystemTime`.
+fn micros_to_time(micros: i64) -> Option<SystemTime> {
+    let micros = u64::try_from(micros).ok()?;
+    let duration = Duration::from_micros(micros);
+    SystemTime::UNIX_EPOCH.checked_add(duration)
 }
 
 #[cfg(test)]
