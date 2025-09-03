@@ -8,13 +8,15 @@
 mod backend;
 mod metadata;
 
-pub use metadata::*;
 use objectstore_types::Metadata;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::backend::{BackendStream, BigTableConfig, BoxedBackend};
+use crate::backend::{BackendStream, BoxedBackend};
+
+pub use backend::BigTableConfig;
+pub use metadata::*;
 
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]

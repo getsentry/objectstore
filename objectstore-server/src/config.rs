@@ -18,6 +18,11 @@ pub enum Storage {
         endpoint: Option<String>,
         bucket: String,
     },
+    BigTable {
+        project_id: String,
+        instance_name: String,
+        table_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

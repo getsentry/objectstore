@@ -35,11 +35,15 @@ const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
 
+/// Configuration for the BigTable backend.
 #[derive(Debug)]
 pub struct BigTableConfig {
-    project_id: String,
-    instance_name: String,
-    table_name: String,
+    /// GCP project ID.
+    pub project_id: String,
+    /// BigTable instance name. The instance has to exist.
+    pub instance_name: String,
+    /// BigTable table name. Table will be auto-created.
+    pub table_name: String,
 }
 
 pub struct BigTableBackend {
