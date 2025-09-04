@@ -7,7 +7,7 @@ on:
       - release/**
 
   # NB: Do not build on pull requests by default. Uncomment temporarily to test changes.
-  # pull_request:
+  pull_request:
 
 jobs:
   build:
