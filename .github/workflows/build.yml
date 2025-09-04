@@ -71,7 +71,7 @@ jobs:
     needs: [build]
 
     # Intentionally never publish on pull requests
-    if: ${{ github.event_name != 'pull_request' }}
+    # if: ${{ github.event_name != 'pull_request' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -80,16 +80,10 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download amd64 Image
-        uses: actions/download-artifact@v4
+      - name: Download Images
+        uses: actions/download-artifact@v5
         with:
-          name: objectstore-amd64
-          path: /tmp
-
-      - name: Download arm64 Image
-        uses: actions/download-artifact@v4
-        with:
-          name: objectstore-arm64
+          pattern: objectstore-*
           path: /tmp
 
       - name: Push to GitHub Container Registry
