@@ -36,7 +36,9 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Ensure a clean build on release, use caches when building main.
       - uses: swatinem/rust-cache@v2
+        if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
         with:
           key: ${{ github.job }}
 
