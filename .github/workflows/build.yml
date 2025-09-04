@@ -9,6 +9,10 @@ on:
   # NB: Do not build on pull requests by default. Uncomment temporarily to test changes.
   pull_request:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     name: Build ${{ matrix.platform }}
@@ -69,10 +73,6 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     needs: [build]
-
-    permissions:
-      contents: read
-      packages: write
 
     # Intentionally never publish on pull requests
     # if: ${{ github.event_name != 'pull_request' }}
