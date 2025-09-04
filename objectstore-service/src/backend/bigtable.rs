@@ -270,13 +270,13 @@ impl Backend for BigTableBackend {
         debug_assert!(key == path.as_bytes(), "Row key mismatch");
         let mut value = Bytes::new();
         let mut metadata = Metadata::default();
-        let mut deadline = None;
+        let mut expire_at = None;
 
         for cell in cells {
             match cell.qualifier.as_ref() {
                 self::COLUMN_PAYLOAD => {
                     value = cell.value.into();
-                    deadline = micros_to_time(cell.timestamp_micros);
+                    expire_at = micros_to_time(cell.timestamp_micros);
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
@@ -291,19 +291,15 @@ impl Backend for BigTableBackend {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
-        if matches!(
-            metadata.expiration_policy,
-            ExpirationPolicy::TimeToIdle(_) | ExpirationPolicy::TimeToLive(_)
-        ) && deadline.is_some_and(|ts| ts < access_time)
-        {
-            // Leave the stored row to garbage collection
+        // Filter already expired objects but leave them to garbage collection
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
             return Ok(None);
         }
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // Only bump if the difference in deadlines meets a minimum threshold
-            if deadline.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE) {
+            if expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE) {
                 let value = Bytes::clone(&value);
                 let stream = stream::once(async { Ok(value) }).boxed();
                 // TODO: Avoid the serialize roundtrip for metadata
