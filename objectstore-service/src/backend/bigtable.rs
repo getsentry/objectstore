@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use bigtable_rs::bigtable::BigTableConnection;
-use bigtable_rs::bigtable_table_admin::BigTableTableAdminConnection;
+use bigtable_rs::bigtable_table_admin::{BigTableTableAdminConnection, Error as AdminError};
 use bigtable_rs::google::bigtable::table_admin::v2::gc_rule::Rule;
 use bigtable_rs::google::bigtable::table_admin::v2::table::{TimestampGranularity, View};
 use bigtable_rs::google::bigtable::table_admin::v2::{
@@ -16,6 +16,7 @@ use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
+use tonic::Code;
 
 use crate::backend::{Backend, BackendStream};
 
@@ -105,14 +106,10 @@ impl BigTableBackend {
     async fn ensure_table(&self) -> Result<Table> {
         let mut admin = self.admin.client();
 
-        let request = GetTableRequest {
-            name: self.table_path.clone(),
-            view: View::Unspecified as i32,
-        };
-
-        let result = admin.get_table(request).await;
-        if let Ok(table) = result {
-            return Ok(table);
+        match admin.get_table(self.get_table_request()).await {
+            Err(AdminError::RpcError(e)) if e.code() == Code::NotFound => (), // fall through
+            Err(e) => return Err(e.into()),
+            Ok(table) => return Ok(table),
         }
 
         // With automatic expiry, we set a GC rule to automatically delete rows
@@ -156,9 +153,21 @@ impl BigTableBackend {
             initial_splits: vec![],
         };
 
-        let created_table = admin.create_table(request).await?;
+        match admin.create_table(request).await {
+            // Race condition: table was created by another concurrent call.
+            Err(AdminError::RpcError(e)) if e.code() == Code::AlreadyExists => {
+                Ok(admin.get_table(self.get_table_request()).await?)
+            }
+            Err(e) => Err(e.into()),
+            Ok(created_table) => Ok(created_table),
+        }
+    }
 
-        Ok(created_table)
+    fn get_table_request(&self) -> GetTableRequest {
+        GetTableRequest {
+            name: self.table_path.clone(),
+            view: View::Unspecified as i32,
+        }
     }
 
     async fn mutate<I>(&self, path: &str, mutations: I) -> Result<MutateRowResponse>
