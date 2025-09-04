@@ -89,6 +89,7 @@ jobs:
         with:
           pattern: objectstore-*
           path: /tmp
+          merge-multiple: true
 
       - name: Push to GitHub Container Registry
         env:
@@ -96,7 +97,7 @@ jobs:
           SHA_TAG: ${{ github.sha }}
         run: |
           for PLATFORM in amd64 arm64; do
-            docker load --input /tmp/objectstore-$PLATFORM
+            docker load --input /tmp/objectstore-$PLATFORM.tar
             docker tag $PLATFORM $REGISTRY:$SHA_TAG-$PLATFORM
             docker push $REGISTRY:$SHA_TAG-$PLATFORM
           done
