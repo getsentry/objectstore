@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+
+  # NB: Do not build on pull requests by default. Uncomment temporarily to test changes.
+  # pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: amd64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            platform: arm64
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Ensure a clean build on release, use caches when building main.
+      - uses: swatinem/rust-cache@v2
+        if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+        with:
+          key: ${{ github.job }}
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target=${{ matrix.target }} --bin objectstore
+          cp target/${{ matrix.target }}/release/objectstore ./objectstore
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform }}
+          tags: ${{ matrix.platform }}
+          outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
+          push: false
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: objectstore-${{ matrix.platform }}
+          path: /tmp/objectstore-${{ matrix.platform }}.tar
+
+  assemble-image:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    # Intentionally never publish on pull requests
+    if: ${{ github.event_name != 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: docker login --username '${{ github.actor }}' --password-stdin ghcr.io <<< "$GHCR_TOKEN"
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Images
+        uses: actions/download-artifact@v5
+        with:
+          pattern: objectstore-*
+          path: /tmp
+          merge-multiple: true
+
+      - name: Push to GitHub Container Registry
+        env:
+          REGISTRY: ghcr.io/getsentry/objectstore
+          SHA_TAG: ${{ github.sha }}
+        run: |
+          for PLATFORM in amd64 arm64; do
+            docker load --input /tmp/objectstore-$PLATFORM.tar
+            docker tag $PLATFORM $REGISTRY:$SHA_TAG-$PLATFORM
+            docker push $REGISTRY:$SHA_TAG-$PLATFORM
+          done
+
+          for TAG in $SHA_TAG latest; do
+            docker manifest create $REGISTRY:$TAG \
+              --amend $REGISTRY:$SHA_TAG-amd64 \
+              --amend $REGISTRY:$SHA_TAG-arm64
+            docker manifest push $REGISTRY:$TAG
+          done
