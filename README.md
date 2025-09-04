@@ -25,8 +25,8 @@ Additionally, it contains a number of utilities:
 
 ## Building
 
-Ensure the latest stable Rust toolchain is installed on your machine. A release
-build can be created with:
+Ensure `protoc` and the latest stable Rust toolchain are installed on your
+machine. A release build can be created with:
 
 ```sh
 cargo build --release
@@ -42,9 +42,16 @@ You can run a development build of the server with this command:
 cargo run
 ```
 
+Our test suite also tests backends that require development services to connect to. We recommend to use [`devservices`](https://github.com/getsentry/devservices) and start objectstore in "full" mode. Note that this does not start objectstore itself, but only its dependencies:
+
+```sh
+devservices up objectstore --mode=full
+```
+
 To run tests:
 
 ```sh
+source .envrc
 cargo test --workspace --all-features
 ```
 

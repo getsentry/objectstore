@@ -3,13 +3,16 @@ use std::io;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use objectstore_types::Metadata;
 
+mod bigtable;
 mod gcs;
 mod local_fs;
 mod s3_compatible;
+
+pub use bigtable::{BigTableBackend, BigTableConfig};
 pub use gcs::gcs;
 pub use local_fs::LocalFs;
-use objectstore_types::Metadata;
 pub use s3_compatible::S3Compatible;
 
 pub type BoxedBackend = Box<dyn Backend>;

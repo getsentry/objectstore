@@ -57,11 +57,20 @@ pub enum ExpirationPolicy {
 }
 impl ExpirationPolicy {
     /// Returns the duration after which the object expires.
-    pub fn expires_in(&self) -> Duration {
+    pub fn expires_in(&self) -> Option<Duration> {
         match self {
-            ExpirationPolicy::Manual => Duration::ZERO,
-            ExpirationPolicy::TimeToLive(duration) => *duration,
-            ExpirationPolicy::TimeToIdle(duration) => *duration,
+            ExpirationPolicy::Manual => None,
+            ExpirationPolicy::TimeToLive(duration) => Some(*duration),
+            ExpirationPolicy::TimeToIdle(duration) => Some(*duration),
+        }
+    }
+
+    /// Returns `true` if this policy indicates time-based expiry.
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            ExpirationPolicy::TimeToLive(_) => true,
+            ExpirationPolicy::TimeToIdle(_) => true,
+            ExpirationPolicy::Manual => false,
         }
     }
 }
@@ -132,7 +141,7 @@ impl FromStr for Compression {
 ///
 /// This includes special metadata like the expiration policy and compression used,
 /// as well as arbitrary user-provided metadata.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Metadata {
     /// The expiration policy of the object.
     // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
@@ -145,6 +154,7 @@ pub struct Metadata {
     /// Some arbitrary user-provided metadata.
     pub custom: BTreeMap<String, String>,
 }
+
 impl Metadata {
     /// Extracts metadata from the given [`HeaderMap`].
     ///
@@ -185,7 +195,7 @@ impl Metadata {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
             headers.append(name, self.expiration_policy.to_string().parse()?);
             if with_expiration {
-                let expires_in = self.expiration_policy.expires_in();
+                let expires_in = self.expiration_policy.expires_in().unwrap_or_default();
                 let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
                 headers.append("Custom-Time", expires_at.to_string().parse()?);
             }

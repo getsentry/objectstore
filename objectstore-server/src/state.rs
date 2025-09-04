@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use objectstore_service::{StorageConfig, StorageService};
+use objectstore_service::{BigTableConfig, StorageConfig, StorageService};
 
 use crate::config::{Config, Storage};
 
@@ -19,6 +19,15 @@ impl State {
                 endpoint: endpoint.as_deref(),
                 bucket,
             },
+            Storage::BigTable {
+                project_id,
+                instance_name,
+                table_name,
+            } => StorageConfig::BigTable(BigTableConfig {
+                project_id: project_id.clone(),
+                instance_name: instance_name.clone(),
+                table_name: table_name.clone(),
+            }),
         };
         let service = StorageService::new(storage_config).await?;
 

@@ -24,6 +24,11 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup component add clippy rustfmt rust-docs --toolchain stable
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: swatinem/rust-cache@v2
         with:
           key: ${{ github.job }}
@@ -46,9 +51,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Start Bigtable Emulator
+        run: |
+          docker run -d \
+            --name bigtable-emulator \
+            -p 8086:8086 \
+            google/cloud-sdk \
+            gcloud beta emulators bigtable start --host-port=0.0.0.0:8086
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -56,6 +74,8 @@ jobs:
 
       - name: Run Tests
         run: cargo test --workspace --all-features
+        env:
+          BIGTABLE_EMULATOR_HOST: localhost:8086
 
   docs:
     name: Cargo Docs
@@ -71,6 +91,11 @@ jobs:
 
       - name: Install Rust Toolchain
         run: rustup toolchain install stable --profile minimal --component rust-docs --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: swatinem/rust-cache@v2
         with:

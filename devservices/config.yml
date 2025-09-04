@@ -5,9 +5,12 @@ x-sentry-service-config:
   dependencies:
     objectstore:
       description: Objectstore server
+    bigtable:
+      description: Google Cloud BigTable emulator
   modes:
     default: []
     containerized: [objectstore]
+    full: [bigtable]
 
 x-programs:
   devserver:
@@ -24,6 +27,22 @@ services:
       - 127.0.0.1:8888:8888
     volumes:
       - objectstore-data:/data
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
+  bigtable:
+    image: google/cloud-sdk
+    command:
+      - "gcloud"
+      - "beta"
+      - "emulators"
+      - "bigtable"
+      - "start"
+      - "--host-port=0.0.0.0:8086"
+    ports:
+      - 127.0.0.1:8086:8086
     networks:
       - devservices
     labels:
