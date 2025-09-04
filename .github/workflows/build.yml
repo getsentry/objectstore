@@ -92,7 +92,7 @@ jobs:
           SHA_TAG: ${{ github.sha }}
         run: |
           for PLATFORM in amd64 arm64; do
-            docker load --input /tmp/objectstore-$PLATFORM.tar
+            docker load --input /tmp/objectstore-$PLATFORM
             docker tag $PLATFORM $REGISTRY:$SHA_TAG-$PLATFORM
             docker push $REGISTRY:$SHA_TAG-$PLATFORM
           done
