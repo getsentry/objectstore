@@ -59,6 +59,9 @@ impl BigTableBackend {
         let tokio_runtime = Handle::current();
         let tokio_workers = tokio_runtime.metrics().num_workers();
 
+        // TODO on channel_size: Idle connections are automatically closed in “a few minutes”. We
+        // need to make sure that on longer idle period the channels are re-opened.
+
         // NB: Defaults to gcp_auth::provider() internally, but first checks the
         // BIGTABLE_EMULATOR_HOST environment variable for local dev & tests.
         let bigtable = BigTableConnection::new(
