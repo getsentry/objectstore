@@ -1,4 +1,4 @@
-name: Docker
+name: Build
 
 on:
   push:
@@ -19,21 +19,36 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: amd64
+            target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             platform: arm64
+            target: aarch64-unknown-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
 
-      - name: Build
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ github.job }}
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target=${{ matrix.target }} --bin objectstore
+          cp target/${{ matrix.target }}/release/objectstore ./objectstore
+
+      - name: Build Image
         uses: docker/build-push-action@v6
         with:
           context: .
-          cache-from: ghcr.io/getsentry/objectstore:latest
-          cache-to: type=inline
           platforms: linux/${{ matrix.platform }}
           tags: ${{ matrix.platform }}
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
@@ -60,17 +75,11 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Download amd64 Image
         uses: actions/download-artifact@v4
         with:
           name: objectstore-amd64
           path: /tmp
-
-      - name: Load amd64 Image
-        run: docker load --input /tmp/objectstore-amd64.tar
 
       - name: Download arm64 Image
         uses: actions/download-artifact@v4
@@ -78,27 +87,20 @@ jobs:
           name: objectstore-arm64
           path: /tmp
 
-      - name: Load arm64 Image
-        run: docker load --input /tmp/objectstore-arm64.tar
-
       - name: Push to GitHub Container Registry
+        env:
+          REGISTRY: ghcr.io/getsentry/objectstore
+          SHA_TAG: ${{ github.sha }}
         run: |
-          docker tag amd64 ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64
-          docker push ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64
+          for PLATFORM in amd64 arm64; do
+            docker load --input /tmp/objectstore-$PLATFORM.tar
+            docker tag $PLATFORM $REGISTRY:$SHA_TAG-$PLATFORM
+            docker push $REGISTRY:$SHA_TAG-$PLATFORM
+          done
 
-          docker tag arm64 ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
-          docker push ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
-
-          docker manifest create \
-            ghcr.io/getsentry/objectstore:${{ github.sha }} \
-            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64 \
-            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
-
-          docker manifest push ghcr.io/getsentry/objectstore:${{ github.sha }}
-
-          docker manifest create \
-            ghcr.io/getsentry/objectstore:latest \
-            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-amd64 \
-            --amend ghcr.io/getsentry/objectstore:${{ github.sha }}-arm64
-
-          docker manifest push ghcr.io/getsentry/objectstore:latest
+          for TAG in $SHA_TAG latest; do
+            docker manifest create $REGISTRY:$TAG \
+              --amend $REGISTRY:$SHA_TAG-amd64 \
+              --amend $REGISTRY:$SHA_TAG-arm64
+            docker manifest push $REGISTRY:$TAG
+          done
