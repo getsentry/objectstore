@@ -77,10 +77,6 @@ jobs:
         env:
           BIGTABLE_EMULATOR_HOST: localhost:8086
 
-      - name: Stop Bigtable Emulator
-        if: always()
-        run: docker stop bigtable-emulator || true
-
   docs:
     name: Cargo Docs
     runs-on: ubuntu-latest
