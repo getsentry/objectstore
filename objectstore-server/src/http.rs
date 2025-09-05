@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use std::any::Any;
 use std::io;
 use std::sync::Arc;
 
@@ -114,7 +115,16 @@ mod error {
     impl IntoResponse for AnyhowResponse {
         fn into_response(self) -> Response {
             match self {
-                AnyhowResponse::Error(_error) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                AnyhowResponse::Error(error) => {
+                    tracing::error!(
+                        error = error.as_ref() as &dyn std::error::Error,
+                        "error handling request"
+                    );
+
+                    // TODO: Support more nuanced return codes for validation errors etc. See
+                    // Relay's ApiErrorResponse and BadStoreRequest as examples.
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                }
                 AnyhowResponse::Response(response) => response,
             }
         }
