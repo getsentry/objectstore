@@ -6,8 +6,7 @@ on:
       - main
       - release/**
 
-  # NB: Do not build on pull requests by default. Uncomment temporarily to test changes.
-  # pull_request:
+  pull_request:
 
 permissions:
   contents: read
@@ -21,10 +20,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             platform: amd64
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             platform: arm64
             target: aarch64-unknown-linux-gnu
 
@@ -48,7 +47,7 @@ jobs:
 
       - name: Build Binary
         run: |
-          cargo build --release --target=${{ matrix.target }} --bin objectstore
+          cargo build --release --locked --target=${{ matrix.target }} --bin objectstore
           cp target/${{ matrix.target }}/release/objectstore ./objectstore
 
       - name: Set up Docker Buildx
@@ -62,6 +61,11 @@ jobs:
           tags: ${{ matrix.platform }}
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
+
+      - name: Test Image
+        run: |
+          docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
+          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: entrypoint'
 
       - name: Upload Image
         uses: actions/upload-artifact@v4

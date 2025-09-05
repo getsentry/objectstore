@@ -30,10 +30,38 @@ Ensure `protoc` and the latest stable Rust toolchain are installed on your
 machine. A release build can be created with:
 
 ```sh
-cargo build --release
+cargo build --release --locked
 ```
 
 The server binary will be located at `target/release/objectstore`.
+
+### Docker Container
+
+To build the Docker container, first build the release binary, then build the
+container:
+
+```sh
+docker build -f Dockerfile target/release/
+```
+
+The last argument must be the path to the directory that contains the
+`objectstore` binary.
+
+### Cross-building for AMD64 from ARM64
+
+We have utilities to cross-build an AMD64 container from an ARM64 host, such as
+a macOS machine running on Apple Silicon. To do this, run:
+
+```sh
+scripts/build-cross.sh
+```
+
+This script will take care of the entire cross-compilation build process inside
+an ARM-based Docker container and use the project's `target/` directory for
+caching and build output. The build results in two artifacts:
+
+- The binary at `target/x86_64-unknown-linux-gnu/release/objectstore`
+- The docker container, tagged with `objectstore:latest`
 
 ## Development
 
