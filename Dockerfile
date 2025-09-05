@@ -1,10 +1,10 @@
 FROM gcr.io/distroless/cc-debian12:nonroot
 
-ENV FSS_PATH="/data"
-
-# Copy the pre-built binary
-COPY objectstore /bin/objectstore
+ARG BINARY=objectstore
+COPY ${BINARY} /bin/application
 
 VOLUME ["/data"]
-ENTRYPOINT ["/bin/objectstore"]
+ENV FSS_PATH="/data"
+
+ENTRYPOINT ["/bin/application"]
 EXPOSE 8888
