@@ -11,8 +11,9 @@ utilities to manage stored data.
 
 The platform is split into the following core components:
 
-- `objectstore-client`: The Rust client library SDK, which exposes high-performance blob
-  storage access. A Python library is planned but not yet available.
+- `objectstore-client`: The Rust client library SDK, which exposes
+  high-performance blob storage access. A Python library is planned but not yet
+  available.
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
   functionality from the internal services. This crate creates the `objectstore`
   binary.
@@ -36,27 +37,56 @@ The server binary will be located at `target/release/objectstore`.
 
 ## Development
 
-You can run a development build of the server with this command:
+### Environment Setup
 
-```sh
-cargo run
+Before starting development, ensure you have development tools and environment
+configured:
+
+```bash
+# Option 1: Use direnv (recommended)
+direnv allow
+
+# Option 2: Manually source the environment
+source .envrc
 ```
 
-Our test suite also tests backends that require development services to connect to. We recommend to use [`devservices`](https://github.com/getsentry/devservices) and start objectstore in "full" mode. Note that this does not start objectstore itself, but only its dependencies:
+This will create and activate the `.venv` virtual environment with the correct
+Python version, install development tools, and export environment variables for
+development.
+
+### Devservices
+
+Our test suite also tests backends that require development services to connect
+to. We recommend to use [`devservices`] and start objectstore in "full" mode.
+Note that this does not start objectstore itself, but only its dependencies:
+
+[`devservices`]: https://github.com/getsentry/devservices
 
 ```sh
 devservices up objectstore --mode=full
 ```
 
-To run tests:
+Devservices continue to run in the background until explicitly stopped.
 
-```sh
-source .envrc
-cargo test --workspace --all-features
-```
+### Editor Setup
+
+We recommend using **Visual Studio Code** with the recommended extensions. The
+project includes VSCode configuration that will:
+
+- Automatically format code on save
+- Automatically organize imports on save
+- Show linting errors inline
+
+When you open this project in VSCode, it will prompt you to install the
+recommended extensions if they're not already installed.
+
+### Code Quality
 
 We recommend using Rust Analyzer and clippy, which will apply formatting and
-warn about lints during development. To do this manually, run:
+warn about lints during development. If you use the recommended VSCode setup,
+this is done automatically for you.
+
+To run linters manually, use:
 
 ```sh
 # Check and fix formatting
@@ -66,9 +96,34 @@ cargo fmt
 cargo clippy --workspace --all-features
 ```
 
+### Development Server
+
+You can run a development build of the server with `cargo run`. Objectstore can
+be configured through a configuration file or environment variables. Note that
+if both are given, environment variables override the config file. For this
+reason, we do **not** provide default configuration variables in `.envrc`.
+
+```sh
+# Option 1: Configuration file
+cargo run -- -c path/to/config.yml
+
+# Option 2: Environment variables
+export FSS_STORAGE__TYPE=filesystem
+export FSS_STORAGE__PATH=data
+cargo run
+```
+
+### Tests
+
+To run tests:
+
+```sh
+cargo test --workspace --all-features
+```
+
 ## Utilities
 
-Run the stress test binary against the running server with:
+Run the stresstest binary against the running server with:
 
 ```sh
 cargo run --release -p stresstest
