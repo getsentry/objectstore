@@ -6,8 +6,7 @@ on:
       - main
       - release/**
 
-  # NB: Do not build on pull requests by default. Uncomment temporarily to test changes.
-  # pull_request:
+  pull_request:
 
 permissions:
   contents: read
@@ -66,7 +65,7 @@ jobs:
       - name: Test Image
         run: |
           docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
-          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: objectstore'
+          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: entrypoint'
 
       - name: Upload Image
         uses: actions/upload-artifact@v4
