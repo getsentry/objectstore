@@ -48,7 +48,7 @@ jobs:
 
       - name: Build Binary
         run: |
-          cargo build --release --target=${{ matrix.target }} --bin objectstore
+          cargo build --release --locked --target=${{ matrix.target }} --bin objectstore
           cp target/${{ matrix.target }}/release/objectstore ./objectstore
 
       - name: Set up Docker Buildx
