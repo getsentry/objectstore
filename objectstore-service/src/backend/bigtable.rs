@@ -112,34 +112,32 @@ impl BigTableBackend {
             Ok(table) => return Ok(table),
         }
 
-        // With automatic expiry, we set a GC rule to automatically delete rows
-        // with an age of 0. This sounds odd, but when we write rows, we write
-        // them with a future timestamp as long as a TTL is set during write. By
-        // doing this, we are effectively writing rows into the future, and they
-        // will be deleted due to TTL when their timestamp is passed.
-        // See: https://cloud.google.com/bigtable/docs/gc-cell-level
-        let gc_rule = GcRule {
-            rule: Some(Rule::MaxAge(Duration::from_secs(1).try_into()?)),
-        };
-
         let request = CreateTableRequest {
             parent: self.instance_path.clone(),
             table_id: self.config.table_name.clone(), // name without full path
             table: Some(Table {
-                name: self.table_path.clone(),
+                name: String::new(), // Must be empty during creation
                 cluster_states: Default::default(),
                 column_families: HashMap::from_iter([
                     (
                         FAMILY_MANUAL.to_owned(),
                         ColumnFamily {
-                            gc_rule: None,
+                            gc_rule: Some(GcRule { rule: None }),
                             value_type: None,
                         },
                     ),
                     (
                         FAMILY_GC.to_owned(),
                         ColumnFamily {
-                            gc_rule: Some(gc_rule),
+                            // With automatic expiry, we set a GC rule to automatically delete rows
+                            // with an age of 0. This sounds odd, but when we write rows, we write
+                            // them with a future timestamp as long as a TTL is set during write. By
+                            // doing this, we are effectively writing rows into the future, and they
+                            // will be deleted due to TTL when their timestamp is passed.
+                            // See: https://cloud.google.com/bigtable/docs/gc-cell-level
+                            gc_rule: Some(GcRule {
+                                rule: Some(Rule::MaxAge(Duration::from_secs(1).try_into()?)),
+                            }),
                             value_type: None,
                         },
                     ),
