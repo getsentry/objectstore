@@ -11,8 +11,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
+use http::header::{self, HeaderMap, HeaderName};
 use humantime::{format_duration, format_rfc3339_seconds, parse_duration};
-use reqwest::header::{self, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
