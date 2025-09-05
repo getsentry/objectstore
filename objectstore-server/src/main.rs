@@ -54,6 +54,11 @@ fn initialize_tracing(config: &Config) {
 async fn main() -> Result<()> {
     let config = Config::from_env()?;
 
+    // Ensure a rustls crypto provider is installed, required on distroless.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let _sentry_guard = maybe_initialize_sentry(&config);
     initialize_tracing(&config);
 
