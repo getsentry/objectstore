@@ -2,8 +2,10 @@
 
 use std::any::Any;
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Result;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -16,34 +18,81 @@ use objectstore_service::{ObjectKey, StorageService};
 use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
 use serde::Serialize;
+use tokio::net::{TcpListener, TcpSocket};
+use tower::ServiceBuilder;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
+use tracing::Level;
 use uuid::Uuid;
 
 use crate::authentication::{Claim, ExtractScope, Permission};
 use crate::config::Config;
 use crate::state::ServiceState;
 
-pub async fn start_server(state: ServiceState) {
-    let sentry_tower_service = state.config.sentry_dsn.as_ref().map(|_| {
-        tower::ServiceBuilder::new()
-            .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
-            .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
-    });
-    let http_addr = state.config.http_addr;
+const TCP_LISTEN_BACKLOG: u32 = 1024;
 
-    let app = Router::new()
+fn make_app(state: ServiceState) -> axum::Router {
+    let middleware = ServiceBuilder::new()
+        .layer(CatchPanicLayer::custom(handle_panic))
+        .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
+        .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
+        .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
+
+    let routes = Router::new()
         .route("/", put(put_blob))
-        .route("/{*key}", get(get_blob).delete(delete_blob))
-        .layer(option_layer(sentry_tower_service))
-        .with_state(state)
-        .into_make_service();
+        .route("/{*key}", get(get_blob).delete(delete_blob));
 
-    tracing::info!("HTTP server listening on {http_addr}");
+    routes.layer(middleware).with_state(state)
+}
+
+/// Handler function for the [`CatchPanicLayer`] middleware.
+fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
+    let detail = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "no error details".to_owned()
+    };
+
+    tracing::error!("panic in web handler: {detail}");
+
+    let response = (StatusCode::INTERNAL_SERVER_ERROR, detail);
+    response.into_response()
+}
+
+fn listen(config: &Config) -> Result<TcpListener> {
+    let addr = config.http_addr;
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }?;
+
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    socket.set_reuseport(true)?;
+    socket.bind(addr)?;
+
+    let listener = socket.listen(TCP_LISTEN_BACKLOG)?;
+    tracing::info!("HTTP server listening on {addr}");
+
+    Ok(listener)
+}
+
+async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
     let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
-    let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(guard.wait_owned())
-        .await
-        .unwrap();
+        .await?;
+
+    Ok(())
+}
+
+pub async fn server(state: ServiceState) -> Result<()> {
+    let http_addr = state.config.http_addr;
+    let listener = listen(&state.config)?;
+
+    let app = make_app(state);
+    serve(listener, app).await
 }
 
 #[derive(Debug, Serialize)]

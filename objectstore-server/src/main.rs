@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
 
     tracing::debug!(?config, "Starting service");
     let state = State::new(config).await?;
-    tokio::spawn(http::start_server(state));
+    tokio::spawn(http::server(state));
 
     elegant_departure::tokio::depart()
         .on_termination()
