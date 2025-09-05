@@ -63,6 +63,11 @@ jobs:
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
 
+      - name: Test Image
+        run: |
+          docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
+          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: objectstore'
+
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
