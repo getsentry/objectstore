@@ -21,10 +21,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             platform: amd64
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             platform: arm64
             target: aarch64-unknown-linux-gnu
 
@@ -62,6 +62,11 @@ jobs:
           tags: ${{ matrix.platform }}
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
+
+      - name: Test Image
+        run: |
+          docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
+          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: objectstore'
 
       - name: Upload Image
         uses: actions/upload-artifact@v4

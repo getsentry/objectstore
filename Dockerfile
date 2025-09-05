@@ -1,4 +1,4 @@
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/cc-debian12:nonroot
 
 ENV FSS_PATH="/data"
 
