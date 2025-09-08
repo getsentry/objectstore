@@ -12,10 +12,15 @@ pub struct ObjectKey {
     version: u8,
     /// Denotes the backend being used to store this object.
     pub backend: u8,
-    _padding: [u8; 2],
+    _reserved: [u8; 22],
     /// The unique Id of the object.
-    pub uuid: uuid::Bytes,
+    pub uuid: uuid::Bytes, // this is an alias for [u8;16]
 }
+
+const _: () = const {
+    assert!(std::mem::align_of::<ObjectKey>() == 1);
+    assert!(std::mem::size_of::<ObjectKey>() == 40);
+};
 
 impl ObjectKey {
     /// Generates a fresh [`ObjectKey`], tagging it with the given `backend`.
@@ -23,7 +28,7 @@ impl ObjectKey {
         Self {
             version: 0,
             backend,
-            _padding: [0; 2],
+            _reserved: Default::default(),
             uuid: Uuid::now_v7().into_bytes(),
         }
     }
