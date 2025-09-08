@@ -6,14 +6,35 @@ use uuid::Uuid;
 use watto::Pod;
 
 /// A service-defined key for an object.
+///
+/// The current `version: 0` of the key has a size of 40 bytes, and primarily contains a [`Uuid`].
+/// It has enough reserved bytes to also carry the scope if we decide to do so.
+///
+/// These keys are encoded as 64 "base32"-encoded string.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ObjectKey {
+    /// The key version.
+    ///
+    /// This should be increased whenever the format of the key changes substantially in
+    /// a non-backwards/-forwards way.
     version: u8,
+
     /// Denotes the backend being used to store this object.
+    ///
+    /// I could imagine using `backend: 0` as a special case of "extremely small file optimization",
+    /// where the whole object is stored within the key.
+    /// Otherwise, backends start at `1`, and are hardcoded at first, possibly making them configurable
+    /// at a later point, though care must be taken to do that in a backwards compatible way.
     pub backend: u8,
+
+    /// This is just some bytes reserved for more metadata.
+    ///
+    /// We might want to store things like the usecase (hardcoded), org-id and project-id here.
+    /// Giving those IDs are both 8-bytes, we have enough space here do to so.
     _reserved: [u8; 22],
-    /// The unique Id of the object.
+
+    /// The [`Uuid`] of the object.
     pub uuid: uuid::Bytes, // this is an alias for [u8;16]
 }
 
