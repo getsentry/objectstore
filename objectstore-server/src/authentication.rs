@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::str::FromStr;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -6,7 +7,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::errors::Result as JwtResult;
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use objectstore_service::ObjectKey;
+use objectstore_service::{ObjectKey, ScopedKey};
 use objectstore_types::Scope;
 use serde::Deserialize;
 
@@ -28,12 +29,13 @@ pub struct Claim {
 }
 
 impl Claim {
-    pub fn into_key(self, key: String) -> ObjectKey {
-        ObjectKey {
+    pub fn into_key(self, key: String) -> anyhow::Result<ScopedKey> {
+        let key = ObjectKey::from_str(&key)?;
+        Ok(ScopedKey {
             usecase: self.usecase,
             scope: self.scope,
             key,
-        }
+        })
     }
 
     #[allow(clippy::result_large_err)]

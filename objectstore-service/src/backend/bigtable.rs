@@ -18,6 +18,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 
+use crate::ScopedKey;
 use crate::backend::{Backend, BackendStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
@@ -168,13 +169,13 @@ impl BigTableBackend {
         }
     }
 
-    async fn mutate<I>(&self, path: &str, mutations: I) -> Result<MutateRowResponse>
+    async fn mutate<I>(&self, path: Vec<u8>, mutations: I) -> Result<MutateRowResponse>
     where
         I: IntoIterator<Item = Mutation>,
     {
         let request = v2::MutateRowRequest {
             table_name: self.table_path.clone(),
-            row_key: path.as_bytes().to_vec(),
+            row_key: path,
             mutations: mutations
                 .into_iter()
                 .map(|m| v2::Mutation { mutation: Some(m) })
@@ -206,10 +207,11 @@ impl BigTableBackend {}
 impl Backend for BigTableBackend {
     async fn put_object(
         &self,
-        path: &str,
+        key: &ScopedKey,
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> Result<()> {
+        let path = key.as_path().to_string().into_bytes();
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
@@ -253,9 +255,10 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
-    async fn get_object(&self, path: &str) -> Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
+        let path = key.as_path().to_string().into_bytes();
         let rows = v2::RowSet {
-            row_keys: vec![path.as_bytes().to_vec()],
+            row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
@@ -270,11 +273,11 @@ impl Backend for BigTableBackend {
         let response = client.read_rows(request).await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
-        let Some((key, cells)) = response.into_iter().next() else {
+        let Some((read_path, cells)) = response.into_iter().next() else {
             return Ok(None);
         };
 
-        debug_assert!(key == path.as_bytes(), "Row key mismatch");
+        debug_assert!(read_path == path, "Row key mismatch");
         let mut value = Bytes::new();
         let mut metadata = Metadata::default();
         let mut expire_at = None;
@@ -310,7 +313,7 @@ impl Backend for BigTableBackend {
                 let value = Bytes::clone(&value);
                 let stream = stream::once(async { Ok(value) }).boxed();
                 // TODO: Avoid the serialize roundtrip for metadata
-                self.put_object(path, &metadata, stream).await?;
+                self.put_object(key, &metadata, stream).await?;
             }
         }
 
@@ -318,7 +321,8 @@ impl Backend for BigTableBackend {
         Ok(Some((metadata, stream)))
     }
 
-    async fn delete_object(&self, path: &str) -> Result<()> {
+    async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
+        let path = key.as_path().to_string().into_bytes();
         self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})])
             .await?;
         Ok(())
@@ -350,6 +354,10 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use objectstore_types::Scope;
+
+    use crate::ObjectKey;
+
     use super::*;
 
     // NB: Not run any of these tests, you need to have a BigTable emulator running and
@@ -380,15 +388,22 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_path() -> String {
-        format!("usecase1/4711/{}", uuid::Uuid::new_v4())
+    fn make_key() -> ScopedKey {
+        ScopedKey {
+            usecase: "testing".into(),
+            scope: Scope {
+                organization: 1234,
+                project: Some(1234),
+            },
+            key: ObjectKey::for_backend(0),
+        }
     }
 
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
@@ -413,7 +428,7 @@ mod tests {
     async fn test_get_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let result = backend.get_object(&path).await?;
         assert!(result.is_none());
 
@@ -424,7 +439,7 @@ mod tests {
     async fn test_delete_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         backend.delete_object(&path).await?;
 
         Ok(())
@@ -434,7 +449,7 @@ mod tests {
     async fn test_overwrite() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
@@ -469,7 +484,7 @@ mod tests {
     async fn test_read_after_delete() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
@@ -495,7 +510,7 @@ mod tests {
 
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             compression: None,
@@ -519,7 +534,7 @@ mod tests {
 
         let backend = create_test_backend().await?;
 
-        let path = make_path();
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             compression: None,
