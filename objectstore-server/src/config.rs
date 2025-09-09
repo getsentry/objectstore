@@ -39,6 +39,7 @@ pub struct Config {
 
     // others
     pub sentry_dsn: Option<String>,
+    pub datadog_key: Option<String>,
 }
 
 impl Default for Config {
@@ -56,6 +57,7 @@ impl Default for Config {
             jwt_secret: String::new(),
 
             sentry_dsn: None,
+            datadog_key: None,
         }
     }
 }
