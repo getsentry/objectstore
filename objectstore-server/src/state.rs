@@ -13,24 +13,29 @@ pub struct State {
 
 impl State {
     pub async fn new(config: Config) -> anyhow::Result<ServiceState> {
-        let storage_config = match &config.storage {
-            Storage::FileSystem { path } => StorageConfig::FileSystem { path },
-            Storage::S3Compatible { endpoint, bucket } => StorageConfig::S3Compatible {
-                endpoint: endpoint.as_deref(),
-                bucket,
-            },
-            Storage::BigTable {
-                project_id,
-                instance_name,
-                table_name,
-            } => StorageConfig::BigTable(BigTableConfig {
-                project_id: project_id.clone(),
-                instance_name: instance_name.clone(),
-                table_name: table_name.clone(),
-            }),
-        };
-        let service = StorageService::new(storage_config).await?;
+        let high_volume = map_storage_config(&config.high_volume_storage);
+        let long_term = map_storage_config(&config.long_term_storage);
+        let service = StorageService::new(high_volume, long_term).await?;
 
         Ok(Arc::new(Self { config, service }))
+    }
+}
+
+fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
+    match config {
+        Storage::FileSystem { path } => StorageConfig::FileSystem { path },
+        Storage::S3Compatible { endpoint, bucket } => StorageConfig::S3Compatible {
+            endpoint: endpoint.as_deref(),
+            bucket,
+        },
+        Storage::BigTable {
+            project_id,
+            instance_name,
+            table_name,
+        } => StorageConfig::BigTable(BigTableConfig {
+            project_id: project_id.clone(),
+            instance_name: instance_name.clone(),
+            table_name: table_name.clone(),
+        }),
     }
 }
