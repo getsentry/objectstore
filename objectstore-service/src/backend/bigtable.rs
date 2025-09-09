@@ -49,73 +49,92 @@ pub struct BigTableConfig {
 }
 
 pub struct BigTableBackend {
-    config: BigTableConfig,
     bigtable: BigTableConnection,
     admin: BigTableTableAdminConnection,
+
     instance_path: String,
     table_path: String,
+    table_name: String,
+}
+
+impl fmt::Debug for BigTableBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BigTableBackend")
+            .field("instance_path", &self.instance_path)
+            .field("table_path", &self.table_path)
+            .field("table_name", &self.table_name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BigTableBackend {
-    pub async fn new(config: BigTableConfig) -> Result<Self> {
+    pub async fn new(
+        BigTableConfig {
+            project_id,
+            instance_name,
+            table_name,
+        }: BigTableConfig,
+    ) -> Result<Self> {
         let tokio_runtime = Handle::current();
         let tokio_workers = tokio_runtime.metrics().num_workers();
 
         // TODO on channel_size: Idle connections are automatically closed in “a few minutes”. We
         // need to make sure that on longer idle period the channels are re-opened.
+        let channel_size = 2 * tokio_workers;
 
         // NB: Defaults to gcp_auth::provider() internally, but first checks the
         // BIGTABLE_EMULATOR_HOST environment variable for local dev & tests.
         let bigtable = BigTableConnection::new(
-            &config.project_id,
-            &config.instance_name,
-            false,             // is_read_only
-            2 * tokio_workers, // channel_size
+            &project_id,
+            &instance_name,
+            false, // is_read_only
+            channel_size,
             Some(CONNECT_TIMEOUT),
         )
         .await?;
 
         let client = bigtable.client();
-        let instance_path = format!(
-            "projects/{}/instances/{}",
-            config.project_id, config.instance_name
-        );
-        let table_path = client.get_full_table_name(&config.table_name);
+        let instance_path = format!("projects/{project_id}/instances/{instance_name}");
+        let table_path = client.get_full_table_name(&table_name);
 
         let admin = BigTableTableAdminConnection::new(
-            &config.project_id,
-            &config.instance_name,
-            2 * tokio_workers, // channel_size
+            &project_id,
+            &instance_name,
+            channel_size,
             Some(CONNECT_TIMEOUT),
         )
         .await?;
 
         let backend = Self {
-            config,
             bigtable,
             admin,
+
             instance_path,
             table_path,
+            table_name,
         };
 
         backend.ensure_table().await?;
         Ok(backend)
     }
-}
 
-impl BigTableBackend {
     async fn ensure_table(&self) -> Result<Table> {
         let mut admin = self.admin.client();
 
-        match admin.get_table(self.get_table_request()).await {
+        let get_request = GetTableRequest {
+            name: self.table_path.clone(),
+            view: View::Unspecified as i32,
+        };
+
+        match admin.get_table(get_request.clone()).await {
             Err(AdminError::RpcError(e)) if e.code() == Code::NotFound => (), // fall through
             Err(e) => return Err(e.into()),
             Ok(table) => return Ok(table),
         }
 
-        let request = CreateTableRequest {
+        let create_request = CreateTableRequest {
             parent: self.instance_path.clone(),
-            table_id: self.config.table_name.clone(), // name without full path
+            table_id: self.table_name.clone(), // name without full path
             table: Some(Table {
                 name: String::new(), // Must be empty during creation
                 cluster_states: Default::default(),
@@ -152,20 +171,13 @@ impl BigTableBackend {
             initial_splits: vec![],
         };
 
-        match admin.create_table(request).await {
+        match admin.create_table(create_request).await {
             // Race condition: table was created by another concurrent call.
             Err(AdminError::RpcError(e)) if e.code() == Code::AlreadyExists => {
-                Ok(admin.get_table(self.get_table_request()).await?)
+                Ok(admin.get_table(get_request).await?)
             }
             Err(e) => Err(e.into()),
             Ok(created_table) => Ok(created_table),
-        }
-    }
-
-    fn get_table_request(&self) -> GetTableRequest {
-        GetTableRequest {
-            name: self.table_path.clone(),
-            view: View::Unspecified as i32,
         }
     }
 
@@ -188,20 +200,6 @@ impl BigTableBackend {
         Ok(response.into_inner())
     }
 }
-
-impl fmt::Debug for BigTableBackend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BigTableBackend")
-            .field("config", &self.config)
-            .field("connection", &format_args!("BigTableConnection {{ ... }}"))
-            .field("client", &format_args!("BigTableClient {{ ... }}"))
-            // .field("admin", &self.admin)
-            .field("table_name", &self.table_path)
-            .finish_non_exhaustive()
-    }
-}
-
-impl BigTableBackend {}
 
 #[async_trait::async_trait]
 impl Backend for BigTableBackend {
