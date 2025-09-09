@@ -20,8 +20,10 @@ use crate::backend::{BackendStream, BoxedBackend};
 pub use backend::BigTableConfig;
 pub use metadata::*;
 
-/// The threshold up until which we will go to the small backend.
-const SMALL_THRESHOLD: usize = 50 * 1024; // 50 KiB
+/// The threshold up until which we will go to the "high volume" backend.
+const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+const BACKEND_HIGH_VOLUME: u8 = 1;
+const BACKEND_LONG_TERM: u8 = 2;
 
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
@@ -29,8 +31,8 @@ pub struct StorageService(Arc<StorageServiceInner>);
 
 #[derive(Debug)]
 struct StorageServiceInner {
-    small_backend: BoxedBackend,
-    large_backend: BoxedBackend,
+    high_volume_backend: BoxedBackend,
+    long_term_backend: BoxedBackend,
 }
 
 /// Configuration to initialize a [`StorageService`].
@@ -55,15 +57,15 @@ pub enum StorageConfig<'a> {
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
     pub async fn new(
-        small_config: StorageConfig<'_>,
-        large_config: StorageConfig<'_>,
+        high_volume_config: StorageConfig<'_>,
+        long_term_config: StorageConfig<'_>,
     ) -> anyhow::Result<Self> {
-        let small_backend = create_backend(small_config).await?;
-        let large_backend = create_backend(large_config).await?;
+        let high_volume_backend = create_backend(high_volume_config).await?;
+        let long_term_backend = create_backend(long_term_config).await?;
 
         let inner = StorageServiceInner {
-            small_backend,
-            large_backend,
+            high_volume_backend,
+            long_term_backend,
         };
         Ok(Self(Arc::new(inner)))
     }
@@ -77,12 +79,12 @@ impl StorageService {
         mut stream: BackendStream,
     ) -> anyhow::Result<ScopedKey> {
         let mut first_chunk = BytesMut::new();
-        let mut backend_id = 1; // 1 = small files backend
+        let mut backend_id = BACKEND_HIGH_VOLUME;
         while let Some(chunk) = stream.try_next().await? {
             first_chunk.extend_from_slice(&chunk);
 
-            if first_chunk.len() > SMALL_THRESHOLD {
-                backend_id = 2; // 2 = large files backend
+            if first_chunk.len() > BACKEND_SIZE_THRESHOLD {
+                backend_id = BACKEND_LONG_TERM;
                 break;
             }
         }
@@ -97,10 +99,22 @@ impl StorageService {
             key,
         };
 
-        self.0
-            .small_backend
-            .put_object(&key, metadata, stream)
-            .await?;
+        match backend_id {
+            BACKEND_HIGH_VOLUME => {
+                self.0
+                    .high_volume_backend
+                    .put_object(&key, metadata, stream)
+                    .await?
+            }
+            BACKEND_LONG_TERM => {
+                self.0
+                    .long_term_backend
+                    .put_object(&key, metadata, stream)
+                    .await?
+            }
+            _ => unreachable!(),
+        }
+
         Ok(key)
     }
 
@@ -110,8 +124,8 @@ impl StorageService {
         key: &ScopedKey,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         match key.key.backend {
-            1 => self.0.small_backend.get_object(key).await,
-            2 => self.0.large_backend.get_object(key).await,
+            BACKEND_HIGH_VOLUME => self.0.high_volume_backend.get_object(key).await,
+            BACKEND_LONG_TERM => self.0.long_term_backend.get_object(key).await,
             _ => anyhow::bail!("invalid backend"),
         }
     }
@@ -119,8 +133,8 @@ impl StorageService {
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
         match key.key.backend {
-            1 => self.0.small_backend.delete_object(key).await,
-            2 => self.0.large_backend.delete_object(key).await,
+            BACKEND_HIGH_VOLUME => self.0.high_volume_backend.delete_object(key).await,
+            BACKEND_LONG_TERM => self.0.long_term_backend.delete_object(key).await,
             _ => anyhow::bail!("invalid backend"),
         }
     }

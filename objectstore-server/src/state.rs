@@ -13,9 +13,9 @@ pub struct State {
 
 impl State {
     pub async fn new(config: Config) -> anyhow::Result<ServiceState> {
-        let small_storage = map_storage_config(&config.small_storage);
-        let large_storage = map_storage_config(&config.large_storage);
-        let service = StorageService::new(small_storage, large_storage).await?;
+        let high_volume = map_storage_config(&config.high_volume_storage);
+        let long_term = map_storage_config(&config.long_term_storage);
+        let service = StorageService::new(high_volume, long_term).await?;
 
         Ok(Arc::new(Self { config, service }))
     }

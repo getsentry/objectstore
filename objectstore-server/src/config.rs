@@ -31,8 +31,8 @@ pub struct Config {
     pub http_addr: SocketAddr,
 
     // storage config
-    pub small_storage: Storage,
-    pub large_storage: Storage,
+    pub high_volume_storage: Storage,
+    pub long_term_storage: Storage,
 
     // authentication config
     pub jwt_secret: String,
@@ -46,10 +46,10 @@ impl Default for Config {
         Self {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
-            small_storage: Storage::FileSystem {
+            high_volume_storage: Storage::FileSystem {
                 path: PathBuf::from("data"),
             },
-            large_storage: Storage::FileSystem {
+            long_term_storage: Storage::FileSystem {
                 path: PathBuf::from("data"),
             },
 
@@ -96,13 +96,13 @@ mod tests {
     #[test]
     fn configurable_via_env() {
         figment::Jail::expect_with(|jail| {
-            jail.set_env("fss_large_storage__type", "s3compatible");
-            jail.set_env("fss_large_storage__endpoint", "http://localhost:8888");
-            jail.set_env("fss_large_storage__bucket", "whatever");
+            jail.set_env("fss_long_term_storage__type", "s3compatible");
+            jail.set_env("fss_long_term_storage__endpoint", "http://localhost:8888");
+            jail.set_env("fss_long_term_storage__bucket", "whatever");
 
             let config = Config::from_args(Args::default()).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = dbg!(config).large_storage else {
+            let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
                 panic!("expected s3 storage");
             };
             assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
@@ -118,7 +118,7 @@ mod tests {
         tempfile
             .write_all(
                 br#"
-            large_storage:
+            long_term_storage:
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
@@ -131,7 +131,7 @@ mod tests {
         };
         let config = Config::from_args(args).unwrap();
 
-        let Storage::S3Compatible { endpoint, bucket } = dbg!(config).large_storage else {
+        let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
             panic!("expected s3 storage");
         };
         assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
