@@ -8,6 +8,8 @@
 mod backend;
 mod metadata;
 
+use bytes::BytesMut;
+use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{Metadata, Scope};
 
 use std::path::Path;
@@ -18,17 +20,21 @@ use crate::backend::{BackendStream, BoxedBackend};
 pub use backend::BigTableConfig;
 pub use metadata::*;
 
+/// The threshold up until which we will go to the small backend.
+const SMALL_THRESHOLD: usize = 50 * 1024; // 50 KiB
+
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
 #[derive(Debug)]
 struct StorageServiceInner {
-    backend: BoxedBackend,
+    small_backend: BoxedBackend,
+    large_backend: BoxedBackend,
 }
 
 /// Configuration to initialize a [`StorageService`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StorageConfig<'a> {
     /// Use a local filesystem as the storage backend.
     FileSystem {
@@ -48,22 +54,17 @@ pub enum StorageConfig<'a> {
 
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
-    pub async fn new(config: StorageConfig<'_>) -> anyhow::Result<Self> {
-        let backend = match config {
-            StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
-            StorageConfig::S3Compatible { endpoint, bucket } => {
-                if let Some(endpoint) = endpoint {
-                    Box::new(backend::S3Compatible::without_token(endpoint, bucket))
-                } else {
-                    backend::gcs(bucket).await?
-                }
-            }
-            StorageConfig::BigTable(config) => {
-                Box::new(backend::BigTableBackend::new(config).await?)
-            }
-        };
+    pub async fn new(
+        small_config: StorageConfig<'_>,
+        large_config: StorageConfig<'_>,
+    ) -> anyhow::Result<Self> {
+        let small_backend = create_backend(small_config).await?;
+        let large_backend = create_backend(large_config).await?;
 
-        let inner = StorageServiceInner { backend };
+        let inner = StorageServiceInner {
+            small_backend,
+            large_backend,
+        };
         Ok(Self(Arc::new(inner)))
     }
 
@@ -73,16 +74,33 @@ impl StorageService {
         usecase: String,
         scope: Scope,
         metadata: &Metadata,
-        stream: BackendStream,
+        mut stream: BackendStream,
     ) -> anyhow::Result<ScopedKey> {
-        let key = ObjectKey::for_backend(1);
+        let mut first_chunk = BytesMut::new();
+        let mut backend_id = 1; // 1 = small files backend
+        while let Some(chunk) = stream.try_next().await? {
+            first_chunk.extend_from_slice(&chunk);
+
+            if first_chunk.len() > SMALL_THRESHOLD {
+                backend_id = 2; // 2 = large files backend
+                break;
+            }
+        }
+        let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
+            .chain(stream)
+            .boxed();
+
+        let key = ObjectKey::for_backend(backend_id);
         let key = ScopedKey {
             usecase,
             scope,
             key,
         };
 
-        self.0.backend.put_object(&key, metadata, stream).await?;
+        self.0
+            .small_backend
+            .put_object(&key, metadata, stream)
+            .await?;
         Ok(key)
     }
 
@@ -91,13 +109,35 @@ impl StorageService {
         &self,
         key: &ScopedKey,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        self.0.backend.get_object(key).await
+        match key.key.backend {
+            1 => self.0.small_backend.get_object(key).await,
+            2 => self.0.large_backend.get_object(key).await,
+            _ => anyhow::bail!("invalid backend"),
+        }
     }
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
-        self.0.backend.delete_object(key).await
+        match key.key.backend {
+            1 => self.0.small_backend.delete_object(key).await,
+            2 => self.0.large_backend.delete_object(key).await,
+            _ => anyhow::bail!("invalid backend"),
+        }
     }
+}
+
+async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
+    Ok(match config {
+        StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
+        StorageConfig::S3Compatible { endpoint, bucket } => {
+            if let Some(endpoint) = endpoint {
+                Box::new(backend::S3Compatible::without_token(endpoint, bucket))
+            } else {
+                backend::gcs(bucket).await?
+            }
+        }
+        StorageConfig::BigTable(config) => Box::new(backend::BigTableBackend::new(config).await?),
+    })
 }
 
 #[cfg(test)]
@@ -118,7 +158,7 @@ mod tests {
         let config = StorageConfig::FileSystem {
             path: tempdir.path(),
         };
-        let service = StorageService::new(config).await.unwrap();
+        let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
             .put_object(
@@ -146,7 +186,7 @@ mod tests {
             endpoint: None,
             bucket: "sbx-warp-benchmark-bucket",
         };
-        let service = StorageService::new(config).await.unwrap();
+        let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
             .put_object(
@@ -174,7 +214,7 @@ mod tests {
             endpoint: Some("http://localhost:8333"),
             bucket: "whatever",
         };
-        let service = StorageService::new(config).await.unwrap();
+        let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
             .put_object(

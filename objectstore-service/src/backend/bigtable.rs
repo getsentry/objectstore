@@ -38,7 +38,7 @@ const FAMILY_GC: &str = "fg";
 const FAMILY_MANUAL: &str = "fm";
 
 /// Configuration for the BigTable backend.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BigTableConfig {
     /// GCP project ID.
     pub project_id: String,
@@ -227,7 +227,7 @@ impl Backend for BigTableBackend {
 
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
-            payload.extend(&chunk);
+            payload.extend_from_slice(&chunk);
         }
 
         let mutations = [
