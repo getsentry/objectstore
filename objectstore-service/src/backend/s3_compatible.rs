@@ -13,6 +13,8 @@ use crate::metadata::ScopedKey;
 const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 /// Header used to store the expiration time for GCS using the `daysSinceCustomTime` lifecycle
 /// condition.
+///
+/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
 const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
