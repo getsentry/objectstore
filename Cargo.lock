@@ -1841,7 +1841,6 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
- "jsonwebtoken",
  "objectstore-types",
  "reqwest",
  "serde",

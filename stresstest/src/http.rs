@@ -16,10 +16,8 @@ pub struct HttpRemote {
 
 impl HttpRemote {
     /// Creates a new `HttpRemote` instance with the given remote URL and a default client.
-    ///
-    /// The JWT secret is empty and can be changed with `with_secret`.
-    pub fn new(remote: &str, jwt_secret: &str) -> Self {
-        let client = ClientBuilder::new(remote, jwt_secret, "stresstest")
+    pub fn new(remote: &str) -> Self {
+        let client = ClientBuilder::new(remote, "stresstest")
             .unwrap()
             .for_organization(12345);
         Self { client }

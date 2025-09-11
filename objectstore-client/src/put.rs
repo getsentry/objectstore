@@ -6,7 +6,7 @@ use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::Metadata;
-use reqwest::{Body, header};
+use reqwest::Body;
 use serde::Deserialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -112,12 +112,7 @@ pub struct PutResponse {
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<PutResponse> {
-        let authorization = self.client.make_authorization("write")?;
-        let mut builder = self
-            .client
-            .http
-            .put(self.client.service_url.as_ref())
-            .header(header::AUTHORIZATION, authorization);
+        let mut builder = self.client.http.put(self.client.service_url.as_ref());
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {

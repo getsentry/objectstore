@@ -18,7 +18,7 @@ use super::*;
 #[tokio::test]
 async fn stores_uncompressed() {
     let server = TestServer::new();
-    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "test")
         .unwrap()
         .for_organization(12345);
 
@@ -35,7 +35,7 @@ async fn stores_uncompressed() {
 #[tokio::test]
 async fn uses_zstd_by_default() {
     let server = TestServer::new();
-    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "test")
         .unwrap()
         .for_organization(12345);
 
@@ -67,7 +67,7 @@ async fn uses_zstd_by_default() {
 #[tokio::test]
 async fn deletes_stores_stuff() {
     let server = TestServer::new();
-    let client = ClientBuilder::new(&server.url("/"), "TEST", "test")
+    let client = ClientBuilder::new(&server.url("/"), "test")
         .unwrap()
         .for_organization(12345);
 

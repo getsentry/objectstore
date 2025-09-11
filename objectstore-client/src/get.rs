@@ -3,7 +3,7 @@ use std::{fmt, io};
 use async_compression::tokio::bufread::ZstdDecoder;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
-use reqwest::{StatusCode, header};
+use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::Compression;
@@ -59,13 +59,8 @@ impl GetBuilder<'_> {
     /// Sends the `GET` request.
     pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
         let get_url = format!("{}/{}", self.client.service_url, self.id);
-        let authorization = self.client.make_authorization("read")?;
 
-        let builder = self
-            .client
-            .http
-            .get(get_url)
-            .header(header::AUTHORIZATION, authorization);
+        let builder = self.client.http.get(get_url);
 
         let response = builder.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
