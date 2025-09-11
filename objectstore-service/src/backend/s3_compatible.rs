@@ -1,21 +1,32 @@
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
+use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::Metadata;
-use reqwest::{Body, StatusCode};
+use objectstore_types::{ExpirationPolicy, Metadata};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::ScopedKey;
+use crate::backend::{Backend, BackendStream};
+use crate::metadata::ScopedKey;
 
-use super::{Backend, BackendStream};
-
+/// Prefix used for custom metadata in headers for the GCS backend.
+///
+/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogmeta>
 const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
+/// Header used to store the expiration time for GCS using the `daysSinceCustomTime` lifecycle
+/// condition.
+///
+/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
+const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
+/// Time to debounce bumping an object with configured TTI.
+const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
 pub trait Token: Send + Sync {
     fn as_str(&self) -> &str;
 }
 
 pub trait TokenProvider: Send + Sync + 'static {
-    fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
+    fn get_token(&self) -> impl Future<Output = Result<impl Token>> + Send;
 }
 
 // this only exists because we have to provide *some* kind of provider
@@ -24,7 +35,7 @@ pub struct NoToken;
 
 impl TokenProvider for NoToken {
     #[allow(refining_impl_trait_internal)] // otherwise, returning `!` will not implement the required traits
-    async fn get_token(&self) -> anyhow::Result<NoToken> {
+    async fn get_token(&self) -> Result<NoToken> {
         unimplemented!()
     }
 }
@@ -44,6 +55,7 @@ pub struct S3Compatible<T> {
 }
 
 impl<T> S3Compatible<T> {
+    /// Creates a new S3 compatible backend bound to the given bucket.
     pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -51,6 +63,44 @@ impl<T> S3Compatible<T> {
             bucket: bucket.into(),
             token_provider: Some(token_provider),
         }
+    }
+
+    /// Formats the S3 object URL for the given key.
+    fn object_url(&self, key: &ScopedKey) -> String {
+        format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path())
+    }
+}
+
+impl<T> S3Compatible<T>
+where
+    T: TokenProvider,
+{
+    /// Creates a request builder with the appropriate authentication.
+    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
+        let mut builder = self.client.request(method, url);
+        if let Some(provider) = &self.token_provider {
+            builder = builder.bearer_auth(provider.get_token().await?.as_str());
+        }
+        Ok(builder)
+    }
+
+    /// Issues a request to update the metadata for the given object.
+    async fn update_metadata(&self, key: &ScopedKey, metadata: &Metadata) -> Result<()> {
+        let path = format!("/{}/{}", self.bucket, key.as_path());
+
+        // NB: Meta updates require copy + REPLACE along with *all* metadata. See
+        // https://cloud.google.com/storage/docs/xml-api/put-object-copy
+        self.request(Method::PUT, self.object_url(key))
+            .await?
+            .header("x-goog-copy-source", path)
+            .header("x-goog-metadata-directive", "REPLACE")
+            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to update expiration time for object with TTI")?;
+
+        Ok(())
     }
 }
 
@@ -82,53 +132,70 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         key: &ScopedKey,
         metadata: &Metadata,
         stream: BackendStream,
-    ) -> anyhow::Result<()> {
-        let put_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
-
-        let mut builder = self.client.put(put_url);
-        if let Some(provider) = &self.token_provider {
-            builder = builder.bearer_auth(provider.get_token().await?.as_str());
-        }
-
-        builder = builder.headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?);
-
-        let _response = builder.body(Body::wrap_stream(stream)).send().await?;
+    ) -> Result<()> {
+        self.request(Method::PUT, self.object_url(key))
+            .await?
+            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
+            .body(Body::wrap_stream(stream))
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to put object")?;
 
         Ok(())
     }
 
-    async fn get_object(
-        &self,
-        key: &ScopedKey,
-    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        let get_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
+    async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
+        let object_url = self.object_url(key);
 
-        let mut builder = self.client.get(get_url);
-        if let Some(provider) = &self.token_provider {
-            builder = builder.bearer_auth(provider.get_token().await?.as_str());
-        }
-
-        let response = builder.send().await?;
+        let response = self.request(Method::GET, &object_url).await?.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let response = response.error_for_status()?;
 
-        let metadata = Metadata::from_headers(response.headers(), GCS_CUSTOM_PREFIX)?;
+        let response = response
+            .error_for_status()
+            .context("failed to get object")?;
+
+        let headers = response.headers();
+        let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
+            // TODO: Inject the access time from the request.
+            let access_time = SystemTime::now();
+
+            let expire_at = headers
+                .get(GCS_CUSTOM_TIME)
+                .and_then(|s| s.to_str().ok())
+                .and_then(|s| humantime::parse_rfc3339(s).ok())
+                .unwrap_or(access_time);
+
+            if expire_at < access_time + tti - TTI_DEBOUNCE {
+                // This serializes a new custom-time internally.
+                self.update_metadata(key, &metadata).await?;
+            }
+        }
+
         // TODO: the object *GET* should probably also contain the expiration time?
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
-        let delete_url = format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path());
+    async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
+        let response = self
+            .request(Method::DELETE, self.object_url(key))
+            .await?
+            .send()
+            .await?;
 
-        let mut builder = self.client.delete(delete_url);
-        if let Some(provider) = &self.token_provider {
-            builder = builder.bearer_auth(provider.get_token().await?.as_str());
+        // Do not error for objects that do not exist.
+        if response.status() != StatusCode::NOT_FOUND {
+            response
+                .error_for_status()
+                .context("failed to delete object")?;
         }
-        let _response = builder.send().await?;
 
         Ok(())
     }

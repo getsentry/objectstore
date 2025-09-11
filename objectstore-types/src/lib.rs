@@ -197,7 +197,7 @@ impl Metadata {
             if with_expiration {
                 let expires_in = self.expiration_policy.expires_in().unwrap_or_default();
                 let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
-                headers.append("Custom-Time", expires_at.to_string().parse()?);
+                headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
             }
         }
 
