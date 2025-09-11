@@ -14,6 +14,8 @@ use objectstore_types::{Metadata, Scope};
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crate::backend::{BackendStream, BoxedBackend};
 
@@ -78,6 +80,8 @@ impl StorageService {
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> anyhow::Result<ScopedKey> {
+        let start = Instant::now();
+
         let mut first_chunk = BytesMut::new();
         let mut backend_id = BACKEND_HIGH_VOLUME;
         while let Some(chunk) = stream.try_next().await? {
@@ -88,32 +92,47 @@ impl StorageService {
                 break;
             }
         }
+
+        let stored_size = Arc::new(AtomicU64::new(0));
         let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
             .chain(stream)
+            .inspect({
+                let stored_size = Arc::clone(&stored_size);
+                move |res| {
+                    if let Ok(chunk) = res {
+                        stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    }
+                }
+            })
             .boxed();
 
         let key = ObjectKey::for_backend(backend_id);
         let key = ScopedKey {
-            usecase,
+            usecase: usecase.clone(),
             scope,
             key,
         };
 
-        match backend_id {
+        let backend_tag = match backend_id {
             BACKEND_HIGH_VOLUME => {
                 self.0
                     .high_volume_backend
                     .put_object(&key, metadata, stream)
-                    .await?
+                    .await?;
+                "high-volume"
             }
             BACKEND_LONG_TERM => {
                 self.0
                     .long_term_backend
                     .put_object(&key, metadata, stream)
-                    .await?
+                    .await?;
+                "long-term"
             }
             _ => unreachable!(),
-        }
+        };
+
+        merni::distribution!("put.latency"@s: start.elapsed(), "usecase" => usecase, "backend" => backend_tag);
+        merni::distribution!("put.size"@b: stored_size.load(Ordering::Acquire), "usecase" => usecase, "backend" => backend_tag);
 
         Ok(key)
     }
