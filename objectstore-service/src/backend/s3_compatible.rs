@@ -4,7 +4,7 @@ use std::{fmt, io};
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
-use reqwest::{Body, IntoUrl, Method, RequestBuilder};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::backend::{Backend, BackendStream};
 use crate::metadata::ScopedKey;
@@ -149,7 +149,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         let object_url = self.object_url(key);
 
         let response = self.request(Method::GET, &object_url).await?.send().await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
 
@@ -184,12 +184,18 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
     }
 
     async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
-        self.request(Method::DELETE, self.object_url(key))
+        let response = self
+            .request(Method::DELETE, self.object_url(key))
             .await?
             .send()
-            .await?
-            .error_for_status()
-            .context("failed to delete object")?;
+            .await?;
+
+        // Do not error for objects that do not exist.
+        if response.status() != StatusCode::NOT_FOUND {
+            response
+                .error_for_status()
+                .context("failed to delete object")?;
+        }
 
         Ok(())
     }
