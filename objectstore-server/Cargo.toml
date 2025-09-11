@@ -4,42 +4,42 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = { workspace = true }
 argh = "0.1.13"
 axum = "0.8.4"
 axum-extra = "0.10.1"
 elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
-futures-util = "0.3.31"
-jsonwebtoken = "9.3.1"
-merni = "0.1.0"
-objectstore-service = { path = "../objectstore-service" }
-objectstore-types = { path = "../objectstore-types" }
-rand = { version = "0.9.1" }
+futures-util = { workspace = true }
+jsonwebtoken = { workspace = true }
+merni = { workspace = true }
+objectstore-service = { workspace = true }
+objectstore-types = { workspace = true }
+rand = { workspace = true }
 rustls = { version = "0.23.31", default-features = false }
 sentry = { version = "0.41.0", features = [
     "tower-axum-matched-path",
     "tracing",
     "logs",
 ] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-tokio = { version = "1.45.1", features = ["full"] }
-tokio-stream = "0.1.17"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
 tower = { version = "0.5.2" }
 tower-http = { version = "0.6.6", default-features = false, features = [
     "catch-panic",
     "trace",
 ] }
-tracing = { version = "0.1.41" }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-uuid = { version = "1.17.0", features = ["v4", "v7"] }
+uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 nix = { version = "0.30.1", features = ["signal"] }
-serde_json = "1.0.140"
-stresstest = { path = "../stresstest" }
-tempfile = "3.20.0"
+serde_json = { workspace = true }
+stresstest = { workspace = true }
+tempfile = { workspace = true }
 
 [[bin]]
 name = "objectstore"

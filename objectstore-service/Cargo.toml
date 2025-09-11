@@ -4,28 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.98"
-async-trait = "0.1.88"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 # https://github.com/liufuyang/bigtable_rs/pull/119
 bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", branch = "admin" }
 bincode = { version = "2.0.1", features = ["serde"] }
-bytes = "1.10.1"
+bytes = { workspace = true }
 data-encoding = "2.9.0"
-futures-util = "0.3.31"
+futures-util = { workspace = true }
 gcp_auth = "0.12.3"
-humantime = "2.2.0"
-merni = "0.1.0"
-objectstore-types = { path = "../objectstore-types" }
-reqwest = { version = "0.12.22", features = ["stream"] }
-serde = { version = "1.0.219", features = ["derive"] }
-tokio = { version = "1.46.0", features = ["full"] }
-tokio-util = "0.7.15"
-tonic = "0.13.1"
-uuid = { version = "1.18.0", features = ["v7"] }
+humantime = { workspace = true }
+merni = { workspace = true }
+objectstore-types = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
 watto = "0.2.0"
 zstd = "0.13.3"
 
 [dev-dependencies]
-tempfile = "3.20.0"
-tokio-stream = "0.1.17"
-uuid = { version = "1.18.1", features = ["v4"] }
+tempfile = { workspace = true }
+tokio-stream = { workspace = true }

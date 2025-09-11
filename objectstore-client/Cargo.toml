@@ -4,19 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = { workspace = true }
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
-bytes = "1.10.1"
-futures-util = "0.3.31"
-jsonwebtoken = "9.3.1"
-objectstore-types = { path = "../objectstore-types" }
-reqwest = { version = "0.12.22", features = ["stream", "json"] }
-serde = { version = "1.0.219", features = ["derive"] }
-tokio = "1.47.0"
-tokio-util = { version = "0.7.15", features = ["io"] }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+jsonwebtoken = { workspace = true }
+objectstore-types = { workspace = true }
+reqwest = { workspace = true, features = ["stream", "json"] }
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
 
 [dev-dependencies]
 axum = "0.8.4"
-tokio = { version = "1.47.0", features = ["macros", "full"] }
+tokio = { workspace = true, features = ["macros", "full"] }
 uuid = { version = "1.18.0", features = ["v7"] }
 zstd = "0.13.3"
