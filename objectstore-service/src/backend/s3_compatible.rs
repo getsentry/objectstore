@@ -10,6 +10,8 @@ use crate::backend::{Backend, BackendStream};
 use crate::metadata::ScopedKey;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
+///
+/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogmeta>
 const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 /// Header used to store the expiration time for GCS using the `daysSinceCustomTime` lifecycle
 /// condition.
