@@ -144,11 +144,12 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
     async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
         let object_url = self.object_url(key);
 
-        let response = self
-            .request(Method::GET, &object_url)
-            .await?
-            .send()
-            .await?
+        let response = self.request(Method::GET, &object_url).await?.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        let response = response
             .error_for_status()
             .context("failed to get object")?;
 
