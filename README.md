@@ -136,8 +136,10 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 cargo run -- -c path/to/config.yml
 
 # Option 2: Environment variables
-export FSS_STORAGE__TYPE=filesystem
-export FSS_STORAGE__PATH=data
+export FSS_HIGH_VOLUME_STORAGE__TYPE=filesystem
+export FSS_HIGH_VOLUME_STORAGE__PATH=data
+export FSS_LONG_TERM_STORAGE__TYPE=filesystem
+export FSS_LONG_TERM_STORAGE__PATH=data
 cargo run
 ```
 
