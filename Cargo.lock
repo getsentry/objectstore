@@ -1676,7 +1676,8 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 [[package]]
 name = "merni"
 version = "0.1.0"
-source = "git+https://github.com/Swatinem/merni#84201266711a236e31c80df3273b63aff3c3cc64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc0e41febf9a554de364aa52e0ab5970a2f93a5a2f36ece440ef11f890c7c5f4"
 dependencies = [
  "crossbeam-utils",
  "reqwest",
@@ -2563,9 +2564,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.4"
+version = "0.103.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a17884ae0c1b773f1ccd2bd4a8c72f16da897310a98b0e84bf349ad5ead92fc"
+checksum = "b5a37813727b78798e53c2bec3f5e8fe12a6d6f8389bf9ca7802add4c9905ad8"
 dependencies = [
  "aws-lc-rs",
  "ring",

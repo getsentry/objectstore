@@ -12,7 +12,7 @@ elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = "0.3.31"
 jsonwebtoken = "9.3.1"
-merni = { git = "https://github.com/Swatinem/merni", version = "0.1.0" }
+merni = "0.1.0"
 objectstore-service = { path = "../objectstore-service" }
 objectstore-types = { path = "../objectstore-types" }
 rand = { version = "0.9.1" }
