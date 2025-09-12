@@ -1861,7 +1861,6 @@ dependencies = [
  "elegant-departure",
  "figment",
  "futures-util",
- "jsonwebtoken",
  "merni",
  "nix",
  "objectstore-service",
