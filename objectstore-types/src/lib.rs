@@ -20,6 +20,11 @@ pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
+/// HTTP request query parameter that contains the request scope.
+pub const PARAM_SCOPE: &str = "scope";
+/// HTTP request query parameter that contains the request usecase.
+pub const PARAM_USECASE: &str = "usecase";
+
 /// The storage scope for each object
 ///
 /// Each object is stored within a scope. The scope is used for access control, as well as the ability

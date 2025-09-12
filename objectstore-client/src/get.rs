@@ -6,7 +6,7 @@ use objectstore_types::Metadata;
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::Compression;
+pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
 use crate::{Client, ClientStream};
 
@@ -60,7 +60,10 @@ impl GetBuilder<'_> {
     pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
         let get_url = format!("{}/{}", self.client.service_url, self.id);
 
-        let builder = self.client.http.get(get_url);
+        let builder = self.client.http.get(get_url).query(&[
+            (PARAM_SCOPE, self.client.scope.as_ref()),
+            (PARAM_USECASE, self.client.usecase.as_ref()),
+        ]);
 
         let response = builder.send().await?;
         if response.status() == StatusCode::NOT_FOUND {

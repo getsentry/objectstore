@@ -3,9 +3,8 @@ use std::{fmt, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use objectstore_types::Scope;
 
-pub use objectstore_types::Compression;
+pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
 /// Service for storing and retrieving objects.
 ///
@@ -63,7 +62,7 @@ impl ClientBuilder {
         self
     }
 
-    fn make_client(&self, scope: Scope) -> Client {
+    fn make_client(&self, scope: String) -> Client {
         Client {
             service_url: self.service_url.clone(),
             http: self.client.clone(),
@@ -74,20 +73,17 @@ impl ClientBuilder {
         }
     }
 
-    /// Create a new [`Client`] scoped to the given organization.
+    /// Create a new [`Client`] and sets its `scope` based on the provided organization.
     pub fn for_organization(&self, organization_id: u64) -> Client {
-        self.make_client(Scope {
-            organization: organization_id,
-            project: None,
-        })
+        let scope = format!("org.{organization_id}");
+        self.make_client(scope)
     }
 
-    /// Create a new [`Client`] scoped to the given organization/project.
+    /// Create a new [`Client`] and sets its `scope` based on the provided organization
+    /// and project.
     pub fn for_project(&self, organization_id: u64, project_id: u64) -> Client {
-        self.make_client(Scope {
-            organization: organization_id,
-            project: Some(project_id),
-        })
+        let scope = format!("org.{organization_id}/proj.{project_id}");
+        self.make_client(scope)
     }
 }
 
@@ -96,8 +92,19 @@ pub struct Client {
     pub(crate) http: reqwest::Client,
     pub(crate) service_url: Arc<str>,
 
-    usecase: Arc<str>,
-    scope: Scope,
+    pub(crate) usecase: Arc<str>,
+
+    /// The scope that this client operates within.
+    ///
+    /// Scopes are expected to be serialized ordered lists of key/value pairs. Each
+    /// pair is serialized with a `.` character between the key and value, and with
+    /// a `/` character between each pair. For example:
+    /// - `org.123/proj.456`
+    /// - `state.washington/city.seattle`
+    ///
+    /// It is recommended that both keys and values be restricted to alphanumeric
+    /// characters.
+    pub(crate) scope: String,
     pub(crate) default_compression: Compression,
 }
 impl fmt::Debug for Client {
@@ -120,7 +127,15 @@ impl Client {
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{id}", self.service_url);
 
-        let _response = self.http.delete(delete_url).send().await?;
+        let _response = self
+            .http
+            .delete(delete_url)
+            .query(&[
+                (PARAM_SCOPE, self.scope.as_ref()),
+                (PARAM_USECASE, self.usecase.as_ref()),
+            ])
+            .send()
+            .await?;
 
         Ok(())
     }
