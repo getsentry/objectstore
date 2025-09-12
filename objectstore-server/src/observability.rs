@@ -12,9 +12,11 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
         .datadog_key
         .as_ref()
         .map(|api_key| {
-            merni::datadog(api_key.as_str())
-                .prefix("objectstore.")
-                .try_init()
+            let mut builder = merni::datadog(api_key.as_str()).prefix("objectstore.");
+            for (k, v) in &config.metric_tags {
+                builder = builder.global_tag(k, v);
+            }
+            builder.try_init()
         })
         .transpose()
 }
