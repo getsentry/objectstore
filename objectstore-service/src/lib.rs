@@ -166,7 +166,7 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             if let Some(endpoint) = endpoint {
                 Box::new(backend::S3Compatible::without_token(endpoint, bucket))
             } else {
-                backend::gcs(bucket).await?
+                Box::new(backend::GcsJsonApi::new(None, bucket).await?)
             }
         }
         StorageConfig::BigTable(config) => Box::new(backend::BigTableBackend::new(config).await?),
