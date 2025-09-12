@@ -11,7 +11,7 @@ mod local_fs;
 mod s3_compatible;
 
 pub use bigtable::{BigTableBackend, BigTableConfig};
-pub use gcs::gcs;
+pub use gcs::{GcsJsonApi, GcsMetadata};
 pub use local_fs::LocalFs;
 pub use s3_compatible::S3Compatible;
 
