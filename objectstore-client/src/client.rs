@@ -3,12 +3,8 @@ use std::{fmt, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use jsonwebtoken::{EncodingKey, Header};
-use objectstore_types::Scope;
-use reqwest::header;
-use serde::Serialize;
 
-pub use objectstore_types::Compression;
+pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
 /// Service for storing and retrieving objects.
 ///
@@ -19,7 +15,6 @@ pub use objectstore_types::Compression;
 pub struct ClientBuilder {
     service_url: Arc<str>,
     client: reqwest::Client,
-    jwt_key: EncodingKey,
 
     usecase: Arc<str>,
     default_compression: Compression,
@@ -29,7 +24,6 @@ impl fmt::Debug for ClientBuilder {
         f.debug_struct("ClientBuilder")
             .field("service_url", &self.service_url)
             .field("client", &self.client)
-            .field("jwt_key", &format_args!("[JWT Key]"))
             .field("usecase", &self.usecase)
             .field("default_compression", &self.default_compression)
             .finish()
@@ -39,13 +33,12 @@ impl fmt::Debug for ClientBuilder {
 impl ClientBuilder {
     /// Creates a new [`ClientBuilder`].
     ///
-    /// This service instance is configured to target the given `service_url`, using the `jwt_secret`
-    /// for authentication.
+    /// This service instance is configured to target the given `service_url`.
     /// It is also scoped for the given `usecase`.
     ///
     /// In order to get or put objects, one has to create a [`Client`] using the
     /// [`for_organization`](Self::for_organization) function.
-    pub fn new(service_url: &str, jwt_secret: &str, usecase: &str) -> anyhow::Result<Self> {
+    pub fn new(service_url: &str, usecase: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             // we are dealing with de/compression ourselves:
             .no_brotli()
@@ -53,13 +46,11 @@ impl ClientBuilder {
             .no_gzip()
             .no_zstd()
             .build()?;
-        let jwt_key = EncodingKey::from_secret(jwt_secret.as_bytes());
 
         Ok(Self {
             service_url: service_url.trim_end_matches('/').into(),
             client,
 
-            jwt_key,
             usecase: usecase.into(),
             default_compression: Compression::Zstd,
         })
@@ -71,11 +62,10 @@ impl ClientBuilder {
         self
     }
 
-    fn make_client(&self, scope: Scope) -> Client {
+    fn make_client(&self, scope: String) -> Client {
         Client {
             service_url: self.service_url.clone(),
             http: self.client.clone(),
-            jwt_key: self.jwt_key.clone(),
 
             usecase: self.usecase.clone(),
             scope,
@@ -83,40 +73,38 @@ impl ClientBuilder {
         }
     }
 
-    /// Create a new [`Client`] scoped to the given organization.
+    /// Create a new [`Client`] and sets its `scope` based on the provided organization.
     pub fn for_organization(&self, organization_id: u64) -> Client {
-        self.make_client(Scope {
-            organization: organization_id,
-            project: None,
-        })
+        let scope = format!("org.{organization_id}");
+        self.make_client(scope)
     }
 
-    /// Create a new [`Client`] scoped to the given organization/project.
+    /// Create a new [`Client`] and sets its `scope` based on the provided organization
+    /// and project.
     pub fn for_project(&self, organization_id: u64, project_id: u64) -> Client {
-        self.make_client(Scope {
-            organization: organization_id,
-            project: Some(project_id),
-        })
+        let scope = format!("org.{organization_id}/proj.{project_id}");
+        self.make_client(scope)
     }
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-struct Claims<'a> {
-    pub(crate) exp: u64,
-    pub(crate) usecase: &'a str,
-    pub(crate) scope: &'a Scope,
-    pub(crate) permissions: &'a [&'a str],
 }
 
 /// A scoped objectstore client that can access objects in a specific use case and scope.
 pub struct Client {
     pub(crate) http: reqwest::Client,
     pub(crate) service_url: Arc<str>,
-    jwt_key: EncodingKey,
 
-    usecase: Arc<str>,
-    scope: Scope,
+    pub(crate) usecase: Arc<str>,
+
+    /// The scope that this client operates within.
+    ///
+    /// Scopes are expected to be serialized ordered lists of key/value pairs. Each
+    /// pair is serialized with a `.` character between the key and value, and with
+    /// a `/` character between each pair. For example:
+    /// - `org.123/proj.456`
+    /// - `state.washington/city.seattle`
+    ///
+    /// It is recommended that both keys and values be restricted to alphanumeric
+    /// characters.
+    pub(crate) scope: String,
     pub(crate) default_compression: Compression,
 }
 impl fmt::Debug for Client {
@@ -124,7 +112,6 @@ impl fmt::Debug for Client {
         f.debug_struct("Client")
             .field("http", &self.http)
             .field("service_url", &self.service_url)
-            .field("jwt_key", &format_args!("[JWT Key]"))
             .field("usecase", &self.usecase)
             .field("scope", &self.scope)
             .field("default_compression", &self.default_compression)
@@ -136,28 +123,17 @@ impl fmt::Debug for Client {
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Client {
-    pub(crate) fn make_authorization(&self, permission: &str) -> anyhow::Result<String> {
-        let claims = Claims {
-            exp: jsonwebtoken::get_current_timestamp(),
-            usecase: &self.usecase,
-            scope: &self.scope,
-            permissions: &[permission],
-        };
-        let header = Header::default();
-
-        let token = jsonwebtoken::encode(&header, &claims, &self.jwt_key)?;
-        Ok(token)
-    }
-
     /// Deletes the object with the given `id`.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{id}", self.service_url);
-        let authorization = self.make_authorization("write")?;
 
         let _response = self
             .http
             .delete(delete_url)
-            .header(header::AUTHORIZATION, authorization)
+            .query(&[
+                (PARAM_SCOPE, self.scope.as_ref()),
+                (PARAM_USECASE, self.usecase.as_ref()),
+            ])
             .send()
             .await?;
 

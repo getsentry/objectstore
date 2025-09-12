@@ -352,8 +352,6 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use objectstore_types::Scope;
-
     use crate::ObjectKey;
 
     use super::*;
@@ -389,10 +387,7 @@ mod tests {
     fn make_key() -> ScopedKey {
         ScopedKey {
             usecase: "testing".into(),
-            scope: Scope {
-                organization: 1234,
-                project: Some(1234),
-            },
+            scope: "testing".into(),
             key: ObjectKey::for_backend(0),
         }
     }

@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
-    let remote = HttpRemote::new(&config.remote, &config.jwt_secret);
+    let remote = HttpRemote::new(&config.remote);
 
     let workloads = config
         .workloads

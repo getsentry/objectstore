@@ -7,7 +7,6 @@ use stresstest::Workload;
 use stresstest::http::HttpRemote;
 
 const OBJECTSTORE_EXE: &str = env!("CARGO_BIN_EXE_objectstore");
-const JWT_SECRET: &str = "secret";
 
 fn assert_clean_shutdown(mut child: Child) {
     let pid = Pid::from_raw(child.id() as i32);
@@ -30,7 +29,6 @@ async fn test_basic() {
 
     let mut cmd = Command::new(OBJECTSTORE_EXE);
     cmd.env("FSS_HTTP_ADDR", &addr)
-        .env("FSS_JWT_SECRET", JWT_SECRET)
         .env("FSS_high_volume_storage__TYPE", "filesystem")
         .env(
             "FSS_high_volume_storage__PATH",
@@ -54,7 +52,7 @@ async fn test_basic() {
     // Give the server time to start, or else stresstest might fail to connect.
     std::thread::sleep(Duration::from_secs(1));
 
-    let remote = HttpRemote::new(&format!("http://{addr}"), JWT_SECRET);
+    let remote = HttpRemote::new(&format!("http://{addr}"));
     let workload = Workload::builder("test")
         .concurrency(10)
         .size_distribution(1000, 10_000)
