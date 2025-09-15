@@ -336,16 +336,23 @@ impl Backend for GcsBackend {
             .await
             .context("failed to parse object metadata")?;
 
-        let custom_time = gcs_metadata.custom_time;
+        // TODO: Store custom_time directly in metadata.
+        let expire_at = gcs_metadata.custom_time;
         let metadata = gcs_metadata.into_metadata()?;
 
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
+        // Filter already expired objects but leave them to garbage collection
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            return Ok(None);
+        }
+
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
-            && let Some(expire_at) = custom_time
-        {
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // Only bump if the difference in deadlines meets a minimum threshold
             let new_expire_at = SystemTime::now() + tti;
-            if expire_at < new_expire_at - TTI_DEBOUNCE {
+            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
                 self.update_custom_time(object_url.clone(), new_expire_at)
                     .await?;
             }
@@ -439,6 +446,133 @@ mod tests {
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() -> Result<()> {
+        let backend = create_test_backend();
+
+        let path = make_key();
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent() -> Result<()> {
+        let backend = create_test_backend();
+
+        let path = make_key();
+        backend.delete_object(&path).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() -> Result<()> {
+        let backend = create_test_backend();
+
+        let path = make_key();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello"))
+            .await?;
+
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_after_delete() -> Result<()> {
+        let backend = create_test_backend();
+
+        let path = make_key();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: Default::default(),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        backend.delete_object(&path).await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ttl_immediate() -> Result<()> {
+        // NB: We create a TTL that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend();
+
+        let path = make_key();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            compression: None,
+            custom: Default::default(),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_immediate() -> Result<()> {
+        // NB: We create a TTI that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend();
+
+        let path = make_key();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            compression: None,
+            custom: Default::default(),
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
 
         Ok(())
     }

@@ -56,6 +56,7 @@ pub struct S3Compatible<T> {
 
 impl<T> S3Compatible<T> {
     /// Creates a new S3 compatible backend bound to the given bucket.
+    #[expect(dead_code)]
     pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
         Self {
             client: reqwest::Client::new(),
