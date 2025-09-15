@@ -6,7 +6,7 @@
 #![warn(missing_debug_implementations)]
 
 mod backend;
-mod metadata;
+mod path;
 
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
@@ -20,12 +20,15 @@ use std::time::Instant;
 use crate::backend::{BackendStream, BoxedBackend};
 
 pub use backend::BigTableConfig;
-pub use metadata::*;
+pub use path::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
-const BACKEND_HIGH_VOLUME: u8 = 1;
-const BACKEND_LONG_TERM: u8 = 2;
+
+enum BackendChoice {
+    HighVolume,
+    LongTerm,
+}
 
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
@@ -82,20 +85,19 @@ impl StorageService {
     /// Stores or overwrites an object at the given key.
     pub async fn put_object(
         &self,
-        usecase: String,
-        scope: String,
+        path: ObjectPath,
         metadata: &Metadata,
         mut stream: BackendStream,
-    ) -> anyhow::Result<ScopedKey> {
+    ) -> anyhow::Result<ObjectPath> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
-        let mut backend_id = BACKEND_HIGH_VOLUME;
+        let mut backend = BackendChoice::HighVolume;
         while let Some(chunk) = stream.try_next().await? {
             first_chunk.extend_from_slice(&chunk);
 
             if first_chunk.len() > BACKEND_SIZE_THRESHOLD {
-                backend_id = BACKEND_LONG_TERM;
+                backend = BackendChoice::LongTerm;
                 break;
             }
         }
@@ -113,56 +115,46 @@ impl StorageService {
             })
             .boxed();
 
-        let key = ObjectKey::for_backend(backend_id);
-        let key = ScopedKey {
-            usecase: usecase.clone(),
-            scope,
-            key,
-        };
-
-        let backend_tag = match backend_id {
-            BACKEND_HIGH_VOLUME => {
+        let backend_tag = match backend {
+            BackendChoice::HighVolume => {
                 self.0
                     .high_volume_backend
-                    .put_object(&key, metadata, stream)
+                    .put_object(&path, metadata, stream)
                     .await?;
                 "high-volume"
             }
-            BACKEND_LONG_TERM => {
+            BackendChoice::LongTerm => {
                 self.0
                     .long_term_backend
-                    .put_object(&key, metadata, stream)
+                    .put_object(&path, metadata, stream)
                     .await?;
                 "long-term"
             }
-            _ => unreachable!(),
         };
 
-        merni::distribution!("put.latency"@s: start.elapsed(), "usecase" => usecase, "backend" => backend_tag);
-        merni::distribution!("put.size"@b: stored_size.load(Ordering::Acquire), "usecase" => usecase, "backend" => backend_tag);
+        merni::distribution!("put.latency"@s: start.elapsed(), "usecase" => path.usecase, "backend" => backend_tag);
+        merni::distribution!("put.size"@b: stored_size.load(Ordering::Acquire), "usecase" => path.usecase, "backend" => backend_tag);
 
-        Ok(key)
+        Ok(path)
     }
 
     /// Streams the contents of an object stored at the given key.
     pub async fn get_object(
         &self,
-        key: &ScopedKey,
+        path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        match key.key.backend {
-            BACKEND_HIGH_VOLUME => self.0.high_volume_backend.get_object(key).await,
-            BACKEND_LONG_TERM => self.0.long_term_backend.get_object(key).await,
-            _ => anyhow::bail!("invalid backend"),
+        let result = self.0.high_volume_backend.get_object(path).await?;
+        if result.is_some() {
+            return Ok(result);
         }
+        self.0.long_term_backend.get_object(path).await
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
-        match key.key.backend {
-            BACKEND_HIGH_VOLUME => self.0.high_volume_backend.delete_object(key).await,
-            BACKEND_LONG_TERM => self.0.long_term_backend.delete_object(key).await,
-            _ => anyhow::bail!("invalid backend"),
-        }
+    pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+        let res1 = self.0.high_volume_backend.delete_object(path).await;
+        let res2 = self.0.long_term_backend.delete_object(path).await;
+        res1.or(res2)
     }
 }
 
@@ -190,6 +182,14 @@ mod tests {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
+    fn make_path() -> ObjectPath {
+        ObjectPath {
+            usecase: "testing".into(),
+            scope: "testing".into(),
+            key: "testing".into(),
+        }
+    }
+
     #[tokio::test]
     async fn stores_files() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -199,12 +199,7 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .put_object(
-                "testing".into(),
-                "test_scope".into(),
-                &Default::default(),
-                make_stream(b"oh hai!"),
-            )
+            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
@@ -224,12 +219,7 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .put_object(
-                "testing".into(),
-                "test_scope".into(),
-                &Default::default(),
-                make_stream(b"oh hai!"),
-            )
+            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
@@ -249,12 +239,7 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .put_object(
-                "testing".into(),
-                "testing".into(),
-                &Default::default(),
-                make_stream(b"oh hai!"),
-            )
+            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
             .await
             .unwrap();
 
