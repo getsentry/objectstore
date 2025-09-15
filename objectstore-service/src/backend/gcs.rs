@@ -173,7 +173,7 @@ pub struct GcsBackend {
 impl GcsBackend {
     /// Creates an authenticated GCS JSON API backend bound to the given bucket.
     pub async fn new(endpoint: Option<&str>, bucket: &str) -> Result<Self> {
-        let (endpoint, token_provider) = match std::env::var("GCS_EMULATOR_HOST").ok() {
+        let (endpoint, token_provider) = match std::env::var("STORAGE_EMULATOR_HOST").ok() {
             Some(emulator_host) => (emulator_host, None),
             None => (
                 endpoint.unwrap_or(DEFAULT_ENDPOINT).to_owned(),
