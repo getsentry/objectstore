@@ -1,7 +1,6 @@
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
-use objectstore_types::Scope;
 use uuid::Uuid;
 use watto::Pod;
 
@@ -97,14 +96,24 @@ pub struct ScopedKey {
     /// (such as the concrete backend/bucket) can be tied to this as well.
     pub usecase: String,
 
-    /// The scope of the object, used for access control and compartmentalization.
-    pub scope: Scope,
+    /// The scope of the object, used for compartmentalization.
+    pub scope: String,
 
     /// This is the storage key of the object, unique within the usecase/scope.
     pub key: ObjectKey,
 }
 
 impl ScopedKey {
+    /// Creates a new [`ScopedKey`] from its constituent parts.
+    pub fn from_parts(usecase: String, scope: String, key: &str) -> anyhow::Result<ScopedKey> {
+        let key = ObjectKey::from_str(key)?;
+        Ok(ScopedKey {
+            usecase,
+            scope,
+            key,
+        })
+    }
+
     /// Formats the key as a path.
     pub fn as_path(&self) -> ScopedKeyPath<'_> {
         ScopedKeyPath(self)
@@ -117,11 +126,6 @@ pub struct ScopedKeyPath<'a>(&'a ScopedKey);
 
 impl Display for ScopedKeyPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let project = self.0.scope.project.unwrap_or_default();
-        write!(
-            f,
-            "{}/{}/{project}/{}",
-            self.0.usecase, self.0.scope.organization, self.0.key
-        )
+        write!(f, "{}/{}/{}", self.0.usecase, self.0.scope, self.0.key)
     }
 }

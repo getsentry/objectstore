@@ -3,21 +3,22 @@
 use std::any::Any;
 use std::io;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use axum::body::{Body, to_bytes};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::{ScopedKey, StorageService};
+use objectstore_service::{ObjectKey, ScopedKey, StorageService};
 use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpSocket};
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -25,11 +26,16 @@ use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 use uuid::Uuid;
 
-use crate::authentication::{Claim, ExtractScope, Permission};
 use crate::config::Config;
 use crate::state::ServiceState;
 
 const TCP_LISTEN_BACKLOG: u32 = 1024;
+
+#[derive(Deserialize, Debug)]
+struct ContextParams {
+    pub scope: String,
+    pub usecase: String,
+}
 
 fn make_app(state: ServiceState) -> axum::Router {
     let middleware = ServiceBuilder::new()
@@ -103,17 +109,16 @@ struct PutBlobResponse {
 #[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object(
     State(state): State<ServiceState>,
-    ExtractScope(claim): ExtractScope,
+    Query(params): Query<ContextParams>,
     headers: HeaderMap,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
-    claim.ensure_permission(Permission::Write)?;
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state
         .service
-        .put_object(claim.usecase, claim.scope, &metadata, stream)
+        .put_object(params.usecase, params.scope, &metadata, stream)
         .await?;
 
     Ok(Json(PutBlobResponse {
@@ -124,11 +129,10 @@ async fn put_object(
 #[tracing::instrument(level = "trace", skip(state))]
 async fn get_object(
     State(state): State<ServiceState>,
-    ExtractScope(claim): ExtractScope,
+    Query(params): Query<ContextParams>,
     Path(key): Path<String>,
 ) -> error::Result<Response> {
-    claim.ensure_permission(Permission::Read)?;
-    let key = claim.into_key(key)?;
+    let key = ScopedKey::from_parts(params.usecase, params.scope, &key)?;
 
     let Some((metadata, stream)) = state.service.get_object(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -141,11 +145,10 @@ async fn get_object(
 #[tracing::instrument(level = "trace", skip(state))]
 async fn delete_object(
     State(state): State<ServiceState>,
-    ExtractScope(claim): ExtractScope,
+    Query(params): Query<ContextParams>,
     Path(key): Path<String>,
 ) -> error::Result<impl IntoResponse> {
-    claim.ensure_permission(Permission::Write)?;
-    let key = claim.into_key(key)?;
+    let key = ScopedKey::from_parts(params.usecase, params.scope, &key)?;
 
     state.service.delete_object(&key).await?;
 

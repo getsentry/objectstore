@@ -121,7 +121,7 @@ mod tests {
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
-    use objectstore_types::{Compression, ExpirationPolicy, Scope};
+    use objectstore_types::{Compression, ExpirationPolicy};
 
     use crate::ObjectKey;
 
@@ -138,10 +138,7 @@ mod tests {
 
         let key = ScopedKey {
             usecase: "testing".into(),
-            scope: Scope {
-                organization: 1234,
-                project: Some(1234),
-            },
+            scope: "testing".into(),
             key: ObjectKey::for_backend(0),
         };
         let metadata = Metadata {

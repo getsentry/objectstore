@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -44,6 +45,7 @@ pub struct Config {
     // others
     pub sentry_dsn: Option<String>,
     pub datadog_key: Option<String>,
+    pub metric_tags: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -62,6 +64,7 @@ impl Default for Config {
 
             sentry_dsn: None,
             datadog_key: None,
+            metric_tags: Default::default(),
         }
     }
 }
@@ -105,14 +108,21 @@ mod tests {
             jail.set_env("fss_long_term_storage__type", "s3compatible");
             jail.set_env("fss_long_term_storage__endpoint", "http://localhost:8888");
             jail.set_env("fss_long_term_storage__bucket", "whatever");
+            jail.set_env("fss_metric_tags__foo", "bar");
+            jail.set_env("fss_metric_tags__baz", "qux");
 
             let config = Config::from_args(Args::default()).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
+            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            else {
                 panic!("expected s3 storage");
             };
             assert_eq!(endpoint, "http://localhost:8888");
             assert_eq!(bucket, "whatever");
+            assert_eq!(
+                config.metric_tags,
+                [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
+            );
 
             Ok(())
         });

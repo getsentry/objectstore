@@ -7,7 +7,6 @@ use stresstest::workload::WorkloadMode;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub remote: String,
-    pub jwt_secret: String,
 
     #[serde(with = "humantime_serde")]
     pub duration: Duration,

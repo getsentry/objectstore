@@ -370,8 +370,6 @@ impl Backend for GcsBackend {
 mod tests {
     use std::collections::BTreeMap;
 
-    use objectstore_types::Scope;
-
     use super::*;
     use crate::ObjectKey;
 
@@ -394,10 +392,7 @@ mod tests {
     fn make_key() -> ScopedKey {
         ScopedKey {
             usecase: "testing".into(),
-            scope: Scope {
-                organization: 1234,
-                project: Some(1234),
-            },
+            scope: "testing".into(),
             key: ObjectKey::for_backend(0),
         }
     }

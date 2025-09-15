@@ -12,7 +12,6 @@ use crate::config::Config;
 use crate::observability::{initialize_tracing, maybe_initialize_metrics, maybe_initialize_sentry};
 use crate::state::State;
 
-mod authentication;
 mod config;
 mod http;
 mod observability;

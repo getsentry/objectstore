@@ -10,7 +10,7 @@ mod metadata;
 
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::{Metadata, Scope};
+use objectstore_types::Metadata;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -83,7 +83,7 @@ impl StorageService {
     pub async fn put_object(
         &self,
         usecase: String,
-        scope: Scope,
+        scope: String,
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> anyhow::Result<ScopedKey> {
@@ -183,7 +183,6 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
 mod tests {
     use bytes::BytesMut;
     use futures_util::{StreamExt, TryStreamExt};
-    use objectstore_types::Scope;
 
     use super::*;
 
@@ -202,10 +201,7 @@ mod tests {
         let key = service
             .put_object(
                 "testing".into(),
-                Scope {
-                    organization: 1234,
-                    project: None,
-                },
+                "test_scope".into(),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
@@ -230,10 +226,7 @@ mod tests {
         let key = service
             .put_object(
                 "testing".into(),
-                Scope {
-                    organization: 1234,
-                    project: None,
-                },
+                "test_scope".into(),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
@@ -258,10 +251,7 @@ mod tests {
         let key = service
             .put_object(
                 "testing".into(),
-                Scope {
-                    organization: 1234,
-                    project: None,
-                },
+                "testing".into(),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
