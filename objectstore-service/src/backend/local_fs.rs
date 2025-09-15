@@ -9,7 +9,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::ScopedKey;
+use crate::ObjectPath;
 
 use super::{Backend, BackendStream};
 
@@ -30,12 +30,11 @@ impl LocalFs {
 impl Backend for LocalFs {
     async fn put_object(
         &self,
-        key: &ScopedKey,
+        path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()> {
-        let path = key.as_path().to_string();
-        let path = self.path.join(path);
+        let path = self.path.join(path.to_string());
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
             .create(true)
@@ -61,10 +60,9 @@ impl Backend for LocalFs {
 
     async fn get_object(
         &self,
-        key: &ScopedKey,
+        path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        let path = key.as_path().to_string();
-        let path = self.path.join(path);
+        let path = self.path.join(path.to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -108,9 +106,8 @@ impl Backend for LocalFs {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()> {
-        let path = key.as_path().to_string();
-        let path = self.path.join(path);
+    async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+        let path = self.path.join(path.to_string());
         Ok(tokio::fs::remove_file(path).await?)
     }
 }
@@ -123,8 +120,6 @@ mod tests {
     use futures_util::TryStreamExt;
     use objectstore_types::{Compression, ExpirationPolicy};
 
-    use crate::ObjectKey;
-
     use super::*;
 
     fn make_stream(contents: &[u8]) -> BackendStream {
@@ -136,10 +131,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFs::new(tempdir.path());
 
-        let key = ScopedKey {
+        let key = ObjectPath {
             usecase: "testing".into(),
             scope: "testing".into(),
-            key: ObjectKey::for_backend(0),
+            key: "testing".into(),
         };
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),

@@ -7,7 +7,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::backend::{Backend, BackendStream};
-use crate::metadata::ScopedKey;
+use crate::path::ObjectPath;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -66,8 +66,8 @@ impl<T> S3Compatible<T> {
     }
 
     /// Formats the S3 object URL for the given key.
-    fn object_url(&self, key: &ScopedKey) -> String {
-        format!("{}/{}/{}", self.endpoint, self.bucket, key.as_path())
+    fn object_url(&self, path: &ObjectPath) -> String {
+        format!("{}/{}/{path}", self.endpoint, self.bucket)
     }
 }
 
@@ -85,14 +85,12 @@ where
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, key: &ScopedKey, metadata: &Metadata) -> Result<()> {
-        let path = format!("/{}/{}", self.bucket, key.as_path());
-
+    async fn update_metadata(&self, path: &ObjectPath, metadata: &Metadata) -> Result<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
-        self.request(Method::PUT, self.object_url(key))
+        self.request(Method::PUT, self.object_url(path))
             .await?
-            .header("x-goog-copy-source", path)
+            .header("x-goog-copy-source", format!("/{}/{path}", self.bucket))
             .header("x-goog-metadata-directive", "REPLACE")
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .send()
@@ -129,11 +127,11 @@ impl S3Compatible<NoToken> {
 impl<T: TokenProvider> Backend for S3Compatible<T> {
     async fn put_object(
         &self,
-        key: &ScopedKey,
+        path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
-        self.request(Method::PUT, self.object_url(key))
+        self.request(Method::PUT, self.object_url(path))
             .await?
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .body(Body::wrap_stream(stream))
@@ -145,8 +143,8 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         Ok(())
     }
 
-    async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
-        let object_url = self.object_url(key);
+    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+        let object_url = self.object_url(path);
 
         let response = self.request(Method::GET, &object_url).await?.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -173,7 +171,7 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
 
             if expire_at < access_time + tti - TTI_DEBOUNCE {
                 // This serializes a new custom-time internally.
-                self.update_metadata(key, &metadata).await?;
+                self.update_metadata(path, &metadata).await?;
             }
         }
 
@@ -183,9 +181,9 @@ impl<T: TokenProvider> Backend for S3Compatible<T> {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
+    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         let response = self
-            .request(Method::DELETE, self.object_url(key))
+            .request(Method::DELETE, self.object_url(path))
             .await?
             .send()
             .await?;
