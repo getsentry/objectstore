@@ -352,6 +352,8 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use uuid::Uuid;
+
     use super::*;
 
     // NB: Not run any of these tests, you need to have a BigTable emulator running and
@@ -386,7 +388,7 @@ mod tests {
         ObjectPath {
             usecase: "testing".into(),
             scope: "testing".into(),
-            key: "testing".into(),
+            key: Uuid::new_v4().to_string(),
         }
     }
 

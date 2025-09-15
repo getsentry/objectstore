@@ -145,8 +145,9 @@ impl StorageService {
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
-        self.0.high_volume_backend.delete_object(path).await?;
-        self.0.long_term_backend.delete_object(path).await
+        let res1 = self.0.high_volume_backend.delete_object(path).await;
+        let res2 = self.0.long_term_backend.delete_object(path).await;
+        res1.or(res2)
     }
 }
 
