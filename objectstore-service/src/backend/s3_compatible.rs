@@ -45,7 +45,7 @@ impl Token for NoToken {
     }
 }
 
-pub struct S3Compatible<T> {
+pub struct S3CompatibleBackend<T> {
     client: reqwest::Client,
 
     endpoint: String,
@@ -54,7 +54,7 @@ pub struct S3Compatible<T> {
     token_provider: Option<T>,
 }
 
-impl<T> S3Compatible<T> {
+impl<T> S3CompatibleBackend<T> {
     /// Creates a new S3 compatible backend bound to the given bucket.
     #[expect(dead_code)]
     pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
@@ -72,7 +72,7 @@ impl<T> S3Compatible<T> {
     }
 }
 
-impl<T> S3Compatible<T>
+impl<T> S3CompatibleBackend<T>
 where
     T: TokenProvider,
 {
@@ -105,7 +105,7 @@ where
     }
 }
 
-impl<T> fmt::Debug for S3Compatible<T> {
+impl<T> fmt::Debug for S3CompatibleBackend<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S3Compatible")
             .field("client", &self.client)
@@ -115,7 +115,7 @@ impl<T> fmt::Debug for S3Compatible<T> {
     }
 }
 
-impl S3Compatible<NoToken> {
+impl S3CompatibleBackend<NoToken> {
     pub fn without_token(endpoint: &str, bucket: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -127,7 +127,7 @@ impl S3Compatible<NoToken> {
 }
 
 #[async_trait::async_trait]
-impl<T: TokenProvider> Backend for S3Compatible<T> {
+impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn put_object(
         &self,
         key: &ScopedKey,

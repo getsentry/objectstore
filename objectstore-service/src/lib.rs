@@ -180,10 +180,10 @@ impl StorageService {
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
     Ok(match config {
-        StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
-        StorageConfig::S3Compatible { endpoint, bucket } => {
-            Box::new(backend::S3Compatible::without_token(endpoint, bucket))
-        }
+        StorageConfig::FileSystem { path } => Box::new(backend::LocalFsBackend::new(path)),
+        StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
+            backend::S3CompatibleBackend::without_token(endpoint, bucket),
+        ),
         StorageConfig::Gcs { endpoint, bucket } => {
             Box::new(backend::GcsBackend::new(endpoint, bucket).await?)
         }

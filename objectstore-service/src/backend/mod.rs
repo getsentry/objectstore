@@ -12,8 +12,8 @@ mod s3_compatible;
 
 pub use bigtable::BigTableBackend;
 pub use gcs::GcsBackend;
-pub use local_fs::LocalFs;
-pub use s3_compatible::S3Compatible;
+pub use local_fs::LocalFsBackend;
+pub use s3_compatible::S3CompatibleBackend;
 
 use crate::ScopedKey;
 
