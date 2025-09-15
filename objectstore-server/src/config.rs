@@ -15,6 +15,10 @@ pub enum Storage {
         path: PathBuf,
     },
     S3Compatible {
+        endpoint: String,
+        bucket: String,
+    },
+    Gcs {
         endpoint: Option<String>,
         bucket: String,
     },
@@ -107,7 +111,7 @@ mod tests {
             let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
+            assert_eq!(endpoint, "http://localhost:8888");
             assert_eq!(bucket, "whatever");
 
             Ok(())
@@ -136,7 +140,7 @@ mod tests {
         let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
             panic!("expected s3 storage");
         };
-        assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
+        assert_eq!(endpoint, "http://localhost:8888");
         assert_eq!(bucket, "whatever");
     }
 }

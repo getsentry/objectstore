@@ -24,7 +24,10 @@ impl State {
 fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
     match config {
         Storage::FileSystem { path } => StorageConfig::FileSystem { path },
-        Storage::S3Compatible { endpoint, bucket } => StorageConfig::S3Compatible {
+        Storage::S3Compatible { endpoint, bucket } => {
+            StorageConfig::S3Compatible { endpoint, bucket }
+        }
+        Storage::Gcs { endpoint, bucket } => StorageConfig::Gcs {
             endpoint: endpoint.as_deref(),
             bucket,
         },
