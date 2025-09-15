@@ -7,7 +7,7 @@ use std::{fmt, io};
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, BackendStream};
@@ -82,6 +82,9 @@ impl GcsObject {
 
     /// Converts GCS JSON object metadata to our Metadata type.
     pub fn into_metadata(mut self) -> Result<Metadata> {
+        // Remove ignored metadata keys that are set by the GCS emulator.
+        self.metadata.remove(&GcsMetaKey::EmulatorIgnored);
+
         let expiration_policy = self
             .metadata
             .remove(&GcsMetaKey::Expiration)
@@ -94,10 +97,11 @@ impl GcsObject {
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
         for (key, value) in self.metadata {
-            match key {
-                GcsMetaKey::Custom(custom_key) => custom.insert(custom_key, value),
-                GcsMetaKey::Expiration => anyhow::bail!("unexpected expiration metadata"),
-            };
+            if let GcsMetaKey::Custom(custom_key) = key {
+                custom.insert(custom_key, value);
+            } else {
+                anyhow::bail!("unexpected metadata");
+            }
         }
 
         Ok(Metadata {
@@ -113,6 +117,8 @@ impl GcsObject {
 enum GcsMetaKey {
     /// Built-in metadata key for [`Metadata::expiration_policy`].
     Expiration,
+    /// Ignored metadata set by the GCS emulator.
+    EmulatorIgnored,
     /// User-defined custom metadata key.
     Custom(String),
 }
@@ -121,17 +127,18 @@ impl std::str::FromStr for GcsMetaKey {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.strip_prefix(BUILTIN_META_PREFIX) {
-            Some("expiration") => return Ok(GcsMetaKey::Expiration),
+        if matches!(s, "x_emulator_upload" | "x_testbench_upload") {
+            return Ok(GcsMetaKey::EmulatorIgnored);
+        }
+
+        Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
+            Some("expiration") => GcsMetaKey::Expiration,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
-            None => (), // fallthrough
-        }
-
-        if let Some(key) = s.strip_prefix(CUSTOM_META_PREFIX) {
-            return Ok(GcsMetaKey::Custom(key.to_string()));
-        }
-
-        anyhow::bail!("invalid GCS metadata key format: {s}")
+            None => match s.strip_prefix(CUSTOM_META_PREFIX) {
+                Some(key) => GcsMetaKey::Custom(key.to_string()),
+                None => anyhow::bail!("invalid GCS metadata key format: {s}"),
+            },
+        })
     }
 }
 
@@ -139,6 +146,7 @@ impl fmt::Display for GcsMetaKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
+            Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
     }
@@ -276,16 +284,29 @@ impl Backend for GcsBackend {
     ) -> Result<()> {
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
-        let form = reqwest::multipart::Form::new()
-            .text("metadata", serde_json::to_string(&gcs_metadata)?)
+        // NB: Ensure the order of these fields and that a content-type is attached to them. Both
+        // are required by the GCS API.
+        let multipart = multipart::Form::new()
+            .part(
+                "metadata",
+                multipart::Part::text(serde_json::to_string(&gcs_metadata)?)
+                    .mime_str("application/json")?,
+            )
             .part(
                 "media",
-                reqwest::multipart::Part::stream(Body::wrap_stream(stream)),
+                multipart::Part::stream(Body::wrap_stream(stream))
+                    .mime_str("application/octet-stream")?,
             );
+
+        // GCS requires a multipart/related request. Its body looks identical to
+        // multipart/form-data, but the Content-Type header is different. Hence, we have to manually
+        // set the header *after* writing the multipart form into the request.
+        let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
         self.request(Method::POST, self.upload_url(key, "multipart")?)
             .await?
-            .multipart(form)
+            .multipart(multipart)
+            .header(header::CONTENT_TYPE, content_type)
             .send()
             .await?
             .error_for_status()
