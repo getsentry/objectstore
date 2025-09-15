@@ -233,12 +233,11 @@ mod tests {
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
-    #[ignore = "gcs credentials are not yet set up in CI"]
     #[tokio::test]
     async fn works_with_gcs() {
         let config = StorageConfig::Gcs {
-            endpoint: None,
-            bucket: "sbx-warp-benchmark-bucket",
+            endpoint: Some("http://localhost:8087"),
+            bucket: "test-bucket", // aligned with the env var in devservices and CI
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
