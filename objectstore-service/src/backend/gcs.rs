@@ -401,6 +401,11 @@ mod tests {
     use super::*;
     use crate::ObjectKey;
 
+    // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
+    // automatically in CI.
+    //
+    // Refer to the readme for how to set up the emulator.
+
     fn create_test_backend() -> GcsBackend {
         GcsBackend::without_token("http://localhost:8087".parse().unwrap(), "test-bucket")
     }
