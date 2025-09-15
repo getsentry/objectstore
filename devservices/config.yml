@@ -7,10 +7,12 @@ x-sentry-service-config:
       description: Objectstore server
     bigtable:
       description: Google Cloud BigTable emulator
+    gcs:
+      description: Google Cloud Storage emulator
   modes:
     default: []
     containerized: [objectstore]
-    full: [bigtable]
+    full: [bigtable, gcs]
 
 x-programs:
   devserver:
@@ -45,6 +47,17 @@ services:
       - "--host-port=0.0.0.0:8086"
     ports:
       - 127.0.0.1:8086:8086
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
+  gcs:
+    image: gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+    environment:
+      GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME: test-bucket
+    ports:
+      - 127.0.0.1:8087:9000
     networks:
       - devservices
     labels:

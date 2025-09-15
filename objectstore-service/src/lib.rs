@@ -48,6 +48,13 @@ pub enum StorageConfig<'a> {
     /// Use an S3-compatible storage backend.
     S3Compatible {
         /// Optional endpoint URL for the S3-compatible storage.
+        endpoint: &'a str,
+        /// The name of the bucket to use.
+        bucket: &'a str,
+    },
+    /// Use Google Cloud Storage as storage backend.
+    Gcs {
+        /// Optional endpoint URL for the S3-compatible storage.
         endpoint: Option<&'a str>,
         /// The name of the bucket to use.
         bucket: &'a str,
@@ -163,11 +170,10 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
     Ok(match config {
         StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
         StorageConfig::S3Compatible { endpoint, bucket } => {
-            if let Some(endpoint) = endpoint {
-                Box::new(backend::S3Compatible::without_token(endpoint, bucket))
-            } else {
-                backend::gcs(bucket).await?
-            }
+            Box::new(backend::S3Compatible::without_token(endpoint, bucket))
+        }
+        StorageConfig::Gcs { endpoint, bucket } => {
+            Box::new(backend::GcsBackend::new(endpoint, bucket).await?)
         }
         StorageConfig::BigTable(config) => Box::new(backend::BigTableBackend::new(config).await?),
     })
@@ -211,7 +217,7 @@ mod tests {
     #[ignore = "gcs credentials are not yet set up in CI"]
     #[tokio::test]
     async fn works_with_gcs() {
-        let config = StorageConfig::S3Compatible {
+        let config = StorageConfig::Gcs {
             endpoint: None,
             bucket: "sbx-warp-benchmark-bucket",
         };
@@ -237,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn works_with_seaweed() {
         let config = StorageConfig::S3Compatible {
-            endpoint: Some("http://localhost:8333"),
+            endpoint: "http://localhost:8333",
             bucket: "whatever",
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();

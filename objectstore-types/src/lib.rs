@@ -33,6 +33,7 @@ pub const PARAM_USECASE: &str = "usecase";
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpirationPolicy {
     /// Manual expiration, meaning no automatic cleanup.
+    // IMPORTANT: Do not change the default, we rely on this for persisted objects.
     #[default]
     Manual,
     /// Time to live, with expiration after the specified duration.
@@ -99,6 +100,7 @@ pub enum Compression {
     // /// Compressed using `lz4`.
     // Lz4,
 }
+
 impl Compression {
     /// Returns a string representation of the compression algorithm.
     pub fn as_str(&self) -> &str {
@@ -109,6 +111,13 @@ impl Compression {
         }
     }
 }
+
+impl fmt::Display for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl FromStr for Compression {
     type Err = anyhow::Error;
 

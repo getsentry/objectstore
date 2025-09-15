@@ -94,7 +94,9 @@ Note that this does not start objectstore itself, but only its dependencies:
 devservices up objectstore --mode=full
 ```
 
-Devservices continue to run in the background until explicitly stopped.
+Devservices continue to run in the background until explicitly stopped. If you
+prefer to start containers manually, please check `devservices/config.yml` for
+the required images and configuration, such as port mapping.
 
 ### Editor Setup
 

@@ -59,6 +59,14 @@ jobs:
             google/cloud-sdk \
             gcloud beta emulators bigtable start --host-port=0.0.0.0:8086
 
+      - name: Start GCS Emulator
+        run: |
+          docker run -d \
+            --name gcs-emulator \
+            -p 8087:9000 \
+            -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
+            gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
