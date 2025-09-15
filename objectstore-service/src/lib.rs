@@ -19,7 +19,6 @@ use std::time::Instant;
 
 use crate::backend::{BackendStream, BoxedBackend};
 
-pub use backend::BigTableConfig;
 pub use metadata::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -55,12 +54,25 @@ pub enum StorageConfig<'a> {
     /// Use Google Cloud Storage as storage backend.
     Gcs {
         /// Optional endpoint URL for the S3-compatible storage.
+        ///
+        /// Assumes an emulator without authentication if set.
         endpoint: Option<&'a str>,
         /// The name of the bucket to use.
         bucket: &'a str,
     },
     /// Use BigTable as storage backend.
-    BigTable(BigTableConfig),
+    BigTable {
+        /// Optional endpoint URL for the BigTable storage.
+        ///
+        /// Assumes an emulator without authentication if set.
+        endpoint: Option<&'a str>,
+        /// The Google Cloud project ID.
+        project_id: &'a str,
+        /// The BigTable instance name.
+        instance_name: &'a str,
+        /// The BigTable table name.
+        table_name: &'a str,
+    },
 }
 
 impl StorageService {
@@ -175,7 +187,14 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
         StorageConfig::Gcs { endpoint, bucket } => {
             Box::new(backend::GcsBackend::new(endpoint, bucket).await?)
         }
-        StorageConfig::BigTable(config) => Box::new(backend::BigTableBackend::new(config).await?),
+        StorageConfig::BigTable {
+            endpoint,
+            project_id,
+            instance_name,
+            table_name,
+        } => Box::new(
+            backend::BigTableBackend::new(endpoint, project_id, instance_name, table_name).await?,
+        ),
     })
 }
 

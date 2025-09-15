@@ -10,7 +10,7 @@ mod gcs;
 mod local_fs;
 mod s3_compatible;
 
-pub use bigtable::{BigTableBackend, BigTableConfig};
+pub use bigtable::BigTableBackend;
 pub use gcs::GcsBackend;
 pub use local_fs::LocalFs;
 pub use s3_compatible::S3Compatible;

@@ -37,16 +37,16 @@ const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
 
-/// Configuration for the BigTable backend.
-#[derive(Debug, Clone)]
-pub struct BigTableConfig {
-    /// GCP project ID.
-    pub project_id: String,
-    /// BigTable instance name. The instance has to exist.
-    pub instance_name: String,
-    /// BigTable table name. Table will be auto-created.
-    pub table_name: String,
-}
+// /// Configuration for the BigTable backend.
+// #[derive(Debug, Clone)]
+// pub struct BigTableConfig {
+//     /// GCP project ID.
+//     pub project_id: String,
+//     /// BigTable instance name. The instance has to exist.
+//     pub instance_name: String,
+//     /// BigTable table name. Table will be auto-created.
+//     pub table_name: String,
+// }
 
 pub struct BigTableBackend {
     bigtable: BigTableConnection,
@@ -69,49 +69,60 @@ impl fmt::Debug for BigTableBackend {
 
 impl BigTableBackend {
     pub async fn new(
-        BigTableConfig {
-            project_id,
-            instance_name,
-            table_name,
-        }: BigTableConfig,
+        endpoint: Option<&str>,
+        project_id: &str,
+        instance_name: &str,
+        table_name: &str,
     ) -> Result<Self> {
-        let tokio_runtime = Handle::current();
-        let tokio_workers = tokio_runtime.metrics().num_workers();
+        let bigtable;
+        let admin;
 
-        // TODO on channel_size: Idle connections are automatically closed in “a few minutes”. We
-        // need to make sure that on longer idle period the channels are re-opened.
-        let channel_size = 2 * tokio_workers;
+        if let Some(endpoint) = endpoint {
+            bigtable = BigTableConnection::new_with_emulator(
+                endpoint,
+                project_id,
+                instance_name,
+                false, // is_read_only
+                Some(CONNECT_TIMEOUT),
+            )?;
+            admin = BigTableTableAdminConnection::new_with_emulator(
+                endpoint,
+                project_id,
+                instance_name,
+                Some(CONNECT_TIMEOUT),
+            )?;
+        } else {
+            let token_provider = gcp_auth::provider().await?;
+            // TODO on channel_size: Idle connections are automatically closed in “a few minutes”.
+            // We need to make sure that on longer idle periods the channels are re-opened.
+            let channel_size = 2 * Handle::current().metrics().num_workers();
 
-        // NB: Defaults to gcp_auth::provider() internally, but first checks the
-        // BIGTABLE_EMULATOR_HOST environment variable for local dev & tests.
-        let bigtable = BigTableConnection::new(
-            &project_id,
-            &instance_name,
-            false, // is_read_only
-            channel_size,
-            Some(CONNECT_TIMEOUT),
-        )
-        .await?;
+            bigtable = BigTableConnection::new_with_token_provider(
+                project_id,
+                instance_name,
+                false, // is_read_only
+                channel_size,
+                Some(CONNECT_TIMEOUT),
+                token_provider.clone(),
+            )?;
+            admin = BigTableTableAdminConnection::new_with_token_provider(
+                project_id,
+                instance_name,
+                1, // channel_size
+                Some(CONNECT_TIMEOUT),
+                token_provider,
+            )?;
+        };
 
         let client = bigtable.client();
-        let instance_path = format!("projects/{project_id}/instances/{instance_name}");
-        let table_path = client.get_full_table_name(&table_name);
-
-        let admin = BigTableTableAdminConnection::new(
-            &project_id,
-            &instance_name,
-            channel_size,
-            Some(CONNECT_TIMEOUT),
-        )
-        .await?;
 
         let backend = Self {
             bigtable,
             admin,
 
-            instance_path,
-            table_path,
-            table_name,
+            instance_path: format!("projects/{project_id}/instances/{instance_name}"),
+            table_path: client.get_full_table_name(table_name),
+            table_name: table_name.to_owned(),
         };
 
         backend.ensure_table().await?;
@@ -356,20 +367,19 @@ mod tests {
 
     use super::*;
 
-    // NB: Not run any of these tests, you need to have a BigTable emulator running and
-    // `BIGTABLE_EMULATOR_HOST` set to the address where it is listening. This is done automatically
-    // in CI.
+    // NB: Not run any of these tests, you need to have a BigTable emulator running. This is done
+    // automatically in CI.
     //
     // Refer to the readme for how to set up the emulator.
 
     async fn create_test_backend() -> Result<BigTableBackend> {
-        let config = BigTableConfig {
-            project_id: String::from("my-project"),
-            instance_name: String::from("my-instance"),
-            table_name: String::from("my-table"),
-        };
-
-        BigTableBackend::new(config).await
+        BigTableBackend::new(
+            Some("localhost:8086"),
+            "my-project",
+            "my-instance",
+            "my-table",
+        )
+        .await
     }
 
     fn make_stream(contents: &[u8]) -> BackendStream {

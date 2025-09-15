@@ -82,8 +82,6 @@ jobs:
 
       - name: Run Tests
         run: cargo test --workspace --all-features
-        env:
-          BIGTABLE_EMULATOR_HOST: localhost:8086
 
   docs:
     name: Cargo Docs
