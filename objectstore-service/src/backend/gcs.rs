@@ -1,107 +1,103 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use std::{fmt, io};
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::backend::{Backend, BackendStream};
 use crate::metadata::ScopedKey;
 
+/// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
+/// Permission scopes required for accessing GCS.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read_write"];
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
 /// Prefix for our built-in metadata stored in GCS metadata field
 const BUILTIN_META_PREFIX: &str = "x-sn-";
-/// Prefix for user custom metadata stored in GCS metadata field  
+/// Prefix for user custom metadata stored in GCS metadata field
 const CUSTOM_META_PREFIX: &str = "x-snme-";
-/// Key for storing expiration policy in GCS metadata
-const EXPIRATION_META_KEY: &str = "x-sn-expiration";
 
-#[derive(Debug, Serialize, Deserialize)]
+/// GCS object resource.
+///
+/// This is the representation of the object resource in GCS JSON API without its payload. Where no
+/// dedicated fields are available, we encode both built-in and custom metadata in the `metadata`
+/// field.
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GcsMetadata {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<BTreeMap<String, String>>,
+struct GcsObject {
+    /// Content encoding, used to store [`Metadata::compression`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_encoding: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_time: Option<String>,
+    /// Custom time stamp used for time-based expiration.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "humantime_serde"
+    )]
+    pub custom_time: Option<SystemTime>,
+    /// User-provided metadata, including our built-in metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<GcsMetaKey, String>,
 }
 
-impl GcsMetadata {
+impl GcsObject {
     /// Converts our Metadata type to GCS JSON object metadata.
-    pub fn from_metadata(key: &ScopedKey, metadata: &Metadata) -> Self {
-        let custom_time = if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-            let expires_at = SystemTime::now() + expires_in;
-            Some(humantime::format_rfc3339_seconds(expires_at).to_string())
-        } else {
-            None
-        };
+    pub fn from_metadata(metadata: &Metadata) -> Self {
+        let mut gcs_object = Self::default();
 
-        // Build GCS metadata combining built-in and custom metadata
-        let mut gcs_metadata = BTreeMap::new();
-        
-        // Add expiration policy if not manual
-        if metadata.expiration_policy != ExpirationPolicy::Manual {
-            gcs_metadata.insert(
-                EXPIRATION_META_KEY.to_string(),
+        // For time-based expiration, set the `customTime` field. The bucket must have a
+        // `daysSinceCustomTime` lifecycle rule configured to delete objects with this field set.
+        // This rule automatically skips objects without `customTime` set.
+        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
+            gcs_object.custom_time = Some(SystemTime::now() + expires_in);
+        }
+
+        if let Some(compression) = metadata.compression {
+            gcs_object.content_encoding = Some(compression.to_string());
+        }
+
+        if metadata.expiration_policy != ExpirationPolicy::default() {
+            gcs_object.metadata.insert(
+                GcsMetaKey::Expiration,
                 metadata.expiration_policy.to_string(),
             );
         }
-        
-        // Add user custom metadata with prefix
+
         for (key, value) in &metadata.custom {
-            gcs_metadata.insert(
-                format!("{}{}", CUSTOM_META_PREFIX, key),
-                value.clone(),
-            );
+            gcs_object
+                .metadata
+                .insert(GcsMetaKey::Custom(key.clone()), value.clone());
         }
 
-        Self {
-            name: key.as_path().to_string(), // TODO: Replace with object name.
-            metadata: if gcs_metadata.is_empty() {
-                None
-            } else {
-                Some(gcs_metadata)
-            },
-            content_encoding: metadata.compression.map(|c| c.as_str().to_string()),
-            custom_time,
-        }
+        gcs_object
     }
 
     /// Converts GCS JSON object metadata to our Metadata type.
-    pub fn to_metadata(&self) -> Result<Metadata> {
-        let empty_map = BTreeMap::new();
-        let gcs_metadata = self.metadata.as_ref().unwrap_or(&empty_map);
+    pub fn into_metadata(mut self) -> Result<Metadata> {
+        let expiration_policy = self
+            .metadata
+            .remove(&GcsMetaKey::Expiration)
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
 
-        let compression = if let Some(ref content_encoding) = self.content_encoding {
-            Some(content_encoding.parse()?)
-        } else {
-            None
-        };
+        let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
 
-        let expiration_policy = if let Some(expiration_str) = gcs_metadata.get(EXPIRATION_META_KEY) {
-            expiration_str.parse()?
-        } else {
-            ExpirationPolicy::Manual
-        };
-
-        // Extract user custom metadata by removing our prefixes
+        // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
-        for (key, value) in gcs_metadata {
-            if let Some(custom_key) = key.strip_prefix(CUSTOM_META_PREFIX) {
-                custom.insert(custom_key.to_string(), value.clone());
-            }
-            // Skip built-in metadata (with BUILTIN_META_PREFIX)
+        for (key, value) in self.metadata {
+            match key {
+                GcsMetaKey::Custom(custom_key) => custom.insert(custom_key, value),
+                GcsMetaKey::Expiration => anyhow::bail!("unexpected expiration metadata"),
+            };
         }
 
         Ok(Metadata {
@@ -112,15 +108,70 @@ impl GcsMetadata {
     }
 }
 
-pub struct GcsJsonApi {
+/// Key for [`GcsObject::metadata`].
+#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
+enum GcsMetaKey {
+    /// Built-in metadata key for [`Metadata::expiration_policy`].
+    Expiration,
+    /// User-defined custom metadata key.
+    Custom(String),
+}
+
+impl std::str::FromStr for GcsMetaKey {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.strip_prefix(BUILTIN_META_PREFIX) {
+            Some("expiration") => return Ok(GcsMetaKey::Expiration),
+            Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
+            None => (), // fallthrough
+        }
+
+        if let Some(key) = s.strip_prefix(CUSTOM_META_PREFIX) {
+            return Ok(GcsMetaKey::Custom(key.to_string()));
+        }
+
+        anyhow::bail!("invalid GCS metadata key format: {s}")
+    }
+}
+
+impl fmt::Display for GcsMetaKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
+            Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GcsMetaKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = Cow::<'de, str>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for GcsMetaKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+pub struct GcsBackend {
     client: reqwest::Client,
-    endpoint: String,
+    endpoint: Url,
     bucket: String,
     token_provider: Option<Arc<dyn gcp_auth::TokenProvider>>,
 }
 
-impl GcsJsonApi {
-    /// Creates a new GCS JSON API backend bound to the given bucket.
+impl GcsBackend {
+    /// Creates an authenticated GCS JSON API backend bound to the given bucket.
     pub async fn new(endpoint: Option<&str>, bucket: &str) -> Result<Self> {
         let (endpoint, token_provider) = match std::env::var("GCS_EMULATOR_HOST").ok() {
             Some(emulator_host) => (emulator_host, None),
@@ -132,46 +183,48 @@ impl GcsJsonApi {
 
         Ok(Self {
             client: reqwest::Client::new(),
-            endpoint,
+            endpoint: endpoint.parse().context("invalid GCS endpoint URL")?,
             bucket: bucket.to_string(),
             token_provider,
         })
     }
 
     /// Creates a new GCS JSON API backend without authentication.
-    pub fn without_token(endpoint: &str, bucket: &str) -> Self {
+    #[cfg(test)]
+    pub fn without_token(endpoint: Url, bucket: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            endpoint: endpoint.to_owned(),
+            endpoint,
             bucket: bucket.to_string(),
             token_provider: None,
         }
     }
 
-    /// Formats the GCS object URL for the given key.
-    /// If `media` is true, returns URL for downloading object data.
-    /// If `media` is false, returns URL for accessing object metadata.
-    fn object_url(&self, key: &ScopedKey, media: bool) -> String {
-        let base_url = format!(
-            "{}/storage/v1/b/{}/o/{}",
-            self.endpoint,
-            self.bucket,
-            urlencoding::encode(&key.as_path().to_string())
-        );
-        
-        if media {
-            format!("{}?alt=media", base_url)
-        } else {
-            base_url
-        }
+    /// Formats the GCS object (metadata) URL for the given key.
+    fn object_url(&self, key: &ScopedKey) -> Result<Url> {
+        let mut url = self.endpoint.clone();
+
+        let path = key.as_path().to_string();
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
+
+        Ok(url)
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, upload_type: &str) -> String {
-        format!(
-            "{}/upload/storage/v1/b/{}/o?uploadType={}",
-            self.endpoint, self.bucket, upload_type
-        )
+    fn upload_url(&self, key: &ScopedKey, upload_type: &str) -> Result<Url> {
+        let mut url = self.endpoint.clone();
+
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
+
+        url.query_pairs_mut()
+            .append_pair("uploadType", upload_type)
+            .append_pair("name", &key.as_path().to_string());
+
+        Ok(url)
     }
 
     /// Creates a request builder with the appropriate authentication.
@@ -184,27 +237,28 @@ impl GcsJsonApi {
         Ok(builder)
     }
 
-    /// Updates metadata for TTI bumping.
-    async fn update_metadata(&self, key: &ScopedKey, metadata: &Metadata) -> Result<()> {
-        let update_data = json!({
-            "customTime": humantime::format_rfc3339_seconds(SystemTime::now() + metadata.expiration_policy.expires_in().unwrap_or_default()).to_string()
-        });
+    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<()> {
+        #[derive(Debug, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CustomTimeRequest {
+            #[serde(with = "humantime_serde")]
+            custom_time: SystemTime,
+        }
 
-        self.request(Method::PATCH, self.object_url(key, false))
+        self.request(Method::PATCH, object_url)
             .await?
-            .header("Content-Type", "application/json")
-            .json(&update_data)
+            .json(&CustomTimeRequest { custom_time })
             .send()
             .await?
             .error_for_status()
-            .context("failed to update object metadata")?;
+            .context("failed to update expiration time for object with TTI")?;
 
         Ok(())
     }
 }
 
-impl std::fmt::Debug for GcsJsonApi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for GcsBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcsJsonApi")
             .field("endpoint", &self.endpoint)
             .field("bucket", &self.bucket)
@@ -213,14 +267,14 @@ impl std::fmt::Debug for GcsJsonApi {
 }
 
 #[async_trait::async_trait]
-impl Backend for GcsJsonApi {
+impl Backend for GcsBackend {
     async fn put_object(
         &self,
         key: &ScopedKey,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
-        let gcs_metadata = GcsMetadata::from_metadata(key, metadata);
+        let gcs_metadata = GcsObject::from_metadata(metadata);
 
         let form = reqwest::multipart::Form::new()
             .text("metadata", serde_json::to_string(&gcs_metadata)?)
@@ -229,7 +283,7 @@ impl Backend for GcsJsonApi {
                 reqwest::multipart::Part::stream(Body::wrap_stream(stream)),
             );
 
-        self.request(Method::POST, self.upload_url("multipart"))
+        self.request(Method::POST, self.upload_url(key, "multipart")?)
             .await?
             .multipart(form)
             .send()
@@ -241,9 +295,9 @@ impl Backend for GcsJsonApi {
     }
 
     async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
-        // First, get object metadata
+        let object_url = self.object_url(key)?;
         let metadata_response = self
-            .request(Method::GET, self.object_url(key, false))
+            .request(Method::GET, object_url.clone())
             .await?
             .send()
             .await?;
@@ -256,27 +310,30 @@ impl Backend for GcsJsonApi {
             .error_for_status()
             .context("failed to get object metadata")?;
 
-        let gcs_metadata: GcsMetadata = metadata_response
+        let gcs_metadata: GcsObject = metadata_response
             .json()
             .await
             .context("failed to parse object metadata")?;
 
-        let metadata = gcs_metadata.to_metadata()?;
+        let custom_time = gcs_metadata.custom_time;
+        let metadata = gcs_metadata.into_metadata()?;
 
-        // Handle TTI bumping
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
-            && let Some(custom_time_str) = &gcs_metadata.custom_time
-            && let Ok(expire_at) = humantime::parse_rfc3339(custom_time_str)
+            && let Some(expire_at) = custom_time
         {
-            let access_time = SystemTime::now();
-            if expire_at < access_time + tti - TTI_DEBOUNCE {
-                self.update_metadata(key, &metadata).await?;
+            // Only bump if the difference in deadlines meets a minimum threshold
+            let new_expire_at = SystemTime::now() + tti;
+            if expire_at < new_expire_at - TTI_DEBOUNCE {
+                self.update_custom_time(object_url.clone(), new_expire_at)
+                    .await?;
             }
         }
 
-        // Get object data
+        let mut download_url = object_url;
+        download_url.query_pairs_mut().append_pair("alt", "media");
         let payload_response = self
-            .request(Method::GET, self.object_url(key, true))
+            .request(Method::GET, download_url)
             .await?
             .send()
             .await?
@@ -293,7 +350,7 @@ impl Backend for GcsJsonApi {
 
     async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
         let response = self
-            .request(Method::DELETE, self.object_url(key, false))
+            .request(Method::DELETE, self.object_url(key)?)
             .await?
             .send()
             .await?;
@@ -318,8 +375,20 @@ mod tests {
     use super::*;
     use crate::ObjectKey;
 
-    fn create_test_backend() -> GcsJsonApi {
-        GcsJsonApi::without_token("http://localhost:8087", "test-bucket")
+    fn create_test_backend() -> GcsBackend {
+        GcsBackend::without_token("http://localhost:8087".parse().unwrap(), "test-bucket")
+    }
+
+    fn make_stream(contents: &[u8]) -> BackendStream {
+        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
+    }
+
+    async fn read_to_vec(mut stream: BackendStream) -> Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        while let Some(chunk) = stream.try_next().await? {
+            payload.extend(&chunk);
+        }
+        Ok(payload)
     }
 
     fn make_key() -> ScopedKey {
@@ -334,21 +403,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metadata_conversion() {
-        let key = make_key();
+    async fn test_roundtrip() -> Result<()> {
+        let backend = create_test_backend();
+
+        let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
         };
 
-        let gcs_metadata = GcsMetadata::from_metadata(&key, &metadata);
-        assert_eq!(gcs_metadata.name, key.as_path().to_string());
-        assert_eq!(gcs_metadata.metadata.as_ref().unwrap()["hello"], "world");
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
 
-        let converted_back = gcs_metadata.to_metadata().unwrap();
-        assert_eq!(converted_back.custom, metadata.custom);
-        assert_eq!(converted_back.compression, metadata.compression);
-        assert_eq!(converted_back.expiration_policy, metadata.expiration_policy);
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
     }
 }

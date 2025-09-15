@@ -10,7 +10,7 @@ bytes = { workspace = true }
 bytesize = { version = "2.0.1", features = ["serde"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
-humantime-serde = "1.1.1"
+humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-client = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
