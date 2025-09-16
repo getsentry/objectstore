@@ -15,7 +15,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::{ObjectPath, StorageService};
+use objectstore_service::{ObjectKey, ScopedKey, StorageService};
 use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
 use serde::{Deserialize, Serialize};
@@ -44,10 +44,9 @@ fn make_app(state: ServiceState) -> axum::Router {
         .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
         .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
 
-    let routes = Router::new().route("/", put(put_object_nokey)).route(
-        "/{*key}",
-        put(put_object).get(get_object).delete(delete_object),
-    );
+    let routes = Router::new()
+        .route("/", put(put_object))
+        .route("/{*key}", get(get_object).delete(delete_object));
 
     routes.layer(middleware).with_state(state)
 }
@@ -108,44 +107,19 @@ struct PutBlobResponse {
 }
 
 #[tracing::instrument(level = "trace", skip(state, body))]
-async fn put_object_nokey(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    headers: HeaderMap,
-    body: Body,
-) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key: uuid::Uuid::new_v4().to_string(),
-    };
-    let metadata = Metadata::from_headers(&headers, "")?;
-
-    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
-
-    Ok(Json(PutBlobResponse {
-        key: key.key.to_string(),
-    }))
-}
-
-#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
     headers: HeaderMap,
     body: Body,
 ) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
+    let key = state
+        .service
+        .put_object(params.usecase, params.scope, &metadata, stream)
+        .await?;
 
     Ok(Json(PutBlobResponse {
         key: key.key.to_string(),
@@ -158,13 +132,9 @@ async fn get_object(
     Query(params): Query<ContextParams>,
     Path(key): Path<String>,
 ) -> error::Result<Response> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
+    let key = ScopedKey::from_parts(params.usecase, params.scope, &key)?;
 
-    let Some((metadata, stream)) = state.service.get_object(&path).await? else {
+    let Some((metadata, stream)) = state.service.get_object(&key).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -178,13 +148,9 @@ async fn delete_object(
     Query(params): Query<ContextParams>,
     Path(key): Path<String>,
 ) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
+    let key = ScopedKey::from_parts(params.usecase, params.scope, &key)?;
 
-    state.service.delete_object(&path).await?;
+    state.service.delete_object(&key).await?;
 
     Ok(())
 }

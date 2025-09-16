@@ -18,7 +18,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 
-use crate::ObjectPath;
+use crate::ScopedKey;
 use crate::backend::{Backend, BackendStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
@@ -205,11 +205,11 @@ impl BigTableBackend {
 impl Backend for BigTableBackend {
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        key: &ScopedKey,
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> Result<()> {
-        let path = path.to_string().into_bytes();
+        let path = key.as_path().to_string().into_bytes();
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
@@ -253,10 +253,10 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
-        let row_path = path.to_string().into_bytes();
+    async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
+        let path = key.as_path().to_string().into_bytes();
         let rows = v2::RowSet {
-            row_keys: vec![row_path.clone()],
+            row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
@@ -275,7 +275,7 @@ impl Backend for BigTableBackend {
             return Ok(None);
         };
 
-        debug_assert!(read_path == row_path, "Row key mismatch");
+        debug_assert!(read_path == path, "Row key mismatch");
         let mut value = Bytes::new();
         let mut metadata = Metadata::default();
         let mut expire_at = None;
@@ -311,7 +311,7 @@ impl Backend for BigTableBackend {
                 let value = Bytes::clone(&value);
                 let stream = stream::once(async { Ok(value) }).boxed();
                 // TODO: Avoid the serialize roundtrip for metadata
-                self.put_object(path, &metadata, stream).await?;
+                self.put_object(key, &metadata, stream).await?;
             }
         }
 
@@ -319,8 +319,8 @@ impl Backend for BigTableBackend {
         Ok(Some((metadata, stream)))
     }
 
-    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
-        let path = path.to_string().into_bytes();
+    async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
+        let path = key.as_path().to_string().into_bytes();
         self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})])
             .await?;
         Ok(())
@@ -352,7 +352,7 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use uuid::Uuid;
+    use crate::ObjectKey;
 
     use super::*;
 
@@ -384,11 +384,11 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_key() -> ObjectPath {
-        ObjectPath {
+    fn make_key() -> ScopedKey {
+        ScopedKey {
             usecase: "testing".into(),
             scope: "testing".into(),
-            key: Uuid::new_v4().to_string(),
+            key: ObjectKey::for_backend(0),
         }
     }
 

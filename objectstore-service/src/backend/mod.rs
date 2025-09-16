@@ -15,7 +15,7 @@ pub use gcs::GcsBackend;
 pub use local_fs::LocalFs;
 pub use s3_compatible::S3Compatible;
 
-use crate::ObjectPath;
+use crate::ScopedKey;
 
 pub type BoxedBackend = Box<dyn Backend>;
 pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
@@ -24,13 +24,13 @@ pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 pub trait Backend: Debug + Send + Sync + 'static {
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        key: &ScopedKey,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()>;
     async fn get_object(
         &self,
-        path: &ObjectPath,
+        key: &ScopedKey,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>>;
-    async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()>;
+    async fn delete_object(&self, key: &ScopedKey) -> anyhow::Result<()>;
 }

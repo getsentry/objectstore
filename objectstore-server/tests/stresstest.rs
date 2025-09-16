@@ -59,7 +59,7 @@ async fn test_basic() {
         .action_weights(8, 1, 1)
         .build();
 
-    stresstest::run(remote, vec![workload], Duration::from_secs(2))
+    stresstest::run(remote, vec![workload], Duration::from_secs(5))
         .await
         .expect("Failed to run stress test");
 
