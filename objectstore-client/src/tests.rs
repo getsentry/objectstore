@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +8,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{Router, routing};
 use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
-use reqwest::{StatusCode, header};
+use objectstore_types::Metadata;
+use reqwest::StatusCode;
 use uuid::Uuid;
 
 use crate::get::GetResult;
@@ -80,6 +81,44 @@ async fn deletes_stores_stuff() {
     assert!(response.is_none());
 }
 
+#[tokio::test]
+async fn patch_updates_metadata() {
+    let server = TestServer::new();
+    let client = ClientBuilder::new(&server.url("/"), "test")
+        .unwrap()
+        .for_organization(12345);
+
+    let body = "oh hai!";
+    let mut full_metadata = BTreeMap::from_iter([
+        ("123".to_owned(), "456".to_owned()),
+        ("abc".to_owned(), "def".to_owned()),
+    ]);
+    let stored_id = client
+        .put(body)
+        .set_metadata(full_metadata.clone())
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    // Our delta only updates "abc" and leaves "123" alone.
+    let metadata_delta = BTreeMap::from_iter([("abc".to_owned(), "xyz".to_owned())]);
+    full_metadata.insert("abc".to_owned(), "xyz".to_owned());
+    client
+        .patch(&stored_id)
+        .set_metadata(metadata_delta)
+        .send()
+        .await
+        .unwrap();
+
+    // The metadata we get back should have the new "abc" value and the original "123" value.
+    let GetResult {
+        metadata,
+        stream: _stream,
+    } = client.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(metadata.custom, full_metadata);
+}
+
 #[derive(Debug)]
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
@@ -90,31 +129,26 @@ impl TestServer {
     /// Creates a new Server with a special testing-focused router,
     /// as described in the main [`Server`] docs.
     pub fn new() -> Self {
-        type TestState = Arc<Mutex<HashMap<String, (Option<String>, Bytes)>>>;
+        type TestState = Arc<Mutex<HashMap<String, (Bytes, Metadata)>>>;
         let state: TestState = Default::default();
 
         async fn put(State(state): State<TestState>, headers: HeaderMap, body: Bytes) -> Response {
-            let content_encoding = headers
-                .get(header::CONTENT_ENCODING)
-                .and_then(|h| h.to_str().ok().map(ToString::to_string));
             let key = Uuid::now_v7().to_string();
 
             let mut state = state.lock().unwrap();
-            state.insert(key.clone(), (content_encoding, body));
+            let metadata = Metadata::from_headers(&headers, "").unwrap();
+            state.insert(key.clone(), (body, metadata));
 
             format!(r#"{{"key":{key:?}}}"#).into_response()
         }
 
         async fn get(State(state): State<TestState>, Path(key): Path<String>) -> Response {
             let state = state.lock().unwrap();
-            let Some((content_encoding, body)) = state.get(&key) else {
+            let Some((body, metadata)) = state.get(&key) else {
                 return StatusCode::NOT_FOUND.into_response();
             };
 
-            let mut headers = HeaderMap::new();
-            if let Some(content_encoding) = content_encoding {
-                headers.append(header::CONTENT_ENCODING, content_encoding.parse().unwrap());
-            }
+            let headers = metadata.to_headers("", false).unwrap();
             (headers, body.clone()).into_response()
         }
 
@@ -123,9 +157,21 @@ impl TestServer {
             state.remove(&key);
         }
 
+        async fn patch(
+            State(state): State<TestState>,
+            Path(key): Path<String>,
+            headers: HeaderMap,
+        ) {
+            let mut state = state.lock().unwrap();
+            let (body, mut current_metadata) = state.remove(&key).unwrap();
+            let new_metadata = Metadata::from_headers(&headers, "").unwrap();
+            current_metadata.update(&new_metadata);
+            state.insert(key.clone(), (body, current_metadata));
+        }
+
         let router = Router::new()
             .route("/", routing::put(put))
-            .route("/{*key}", routing::get(get).delete(delete))
+            .route("/{*key}", routing::get(get).delete(delete).patch(patch))
             .with_state(state);
         Self::with_router(router)
     }
