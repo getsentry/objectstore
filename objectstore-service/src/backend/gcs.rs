@@ -10,8 +10,8 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
+use crate::ObjectPath;
 use crate::backend::{Backend, BackendStream};
-use crate::metadata::ScopedKey;
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -209,10 +209,10 @@ impl GcsBackend {
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
-    fn object_url(&self, key: &ScopedKey) -> Result<Url> {
+    fn object_url(&self, path: &ObjectPath) -> Result<Url> {
         let mut url = self.endpoint.clone();
 
-        let path = key.as_path().to_string();
+        let path = path.to_string();
         url.path_segments_mut()
             .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
@@ -221,7 +221,7 @@ impl GcsBackend {
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, key: &ScopedKey, upload_type: &str) -> Result<Url> {
+    fn upload_url(&self, path: &ObjectPath, upload_type: &str) -> Result<Url> {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
@@ -230,7 +230,7 @@ impl GcsBackend {
 
         url.query_pairs_mut()
             .append_pair("uploadType", upload_type)
-            .append_pair("name", &key.as_path().to_string());
+            .append_pair("name", &path.to_string());
 
         Ok(url)
     }
@@ -278,7 +278,7 @@ impl fmt::Debug for GcsBackend {
 impl Backend for GcsBackend {
     async fn put_object(
         &self,
-        key: &ScopedKey,
+        path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
@@ -303,7 +303,7 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        self.request(Method::POST, self.upload_url(key, "multipart")?)
+        self.request(Method::POST, self.upload_url(path, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
@@ -315,8 +315,8 @@ impl Backend for GcsBackend {
         Ok(())
     }
 
-    async fn get_object(&self, key: &ScopedKey) -> Result<Option<(Metadata, BackendStream)>> {
-        let object_url = self.object_url(key)?;
+    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+        let object_url = self.object_url(path)?;
         let metadata_response = self
             .request(Method::GET, object_url.clone())
             .await?
@@ -376,9 +376,9 @@ impl Backend for GcsBackend {
         Ok(Some((metadata, stream)))
     }
 
-    async fn delete_object(&self, key: &ScopedKey) -> Result<()> {
+    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         let response = self
-            .request(Method::DELETE, self.object_url(key)?)
+            .request(Method::DELETE, self.object_url(path)?)
             .await?
             .send()
             .await?;
@@ -398,8 +398,9 @@ impl Backend for GcsBackend {
 mod tests {
     use std::collections::BTreeMap;
 
+    use uuid::Uuid;
+
     use super::*;
-    use crate::ObjectKey;
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
     // automatically in CI.
@@ -422,11 +423,11 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_key() -> ScopedKey {
-        ScopedKey {
+    fn make_key() -> ObjectPath {
+        ObjectPath {
             usecase: "testing".into(),
             scope: "testing".into(),
-            key: ObjectKey::for_backend(0),
+            key: Uuid::new_v4().to_string(),
         }
     }
 
