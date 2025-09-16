@@ -16,18 +16,18 @@ use super::{Backend, BackendStream};
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 #[derive(Debug)]
-pub struct LocalFs {
+pub struct LocalFsBackend {
     path: PathBuf,
 }
 
-impl LocalFs {
+impl LocalFsBackend {
     pub fn new(path: &Path) -> Self {
         Self { path: path.into() }
     }
 }
 
 #[async_trait::async_trait]
-impl Backend for LocalFs {
+impl Backend for LocalFsBackend {
     async fn put_object(
         &self,
         path: &ObjectPath,
@@ -129,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn stores_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFs::new(tempdir.path());
+        let backend = LocalFsBackend::new(tempdir.path());
 
         let key = ObjectPath {
             usecase: "testing".into(),

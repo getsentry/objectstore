@@ -24,6 +24,7 @@ pub enum Storage {
         bucket: String,
     },
     BigTable {
+        endpoint: Option<String>,
         project_id: String,
         instance_name: String,
         table_name: String,

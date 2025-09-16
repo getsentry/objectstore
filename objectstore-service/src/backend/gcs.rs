@@ -181,12 +181,9 @@ pub struct GcsBackend {
 impl GcsBackend {
     /// Creates an authenticated GCS JSON API backend bound to the given bucket.
     pub async fn new(endpoint: Option<&str>, bucket: &str) -> Result<Self> {
-        let (endpoint, token_provider) = match std::env::var("STORAGE_EMULATOR_HOST").ok() {
+        let (endpoint, token_provider) = match endpoint {
             Some(emulator_host) => (emulator_host, None),
-            None => (
-                endpoint.unwrap_or(DEFAULT_ENDPOINT).to_owned(),
-                Some(gcp_auth::provider().await?),
-            ),
+            None => (DEFAULT_ENDPOINT, Some(gcp_auth::provider().await?)),
         };
 
         Ok(Self {
@@ -195,17 +192,6 @@ impl GcsBackend {
             bucket: bucket.to_string(),
             token_provider,
         })
-    }
-
-    /// Creates a new GCS JSON API backend without authentication.
-    #[cfg(test)]
-    pub fn without_token(endpoint: Url, bucket: &str) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            endpoint,
-            bucket: bucket.to_string(),
-            token_provider: None,
-        }
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
@@ -407,8 +393,8 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    fn create_test_backend() -> GcsBackend {
-        GcsBackend::without_token("http://localhost:8087".parse().unwrap(), "test-bucket")
+    async fn create_test_backend() -> Result<GcsBackend> {
+        GcsBackend::new(Some("http://localhost:8087"), "test-bucket").await
     }
 
     fn make_stream(contents: &[u8]) -> BackendStream {
@@ -433,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let metadata = Metadata {
@@ -458,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_nonexistent() -> Result<()> {
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let result = backend.get_object(&path).await?;
@@ -469,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_nonexistent() -> Result<()> {
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         backend.delete_object(&path).await?;
@@ -479,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_overwrite() -> Result<()> {
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let metadata = Metadata {
@@ -514,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_after_delete() -> Result<()> {
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let metadata = Metadata {
@@ -540,7 +526,7 @@ mod tests {
         // NB: We create a TTL that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let metadata = Metadata {
@@ -564,7 +550,7 @@ mod tests {
         // NB: We create a TTI that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 
-        let backend = create_test_backend();
+        let backend = create_test_backend().await?;
 
         let path = make_key();
         let metadata = Metadata {

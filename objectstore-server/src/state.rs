@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use objectstore_service::{BigTableConfig, StorageConfig, StorageService};
+use objectstore_service::{StorageConfig, StorageService};
 
 use crate::config::{Config, Storage};
 
@@ -32,13 +32,15 @@ fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
             bucket,
         },
         Storage::BigTable {
+            endpoint,
             project_id,
             instance_name,
             table_name,
-        } => StorageConfig::BigTable(BigTableConfig {
-            project_id: project_id.clone(),
-            instance_name: instance_name.clone(),
-            table_name: table_name.clone(),
-        }),
+        } => StorageConfig::BigTable {
+            endpoint: endpoint.as_deref(),
+            project_id,
+            instance_name,
+            table_name,
+        },
     }
 }

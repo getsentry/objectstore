@@ -19,7 +19,6 @@ use std::time::Instant;
 
 use crate::backend::{BackendStream, BoxedBackend};
 
-pub use backend::BigTableConfig;
 pub use path::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -58,12 +57,25 @@ pub enum StorageConfig<'a> {
     /// Use Google Cloud Storage as storage backend.
     Gcs {
         /// Optional endpoint URL for the S3-compatible storage.
+        ///
+        /// Assumes an emulator without authentication if set.
         endpoint: Option<&'a str>,
         /// The name of the bucket to use.
         bucket: &'a str,
     },
     /// Use BigTable as storage backend.
-    BigTable(BigTableConfig),
+    BigTable {
+        /// Optional endpoint URL for the BigTable storage.
+        ///
+        /// Assumes an emulator without authentication if set.
+        endpoint: Option<&'a str>,
+        /// The Google Cloud project ID.
+        project_id: &'a str,
+        /// The BigTable instance name.
+        instance_name: &'a str,
+        /// The BigTable table name.
+        table_name: &'a str,
+    },
 }
 
 impl StorageService {
@@ -160,14 +172,21 @@ impl StorageService {
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
     Ok(match config {
-        StorageConfig::FileSystem { path } => Box::new(backend::LocalFs::new(path)),
-        StorageConfig::S3Compatible { endpoint, bucket } => {
-            Box::new(backend::S3Compatible::without_token(endpoint, bucket))
-        }
+        StorageConfig::FileSystem { path } => Box::new(backend::LocalFsBackend::new(path)),
+        StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
+            backend::S3CompatibleBackend::without_token(endpoint, bucket),
+        ),
         StorageConfig::Gcs { endpoint, bucket } => {
             Box::new(backend::GcsBackend::new(endpoint, bucket).await?)
         }
-        StorageConfig::BigTable(config) => Box::new(backend::BigTableBackend::new(config).await?),
+        StorageConfig::BigTable {
+            endpoint,
+            project_id,
+            instance_name,
+            table_name,
+        } => Box::new(
+            backend::BigTableBackend::new(endpoint, project_id, instance_name, table_name).await?,
+        ),
     })
 }
 
@@ -209,12 +228,11 @@ mod tests {
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
-    #[ignore = "gcs credentials are not yet set up in CI"]
     #[tokio::test]
     async fn works_with_gcs() {
         let config = StorageConfig::Gcs {
-            endpoint: None,
-            bucket: "sbx-warp-benchmark-bucket",
+            endpoint: Some("http://localhost:8087"),
+            bucket: "test-bucket", // aligned with the env var in devservices and CI
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
