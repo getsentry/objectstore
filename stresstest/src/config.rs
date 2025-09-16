@@ -19,11 +19,17 @@ pub struct Workload {
     pub name: String,
     #[serde(default)]
     pub concurrency: usize,
+    #[serde(default = "default_organizations")]
+    pub organizations: u64,
     #[serde(default)]
     pub mode: WorkloadMode,
     pub file_sizes: FileSizes,
     #[serde(default)]
     pub actions: Actions,
+}
+
+fn default_organizations() -> u64 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
