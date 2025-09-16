@@ -40,9 +40,6 @@ pub struct Config {
     pub high_volume_storage: Storage,
     pub long_term_storage: Storage,
 
-    // authentication config
-    pub jwt_secret: String,
-
     // others
     pub sentry_dsn: Option<String>,
     pub datadog_key: Option<String>,
@@ -60,8 +57,6 @@ impl Default for Config {
             long_term_storage: Storage::FileSystem {
                 path: PathBuf::from("data"),
             },
-
-            jwt_secret: String::new(),
 
             sentry_dsn: None,
             datadog_key: None,
