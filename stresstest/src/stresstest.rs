@@ -19,8 +19,17 @@ use crate::workload::{Action, Workload, WorkloadMode};
 ///
 /// The function runs all workloads concurrently, then prints metrics and finally deletes all
 /// objects from the remote.
-pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duration) -> Result<()> {
+pub async fn run(
+    mut remote: HttpRemote,
+    workloads: Vec<Workload>,
+    duration: Duration,
+) -> Result<()> {
+    for workload in &workloads {
+        remote.register_usecase(&workload.name);
+    }
+
     let remote = Arc::new(remote);
+
     // run the workloads concurrently
     let tasks: Vec<_> = workloads
         .into_iter()
@@ -76,12 +85,12 @@ pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duratio
     let start = Instant::now();
     let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
     futures::stream::iter(files_to_cleanup)
-        .for_each_concurrent(max_concurrency, |external_id| {
+        .for_each_concurrent(max_concurrency, |(usecase, organization_id, object_key)| {
             let remote = remote.clone();
             let cleanup_timing = cleanup_timing.clone();
             async move {
                 let start = Instant::now();
-                remote.delete(external_id).await;
+                remote.delete(&usecase, organization_id, &object_key).await;
                 cleanup_timing
                     .lock()
                     .unwrap()
@@ -147,12 +156,16 @@ async fn run_workload(
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 };
 
+
                 let task = async move {
                     let start = Instant::now();
                     match action {
                         Action::Write(internal_id, payload) => {
                             let file_size = payload.len;
-                            let external_id = remote.write(payload).await;
+                            let usecase = workload.lock().unwrap().name.clone();
+                            let organization_id = workload.lock().unwrap().next_organization_id();
+                            let object_key = remote.write(&usecase, organization_id, payload).await;
+                            let external_id = (usecase, organization_id, object_key);
                             workload.lock().unwrap().push_file(internal_id, external_id);
                             let mut metrics = metrics.lock().unwrap();
                             metrics.write_timing.add(start.elapsed().as_secs_f64());
@@ -161,14 +174,16 @@ async fn run_workload(
                         }
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
-                            remote.read(&external_id, payload).await;
+                            let (usecase, organization_id, object_key) = &external_id;
+                            remote.read(usecase, *organization_id, object_key, payload).await;
                             workload.lock().unwrap().push_file(internal_id, external_id);
                             let mut metrics = metrics.lock().unwrap();
                             metrics.read_timing.add(start.elapsed().as_secs_f64());
                             metrics.bytes_read += file_size;
                         }
                         Action::Delete(external_id) => {
-                            remote.delete(external_id).await;
+                            let (usecase, organization_id, object_key) = &external_id;
+                            remote.delete(usecase, *organization_id, object_key).await;
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }

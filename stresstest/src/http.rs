@@ -1,5 +1,7 @@
 //! Contains a remote implementation using HTTP to interact with objectstore.
 
+use std::collections::BTreeMap;
+
 use futures::StreamExt;
 use objectstore_client::{Client, ClientBuilder, GetResult};
 use tokio::io::AsyncReadExt;
@@ -10,23 +12,29 @@ use crate::workload::Payload;
 /// A remote implementation using HTTP to interact with objectstore.
 #[derive(Debug)]
 pub struct HttpRemote {
-    /// The Storage Client used to talk to our service.
-    pub client: Client,
+    remote: String,
+    builders: BTreeMap<String, ClientBuilder>,
 }
 
 impl HttpRemote {
     /// Creates a new `HttpRemote` instance with the given remote URL and a default client.
     pub fn new(remote: &str) -> Self {
-        let client = ClientBuilder::new(remote, "stresstest")
-            .unwrap()
-            .for_organization(12345);
-        Self { client }
+        Self {
+            remote: remote.to_owned(),
+            builders: BTreeMap::new(),
+        }
     }
 
-    pub(crate) async fn write(&self, payload: Payload) -> String {
+    pub(crate) async fn write(
+        &self,
+        usecase: &str,
+        organization_id: u64,
+        payload: Payload,
+    ) -> String {
+        let client = self.client(usecase, organization_id);
         let stream = ReaderStream::new(payload).boxed();
 
-        self.client
+        client
             .put_stream(stream)
             .compression(None)
             .send()
@@ -35,8 +43,15 @@ impl HttpRemote {
             .key
     }
 
-    pub(crate) async fn read(&self, key: &str, mut payload: Payload) {
-        let GetResult { stream, .. } = self.client.get(key).send().await.unwrap().unwrap();
+    pub(crate) async fn read(
+        &self,
+        usecase: &str,
+        organization_id: u64,
+        key: &str,
+        mut payload: Payload,
+    ) {
+        let client = self.client(usecase, organization_id);
+        let GetResult { stream, .. } = client.get(key).send().await.unwrap().unwrap();
         let mut reader = StreamReader::new(stream);
 
         // TODO: both of these are currently buffering in-memory. we should use streaming here as well.
@@ -50,7 +65,20 @@ impl HttpRemote {
         }
     }
 
-    pub(crate) async fn delete(&self, key: String) {
-        self.client.delete(&key).await.unwrap();
+    pub(crate) async fn delete(&self, usecase: &str, organization_id: u64, key: &str) {
+        let client = self.client(usecase, organization_id);
+        client.delete(key).await.unwrap();
+    }
+
+    /// Registers a new usecase that can be used by the workloads.
+    pub fn register_usecase(&mut self, usecase: &str) {
+        let builder = ClientBuilder::new(&self.remote, usecase).unwrap();
+        self.builders.insert(usecase.to_owned(), builder);
+    }
+
+    fn client(&self, usecase: &str, organization_id: u64) -> Client {
+        // NB: Reuse the organization ID as project ID to create unique projects. Right now, we do
+        // not benefit from simulating multiple projects per org.
+        self.builders[usecase].for_project(organization_id, organization_id)
     }
 }

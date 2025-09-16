@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|w| {
             Workload::builder(w.name)
                 .concurrency(w.concurrency)
+                .organizations(w.organizations)
                 .mode(w.mode)
                 .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
                 .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)

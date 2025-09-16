@@ -33,6 +33,7 @@ pub enum WorkloadMode {
 pub struct WorkloadBuilder {
     name: String,
     concurrency: usize,
+    organizations: u64,
     mode: WorkloadMode,
     seed: u64,
 
@@ -48,6 +49,12 @@ impl WorkloadBuilder {
     /// The maximum number of concurrent operations that can be performed within this workload.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency;
+        self
+    }
+
+    /// The number of organizations to distribute the workload across.
+    pub fn organizations(mut self, organizations: u64) -> Self {
+        self.organizations = organizations;
         self
     }
 
@@ -89,6 +96,7 @@ impl WorkloadBuilder {
         Workload {
             name: self.name,
             concurrency: self.concurrency,
+            organizations: self.organizations,
             mode: self.mode,
 
             rng,
@@ -117,6 +125,8 @@ pub struct Workload {
     pub(crate) name: String,
     /// The maximum number of concurrent operations that can be performed within this workload.
     pub(crate) concurrency: usize,
+    /// The number of organizations to distribute the workload across.
+    pub(crate) organizations: u64,
     /// The target throughput for the workload, in bytes per second. Overrides concurrency.
     pub(crate) mode: WorkloadMode,
 
@@ -140,6 +150,7 @@ impl Workload {
         WorkloadBuilder {
             name: name.into(),
             concurrency: available_parallelism().unwrap().get(),
+            organizations: 1,
             mode: WorkloadMode::default(),
             seed: rand::random(),
 
@@ -233,6 +244,10 @@ impl Workload {
         }
     }
 
+    pub(crate) fn next_organization_id(&mut self) -> u64 {
+        self.rng.next_u64() % self.organizations
+    }
+
     /// Adds a file to the internal store, so it can be yielded for reads or deletes.
     ///
     /// This function has to be called for files when a write or read has completed.
@@ -262,8 +277,9 @@ impl fmt::Display for InternalId {
 
 /// Unique identifier for an object in the remote storage.
 ///
-/// These identifiers map to [`InternalId`]s.
-pub type ExternalId = String;
+/// The identifier consists of the usecase, organization ID and the object key. These key maps to
+/// [`InternalId`].
+pub type ExternalId = (String, u64, String);
 
 /// An action that can be performed by the workload.
 #[derive(Debug)]
