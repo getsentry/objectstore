@@ -378,6 +378,25 @@ impl Backend for GcsBackend {
 
         Ok(())
     }
+
+    async fn patch_object(&self, path: &ObjectPath, metadata: &Metadata) -> Result<()> {
+        let gcs_metadata = GcsObject::from_metadata(metadata);
+        let response = self
+            .request(Method::PATCH, self.object_url(path)?)
+            .await?
+            .json(&gcs_metadata)
+            .send()
+            .await?;
+
+        // Do not error for objects that do not exist
+        if response.status() != StatusCode::NOT_FOUND {
+            response
+                .error_for_status()
+                .context("failed to delete object")?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

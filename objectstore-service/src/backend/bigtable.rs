@@ -325,6 +325,59 @@ impl Backend for BigTableBackend {
             .await?;
         Ok(())
     }
+
+    async fn patch_object(&self, path: &ObjectPath, new_metadata: &Metadata) -> Result<()> {
+        let row_path = path.to_string().into_bytes();
+        let rows = v2::RowSet {
+            row_keys: vec![row_path.clone()],
+            row_ranges: vec![],
+        };
+        let row_filter = v2::RowFilter {
+            filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                COLUMN_METADATA.to_owned(),
+            )),
+        };
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(rows),
+            rows_limit: 1,
+            filter: Some(row_filter),
+            ..Default::default()
+        };
+
+        let mut client = self.bigtable.client();
+        let response = client.read_rows(request).await?;
+        debug_assert!(response.len() <= 1, "Expected at most one row");
+
+        // Do not error for objects that do not exist
+        let Some((read_path, cells)) = response.into_iter().next() else {
+            return Ok(());
+        };
+        debug_assert!(read_path == row_path, "Row key mismatch");
+
+        debug_assert!(cells.len() == 1, "Only a single cell should be returned");
+        let Some(cell) = cells.into_iter().next() else {
+            return Ok(());
+        };
+        debug_assert!(cell.qualifier == COLUMN_METADATA, "Expected metadata cell");
+
+        let mut current_metadata: Metadata =
+            bincode::serde::decode_from_slice(&cell.value, BC_CONFIG)?.0;
+        current_metadata.update(new_metadata);
+
+        let mutations = [Mutation::SetCell(SetCell {
+            family_name: cell.family_name,
+            column_qualifier: COLUMN_METADATA.to_owned(),
+            timestamp_micros: cell.timestamp_micros,
+            // TODO: Do we really want bincode here?
+            value: bincode::serde::encode_to_vec(current_metadata, BC_CONFIG)?,
+        })];
+
+        self.mutate(row_path, mutations).await?;
+
+        Ok(())
+    }
 }
 
 /// Converts the given TTL duration to a microsecond-precision unix timestamp.

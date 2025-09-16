@@ -33,4 +33,5 @@ pub trait Backend: Debug + Send + Sync + 'static {
         path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>>;
     async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()>;
+    async fn patch_object(&self, path: &ObjectPath, metdata: &Metadata) -> anyhow::Result<()>;
 }

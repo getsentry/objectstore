@@ -164,8 +164,23 @@ impl StorageService {
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+        // TODO: Don't evaluate `res2` if `res1` succeeds
         let res1 = self.0.high_volume_backend.delete_object(path).await;
         let res2 = self.0.long_term_backend.delete_object(path).await;
+        res1.or(res2)
+    }
+
+    /// Updates the metadata for an object stored at the given key, if it exists.
+    ///
+    /// To erase a specific metadata field, set its value to the empty string.
+    pub async fn patch_object(&self, path: &ObjectPath, metadata: &Metadata) -> anyhow::Result<()> {
+        // TODO: Don't evaluate `res2` if `res1` succeeds
+        let res1 = self
+            .0
+            .high_volume_backend
+            .patch_object(path, metadata)
+            .await;
+        let res2 = self.0.long_term_backend.patch_object(path, metadata).await;
         res1.or(res2)
     }
 }

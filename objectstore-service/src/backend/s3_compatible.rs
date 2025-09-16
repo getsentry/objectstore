@@ -198,4 +198,18 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         Ok(())
     }
+
+    // S3 doesn't support updating metadata without creating a new object
+    async fn patch_object(&self, path: &ObjectPath, metadata: &Metadata) -> Result<()> {
+        let Some((mut current_metadata, current_data)) = self.get_object(path).await? else {
+            return Ok(());
+        };
+
+        current_metadata.update(metadata);
+
+        self.put_object(path, &current_metadata, current_data)
+            .await?;
+
+        Ok(())
+    }
 }

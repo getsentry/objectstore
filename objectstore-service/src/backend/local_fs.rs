@@ -110,6 +110,19 @@ impl Backend for LocalFsBackend {
         let path = self.path.join(path.to_string());
         Ok(tokio::fs::remove_file(path).await?)
     }
+
+    async fn patch_object(&self, path: &ObjectPath, metadata: &Metadata) -> anyhow::Result<()> {
+        let Some((mut current_metadata, current_data)) = self.get_object(path).await? else {
+            return Ok(());
+        };
+
+        current_metadata.update(metadata);
+
+        self.put_object(path, &current_metadata, current_data)
+            .await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

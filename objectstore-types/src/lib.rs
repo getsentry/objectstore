@@ -202,4 +202,15 @@ impl Metadata {
 
         Ok(headers)
     }
+
+    /// Updates the custom metadata in `self` with key/value pairs from another [`Metadata`]
+    /// instance.
+    ///
+    /// Values that already exist are overwritten with the new value. Values that
+    /// only exist in `self` and not in the other [`Metadata`] instance are not removed.
+    pub fn update(&mut self, other: &Metadata) {
+        for (k, v) in other.custom.iter() {
+            self.custom.insert(k.clone(), v.clone());
+        }
+    }
 }
