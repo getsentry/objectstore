@@ -22,12 +22,12 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
 }
 
 pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
-    config.sentry_dsn.as_ref().map(|sentry_dsn| {
+    config.sentry.as_ref().map(|sentry_config| {
         sentry::init(sentry::ClientOptions {
-            dsn: sentry_dsn.parse().ok(),
+            dsn: sentry_config.dsn.parse().ok(),
             enable_logs: true,
-            sample_rate: 1.0,
-            traces_sample_rate: 1.0,
+            sample_rate: sentry_config.sample_rate.unwrap_or(1.0),
+            traces_sample_rate: sentry_config.traces_sample_rate.unwrap_or(0.01),
             ..Default::default()
         })
     })
@@ -36,7 +36,7 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
 pub fn initialize_tracing(config: &Config) {
     // Same as the default filter, except it converts warnings into events
     // and also sends everything at or above INFO as logs instead of breadcrumbs.
-    let sentry_layer = config.sentry_dsn.as_ref().map(|_| {
+    let sentry_layer = config.sentry.as_ref().map(|_| {
         sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
             Level::ERROR | Level::WARN => {
                 sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
