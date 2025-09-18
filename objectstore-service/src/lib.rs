@@ -8,7 +8,7 @@
 mod backend;
 mod path;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
 
@@ -114,38 +114,64 @@ impl StorageService {
             }
         }
 
-        let stored_size = Arc::new(AtomicU64::new(0));
-        let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
-            .chain(stream)
-            .inspect({
-                let stored_size = Arc::clone(&stored_size);
-                move |res| {
-                    if let Ok(chunk) = res {
-                        stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                    }
-                }
-            })
-            .boxed();
-
-        let backend_tag = match backend {
+        let (backend_choice, backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
-                self.0
-                    .high_volume_backend
-                    .put_object(&path, metadata, stream)
-                    .await?;
-                "high-volume"
+                let stored_size = first_chunk.len() as u64;
+                let first_chunk: Bytes = first_chunk.into();
+                let path = &path;
+                with_retry(move || {
+                    let first_chunk = first_chunk.clone();
+                    let stream = futures_util::stream::once(async { Ok(first_chunk) }).boxed();
+
+                    self.0
+                        .high_volume_backend
+                        .put_object(path, metadata, stream)
+                })
+                .await?;
+                (
+                    "high-volume",
+                    self.0.high_volume_backend.name(),
+                    stored_size,
+                )
             }
             BackendChoice::LongTerm => {
+                let stored_size = Arc::new(AtomicU64::new(0));
+                let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
+                    .chain(stream)
+                    .inspect({
+                        let stored_size = Arc::clone(&stored_size);
+                        move |res| {
+                            if let Ok(chunk) = res {
+                                stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                    .boxed();
+
                 self.0
                     .long_term_backend
                     .put_object(&path, metadata, stream)
                     .await?;
-                "long-term"
+                (
+                    "long-term",
+                    self.0.long_term_backend.name(),
+                    stored_size.load(Ordering::Acquire),
+                )
             }
         };
 
-        merni::distribution!("put.latency"@s: start.elapsed(), "usecase" => path.usecase, "backend" => backend_tag);
-        merni::distribution!("put.size"@b: stored_size.load(Ordering::Acquire), "usecase" => path.usecase, "backend" => backend_tag);
+        merni::distribution!(
+            "put.latency"@s: start.elapsed(),
+            "usecase" => path.usecase,
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_ty
+        );
+        merni::distribution!(
+            "put.size"@b: stored_size,
+            "usecase" => path.usecase,
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_ty
+        );
 
         Ok(path)
     }
@@ -167,6 +193,22 @@ impl StorageService {
         let res1 = self.0.high_volume_backend.delete_object(path).await;
         let res2 = self.0.long_term_backend.delete_object(path).await;
         res1.or(res2)
+    }
+}
+
+async fn with_retry<T, E, F, Fut>(f: F) -> Result<T, E>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut try_num = 0;
+    loop {
+        let res = f().await;
+        // this means trying 3 times in total
+        if res.is_ok() || try_num >= 2 {
+            return res;
+        }
+        try_num += 1;
     }
 }
 
