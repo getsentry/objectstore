@@ -70,6 +70,8 @@ pub async fn run(
             .delete_timing
             .merge(&metrics.delete_timing)
             .unwrap();
+        total_metrics.write_failures += metrics.write_failures;
+        total_metrics.read_failures += metrics.read_failures;
 
         workload
     });
@@ -164,22 +166,30 @@ async fn run_workload(
                             let file_size = payload.len;
                             let usecase = workload.lock().unwrap().name.clone();
                             let organization_id = workload.lock().unwrap().next_organization_id();
-                            let object_key = remote.write(&usecase, organization_id, payload).await;
-                            let external_id = (usecase, organization_id, object_key);
-                            workload.lock().unwrap().push_file(internal_id, external_id);
-                            let mut metrics = metrics.lock().unwrap();
-                            metrics.write_timing.add(start.elapsed().as_secs_f64());
-                            metrics.file_sizes.add(file_size as f64);
-                            metrics.bytes_written += file_size;
+                            if let Ok(object_key) = remote.write(&usecase, organization_id, payload).await {
+                                let external_id = (usecase, organization_id, object_key);
+                                workload.lock().unwrap().push_file(internal_id, external_id);
+                                let mut metrics = metrics.lock().unwrap();
+                                metrics.write_timing.add(start.elapsed().as_secs_f64());
+                                metrics.file_sizes.add(file_size as f64);
+                                metrics.bytes_written += file_size;
+                            } else {
+                                let mut metrics = metrics.lock().unwrap();
+                                metrics.write_failures += 1;
+                            }
                         }
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.read(usecase, *organization_id, object_key, payload).await;
-                            workload.lock().unwrap().push_file(internal_id, external_id);
-                            let mut metrics = metrics.lock().unwrap();
-                            metrics.read_timing.add(start.elapsed().as_secs_f64());
-                            metrics.bytes_read += file_size;
+                            if remote.read(usecase, *organization_id, object_key, payload).await.is_ok() {
+                                workload.lock().unwrap().push_file(internal_id, external_id);
+                                let mut metrics = metrics.lock().unwrap();
+                                metrics.read_timing.add(start.elapsed().as_secs_f64());
+                                metrics.bytes_read += file_size;
+                            } else {
+                                let mut metrics = metrics.lock().unwrap();
+                                metrics.read_failures += 1;
+                            }
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
@@ -218,11 +228,14 @@ async fn run_workload(
 fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
     let sketch = &metrics.file_sizes;
     if sketch.count() > 0 {
-        println!(
-            "{} ({} ops)",
-            "WRITE:".bold().green(),
-            sketch.count().bold()
-        );
+        print!("{} ({} ops", "WRITE:".bold().green(), sketch.count().bold());
+        if metrics.write_failures > 0 {
+            print!(
+                ", {}",
+                format!("{} FAILURES", metrics.write_failures).bold().red()
+            )
+        }
+        println!(")");
         let avg = ByteSize::b((sketch.sum().unwrap() / sketch.count() as f64) as u64);
         let p50 = ByteSize::b(sketch.quantile(0.5).unwrap().unwrap() as u64);
         let p90 = ByteSize::b(sketch.quantile(0.9).unwrap().unwrap() as u64);
@@ -235,16 +248,37 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         print_ops(&metrics.write_timing, duration);
         print_throughput(metrics.bytes_written, duration);
         print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
+    } else if metrics.write_failures > 0 {
+        println!(
+            "{}",
+            format!("{} WRITE FAILURES", metrics.write_failures)
+                .bold()
+                .red()
+        );
     }
     if metrics.read_timing.count() > 0 {
-        println!(
-            "{} ({} ops)",
+        print!(
+            "{} ({} ops",
             "READ:".bold().green(),
             metrics.read_timing.count().bold()
         );
+        if metrics.read_failures > 0 {
+            print!(
+                ", {}",
+                format!("{} FAILURES", metrics.read_failures).bold().red()
+            )
+        }
+        println!(")");
         print_ops(&metrics.read_timing, duration);
         print_throughput(metrics.bytes_read, duration);
         print_percentiles(&metrics.read_timing, Duration::from_secs_f64);
+    } else if metrics.read_failures > 0 {
+        println!(
+            "{}",
+            format!("{} READ FAILURES", metrics.read_failures)
+                .bold()
+                .red()
+        );
     }
     if metrics.delete_timing.count() > 0 {
         println!(
@@ -291,4 +325,7 @@ struct WorkloadMetrics {
     write_timing: DDSketch,
     read_timing: DDSketch,
     delete_timing: DDSketch,
+
+    write_failures: u64,
+    read_failures: u64,
 }
