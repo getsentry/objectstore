@@ -20,6 +20,7 @@ mod state;
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let _runtime_guard = runtime.enter();
+    tracing::info!("test");
 
     let config = Config::from_env()?;
     tracing::debug!(?config, "Starting service");
