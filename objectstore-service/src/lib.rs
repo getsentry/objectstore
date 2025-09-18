@@ -114,38 +114,59 @@ impl StorageService {
             }
         }
 
-        let stored_size = Arc::new(AtomicU64::new(0));
-        let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
-            .chain(stream)
-            .inspect({
-                let stored_size = Arc::clone(&stored_size);
-                move |res| {
-                    if let Ok(chunk) = res {
-                        stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                    }
-                }
-            })
-            .boxed();
-
-        let backend_tag = match backend {
+        let (backend_choice, backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
+                let stored_size = first_chunk.len() as u64;
+                let stream = futures_util::stream::once(async { Ok(first_chunk.into()) }).boxed();
+
                 self.0
                     .high_volume_backend
                     .put_object(&path, metadata, stream)
                     .await?;
-                "high-volume"
+                (
+                    "high-volume",
+                    self.0.high_volume_backend.name(),
+                    stored_size,
+                )
             }
             BackendChoice::LongTerm => {
+                let stored_size = Arc::new(AtomicU64::new(0));
+                let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
+                    .chain(stream)
+                    .inspect({
+                        let stored_size = Arc::clone(&stored_size);
+                        move |res| {
+                            if let Ok(chunk) = res {
+                                stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                    .boxed();
+
                 self.0
                     .long_term_backend
                     .put_object(&path, metadata, stream)
                     .await?;
-                "long-term"
+                (
+                    "long-term",
+                    self.0.long_term_backend.name(),
+                    stored_size.load(Ordering::Acquire),
+                )
             }
         };
 
-        merni::distribution!("put.latency"@s: start.elapsed(), "usecase" => path.usecase, "backend" => backend_tag);
-        merni::distribution!("put.size"@b: stored_size.load(Ordering::Acquire), "usecase" => path.usecase, "backend" => backend_tag);
+        merni::distribution!(
+            "put.latency"@s: start.elapsed(),
+            "usecase" => path.usecase,
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_ty
+        );
+        merni::distribution!(
+            "put.size"@b: stored_size,
+            "usecase" => path.usecase,
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_ty
+        );
 
         Ok(path)
     }

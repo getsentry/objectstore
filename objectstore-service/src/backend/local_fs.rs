@@ -28,6 +28,10 @@ impl LocalFsBackend {
 
 #[async_trait::async_trait]
 impl Backend for LocalFsBackend {
+    fn name(&self) -> &'static str {
+        "local-fs"
+    }
+
     async fn put_object(
         &self,
         path: &ObjectPath,

@@ -22,6 +22,9 @@ pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {
+    /// The backend name, used for diagnostics.
+    fn name(&self) -> &'static str;
+
     async fn put_object(
         &self,
         path: &ObjectPath,
