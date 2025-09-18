@@ -32,6 +32,13 @@ pub enum Storage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Sentry {
+    pub dsn: String,
+    pub sample_rate: Option<f32>,
+    pub traces_sample_rate: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     // server addr config
     pub http_addr: SocketAddr,
@@ -41,7 +48,7 @@ pub struct Config {
     pub long_term_storage: Storage,
 
     // others
-    pub sentry_dsn: Option<String>,
+    pub sentry: Option<Sentry>,
     pub datadog_key: Option<String>,
     pub metric_tags: BTreeMap<String, String>,
 }
@@ -58,7 +65,7 @@ impl Default for Config {
                 path: PathBuf::from("data"),
             },
 
-            sentry_dsn: None,
+            sentry: None,
             datadog_key: None,
             metric_tags: Default::default(),
         }
@@ -106,6 +113,9 @@ mod tests {
             jail.set_env("fss_long_term_storage__bucket", "whatever");
             jail.set_env("fss_metric_tags__foo", "bar");
             jail.set_env("fss_metric_tags__baz", "qux");
+            jail.set_env("fss_sentry__dsn", "abcde");
+            jail.set_env("fss_sentry__sample_rate", "0.5");
+            jail.set_env("fss_sentry__traces_sample_rate", "0.5");
 
             let config = Config::from_args(Args::default()).unwrap();
 
@@ -119,6 +129,15 @@ mod tests {
                 config.metric_tags,
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
             );
+
+            let Sentry {
+                dsn,
+                sample_rate,
+                traces_sample_rate,
+            } = &dbg!(&config).sentry.as_ref().unwrap();
+            assert_eq!(dsn, "abcde");
+            assert_eq!(sample_rate, &Some(0.5));
+            assert_eq!(traces_sample_rate, &Some(0.5));
 
             Ok(())
         });
@@ -134,6 +153,10 @@ mod tests {
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
+            sentry:
+                dsn: abcde
+                sample_rate: 0.5
+                traces_sample_rate: 0.5
             "#,
             )
             .unwrap();
@@ -143,10 +166,19 @@ mod tests {
         };
         let config = Config::from_args(args).unwrap();
 
-        let Storage::S3Compatible { endpoint, bucket } = dbg!(config).long_term_storage else {
+        let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage else {
             panic!("expected s3 storage");
         };
         assert_eq!(endpoint, "http://localhost:8888");
         assert_eq!(bucket, "whatever");
+
+        let Sentry {
+            dsn,
+            sample_rate,
+            traces_sample_rate,
+        } = &dbg!(&config).sentry.as_ref().unwrap();
+        assert_eq!(dsn, "abcde");
+        assert_eq!(sample_rate, &Some(0.5));
+        assert_eq!(traces_sample_rate, &Some(0.5));
     }
 }
