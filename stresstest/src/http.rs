@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::Context;
 use futures::StreamExt;
 use objectstore_client::{Client, ClientBuilder, GetResult};
 use tokio::io::AsyncReadExt;
@@ -30,7 +31,7 @@ impl HttpRemote {
         usecase: &str,
         organization_id: u64,
         payload: Payload,
-    ) -> String {
+    ) -> anyhow::Result<String> {
         let client = self.client(usecase, organization_id);
         let stream = ReaderStream::new(payload).boxed();
 
@@ -39,8 +40,7 @@ impl HttpRemote {
             .compression(None)
             .send()
             .await
-            .unwrap()
-            .key
+            .map(|r| r.key)
     }
 
     pub(crate) async fn read(
@@ -49,20 +49,25 @@ impl HttpRemote {
         organization_id: u64,
         key: &str,
         mut payload: Payload,
-    ) {
+    ) -> anyhow::Result<()> {
         let client = self.client(usecase, organization_id);
-        let GetResult { stream, .. } = client.get(key).send().await.unwrap().unwrap();
+        let GetResult { stream, .. } = client
+            .get(key)
+            .send()
+            .await?
+            .context("expected file to exist")?;
         let mut reader = StreamReader::new(stream);
 
         // TODO: both of these are currently buffering in-memory. we should use streaming here as well.
         let mut read_contents = Vec::new();
-        reader.read_to_end(&mut read_contents).await.unwrap();
+        reader.read_to_end(&mut read_contents).await?;
         let mut expected_payload = Vec::new();
-        payload.read_to_end(&mut expected_payload).await.unwrap();
+        payload.read_to_end(&mut expected_payload).await?;
 
         if read_contents != expected_payload {
-            eprintln!("contents of `{key}` do not match expectation");
+            anyhow::bail!("contents of `{key}` do not match expectation");
         }
+        Ok(())
     }
 
     pub(crate) async fn delete(&self, usecase: &str, organization_id: u64, key: &str) {
