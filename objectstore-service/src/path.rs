@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 /// The fully scoped path of an object.
 ///
 /// This consists of a usecase, the scope, and the user-defined object key.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObjectPath {
     /// The usecase, or "product" this object belongs to.
     ///

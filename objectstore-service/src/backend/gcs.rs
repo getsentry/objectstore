@@ -262,6 +262,10 @@ impl fmt::Debug for GcsBackend {
 
 #[async_trait::async_trait]
 impl Backend for GcsBackend {
+    fn name(&self) -> &'static str {
+        "gcs"
+    }
+
     async fn put_object(
         &self,
         path: &ObjectPath,
