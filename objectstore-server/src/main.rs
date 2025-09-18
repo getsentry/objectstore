@@ -18,6 +18,9 @@ mod observability;
 mod state;
 
 fn main() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+
     let config = Config::from_env()?;
     tracing::debug!(?config, "Starting service");
 
@@ -30,7 +33,6 @@ fn main() -> Result<()> {
     let metrics_guard = maybe_initialize_metrics(&config)?;
     initialize_tracing(&config);
 
-    let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
         let state = State::new(config).await?;
         tokio::spawn(http::server(state));
