@@ -166,29 +166,37 @@ async fn run_workload(
                             let file_size = payload.len;
                             let usecase = workload.lock().unwrap().name.clone();
                             let organization_id = workload.lock().unwrap().next_organization_id();
-                            if let Ok(object_key) = remote.write(&usecase, organization_id, payload).await {
-                                let external_id = (usecase, organization_id, object_key);
-                                workload.lock().unwrap().push_file(internal_id, external_id);
-                                let mut metrics = metrics.lock().unwrap();
-                                metrics.write_timing.add(start.elapsed().as_secs_f64());
-                                metrics.file_sizes.add(file_size as f64);
-                                metrics.bytes_written += file_size;
-                            } else {
-                                let mut metrics = metrics.lock().unwrap();
-                                metrics.write_failures += 1;
+                            match remote.write(&usecase, organization_id, payload).await {
+                                Ok(object_key) => {
+                                    let external_id = (usecase, organization_id, object_key);
+                                    workload.lock().unwrap().push_file(internal_id, external_id);
+                                    let mut metrics = metrics.lock().unwrap();
+                                    metrics.write_timing.add(start.elapsed().as_secs_f64());
+                                    metrics.file_sizes.add(file_size as f64);
+                                    metrics.bytes_written += file_size;
+                                }
+                                Err(err) => {
+                                    eprintln!("error writing object: {err}");
+                                    let mut metrics = metrics.lock().unwrap();
+                                    metrics.write_failures += 1;
+                                }
                             }
                         }
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            if remote.read(usecase, *organization_id, object_key, payload).await.is_ok() {
-                                workload.lock().unwrap().push_file(internal_id, external_id);
-                                let mut metrics = metrics.lock().unwrap();
-                                metrics.read_timing.add(start.elapsed().as_secs_f64());
-                                metrics.bytes_read += file_size;
-                            } else {
-                                let mut metrics = metrics.lock().unwrap();
-                                metrics.read_failures += 1;
+                            match remote.read(usecase, *organization_id, object_key, payload).await {
+                                Ok(_) => {
+                                    workload.lock().unwrap().push_file(internal_id, external_id);
+                                    let mut metrics = metrics.lock().unwrap();
+                                    metrics.read_timing.add(start.elapsed().as_secs_f64());
+                                    metrics.bytes_read += file_size;
+                                }
+                                Err(err) => {
+                                    eprintln!("error reading object: {err}");
+                                    let mut metrics = metrics.lock().unwrap();
+                                    metrics.read_failures += 1;
+                                }
                             }
                         }
                         Action::Delete(external_id) => {
