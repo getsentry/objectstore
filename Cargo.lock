@@ -1845,6 +1845,7 @@ dependencies = [
  "futures-util",
  "objectstore-types",
  "reqwest",
+ "sentry",
  "serde",
  "tokio",
  "tokio-util",
