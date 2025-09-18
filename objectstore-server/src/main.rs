@@ -17,35 +17,37 @@ mod http;
 mod observability;
 mod state;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let config = Config::from_env()?;
+    tracing::debug!(?config, "Starting service");
 
     // Ensure a rustls crypto provider is installed, required on distroless.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let metrics_guard = maybe_initialize_metrics(&config)?;
     let _sentry_guard = maybe_initialize_sentry(&config);
+    let metrics_guard = maybe_initialize_metrics(&config)?;
     initialize_tracing(&config);
 
-    tracing::debug!(?config, "Starting service");
-    let state = State::new(config).await?;
-    tokio::spawn(http::server(state));
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let state = State::new(config).await?;
+        tokio::spawn(http::server(state));
 
-    elegant_departure::tokio::depart()
-        .on_termination()
-        .on_sigint()
-        .on_signal(SignalKind::hangup())
-        .on_signal(SignalKind::quit())
-        .await;
+        elegant_departure::tokio::depart()
+            .on_termination()
+            .on_sigint()
+            .on_signal(SignalKind::hangup())
+            .on_signal(SignalKind::quit())
+            .await;
 
-    if let Some(metrics_guard) = metrics_guard {
-        metrics_guard.flush(None).await?;
-    }
+        if let Some(metrics_guard) = metrics_guard {
+            metrics_guard.flush(None).await?;
+        }
 
-    tracing::info!("shutting down");
+        tracing::info!("shutting down");
 
-    Ok(())
+        Ok(())
+    })
 }
