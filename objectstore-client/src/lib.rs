@@ -8,12 +8,14 @@
 
 mod client;
 mod get;
+mod patch;
 mod put;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
 pub use client::*;
 pub use get::*;
+pub use patch::*;
 pub use put::*;
 
 #[cfg(test)]
