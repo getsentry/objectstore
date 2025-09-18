@@ -203,6 +203,10 @@ impl BigTableBackend {
 
 #[async_trait::async_trait]
 impl Backend for BigTableBackend {
+    fn name(&self) -> &'static str {
+        "bigtable"
+    }
+
     async fn put_object(
         &self,
         path: &ObjectPath,
