@@ -1,4 +1,4 @@
-FROM gcr.io/distroless/cc-debian12:debug-nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot
 
 ARG BINARY=objectstore
 COPY ${BINARY} /bin/entrypoint
