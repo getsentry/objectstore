@@ -16,7 +16,7 @@ objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
 rustls = { version = "0.23.31", default-features = false }
-sentry = { version = "0.41.0", features = [
+sentry = { workspace = true, features = [
     "tower-axum-matched-path",
     "tracing",
     "logs",
