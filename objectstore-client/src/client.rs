@@ -3,6 +3,7 @@ use std::{fmt, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use reqwest::header::HeaderName;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
@@ -18,6 +19,7 @@ pub struct ClientBuilder {
 
     usecase: Arc<str>,
     default_compression: Compression,
+    propagate_traces: bool,
 }
 impl fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -26,6 +28,7 @@ impl fmt::Debug for ClientBuilder {
             .field("client", &self.client)
             .field("usecase", &self.usecase)
             .field("default_compression", &self.default_compression)
+            .field("propagate_traces", &self.propagate_traces)
             .finish()
     }
 }
@@ -53,12 +56,20 @@ impl ClientBuilder {
 
             usecase: usecase.into(),
             default_compression: Compression::Zstd,
+            propagate_traces: false,
         })
     }
 
     /// This changes the default compression used for uploads.
     pub fn default_compression(mut self, compression: Compression) -> Self {
         self.default_compression = compression;
+        self
+    }
+
+    /// This changes whether the `sentry-trace` header will be sent to Objectstore
+    /// to take advantage of Sentry's distributed tracing.
+    pub fn with_distributed_tracing(mut self, propagate_traces: bool) -> Self {
+        self.propagate_traces = propagate_traces;
         self
     }
 
@@ -70,6 +81,7 @@ impl ClientBuilder {
             usecase: self.usecase.clone(),
             scope,
             default_compression: self.default_compression,
+            propagate_traces: self.propagate_traces,
         }
     }
 
@@ -106,6 +118,8 @@ pub struct Client {
     /// characters.
     pub(crate) scope: String,
     pub(crate) default_compression: Compression,
+
+    propagate_traces: bool,
 }
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -115,6 +129,7 @@ impl fmt::Debug for Client {
             .field("usecase", &self.usecase)
             .field("scope", &self.scope)
             .field("default_compression", &self.default_compression)
+            .field("propagate_traces", &self.propagate_traces)
             .finish()
     }
 }
@@ -123,17 +138,33 @@ impl fmt::Debug for Client {
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Client {
+    pub(crate) fn request<U: reqwest::IntoUrl>(
+        &self,
+        method: reqwest::Method,
+        uri: U,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let mut builder = self.http.request(method, uri).query(&[
+            (PARAM_SCOPE, self.scope.as_ref()),
+            (PARAM_USECASE, self.usecase.as_ref()),
+        ]);
+
+        if self.propagate_traces {
+            let trace_headers =
+                sentry::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
+            for (header_name, value) in trace_headers.into_iter().flatten() {
+                builder = builder.header(HeaderName::try_from(header_name)?, value);
+            }
+        }
+
+        Ok(builder)
+    }
+
     /// Deletes the object with the given `id`.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{id}", self.service_url);
 
         let _response = self
-            .http
-            .delete(delete_url)
-            .query(&[
-                (PARAM_SCOPE, self.scope.as_ref()),
-                (PARAM_USECASE, self.usecase.as_ref()),
-            ])
+            .request(reqwest::Method::DELETE, delete_url)?
             .send()
             .await?;
 
