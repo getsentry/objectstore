@@ -12,7 +12,6 @@ use bigtable_rs::google::bigtable::table_admin::v2::{
 };
 use bigtable_rs::google::bigtable::v2::mutation::{DeleteFromRow, Mutation, SetCell};
 use bigtable_rs::google::bigtable::v2::{self, MutateRowResponse};
-use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
@@ -27,6 +26,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+
+/// How often to retry failed `mutate` operations
+const REQUEST_RETRY_COUNT: usize = 2;
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
@@ -185,38 +187,45 @@ impl BigTableBackend {
     where
         I: IntoIterator<Item = Mutation>,
     {
+        let mutations = mutations
+            .into_iter()
+            .map(|m| v2::Mutation { mutation: Some(m) })
+            .collect();
         let request = v2::MutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
-            mutations: mutations
-                .into_iter()
-                .map(|m| v2::Mutation { mutation: Some(m) })
-                .collect(),
+            mutations,
             ..Default::default()
         };
 
         let mut client = self.bigtable.client();
-        let response = client.mutate_row(request).await?;
-        Ok(response.into_inner())
-    }
-}
 
-#[async_trait::async_trait]
-impl Backend for BigTableBackend {
-    fn name(&self) -> &'static str {
-        "bigtable"
+        let mut retry_count = 0;
+        loop {
+            let response = client
+                .mutate_row(request.clone())
+                .await
+                .map(|res| res.into_inner());
+            if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
+                if let Err(err) = response.as_ref() {
+                    merni::counter!("bigtable.mutate_failures": 1);
+                    sentry::capture_error(err);
+                }
+                return Ok(response?);
+            }
+            retry_count += 1;
+            merni::counter!("bigtable.mutate_retry": 1);
+        }
     }
 
-    async fn put_object(
+    async fn put_row(
         &self,
-        path: &ObjectPath,
+        path: Vec<u8>,
         metadata: &Metadata,
-        mut stream: BackendStream,
-    ) -> Result<()> {
-        let path = path.to_string().into_bytes();
+        payload: Vec<u8>,
+    ) -> Result<MutateRowResponse> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
-
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
             ExpirationPolicy::TimeToLive(ttl) => (
@@ -228,11 +237,6 @@ impl Backend for BigTableBackend {
                 ttl_to_micros(tti, access_time).context("TTL out of range")?,
             ),
         };
-
-        let mut payload = Vec::new();
-        while let Some(chunk) = stream.try_next().await? {
-            payload.extend_from_slice(&chunk);
-        }
 
         let mutations = [
             // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -251,16 +255,37 @@ impl Backend for BigTableBackend {
                 value: bincode::serde::encode_to_vec(metadata, BC_CONFIG)?,
             }),
         ];
+        self.mutate(path, mutations).await
+    }
+}
 
-        self.mutate(path, mutations).await?;
+#[async_trait::async_trait]
+impl Backend for BigTableBackend {
+    fn name(&self) -> &'static str {
+        "bigtable"
+    }
 
+    async fn put_object(
+        &self,
+        path: &ObjectPath,
+        metadata: &Metadata,
+        mut stream: BackendStream,
+    ) -> Result<()> {
+        let path = path.to_string().into_bytes();
+
+        let mut payload = Vec::new();
+        while let Some(chunk) = stream.try_next().await? {
+            payload.extend_from_slice(&chunk);
+        }
+
+        self.put_row(path, metadata, payload).await?;
         Ok(())
     }
 
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
-        let row_path = path.to_string().into_bytes();
+        let path = path.to_string().into_bytes();
         let rows = v2::RowSet {
-            row_keys: vec![row_path.clone()],
+            row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
@@ -272,22 +297,35 @@ impl Backend for BigTableBackend {
         };
 
         let mut client = self.bigtable.client();
-        let response = client.read_rows(request).await?;
+
+        let mut retry_count = 0;
+        let response = loop {
+            let response = client.read_rows(request.clone()).await;
+            if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
+                if let Err(err) = response.as_ref() {
+                    merni::counter!("bigtable.read_failures": 1);
+                    sentry::capture_error(err);
+                }
+                break response?;
+            }
+            retry_count += 1;
+            merni::counter!("bigtable.read_retry": 1);
+        };
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((read_path, cells)) = response.into_iter().next() else {
             return Ok(None);
         };
 
-        debug_assert!(read_path == row_path, "Row key mismatch");
-        let mut value = Bytes::new();
+        debug_assert!(read_path == path, "Row key mismatch");
+        let mut value = Vec::new();
         let mut metadata = Metadata::default();
         let mut expire_at = None;
 
         for cell in cells {
             match cell.qualifier.as_ref() {
                 self::COLUMN_PAYLOAD => {
-                    value = cell.value.into();
+                    value = cell.value;
                     expire_at = micros_to_time(cell.timestamp_micros);
                     // TODO: Log if the timestamp is invalid.
                 }
@@ -308,18 +346,16 @@ impl Backend for BigTableBackend {
             return Ok(None);
         }
 
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // Only bump if the difference in deadlines meets a minimum threshold
-            if expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE) {
-                let value = Bytes::clone(&value);
-                let stream = stream::once(async { Ok(value) }).boxed();
-                // TODO: Avoid the serialize roundtrip for metadata
-                self.put_object(path, &metadata, stream).await?;
-            }
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
+            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
+        {
+            // TODO: Only bump if the difference in deadlines meets a minimum threshold
+            // TODO: Schedule into background persistently so this doesn't get lost on restarts
+            // `put_row` will internally log an error, so no need to duplicate that here
+            let _ = self.put_row(path.clone(), &metadata, value.clone()).await;
         }
 
-        let stream = stream::once(async { Ok(value) }).boxed();
+        let stream = stream::once(async { Ok(value.into()) }).boxed();
         Ok(Some((metadata, stream)))
     }
 
