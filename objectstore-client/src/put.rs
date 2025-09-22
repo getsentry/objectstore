@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::{Compression, ExpirationPolicy, PARAM_SCOPE, PARAM_USECASE};
+pub use objectstore_types::{Compression, ExpirationPolicy};
 
 use crate::{Client, ClientStream};
 
@@ -114,12 +114,7 @@ impl PutBuilder<'_> {
     pub async fn send(self) -> anyhow::Result<PutResponse> {
         let mut builder = self
             .client
-            .http
-            .put(self.client.service_url.as_ref())
-            .query(&[
-                (PARAM_SCOPE, self.client.scope.as_ref()),
-                (PARAM_USECASE, self.client.usecase.as_ref()),
-            ]);
+            .request(reqwest::Method::PUT, self.client.service_url.as_ref())?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
