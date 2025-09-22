@@ -1,5 +1,6 @@
 use std::env;
 
+use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
 use tracing::level_filters::LevelFilter;
@@ -12,7 +13,8 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
         .datadog_key
         .as_ref()
         .map(|api_key| {
-            let mut builder = merni::datadog(api_key.as_str()).prefix("objectstore.");
+            let mut builder =
+                merni::datadog(api_key.expose_secret().as_str()).prefix("objectstore.");
             for (k, v) in &config.metric_tags {
                 builder = builder.global_tag(k, v);
             }
@@ -24,7 +26,7 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
 pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     config.sentry.as_ref().map(|sentry_config| {
         sentry::init(sentry::ClientOptions {
-            dsn: sentry_config.dsn.parse().ok(),
+            dsn: sentry_config.dsn.expose_secret().parse().ok(),
             enable_logs: true,
             sample_rate: sentry_config.sample_rate.unwrap_or(1.0),
             traces_sample_rate: sentry_config.traces_sample_rate.unwrap_or(0.01),

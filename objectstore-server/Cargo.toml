@@ -21,6 +21,7 @@ sentry = { version = "0.41.0", features = [
     "tracing",
     "logs",
 ] }
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

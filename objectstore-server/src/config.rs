@@ -1,13 +1,48 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use argh::FromArgs;
 use figment::providers::{Env, Format, Serialized, Yaml};
+use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 const ENV_PREFIX: &str = "FSS_";
+
+/// Newtype around `String` that may protect against accidental
+/// logging of secrets in our configuration struct. Use with
+/// [`secrecy::SecretBox`].
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ConfigSecret(String);
+
+impl ConfigSecret {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::ops::Deref for ConfigSecret {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ConfigSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "[redacted]")
+    }
+}
+
+impl CloneableSecret for ConfigSecret {}
+impl SerializableSecret for ConfigSecret {}
+impl Zeroize for ConfigSecret {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -33,7 +68,7 @@ pub enum Storage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Sentry {
-    pub dsn: String,
+    pub dsn: SecretBox<ConfigSecret>,
     pub sample_rate: Option<f32>,
     pub traces_sample_rate: Option<f32>,
 }
@@ -49,7 +84,7 @@ pub struct Config {
 
     // others
     pub sentry: Option<Sentry>,
-    pub datadog_key: Option<String>,
+    pub datadog_key: Option<SecretBox<ConfigSecret>>,
     pub metric_tags: BTreeMap<String, String>,
 }
 
@@ -103,6 +138,8 @@ pub struct Args {
 mod tests {
     use std::io::Write;
 
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -135,7 +172,7 @@ mod tests {
                 sample_rate,
                 traces_sample_rate,
             } = &dbg!(&config).sentry.as_ref().unwrap();
-            assert_eq!(dsn, "abcde");
+            assert_eq!(dsn.expose_secret().as_str(), "abcde");
             assert_eq!(sample_rate, &Some(0.5));
             assert_eq!(traces_sample_rate, &Some(0.5));
 
@@ -177,8 +214,43 @@ mod tests {
             sample_rate,
             traces_sample_rate,
         } = &dbg!(&config).sentry.as_ref().unwrap();
-        assert_eq!(dsn, "abcde");
+        assert_eq!(dsn.expose_secret().as_str(), "abcde");
         assert_eq!(sample_rate, &Some(0.5));
         assert_eq!(traces_sample_rate, &Some(0.5));
+    }
+
+    #[test]
+    fn configured_with_env_and_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            long_term_storage:
+                type: s3compatible
+                endpoint: http://localhost:8888
+                bucket: whatever
+            "#,
+            )
+            .unwrap();
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("fss_long_term_storage__endpoint", "http://localhost:9001");
+
+            let args = Args {
+                config: Some(tempfile.path().into()),
+            };
+            let config = Config::from_args(args).unwrap();
+
+            let Storage::S3Compatible {
+                endpoint,
+                bucket: _bucket,
+            } = &dbg!(&config).long_term_storage
+            else {
+                panic!("expected s3 storage");
+            };
+            // Env should overwrite the yaml config
+            assert_eq!(endpoint, "http://localhost:9001");
+
+            Ok(())
+        });
     }
 }
