@@ -1,8 +1,9 @@
+use std::io;
 use std::sync::Arc;
-use std::{fmt, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use reqwest::header::HeaderName;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
@@ -12,22 +13,14 @@ pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 /// It has to be further initialized with credentials using the
 /// [`for_organization`](Self::for_organization) and
 /// [`for_project`](Self::for_project) functions.
+#[derive(Debug)]
 pub struct ClientBuilder {
     service_url: Arc<str>,
     client: reqwest::Client,
 
     usecase: Arc<str>,
     default_compression: Compression,
-}
-impl fmt::Debug for ClientBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ClientBuilder")
-            .field("service_url", &self.service_url)
-            .field("client", &self.client)
-            .field("usecase", &self.usecase)
-            .field("default_compression", &self.default_compression)
-            .finish()
-    }
+    propagate_traces: bool,
 }
 
 impl ClientBuilder {
@@ -53,12 +46,20 @@ impl ClientBuilder {
 
             usecase: usecase.into(),
             default_compression: Compression::Zstd,
+            propagate_traces: false,
         })
     }
 
     /// This changes the default compression used for uploads.
     pub fn default_compression(mut self, compression: Compression) -> Self {
         self.default_compression = compression;
+        self
+    }
+
+    /// This changes whether the `sentry-trace` header will be sent to Objectstore
+    /// to take advantage of Sentry's distributed tracing.
+    pub fn with_distributed_tracing(mut self, propagate_traces: bool) -> Self {
+        self.propagate_traces = propagate_traces;
         self
     }
 
@@ -70,6 +71,7 @@ impl ClientBuilder {
             usecase: self.usecase.clone(),
             scope,
             default_compression: self.default_compression,
+            propagate_traces: self.propagate_traces,
         }
     }
 
@@ -88,6 +90,7 @@ impl ClientBuilder {
 }
 
 /// A scoped objectstore client that can access objects in a specific use case and scope.
+#[derive(Debug)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
     pub(crate) service_url: Arc<str>,
@@ -106,34 +109,41 @@ pub struct Client {
     /// characters.
     pub(crate) scope: String,
     pub(crate) default_compression: Compression,
-}
-impl fmt::Debug for Client {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client")
-            .field("http", &self.http)
-            .field("service_url", &self.service_url)
-            .field("usecase", &self.usecase)
-            .field("scope", &self.scope)
-            .field("default_compression", &self.default_compression)
-            .finish()
-    }
+
+    propagate_traces: bool,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Client {
+    pub(crate) fn request<U: reqwest::IntoUrl>(
+        &self,
+        method: reqwest::Method,
+        uri: U,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let mut builder = self.http.request(method, uri).query(&[
+            (PARAM_SCOPE, self.scope.as_ref()),
+            (PARAM_USECASE, self.usecase.as_ref()),
+        ]);
+
+        if self.propagate_traces {
+            let trace_headers =
+                sentry::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
+            for (header_name, value) in trace_headers.into_iter().flatten() {
+                builder = builder.header(HeaderName::try_from(header_name)?, value);
+            }
+        }
+
+        Ok(builder)
+    }
+
     /// Deletes the object with the given `id`.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let delete_url = format!("{}/{id}", self.service_url);
 
         let _response = self
-            .http
-            .delete(delete_url)
-            .query(&[
-                (PARAM_SCOPE, self.scope.as_ref()),
-                (PARAM_USECASE, self.usecase.as_ref()),
-            ])
+            .request(reqwest::Method::DELETE, delete_url)?
             .send()
             .await?;
 

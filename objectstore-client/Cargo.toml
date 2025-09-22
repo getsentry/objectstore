@@ -13,6 +13,7 @@ reqwest = { workspace = true, features = ["stream", "json"] }
 serde = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
+sentry = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8.4"
