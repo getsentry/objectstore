@@ -58,7 +58,7 @@ impl GetBuilder<'_> {
 
     /// Sends the `GET` request.
     pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
-        let get_url = format!("{}/{}", self.client.service_url, self.id);
+        let get_url = format!("{}/v1/{}", self.client.service_url, self.id);
 
         let response = self
             .client
