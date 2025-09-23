@@ -1,21 +1,16 @@
-#![allow(unused)]
-
 use std::any::Any;
 use std::io;
 use std::net::SocketAddr;
-use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::Result;
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::put;
 use axum::{Json, Router};
-use axum_extra::middleware::option_layer;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::{ObjectPath, StorageService};
+use objectstore_service::ObjectPath;
 use objectstore_types::Metadata;
 use sentry::integrations::tower as sentry_tower;
 use serde::{Deserialize, Serialize};
@@ -24,7 +19,6 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
-use uuid::Uuid;
 
 use crate::config::Config;
 use crate::state::ServiceState;
@@ -95,7 +89,6 @@ async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
 }
 
 pub async fn server(state: ServiceState) -> Result<()> {
-    let http_addr = state.config.http_addr;
     let listener = listen(&state.config)?;
 
     let app = make_app(state);
