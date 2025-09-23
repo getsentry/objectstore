@@ -46,7 +46,10 @@ fn make_app(state: ServiceState) -> axum::Router {
 
     let routes = Router::new().route("/", put(put_object_nokey)).route(
         "/{*key}",
-        put(put_object).get(get_object).delete(delete_object),
+        put(put_object)
+            .get(get_object)
+            .delete(delete_object)
+            .patch(patch_object),
     );
 
     routes.layer(middleware).with_state(state)
@@ -185,6 +188,25 @@ async fn delete_object(
     };
 
     state.service.delete_object(&path).await?;
+
+    Ok(())
+}
+
+#[tracing::instrument(level = "trace", skip(state))]
+async fn patch_object(
+    State(state): State<ServiceState>,
+    Query(params): Query<ContextParams>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+) -> error::Result<impl IntoResponse> {
+    let metadata = Metadata::from_headers(&headers, "")?;
+    let path = ObjectPath {
+        usecase: params.usecase,
+        scope: params.scope,
+        key,
+    };
+
+    state.service.patch_object(&path, &metadata).await?;
 
     Ok(())
 }
