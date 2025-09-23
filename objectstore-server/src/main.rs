@@ -22,7 +22,9 @@ fn main() -> Result<()> {
     let _runtime_guard = runtime.enter();
 
     let config = Config::from_env()?;
-    tracing::debug!(?config, "Starting service");
+    initialize_tracing(&config);
+    tracing::info!("Starting service");
+    tracing::debug!(?config);
 
     // Ensure a rustls crypto provider is installed, required on distroless.
     rustls::crypto::ring::default_provider()
@@ -31,7 +33,6 @@ fn main() -> Result<()> {
 
     let _sentry_guard = maybe_initialize_sentry(&config);
     let metrics_guard = maybe_initialize_metrics(&config)?;
-    initialize_tracing(&config);
 
     runtime.block_on(async move {
         let state = State::new(config).await?;

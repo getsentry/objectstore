@@ -206,8 +206,14 @@ impl BigTableBackend {
                 .mutate_row(request.clone())
                 .await
                 .map(|res| res.into_inner());
+            // TODO: Stop retrying if the object doesn't exist
             if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
                 if let Err(err) = response.as_ref() {
+                    tracing::error!(
+                        retry_count = retry_count,
+                        err = err.to_string(),
+                        "Mutate failure"
+                    );
                     merni::counter!("bigtable.mutate_failures": 1);
                     sentry::capture_error(err);
                 }
@@ -215,6 +221,7 @@ impl BigTableBackend {
             }
             retry_count += 1;
             merni::counter!("bigtable.mutate_retry": 1);
+            tracing::debug!(retry_count = retry_count, "Retrying mutate");
         }
     }
 
@@ -265,12 +272,14 @@ impl Backend for BigTableBackend {
         "bigtable"
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
         mut stream: BackendStream,
     ) -> Result<()> {
+        tracing::debug!("Writing to Bigtable backend");
         let path = path.to_string().into_bytes();
 
         let mut payload = Vec::new();
@@ -282,7 +291,9 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+        tracing::debug!("Reading from Bigtable backend");
         let path = path.to_string().into_bytes();
         let rows = v2::RowSet {
             row_keys: vec![path.clone()],
@@ -303,6 +314,11 @@ impl Backend for BigTableBackend {
             let response = client.read_rows(request.clone()).await;
             if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
                 if let Err(err) = response.as_ref() {
+                    tracing::error!(
+                        retry_count = retry_count,
+                        err = err.to_string(),
+                        "Read failure"
+                    );
                     merni::counter!("bigtable.read_failures": 1);
                     sentry::capture_error(err);
                 }
@@ -310,10 +326,12 @@ impl Backend for BigTableBackend {
             }
             retry_count += 1;
             merni::counter!("bigtable.read_retry": 1);
+            tracing::warn!(retry_count = retry_count, "Retrying read");
         };
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((read_path, cells)) = response.into_iter().next() else {
+            tracing::debug!("Object not found");
             return Ok(None);
         };
 
@@ -343,6 +361,7 @@ impl Backend for BigTableBackend {
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            tracing::debug!("Object found but past expiry");
             return Ok(None);
         }
 
@@ -359,7 +378,9 @@ impl Backend for BigTableBackend {
         Ok(Some((metadata, stream)))
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+        tracing::debug!("Deleting from Bigtable backend");
         let path = path.to_string().into_bytes();
         self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})])
             .await?;

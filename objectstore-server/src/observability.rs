@@ -1,9 +1,6 @@
-use std::env;
-
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
-use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::config::Config;
@@ -43,44 +40,33 @@ pub fn initialize_tracing(config: &Config) {
             Level::ERROR | Level::WARN => {
                 sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
             }
-            Level::INFO => sentry_tracing::EventFilter::Log,
-            Level::DEBUG | Level::TRACE => sentry_tracing::EventFilter::Ignore,
+            Level::INFO | Level::DEBUG => sentry_tracing::EventFilter::Log,
+            Level::TRACE => sentry_tracing::EventFilter::Ignore,
         })
     });
 
-    let (level, env_filter) = parse_rust_log();
     let format = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true);
 
     tracing_subscriber::registry()
-        .with(format.with_filter(LevelFilter::from(level)))
+        .with(format)
         .with(sentry_layer)
-        .with(env_filter)
+        .with(env_filter())
         .init();
 }
 
-pub fn parse_rust_log() -> (Level, EnvFilter) {
-    // Try to parse RUST_LOG as a simple level filter and apply default levels internally.
-    // Otherwise, use it literally if the user knows which overrides they want to run.
-    let level = match env::var(EnvFilter::DEFAULT_ENV) {
-        Ok(value) => match value.parse::<Level>() {
-            Ok(level) => level,
-            Err(_) => return (Level::TRACE, EnvFilter::new(value)),
-        },
-        Err(_) => Level::INFO,
-    };
-
-    // This is the maximum verbosity that will be logged, we filter this down to `level`.
-    let env_filter = EnvFilter::new(
-        "INFO,\
-        tower_http=TRACE,\
-        trust_dns_proto=WARN,\
-        objectstore_server=TRACE,\
-        objectstore_service=TRACE,\
-        objectstore_types=TRACE,\
-        ",
-    );
-
-    (level, env_filter)
+fn env_filter() -> EnvFilter {
+    match EnvFilter::try_from_default_env() {
+        Ok(env_filter) => env_filter,
+        // INFO by default. Use stricter levels for noisy crates. Use looser levels
+        // for internal crates and essential dependencies.
+        Err(_) => EnvFilter::new(
+            "INFO,\
+            objectstore=TRACE,\
+            objectstore_service=TRACE,\
+            objectstore_types=TRACE,\
+            ",
+        ),
+    }
 }
