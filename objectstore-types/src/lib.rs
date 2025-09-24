@@ -147,6 +147,9 @@ pub struct Metadata {
 
     /// Some arbitrary user-provided metadata.
     pub custom: BTreeMap<String, String>,
+
+    /// Size of the data in bytes, if known.
+    pub size: Option<usize>,
 }
 
 impl Metadata {

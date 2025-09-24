@@ -358,6 +358,7 @@ impl Backend for BigTableBackend {
 
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
+        metadata.size = Some(value.len());
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
@@ -461,6 +462,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            size: None,
         };
 
         backend
@@ -507,6 +509,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+            size: None,
         };
 
         backend
@@ -517,6 +520,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            size: None,
         };
 
         backend
@@ -542,6 +546,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend
@@ -568,6 +573,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend
@@ -592,6 +598,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend

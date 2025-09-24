@@ -166,6 +166,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .context("failed to get object")?;
 
         let headers = response.headers();
+        // TODO: Populate size in metadata
         let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts

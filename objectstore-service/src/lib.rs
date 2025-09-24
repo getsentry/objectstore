@@ -176,17 +176,57 @@ impl StorageService {
         &self,
         path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
-        let result = self.0.high_volume_backend.get_object(path).await?;
-        if result.is_some() {
-            return Ok(result);
+        let start = Instant::now();
+
+        let (result, backend_choice, backend_type) =
+            match self.0.high_volume_backend.get_object(path).await? {
+                Some(response) => (
+                    Some(response),
+                    "high-volume",
+                    self.0.high_volume_backend.name(),
+                ),
+                None => (
+                    self.0.long_term_backend.get_object(path).await?,
+                    "long-term",
+                    self.0.long_term_backend.name(),
+                ),
+            };
+
+        merni::distribution!(
+            "get.latency.pre-response"@s: start.elapsed(),
+            "usecase" => path.usecase,
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
+
+        if let Some((metadata, _stream)) = &result {
+            if let Some(size) = metadata.size {
+                merni::distribution!(
+                    "get.size"@b: size,
+                    "usecase" => path.usecase,
+                    "backend_choice" => backend_choice,
+                    "backend_type" => backend_type
+                );
+            } else {
+                tracing::warn!(?backend_type, "Missing object size");
+            }
         }
-        self.0.long_term_backend.get_object(path).await
+
+        Ok(result)
     }
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+        let start = Instant::now();
+
         let res1 = self.0.high_volume_backend.delete_object(path).await;
         let res2 = self.0.long_term_backend.delete_object(path).await;
+
+        merni::distribution!(
+            "delete.latency"@s: start.elapsed(),
+            "usecase" => path.usecase
+        );
+
         res1.or(res2)
     }
 }
