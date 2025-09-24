@@ -124,8 +124,8 @@ impl TestServer {
         }
 
         let router = Router::new()
-            .route("/", routing::put(put))
-            .route("/{*key}", routing::get(get).delete(delete))
+            .route("/v1/", routing::put(put))
+            .route("/v1/{*key}", routing::get(get).delete(delete))
             .with_state(state);
         Self::with_router(router)
     }

@@ -44,12 +44,18 @@ fn make_app(state: ServiceState) -> axum::Router {
         .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
         .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
 
-    let routes = Router::new().route("/", put(put_object_nokey)).route(
+    let service_routes = Router::new().route("/", put(put_object_nokey)).route(
         "/{*key}",
         put(put_object).get(get_object).delete(delete_object),
     );
 
-    routes.layer(middleware).with_state(state)
+    Router::new()
+        .nest("/v1", service_routes)
+        .layer(middleware)
+        .with_state(state)
+        // the healthcheck is added after the `layer(middleware)`,
+        // so it will not go through the middleware
+        .route("/health", get(health))
 }
 
 /// Handler function for the [`CatchPanicLayer`] middleware.
@@ -100,6 +106,10 @@ pub async fn server(state: ServiceState) -> Result<()> {
 
     let app = make_app(state);
     serve(listener, app).await
+}
+
+async fn health() -> impl IntoResponse {
+    "OK"
 }
 
 #[derive(Debug, Serialize)]
