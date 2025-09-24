@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::put;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::ObjectPath;
