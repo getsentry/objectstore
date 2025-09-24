@@ -266,12 +266,14 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
+        tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
@@ -305,7 +307,9 @@ impl Backend for GcsBackend {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+        tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(path)?;
         let metadata_response = self
             .request(Method::GET, object_url.clone())
@@ -314,6 +318,7 @@ impl Backend for GcsBackend {
             .await?;
 
         if metadata_response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
             return Ok(None);
         }
 
@@ -335,6 +340,7 @@ impl Backend for GcsBackend {
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            tracing::debug!("Object found but past expiry");
             return Ok(None);
         }
 
@@ -366,7 +372,9 @@ impl Backend for GcsBackend {
         Ok(Some((metadata, stream)))
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+        tracing::debug!("Deleting from GCS backend");
         let response = self
             .request(Method::DELETE, self.object_url(path)?)
             .await?
@@ -375,6 +383,7 @@ impl Backend for GcsBackend {
 
         // Do not error for objects that do not exist
         if response.status() != StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
             response
                 .error_for_status()
                 .context("failed to delete object")?;

@@ -32,12 +32,14 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> anyhow::Result<()> {
+        tracing::debug!("Writing to local_fs backend");
         let path = self.path.join(path.to_string());
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
@@ -62,14 +64,18 @@ impl Backend for LocalFsBackend {
         Ok(())
     }
 
+    // TODO: Return `Ok(None)` if object is found but past expiry
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn get_object(
         &self,
         path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+        tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(path.to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::NotFound => {
+                tracing::debug!("Object not found");
                 return Ok(None);
             }
             err => err?,
@@ -110,9 +116,17 @@ impl Backend for LocalFsBackend {
         Ok(Some((metadata, stream.boxed())))
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+        tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(path.to_string());
-        Ok(tokio::fs::remove_file(path).await?)
+        let result = tokio::fs::remove_file(path).await;
+        if let Err(e) = &result
+            && e.kind() == ErrorKind::NotFound
+        {
+            tracing::debug!("Object not found");
+        }
+        Ok(result?)
     }
 }
 

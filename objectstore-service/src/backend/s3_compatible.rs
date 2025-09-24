@@ -130,12 +130,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         "s3-compatible"
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
+        tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(path))
             .await?
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
@@ -148,11 +150,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+        tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(path);
 
         let response = self.request(Method::GET, &object_url).await?.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
             return Ok(None);
         }
 
@@ -186,7 +191,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(Some((metadata, stream.boxed())))
     }
 
+    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+        tracing::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(path))
             .await?
@@ -195,6 +202,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
             response
                 .error_for_status()
                 .context("failed to delete object")?;
