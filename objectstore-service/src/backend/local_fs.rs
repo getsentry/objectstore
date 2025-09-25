@@ -83,6 +83,7 @@ impl Backend for LocalFsBackend {
 
         let mut reader = BufReader::new(file);
         let mut metadata_buf = vec![];
+        // TODO populate size in our metadata
         let metadata = loop {
             let reader_buf = reader.fill_buf().await?;
             let buf = if metadata_buf.is_empty() {
@@ -158,6 +159,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
+            size: None,
         };
         backend
             .put_object(&key, &metadata, make_stream(b"oh hai!"))

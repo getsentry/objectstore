@@ -46,12 +46,22 @@ struct GcsObject {
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
+
+    /// The `Content-Length` of the data in bytes. GCS returns this as a string.
+    ///
+    /// GCS sets this in metadata responses. We can use it to know the size of an object
+    /// without having to stream it.
+    #[serde(default)]
+    pub size: Option<String>,
 }
 
 impl GcsObject {
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
-        let mut gcs_object = Self::default();
+        let mut gcs_object = GcsObject {
+            size: metadata.size.map(|size| size.to_string()),
+            ..Default::default()
+        };
 
         // For time-based expiration, set the `customTime` field. The bucket must have a
         // `daysSinceCustomTime` lifecycle rule configured to delete objects with this field set.
@@ -93,6 +103,7 @@ impl GcsObject {
             .unwrap_or_default();
 
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
+        let size = self.size.map(|size| size.parse()).transpose()?;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
@@ -108,6 +119,7 @@ impl GcsObject {
             expiration_policy,
             compression,
             custom,
+            size,
         })
     }
 }
@@ -439,6 +451,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            size: None,
         };
 
         backend
@@ -485,6 +498,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+            size: None,
         };
 
         backend
@@ -495,6 +509,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            size: None,
         };
 
         backend
@@ -520,6 +535,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend
@@ -546,6 +562,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend
@@ -570,6 +587,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
+            size: None,
         };
 
         backend
