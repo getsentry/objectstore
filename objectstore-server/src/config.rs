@@ -73,6 +73,14 @@ pub struct Sentry {
     pub traces_sample_rate: Option<f32>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSink {
+    #[default]
+    Term,
+    CloudLogging,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     // server addr config
@@ -86,6 +94,7 @@ pub struct Config {
     pub sentry: Option<Sentry>,
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
     pub metric_tags: BTreeMap<String, String>,
+    pub log_sink: LogSink,
 }
 
 impl Default for Config {
@@ -103,6 +112,7 @@ impl Default for Config {
             sentry: None,
             datadog_key: None,
             metric_tags: Default::default(),
+            log_sink: Default::default(),
         }
     }
 }

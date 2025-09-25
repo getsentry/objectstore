@@ -32,6 +32,7 @@ tower-http = { version = "0.6.6", default-features = false, features = [
     "trace",
 ] }
 tracing = { workspace = true }
+tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uuid = { workspace = true, features = ["v7"] }
 
