@@ -140,7 +140,7 @@ impl Client {
 
     /// Deletes the object with the given `id`.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let delete_url = format!("{}/v1/{id}", self.service_url);
+        let delete_url = format!("{}/{id}", self.service_url);
 
         let _response = self
             .request(reqwest::Method::DELETE, delete_url)?

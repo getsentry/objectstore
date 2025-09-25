@@ -112,8 +112,9 @@ pub struct PutResponse {
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<PutResponse> {
-        let put_url = format!("{}/v1/", self.client.service_url);
-        let mut builder = self.client.request(reqwest::Method::PUT, put_url)?;
+        let mut builder = self
+            .client
+            .request(reqwest::Method::PUT, self.client.service_url.as_ref())?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {

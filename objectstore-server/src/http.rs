@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::put;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::ObjectPath;
@@ -38,18 +38,12 @@ fn make_app(state: ServiceState) -> axum::Router {
         .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
         .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
 
-    let service_routes = Router::new().route("/", put(put_object_nokey)).route(
+    let routes = Router::new().route("/", put(put_object_nokey)).route(
         "/{*key}",
         put(put_object).get(get_object).delete(delete_object),
     );
 
-    Router::new()
-        .nest("/v1", service_routes)
-        .layer(middleware)
-        .with_state(state)
-        // the healthcheck is added after the `layer(middleware)`,
-        // so it will not go through the middleware
-        .route("/health", get(health))
+    routes.layer(middleware).with_state(state)
 }
 
 /// Handler function for the [`CatchPanicLayer`] middleware.
@@ -99,10 +93,6 @@ pub async fn server(state: ServiceState) -> Result<()> {
 
     let app = make_app(state);
     serve(listener, app).await
-}
-
-async fn health() -> impl IntoResponse {
-    "OK"
 }
 
 #[derive(Debug, Serialize)]
