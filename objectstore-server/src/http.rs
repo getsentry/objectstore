@@ -44,7 +44,7 @@ fn make_app(state: ServiceState) -> axum::Router {
     );
 
     Router::new()
-        .nest("/v1", service_routes)
+        .nest("/v1/", service_routes)
         .layer(middleware)
         .with_state(state)
         // the healthcheck is added after the `layer(middleware)`,
