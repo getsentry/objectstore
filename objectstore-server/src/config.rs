@@ -15,7 +15,7 @@ const ENV_PREFIX: &str = "FSS_";
 /// logging of secrets in our configuration struct. Use with
 /// [`secrecy::SecretBox`].
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
-pub(crate) struct ConfigSecret(String);
+pub struct ConfigSecret(String);
 
 impl ConfigSecret {
     pub fn as_str(&self) -> &str {

@@ -31,7 +31,7 @@ struct ContextParams {
     pub usecase: String,
 }
 
-fn make_app(state: ServiceState) -> axum::Router {
+pub fn make_app(state: ServiceState) -> axum::Router {
     let middleware = ServiceBuilder::new()
         .layer(CatchPanicLayer::custom(handle_panic))
         .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
@@ -85,7 +85,7 @@ fn listen(config: &Config) -> Result<TcpListener> {
     Ok(listener)
 }
 
-async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
+pub async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
     let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(guard.wait_owned())

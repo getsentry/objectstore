@@ -8,14 +8,12 @@
 use anyhow::Result;
 use tokio::signal::unix::SignalKind;
 
-use crate::config::Config;
-use crate::observability::{initialize_tracing, maybe_initialize_metrics, maybe_initialize_sentry};
-use crate::state::State;
-
-mod config;
-mod http;
-mod observability;
-mod state;
+use objectstore_server::config::Config;
+use objectstore_server::http;
+use objectstore_server::observability::{
+    initialize_tracing, maybe_initialize_metrics, maybe_initialize_sentry,
+};
+use objectstore_server::state::State;
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
