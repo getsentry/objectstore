@@ -3,7 +3,7 @@ use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-use crate::config::Config;
+use crate::config::{Config, LogSink};
 
 pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     config
@@ -45,12 +45,23 @@ pub fn initialize_tracing(config: &Config) {
         })
     });
 
-    let format = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(true);
+    let term_layer = match config.log_sink {
+        LogSink::Term => Some(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_target(true),
+        ),
+        LogSink::CloudLogging => None,
+    };
+
+    let cloud_logging_layer = match config.log_sink {
+        LogSink::CloudLogging => Some(tracing_stackdriver::layer()),
+        LogSink::Term => None,
+    };
 
     tracing_subscriber::registry()
-        .with(format)
+        .with(term_layer)
+        .with(cloud_logging_layer)
         .with(sentry_layer)
         .with(env_filter())
         .init();
