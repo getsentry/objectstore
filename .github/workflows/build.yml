@@ -79,8 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build]
 
-    # Intentionally never publish on pull requests
-    if: ${{ github.event_name != 'pull_request' }}
+    # Intentionally never publish on pull requests or merge queue
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
 
     steps:
       - uses: actions/checkout@v4
