@@ -95,6 +95,7 @@ pub async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
 }
 
 pub async fn server(state: ServiceState) -> Result<()> {
+    merni::counter!("server.start": 1);
     let listener = listen(&state.config)?;
 
     let app = make_app(state);
