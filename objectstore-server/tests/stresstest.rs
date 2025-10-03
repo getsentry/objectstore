@@ -39,7 +39,7 @@ async fn test_basic() {
             "FSS_long_term_storage__PATH",
             tempdir.path().display().to_string(),
         )
-        .env("RUST_LOG", "warn");
+        .env("FSS_LOGGING__LEVEL", "warn");
     if let Ok(datadog_key) = std::env::var("DD_API_KEY") {
         cmd.env("FSS_datadog_key", datadog_key);
     }

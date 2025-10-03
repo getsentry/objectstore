@@ -111,7 +111,7 @@ struct PutBlobResponse {
     key: String,
 }
 
-#[tracing::instrument(level = "info", skip(state, body))]
+#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object_nokey(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -133,7 +133,7 @@ async fn put_object_nokey(
     }))
 }
 
-#[tracing::instrument(level = "info", skip(state, body))]
+#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -156,7 +156,7 @@ async fn put_object(
     }))
 }
 
-#[tracing::instrument(level = "info", skip(state))]
+#[tracing::instrument(level = "trace", skip(state))]
 async fn get_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -176,7 +176,7 @@ async fn get_object(
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
-#[tracing::instrument(level = "info", skip(state))]
+#[tracing::instrument(level = "trace", skip(state))]
 async fn delete_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,

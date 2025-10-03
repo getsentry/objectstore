@@ -26,7 +26,7 @@ services:
       FSS_HIGH_VOLUME_STORAGE__PATH: "/data"
       FSS_LONG_TERM_STORAGE__TYPE: "filesystem"
       FSS_LONG_TERM_STORAGE__PATH: "/data"
-      RUST_LOG: "debug"
+      FSS_LOGGING__LEVEL: "debug"
     ports:
       - 127.0.0.1:8888:8888
     volumes:
