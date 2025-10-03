@@ -3,7 +3,7 @@ use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-use crate::config::Config;
+use crate::config::{Config, LogFormat};
 
 pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     config
@@ -49,15 +49,20 @@ pub fn initialize_tracing(config: &Config) {
         .with_writer(std::io::stderr)
         .with_target(true);
 
-    tracing_subscriber::registry()
-        .with(format)
-        .with(sentry_layer)
-        .with(env_filter())
-        .init();
-}
+    let format = match (config.logging.format, console::user_attended()) {
+        (LogFormat::Auto, true) | (LogFormat::Pretty, _) => format.compact().without_time().boxed(),
+        (LogFormat::Auto, false) | (LogFormat::Simplified, _) => format.with_ansi(false).boxed(),
+        (LogFormat::Json, _) => format
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .boxed(),
+    };
 
-fn env_filter() -> EnvFilter {
-    match EnvFilter::try_from_default_env() {
+    let env_filter = match EnvFilter::try_from_default_env() {
         Ok(env_filter) => env_filter,
         // INFO by default. Use stricter levels for noisy crates. Use looser levels
         // for internal crates and essential dependencies.
@@ -68,5 +73,11 @@ fn env_filter() -> EnvFilter {
             objectstore_types=TRACE,\
             ",
         ),
-    }
+    };
+
+    tracing_subscriber::registry()
+        .with(format.with_filter(config.logging.level))
+        .with(sentry_layer)
+        .with(env_filter)
+        .init();
 }

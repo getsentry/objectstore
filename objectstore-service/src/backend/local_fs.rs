@@ -32,7 +32,7 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
@@ -65,7 +65,7 @@ impl Backend for LocalFsBackend {
     }
 
     // TODO: Return `Ok(None)` if object is found but past expiry
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn get_object(
         &self,
         path: &ObjectPath,
@@ -117,7 +117,7 @@ impl Backend for LocalFsBackend {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
         tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(path.to_string());

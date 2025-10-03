@@ -278,7 +278,7 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
@@ -319,7 +319,7 @@ impl Backend for GcsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(path)?;
@@ -384,7 +384,7 @@ impl Backend for GcsBackend {
         Ok(Some((metadata, stream)))
     }
 
-    #[tracing::instrument(level = "info", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from GCS backend");
         let response = self

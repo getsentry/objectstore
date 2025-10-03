@@ -8,6 +8,7 @@ use argh::FromArgs;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
+use tracing::level_filters::LevelFilter;
 
 const ENV_PREFIX: &str = "FSS_";
 
@@ -73,6 +74,107 @@ pub struct Sentry {
     pub traces_sample_rate: Option<f32>,
 }
 
+/// Controls the log format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Auto detect the best format.
+    ///
+    /// This chooses [`LogFormat::Pretty`] for TTY, otherwise [`LogFormat::Simplified`].
+    Auto,
+
+    /// Pretty printing with colors.
+    ///
+    /// ```text
+    ///  INFO  objectstore::http > objectstore starting
+    /// ```
+    Pretty,
+
+    /// Simplified plain text output.
+    ///
+    /// ```text
+    /// 2020-12-04T12:10:32Z [objectstore::http] INFO: objectstore starting
+    /// ```
+    Simplified,
+
+    /// Dump out JSON lines.
+    ///
+    /// ```text
+    /// {"timestamp":"2020-12-04T12:11:08.729716Z","level":"INFO","logger":"objectstore::http","message":"objectstore starting","module_path":"objectstore::http","filename":"objectstore_service/src/http.rs","lineno":31}
+    /// ```
+    Json,
+}
+
+/// The logging format parse error.
+#[derive(Clone, Debug)]
+pub struct FormatParseError(String);
+
+impl fmt::Display for FormatParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            r#"error parsing "{}" as format: expected one of "auto", "pretty", "simplified", "json""#,
+            self.0
+        )
+    }
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = FormatParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let result = match s {
+            "" => LogFormat::Auto,
+            s if s.eq_ignore_ascii_case("auto") => LogFormat::Auto,
+            s if s.eq_ignore_ascii_case("pretty") => LogFormat::Pretty,
+            s if s.eq_ignore_ascii_case("simplified") => LogFormat::Simplified,
+            s if s.eq_ignore_ascii_case("json") => LogFormat::Json,
+            s => return Err(FormatParseError(s.into())),
+        };
+
+        Ok(result)
+    }
+}
+
+impl std::error::Error for FormatParseError {}
+
+mod display_fromstr {
+    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        T: std::fmt::Display,
+    {
+        serializer.collect_str(&value)
+    }
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: std::str::FromStr,
+        <T as std::str::FromStr>::Err: std::fmt::Display,
+    {
+        use serde::Deserialize;
+        let s = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Logging {
+    #[serde(with = "display_fromstr")]
+    pub level: LevelFilter,
+    pub format: LogFormat,
+}
+
+impl Default for Logging {
+    fn default() -> Self {
+        Self {
+            level: LevelFilter::INFO,
+            format: LogFormat::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     // server addr config
@@ -83,6 +185,7 @@ pub struct Config {
     pub long_term_storage: Storage,
 
     // others
+    pub logging: Logging,
     pub sentry: Option<Sentry>,
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
     pub metric_tags: BTreeMap<String, String>,
@@ -100,6 +203,7 @@ impl Default for Config {
                 path: PathBuf::from("data"),
             },
 
+            logging: Logging::default(),
             sentry: None,
             datadog_key: None,
             metric_tags: Default::default(),
