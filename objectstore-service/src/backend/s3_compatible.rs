@@ -130,7 +130,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         "s3-compatible"
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
@@ -150,7 +150,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(path);
@@ -192,7 +192,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from s3_compatible backend");
         let response = self

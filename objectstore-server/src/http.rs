@@ -111,7 +111,6 @@ struct PutBlobResponse {
     key: String,
 }
 
-#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object_nokey(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -123,6 +122,7 @@ async fn put_object_nokey(
         scope: params.scope,
         key: uuid::Uuid::new_v4().to_string(),
     };
+    populate_sentry_scope(&path);
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
@@ -133,7 +133,6 @@ async fn put_object_nokey(
     }))
 }
 
-#[tracing::instrument(level = "trace", skip(state, body))]
 async fn put_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -146,6 +145,7 @@ async fn put_object(
         scope: params.scope,
         key,
     };
+    populate_sentry_scope(&path);
     let metadata = Metadata::from_headers(&headers, "")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
@@ -156,7 +156,6 @@ async fn put_object(
     }))
 }
 
-#[tracing::instrument(level = "trace", skip(state))]
 async fn get_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -167,6 +166,7 @@ async fn get_object(
         scope: params.scope,
         key,
     };
+    populate_sentry_scope(&path);
 
     let Some((metadata, stream)) = state.service.get_object(&path).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -176,7 +176,6 @@ async fn get_object(
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
-#[tracing::instrument(level = "trace", skip(state))]
 async fn delete_object(
     State(state): State<ServiceState>,
     Query(params): Query<ContextParams>,
@@ -187,10 +186,19 @@ async fn delete_object(
         scope: params.scope,
         key,
     };
+    populate_sentry_scope(&path);
 
     state.service.delete_object(&path).await?;
 
     Ok(())
+}
+
+fn populate_sentry_scope(path: &ObjectPath) {
+    sentry::configure_scope(|s| {
+        s.set_tag("usecase", path.usecase.clone());
+        s.set_extra("scope", path.scope.clone().into());
+        s.set_extra("key", path.key.clone().into());
+    });
 }
 
 mod error {

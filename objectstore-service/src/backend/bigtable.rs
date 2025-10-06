@@ -274,7 +274,7 @@ impl Backend for BigTableBackend {
         "bigtable"
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn put_object(
         &self,
         path: &ObjectPath,
@@ -293,7 +293,7 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = path.to_string().into_bytes();
@@ -377,7 +377,7 @@ impl Backend for BigTableBackend {
         Ok(Some((metadata, stream)))
     }
 
-    #[tracing::instrument(level = "trace", fields(backend = self.name()), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from Bigtable backend");
         let path = path.to_string().into_bytes();
