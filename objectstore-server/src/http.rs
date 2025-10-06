@@ -216,7 +216,7 @@ mod error {
 
                     // TODO: Support more nuanced return codes for validation errors etc. See
                     // Relay's ApiErrorResponse and BadStoreRequest as examples.
-                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
                 }
                 AnyhowResponse::Response(response) => response,
             }
