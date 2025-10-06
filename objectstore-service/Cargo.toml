@@ -6,8 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-# https://github.com/liufuyang/bigtable_rs/pull/119
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", branch = "admin" }
+bigtable_rs = "0.2.18"
 bincode = { version = "2.0.1", features = ["serde"] }
 bytes = { workspace = true }
 data-encoding = "2.9.0"
@@ -23,11 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-watto = "0.2.0"
-zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
