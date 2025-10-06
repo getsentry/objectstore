@@ -1,21 +1,15 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use bigtable_rs::bigtable::BigTableConnection;
-use bigtable_rs::bigtable_table_admin::{BigTableTableAdminConnection, Error as AdminError};
-use bigtable_rs::google::bigtable::table_admin::v2::gc_rule::Rule;
-use bigtable_rs::google::bigtable::table_admin::v2::table::{TimestampGranularity, View};
-use bigtable_rs::google::bigtable::table_admin::v2::{
-    ColumnFamily, CreateTableRequest, GcRule, GetTableRequest, Table,
+use bigtable_rs::google::bigtable::v2::mutation;
+use bigtable_rs::google::bigtable::v2::{
+    MutateRowRequest, MutateRowResponse, Mutation, ReadRowsRequest, RowSet,
 };
-use bigtable_rs::google::bigtable::v2::mutation::{DeleteFromRow, Mutation, SetCell};
-use bigtable_rs::google::bigtable::v2::{self, MutateRowResponse};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
-use tonic::Code;
 
 use crate::ObjectPath;
 use crate::backend::{Backend, BackendStream};
@@ -41,7 +35,6 @@ const FAMILY_MANUAL: &str = "fm";
 
 pub struct BigTableBackend {
     bigtable: BigTableConnection,
-    admin: BigTableTableAdminConnection,
 
     instance_path: String,
     table_path: String,
@@ -66,7 +59,6 @@ impl BigTableBackend {
         table_name: &str,
     ) -> Result<Self> {
         let bigtable;
-        let admin;
 
         if let Some(endpoint) = endpoint {
             bigtable = BigTableConnection::new_with_emulator(
@@ -74,12 +66,6 @@ impl BigTableBackend {
                 project_id,
                 instance_name,
                 false, // is_read_only
-                Some(CONNECT_TIMEOUT),
-            )?;
-            admin = BigTableTableAdminConnection::new_with_emulator(
-                endpoint,
-                project_id,
-                instance_name,
                 Some(CONNECT_TIMEOUT),
             )?;
         } else {
@@ -96,91 +82,17 @@ impl BigTableBackend {
                 Some(CONNECT_TIMEOUT),
                 token_provider.clone(),
             )?;
-            admin = BigTableTableAdminConnection::new_with_token_provider(
-                project_id,
-                instance_name,
-                1, // channel_size
-                Some(CONNECT_TIMEOUT),
-                token_provider,
-            )?;
         };
 
         let client = bigtable.client();
 
-        let backend = Self {
+        Ok(Self {
             bigtable,
-            admin,
 
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
             table_path: client.get_full_table_name(table_name),
             table_name: table_name.to_owned(),
-        };
-
-        backend.ensure_table().await?;
-        Ok(backend)
-    }
-
-    async fn ensure_table(&self) -> Result<Table> {
-        let mut admin = self.admin.client();
-
-        let get_request = GetTableRequest {
-            name: self.table_path.clone(),
-            view: View::Unspecified as i32,
-        };
-
-        match admin.get_table(get_request.clone()).await {
-            Err(AdminError::RpcError(e)) if e.code() == Code::NotFound => (), // fall through
-            Err(e) => return Err(e.into()),
-            Ok(table) => return Ok(table),
-        }
-
-        let create_request = CreateTableRequest {
-            parent: self.instance_path.clone(),
-            table_id: self.table_name.clone(), // name without full path
-            table: Some(Table {
-                name: String::new(), // Must be empty during creation
-                cluster_states: Default::default(),
-                column_families: HashMap::from_iter([
-                    (
-                        FAMILY_MANUAL.to_owned(),
-                        ColumnFamily {
-                            gc_rule: Some(GcRule { rule: None }),
-                            value_type: None,
-                        },
-                    ),
-                    (
-                        FAMILY_GC.to_owned(),
-                        ColumnFamily {
-                            // With automatic expiry, we set a GC rule to automatically delete rows
-                            // with an age of 0. This sounds odd, but when we write rows, we write
-                            // them with a future timestamp as long as a TTL is set during write. By
-                            // doing this, we are effectively writing rows into the future, and they
-                            // will be deleted due to TTL when their timestamp is passed.
-                            // See: https://cloud.google.com/bigtable/docs/gc-cell-level
-                            gc_rule: Some(GcRule {
-                                rule: Some(Rule::MaxAge(Duration::from_secs(1).try_into()?)),
-                            }),
-                            value_type: None,
-                        },
-                    ),
-                ]),
-                granularity: TimestampGranularity::Unspecified as i32,
-                restore_info: None,
-                change_stream_config: None,
-                deletion_protection: false,
-                automated_backup_config: None,
-            }),
-            initial_splits: vec![],
-        };
-
-        match admin.create_table(create_request).await {
-            // Race condition: table was created by another concurrent call.
-            Err(AdminError::RpcError(e)) if e.code() == Code::AlreadyExists => {
-                Ok(admin.get_table(get_request).await?)
-            }
-            Err(e) => Err(e.into()),
-            Ok(created_table) => Ok(created_table),
-        }
+        })
     }
 
     async fn mutate<I>(
@@ -190,13 +102,13 @@ impl BigTableBackend {
         action: &str,
     ) -> Result<MutateRowResponse>
     where
-        I: IntoIterator<Item = Mutation>,
+        I: IntoIterator<Item = mutation::Mutation>,
     {
         let mutations = mutations
             .into_iter()
-            .map(|m| v2::Mutation { mutation: Some(m) })
+            .map(|m| Mutation { mutation: Some(m) })
             .collect();
-        let request = v2::MutateRowRequest {
+        let request = MutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
             mutations,
@@ -247,6 +159,7 @@ impl BigTableBackend {
             ),
         };
 
+        use mutation::{DeleteFromRow, Mutation, SetCell};
         let mutations = [
             // NB: We explicitly delete the row to clear metadata on overwrite.
             Mutation::DeleteFromRow(DeleteFromRow {}),
@@ -297,12 +210,12 @@ impl Backend for BigTableBackend {
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = path.to_string().into_bytes();
-        let rows = v2::RowSet {
+        let rows = RowSet {
             row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
-        let request = v2::ReadRowsRequest {
+        let request = ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(rows),
             rows_limit: 1,
@@ -381,6 +294,8 @@ impl Backend for BigTableBackend {
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from Bigtable backend");
         let path = path.to_string().into_bytes();
+
+        use mutation::{DeleteFromRow, Mutation};
         self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})], "delete")
             .await?;
         Ok(())
