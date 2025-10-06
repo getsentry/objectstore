@@ -183,7 +183,12 @@ impl BigTableBackend {
         }
     }
 
-    async fn mutate<I>(&self, path: Vec<u8>, mutations: I) -> Result<MutateRowResponse>
+    async fn mutate<I>(
+        &self,
+        path: Vec<u8>,
+        mutations: I,
+        action: &str,
+    ) -> Result<MutateRowResponse>
     where
         I: IntoIterator<Item = Mutation>,
     {
@@ -208,20 +213,16 @@ impl BigTableBackend {
                 .map(|res| res.into_inner());
             // TODO: Stop retrying if the object doesn't exist
             if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
-                if let Err(err) = response.as_ref() {
-                    tracing::error!(
-                        retry_count = retry_count,
-                        err = err.to_string(),
-                        "Mutate failure"
-                    );
-                    merni::counter!("bigtable.mutate_failures": 1);
-                    sentry::capture_error(err);
+                if response.is_err() {
+                    merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
-                return Ok(response?);
+                return response.with_context(|| {
+                    format!("failed mutating bigtable row performing a `{action}`")
+                });
             }
             retry_count += 1;
-            merni::counter!("bigtable.mutate_retry": 1);
-            tracing::debug!(retry_count = retry_count, "Retrying mutate");
+            merni::counter!("bigtable.mutate_retry": 1, "action" => action);
+            tracing::debug!(retry_count = retry_count, action, "Retrying mutate");
         }
     }
 
@@ -230,6 +231,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         metadata: &Metadata,
         payload: Vec<u8>,
+        action: &str,
     ) -> Result<MutateRowResponse> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
@@ -262,7 +264,7 @@ impl BigTableBackend {
                 value: bincode::serde::encode_to_vec(metadata, BC_CONFIG)?,
             }),
         ];
-        self.mutate(path, mutations).await
+        self.mutate(path, mutations, action).await
     }
 }
 
@@ -287,7 +289,7 @@ impl Backend for BigTableBackend {
             payload.extend_from_slice(&chunk);
         }
 
-        self.put_row(path, metadata, payload).await?;
+        self.put_row(path, metadata, payload, "put").await?;
         Ok(())
     }
 
@@ -313,14 +315,8 @@ impl Backend for BigTableBackend {
         let response = loop {
             let response = client.read_rows(request.clone()).await;
             if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
-                if let Err(err) = response.as_ref() {
-                    tracing::error!(
-                        retry_count = retry_count,
-                        err = err.to_string(),
-                        "Read failure"
-                    );
+                if response.is_err() {
                     merni::counter!("bigtable.read_failures": 1);
-                    sentry::capture_error(err);
                 }
                 break response?;
             }
@@ -372,7 +368,9 @@ impl Backend for BigTableBackend {
             // TODO: Only bump if the difference in deadlines meets a minimum threshold
             // TODO: Schedule into background persistently so this doesn't get lost on restarts
             // `put_row` will internally log an error, so no need to duplicate that here
-            let _ = self.put_row(path.clone(), &metadata, value.clone()).await;
+            let _ = self
+                .put_row(path.clone(), &metadata, value.clone(), "tti-bump")
+                .await;
         }
 
         let stream = stream::once(async { Ok(value.into()) }).boxed();
@@ -383,7 +381,7 @@ impl Backend for BigTableBackend {
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from Bigtable backend");
         let path = path.to_string().into_bytes();
-        self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})])
+        self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})], "delete")
             .await?;
         Ok(())
     }
