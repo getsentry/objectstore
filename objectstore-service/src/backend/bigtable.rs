@@ -26,6 +26,9 @@ const COLUMN_PAYLOAD: &[u8] = b"p";
 /// Column that stores metadata in bincode.
 const COLUMN_METADATA: &[u8] = b"m";
 /// Column family that uses timestamp-based garbage collection.
+///
+/// We require a GC rule on this family to automatically delete rows.
+/// See: https://cloud.google.com/bigtable/docs/gc-cell-level
 const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
