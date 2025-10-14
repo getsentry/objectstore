@@ -339,9 +339,9 @@ mod tests {
     async fn create_test_backend() -> Result<BigTableBackend> {
         BigTableBackend::new(
             Some("localhost:8086"),
-            "my-project",
-            "my-instance",
-            "my-table",
+            "testing",
+            "objectstore",
+            "objectstore",
         )
         .await
     }

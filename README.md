@@ -98,6 +98,27 @@ Devservices continue to run in the background until explicitly stopped. If you
 prefer to start containers manually, please check `devservices/config.yml` for
 the required images and configuration, such as port mapping.
 
+For **Google BigTable**, you additionally need to provision table into the test
+instance. Run `scripts/setup-bigtable.sh` to do that. Use this configuration to
+connect:
+
+```yaml
+type: bigtable
+endpoint: localhost:8086
+project_id: testing
+instance_name: objectstore
+table_name: objectstore
+```
+
+For **Google Cloud Storage** (GCS), a test bucket is already configured in the
+dev container. Use this configuration to connect:
+
+```yaml
+type: gcs
+endpoint: http://localhost:8087
+bucket: test-bucket
+```
+
 ### Editor Setup
 
 We recommend using **Visual Studio Code** with the recommended extensions. The
