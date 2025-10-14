@@ -3,10 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use bigtable_rs::bigtable::BigTableConnection;
-use bigtable_rs::google::bigtable::v2::mutation;
-use bigtable_rs::google::bigtable::v2::{
-    MutateRowRequest, MutateRowResponse, Mutation, ReadRowsRequest, RowSet,
-};
+use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
@@ -58,37 +55,34 @@ impl BigTableBackend {
         instance_name: &str,
         table_name: &str,
     ) -> Result<Self> {
-        let bigtable;
-
-        if let Some(endpoint) = endpoint {
-            bigtable = BigTableConnection::new_with_emulator(
+        let bigtable = if let Some(endpoint) = endpoint {
+            BigTableConnection::new_with_emulator(
                 endpoint,
                 project_id,
                 instance_name,
                 false, // is_read_only
                 Some(CONNECT_TIMEOUT),
-            )?;
+            )?
         } else {
             let token_provider = gcp_auth::provider().await?;
             // TODO on channel_size: Idle connections are automatically closed in “a few minutes”.
             // We need to make sure that on longer idle periods the channels are re-opened.
             let channel_size = 2 * Handle::current().metrics().num_workers();
 
-            bigtable = BigTableConnection::new_with_token_provider(
+            BigTableConnection::new_with_token_provider(
                 project_id,
                 instance_name,
                 false, // is_read_only
                 channel_size,
                 Some(CONNECT_TIMEOUT),
                 token_provider.clone(),
-            )?;
+            )?
         };
 
         let client = bigtable.client();
 
         Ok(Self {
             bigtable,
-
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
             table_path: client.get_full_table_name(table_name),
             table_name: table_name.to_owned(),
@@ -100,15 +94,15 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> Result<MutateRowResponse>
+    ) -> Result<v2::MutateRowResponse>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
         let mutations = mutations
             .into_iter()
-            .map(|m| Mutation { mutation: Some(m) })
+            .map(|m| v2::Mutation { mutation: Some(m) })
             .collect();
-        let request = MutateRowRequest {
+        let request = v2::MutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
             mutations,
@@ -144,7 +138,7 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> Result<MutateRowResponse> {
+    ) -> Result<v2::MutateRowResponse> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
@@ -159,17 +153,16 @@ impl BigTableBackend {
             ),
         };
 
-        use mutation::{DeleteFromRow, Mutation, SetCell};
         let mutations = [
             // NB: We explicitly delete the row to clear metadata on overwrite.
-            Mutation::DeleteFromRow(DeleteFromRow {}),
-            Mutation::SetCell(SetCell {
+            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+            mutation::Mutation::SetCell(mutation::SetCell {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_PAYLOAD.to_owned(),
                 timestamp_micros,
                 value: payload,
             }),
-            Mutation::SetCell(SetCell {
+            mutation::Mutation::SetCell(mutation::SetCell {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
@@ -210,12 +203,12 @@ impl Backend for BigTableBackend {
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = path.to_string().into_bytes();
-        let rows = RowSet {
+        let rows = v2::RowSet {
             row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
-        let request = ReadRowsRequest {
+        let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(rows),
             rows_limit: 1,
@@ -293,11 +286,13 @@ impl Backend for BigTableBackend {
     #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from Bigtable backend");
-        let path = path.to_string().into_bytes();
 
-        use mutation::{DeleteFromRow, Mutation};
-        self.mutate(path, [Mutation::DeleteFromRow(DeleteFromRow {})], "delete")
-            .await?;
+        let path = path.to_string().into_bytes();
+        let mutations = [mutation::Mutation::DeleteFromRow(
+            mutation::DeleteFromRow {},
+        )];
+        self.mutate(path, mutations, "delete").await?;
+
         Ok(())
     }
 }
