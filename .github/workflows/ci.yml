@@ -81,7 +81,7 @@ jobs:
           key: ${{ github.job }}
 
       - name: Setup BigTable
-        run: ./scripts/setup-bigtable.sh
+        run: ./scripts/setup-bigtable.sh bigtable-emulator
 
       - name: Run Tests
         run: cargo test --workspace --all-features
