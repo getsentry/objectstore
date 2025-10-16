@@ -78,8 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build]
 
-    # Intentionally never publish on pull requests
-    if: ${{ github.event_name != 'pull_request' }}
+    # TODO: Revert this change, only publish on pull requests!
+    # if: ${{ github.event_name != 'pull_request' }}
 
     env:
       REGISTRY: ghcr.io/getsentry/objectstore
