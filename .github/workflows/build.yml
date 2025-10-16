@@ -123,6 +123,9 @@ jobs:
     # Intentionally never publish on pull requests
     # if: ${{ github.event_name != 'pull_request' }}
 
+    permissions:
+      id-token: write
+
     env:
       REGISTRY: us-central1-docker.pkg.dev/sentryio/objectstore/image
 
