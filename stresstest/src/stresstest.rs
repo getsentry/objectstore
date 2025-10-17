@@ -8,6 +8,7 @@ use anyhow::Result;
 
 use bytesize::ByteSize;
 use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -30,6 +31,11 @@ pub async fn run(
 
     let remote = Arc::new(remote);
 
+    let bar = ProgressBar::new_spinner()
+        .with_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}")?)
+        .with_message("Running stresstest:");
+    bar.enable_steady_tick(Duration::from_millis(100));
+
     // run the workloads concurrently
     let tasks: Vec<_> = workloads
         .into_iter()
@@ -40,6 +46,7 @@ pub async fn run(
         .collect();
 
     let finished_tasks = futures::future::join_all(tasks).await;
+    bar.finish_and_clear();
 
     let mut total_metrics = WorkloadMetrics::default();
     let workloads = finished_tasks.into_iter().map(|task| {
@@ -78,11 +85,20 @@ pub async fn run(
 
     let workloads: Vec<_> = workloads.collect();
     let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
-    let files_to_cleanup = workloads.into_iter().flat_map(|mut w| w.external_files());
+    let files_to_cleanup = workloads.iter().flat_map(|w| w.external_files());
+    let cleanup_count = workloads.iter().flat_map(|w| w.external_files()).count();
 
     println!();
     println!("{}", "## TOTALS".bold());
     print_metrics(&total_metrics, duration);
+    println!();
+
+    let bar = ProgressBar::new(cleanup_count as u64)
+        .with_message("Deleting remaining files...")
+        .with_style(ProgressStyle::with_template(
+            "{msg}\n{wide_bar} {pos}/{len}",
+        )?);
+    bar.enable_steady_tick(Duration::from_millis(100));
 
     let start = Instant::now();
     let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
@@ -90,20 +106,25 @@ pub async fn run(
         .for_each_concurrent(max_concurrency, |(usecase, organization_id, object_key)| {
             let remote = remote.clone();
             let cleanup_timing = cleanup_timing.clone();
+            let bar = &bar;
             async move {
                 let start = Instant::now();
-                remote.delete(&usecase, organization_id, &object_key).await;
+                remote.delete(usecase, *organization_id, object_key).await;
                 cleanup_timing
                     .lock()
                     .unwrap()
                     .add(start.elapsed().as_secs_f64());
+
+                bar.inc(1);
             }
         })
         .await;
+
+    bar.finish_and_clear();
+
     let cleanup_duration = start.elapsed();
     let cleanup_timing = cleanup_timing.lock().unwrap();
 
-    println!();
     println!(
         "{} ({} files, concurrency: {})",
         "## CLEANUP".bold(),

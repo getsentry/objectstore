@@ -256,9 +256,9 @@ impl Workload {
         self.existing_files.push((internal, external))
     }
 
-    pub(crate) fn external_files(&mut self) -> impl Iterator<Item = ExternalId> + use<> {
-        std::mem::take(&mut self.existing_files)
-            .into_iter()
+    pub(crate) fn external_files(&self) -> impl Iterator<Item = &ExternalId> {
+        self.existing_files
+            .iter()
             .map(|(_internal, external)| external)
     }
 }
