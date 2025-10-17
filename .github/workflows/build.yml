@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
@@ -80,6 +79,9 @@ jobs:
 
     # TODO: Revert this change, only publish on pull requests!
     # if: ${{ github.event_name != 'pull_request' }}
+
+    permissions:
+      packages: write
 
     env:
       REGISTRY: ghcr.io/getsentry/objectstore
