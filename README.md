@@ -100,23 +100,26 @@ the required images and configuration, such as port mapping.
 
 For **Google BigTable**, you additionally need to provision table into the test
 instance. Run `scripts/setup-bigtable.sh` to do that. Use this configuration to
-connect:
+connect (recommended as high-volume backend):
 
 ```yaml
-type: bigtable
-endpoint: localhost:8086
-project_id: testing
-instance_name: objectstore
-table_name: objectstore
+high_volume_storage:
+  type: bigtable
+  endpoint: localhost:8086
+  project_id: testing
+  instance_name: objectstore
+  table_name: objectstore
 ```
 
 For **Google Cloud Storage** (GCS), a test bucket is already configured in the
-dev container. Use this configuration to connect:
+dev container. Use this configuration to connect (recommended as long-term
+backend):
 
 ```yaml
-type: gcs
-endpoint: http://localhost:8087
-bucket: test-bucket
+long_term_storage:
+  type: gcs
+  endpoint: http://localhost:8087
+  bucket: test-bucket
 ```
 
 ### Editor Setup
@@ -156,7 +159,7 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 
 ```sh
 # Option 1: Configuration file
-cargo run -- -c path/to/config.yml
+cargo run -- -c objectstore-server/config/local.example.yaml
 
 # Option 2: Environment variables
 export FSS_HIGH_VOLUME_STORAGE__TYPE=filesystem
@@ -165,6 +168,9 @@ export FSS_LONG_TERM_STORAGE__TYPE=filesystem
 export FSS_LONG_TERM_STORAGE__PATH=data
 cargo run
 ```
+
+You can copy and save additional config files into next to the examples in
+`objectstore-server/config`. All other files are ignored by git.
 
 ### Tests
 
@@ -179,5 +185,9 @@ cargo test --workspace --all-features
 Run the stresstest binary against the running server with:
 
 ```sh
-cargo run --release -p stresstest
+cargo run --release -p stresstest -- -c stresstest/config/example.yaml
 ```
+
+Similar to the objectstore server, you can find example configuration files in
+the `config` subfolder. Copy and save your own files there, as they will not be
+tracked by git.

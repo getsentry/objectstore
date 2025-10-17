@@ -4,5 +4,8 @@ recipe.json
 profile.json.gz
 .envrc.private
 
+**/config/*.yaml
+!**/config/*example.yaml
+
 # vim swap files
 .*.sw*
