@@ -1,0 +1,22 @@
+# Use a port different from devservices
+http_addr: 0.0.0.0:18888
+
+long_term_storage:
+  type: filesystem
+  path: data
+
+high_volume_storage:
+  type: filesystem
+  path: data
+
+logging:
+  level: trace
+  format: auto
+
+# sentry:
+#   dsn: http://<key>@localhost:8000/1
+#   sample_rate: 1.0
+#   traces_sample_rate: 1.0
+
+metric_tags:
+  sentry_region: development
