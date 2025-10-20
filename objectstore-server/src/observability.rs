@@ -5,6 +5,9 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::config::{Config, LogFormat};
 
+/// The full release name including the objectstore version and SHA.
+const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
+
 pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     config
         .datadog_key
@@ -21,21 +24,25 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
 }
 
 pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
-    config.sentry.as_ref().map(|sentry_config| {
-        sentry::init(sentry::ClientOptions {
-            dsn: sentry_config.dsn.expose_secret().parse().ok(),
-            enable_logs: true,
-            sample_rate: sentry_config.sample_rate.unwrap_or(1.0),
-            traces_sample_rate: sentry_config.traces_sample_rate.unwrap_or(0.01),
-            ..Default::default()
-        })
-    })
+    let config = &config.sentry;
+    let dsn = config.dsn.as_ref()?;
+
+    Some(sentry::init(sentry::ClientOptions {
+        dsn: dsn.expose_secret().parse().ok(),
+        release: Some(RELEASE.into()),
+        environment: config.environment.clone(),
+        server_name: config.server_name.clone(),
+        sample_rate: config.sample_rate,
+        traces_sample_rate: config.traces_sample_rate,
+        enable_logs: true,
+        ..Default::default()
+    }))
 }
 
 pub fn initialize_tracing(config: &Config) {
     // Same as the default filter, except it converts warnings into events
     // and also sends everything at or above INFO as logs instead of breadcrumbs.
-    let sentry_layer = config.sentry.as_ref().map(|_| {
+    let sentry_layer = config.sentry.is_enabled().then(|| {
         sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
             Level::ERROR | Level::WARN => {
                 sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
