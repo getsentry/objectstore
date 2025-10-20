@@ -4,7 +4,7 @@ FROM rust:slim-bookworm
 RUN dpkg --add-architecture amd64 \
     && apt-get update -qq \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev pkg-config libssl-dev:amd64 gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+    && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev pkg-config git libssl-dev:amd64 gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add x86_64-unknown-linux-gnu
