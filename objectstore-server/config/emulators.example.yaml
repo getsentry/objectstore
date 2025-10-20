@@ -21,6 +21,7 @@ logging:
 #   dsn: http://<key>@localhost:8000/1
 #   sample_rate: 1.0
 #   traces_sample_rate: 1.0
+#   environment: development
 
 metric_tags:
   sentry_region: development
