@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
@@ -69,9 +70,29 @@ pub enum Storage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Sentry {
-    pub dsn: SecretBox<ConfigSecret>,
-    pub sample_rate: Option<f32>,
-    pub traces_sample_rate: Option<f32>,
+    pub dsn: Option<SecretBox<ConfigSecret>>,
+    pub environment: Option<Cow<'static, str>>,
+    pub server_name: Option<Cow<'static, str>>,
+    pub sample_rate: f32,
+    pub traces_sample_rate: f32,
+}
+
+impl Sentry {
+    pub fn is_enabled(&self) -> bool {
+        self.dsn.is_some()
+    }
+}
+
+impl Default for Sentry {
+    fn default() -> Self {
+        Self {
+            dsn: None,
+            environment: None,
+            server_name: None,
+            sample_rate: 1.0,
+            traces_sample_rate: 0.01,
+        }
+    }
 }
 
 /// Controls the log format.
@@ -186,7 +207,7 @@ pub struct Config {
 
     // others
     pub logging: Logging,
-    pub sentry: Option<Sentry>,
+    pub sentry: Sentry,
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
     pub metric_tags: BTreeMap<String, String>,
 }
@@ -204,7 +225,7 @@ impl Default for Config {
             },
 
             logging: Logging::default(),
-            sentry: None,
+            sentry: Sentry::default(),
             datadog_key: None,
             metric_tags: Default::default(),
         }
@@ -256,6 +277,9 @@ mod tests {
             jail.set_env("fss_metric_tags__baz", "qux");
             jail.set_env("fss_sentry__dsn", "abcde");
             jail.set_env("fss_sentry__sample_rate", "0.5");
+            jail.set_env("fss_sentry__environment", "production");
+            jail.set_env("fss_sentry__server_name", "objectstore-deadbeef");
+            jail.set_env("fss_sentry__traces_sample_rate", "0.5");
             jail.set_env("fss_sentry__traces_sample_rate", "0.5");
 
             let config = Config::from_args(Args::default()).unwrap();
@@ -271,14 +295,14 @@ mod tests {
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
             );
 
-            let Sentry {
-                dsn,
-                sample_rate,
-                traces_sample_rate,
-            } = &dbg!(&config).sentry.as_ref().unwrap();
-            assert_eq!(dsn.expose_secret().as_str(), "abcde");
-            assert_eq!(sample_rate, &Some(0.5));
-            assert_eq!(traces_sample_rate, &Some(0.5));
+            assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
+            assert_eq!(config.sentry.environment.as_deref(), Some("production"));
+            assert_eq!(
+                config.sentry.server_name.as_deref(),
+                Some("objectstore-deadbeef")
+            );
+            assert_eq!(config.sentry.sample_rate, 0.5);
+            assert_eq!(config.sentry.traces_sample_rate, 0.5);
 
             Ok(())
         });
@@ -296,6 +320,8 @@ mod tests {
                 bucket: whatever
             sentry:
                 dsn: abcde
+                environment: production
+                server_name: objectstore-deadbeef
                 sample_rate: 0.5
                 traces_sample_rate: 0.5
             "#,
@@ -313,14 +339,14 @@ mod tests {
         assert_eq!(endpoint, "http://localhost:8888");
         assert_eq!(bucket, "whatever");
 
-        let Sentry {
-            dsn,
-            sample_rate,
-            traces_sample_rate,
-        } = &dbg!(&config).sentry.as_ref().unwrap();
-        assert_eq!(dsn.expose_secret().as_str(), "abcde");
-        assert_eq!(sample_rate, &Some(0.5));
-        assert_eq!(traces_sample_rate, &Some(0.5));
+        assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
+        assert_eq!(config.sentry.environment.as_deref(), Some("production"));
+        assert_eq!(
+            config.sentry.server_name.as_deref(),
+            Some("objectstore-deadbeef")
+        );
+        assert_eq!(config.sentry.sample_rate, 0.5);
+        assert_eq!(config.sentry.traces_sample_rate, 0.5);
     }
 
     #[test]
