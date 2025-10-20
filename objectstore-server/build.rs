@@ -22,5 +22,5 @@ fn emit_release_var() -> Result<(), io::Error> {
 }
 
 fn main() {
-    emit_release_var().ok();
+    emit_release_var().unwrap();
 }
