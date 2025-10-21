@@ -7,6 +7,8 @@ use reqwest::header::HeaderName;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
+const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
+
 /// Service for storing and retrieving objects.
 ///
 /// The Service contains the base configuration to connect to a service.
@@ -33,6 +35,7 @@ impl ClientBuilder {
     /// [`for_organization`](Self::for_organization) function.
     pub fn new(service_url: &str, usecase: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             // we are dealing with de/compression ourselves:
             .no_brotli()
             .no_deflate()
