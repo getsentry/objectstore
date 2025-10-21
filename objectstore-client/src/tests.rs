@@ -1,5 +1,7 @@
 use std::net::{SocketAddr, TcpListener};
 
+use axum::ServiceExt;
+use axum::extract::Request;
 use bytes::BytesMut;
 use futures_util::TryStreamExt;
 use objectstore_server::config::{Config, Storage};
@@ -102,11 +104,13 @@ impl TestServer {
         };
 
         let state = State::new(config).await.unwrap();
-        let router = make_app(state);
+        let app = make_app(state);
 
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router).await.unwrap();
+            let service =
+                ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(app);
+            axum::serve(listener, service).await.unwrap();
         });
 
         Self {
