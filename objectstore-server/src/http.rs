@@ -20,7 +20,6 @@ use tokio::net::{TcpListener, TcpSocket};
 use tokio::time::Instant;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::normalize_path::NormalizePath;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
@@ -33,7 +32,7 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
 static IN_FLIGHT_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
-type App = NormalizePath<axum::Router>;
+pub type App = axum::Router;
 
 #[derive(Deserialize, Debug)]
 struct ContextParams {
@@ -66,13 +65,11 @@ pub fn make_app(state: ServiceState) -> App {
         put(put_object).get(get_object).delete(delete_object),
     );
 
-    let router = Router::new()
+    Router::new()
         .nest("/v1/", service_routes)
         .route("/health", get(health))
         .layer(middleware)
-        .with_state(state);
-
-    NormalizePath::trim_trailing_slash(router)
+        .with_state(state)
 }
 
 /// Create a tracing span for an HTTP request.
