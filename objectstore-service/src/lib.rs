@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::backend::{BackendStream, BoxedBackend};
+use crate::backend::common::{BackendStream, BoxedBackend};
 
 pub use path::*;
 
@@ -233,12 +233,14 @@ impl StorageService {
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
     Ok(match config {
-        StorageConfig::FileSystem { path } => Box::new(backend::LocalFsBackend::new(path)),
+        StorageConfig::FileSystem { path } => {
+            Box::new(backend::local_fs::LocalFsBackend::new(path))
+        }
         StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
-            backend::S3CompatibleBackend::without_token(endpoint, bucket),
+            backend::s3_compatible::S3CompatibleBackend::without_token(endpoint, bucket),
         ),
         StorageConfig::Gcs { endpoint, bucket } => {
-            Box::new(backend::GcsBackend::new(endpoint, bucket).await?)
+            Box::new(backend::gcs::GcsBackend::new(endpoint, bucket).await?)
         }
         StorageConfig::BigTable {
             endpoint,
@@ -246,7 +248,13 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             instance_name,
             table_name,
         } => Box::new(
-            backend::BigTableBackend::new(endpoint, project_id, instance_name, table_name).await?,
+            backend::bigtable::BigTableBackend::new(
+                endpoint,
+                project_id,
+                instance_name,
+                table_name,
+            )
+            .await?,
         ),
     })
 }

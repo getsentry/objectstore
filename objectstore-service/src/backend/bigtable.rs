@@ -9,7 +9,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
 use crate::ObjectPath;
-use crate::backend::{Backend, BackendStream};
+use crate::backend::common::{Backend, BackendStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

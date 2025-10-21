@@ -11,7 +11,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::ObjectPath;
-use crate::backend::{Backend, BackendStream};
+use crate::backend::common::{self, Backend, BackendStream};
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -199,7 +199,7 @@ impl GcsBackend {
         };
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: common::reqwest_client(),
             endpoint: endpoint.parse().context("invalid GCS endpoint URL")?,
             bucket: bucket.to_string(),
             token_provider,
