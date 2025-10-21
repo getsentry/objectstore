@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
-use axum::{Json, RequestExt, Router};
+use axum::{Json, RequestExt, Router, ServiceExt};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::ObjectPath;
 use objectstore_types::Metadata;
@@ -20,7 +20,7 @@ use tokio::net::{TcpListener, TcpSocket};
 use tokio::time::Instant;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::normalize_path::NormalizePath;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
@@ -33,13 +33,19 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
 static IN_FLIGHT_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
+type App = NormalizePath<axum::Router>;
+
 #[derive(Deserialize, Debug)]
 struct ContextParams {
     pub scope: String,
     pub usecase: String,
 }
 
-pub fn make_app(state: ServiceState) -> axum::Router {
+pub fn make_app(state: ServiceState) -> App {
+    // Build the router middleware into a single service which runs _after_ routing. Service
+    // builder order defines layers added first will be called first. This means:
+    //  - Requests go from top to bottom
+    //  - Responses go from bottom to top
     let middleware = ServiceBuilder::new()
         .layer(axum::middleware::from_fn(emit_request_metrics))
         .layer(CatchPanicLayer::custom(handle_panic))
@@ -49,7 +55,6 @@ pub fn make_app(state: ServiceState) -> axum::Router {
         ))
         .layer(NewSentryLayer::new_from_top())
         .layer(SentryHttpLayer::new().enable_transaction())
-        .layer(NormalizePathLayer::trim_trailing_slash())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_http_span)
@@ -61,11 +66,13 @@ pub fn make_app(state: ServiceState) -> axum::Router {
         put(put_object).get(get_object).delete(delete_object),
     );
 
-    Router::new()
+    let router = Router::new()
         .nest("/v1/", service_routes)
         .route("/health", get(health))
         .layer(middleware)
-        .with_state(state)
+        .with_state(state);
+
+    NormalizePath::trim_trailing_slash(router)
 }
 
 /// Create a tracing span for an HTTP request.
@@ -112,7 +119,10 @@ async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let method = request.method().clone();
 
-    let in_flight = IN_FLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    // `fetch_add` returns the previous value, so we add 1. We consider this sufficiently accurate
+    // since we only need to get a rough order of magnitude.
+    let in_flight = IN_FLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
+
     merni::counter!("server.requests": 1, "route" => route, "method" => method.as_str());
     merni::gauge!("server.requests.in_flight": in_flight);
 
@@ -153,9 +163,9 @@ fn listen(config: &Config) -> Result<TcpListener> {
 /// the server to continue running.
 ///
 /// Use [`make_app`] to create the application router.
-async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
+async fn serve(listener: TcpListener, app: App) -> Result<()> {
     let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
-    let service = app.into_make_service_with_connect_info::<SocketAddr>();
+    let service = ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(app);
     axum::serve(listener, service)
         .with_graceful_shutdown(guard.wait_owned())
         .await?;
