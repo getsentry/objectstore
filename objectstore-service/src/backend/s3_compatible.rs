@@ -6,7 +6,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::backend::{Backend, BackendStream};
+use crate::backend::common::{self, Backend, BackendStream};
 use crate::path::ObjectPath;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -59,7 +59,7 @@ impl<T> S3CompatibleBackend<T> {
     #[expect(dead_code)]
     pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: common::reqwest_client(),
             endpoint: endpoint.into(),
             bucket: bucket.into(),
             token_provider: Some(token_provider),

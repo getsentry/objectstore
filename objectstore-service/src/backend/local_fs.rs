@@ -10,8 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::ObjectPath;
-
-use super::{Backend, BackendStream};
+use crate::backend::common::{Backend, BackendStream};
 
 const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
