@@ -32,6 +32,7 @@ tokio-stream = { workspace = true }
 tower = { version = "0.5.2" }
 tower-http = { version = "0.6.6", default-features = false, features = [
     "catch-panic",
+    "set-header",
     "trace",
 ] }
 tracing = { workspace = true }

@@ -75,6 +75,7 @@ pub fn initialize_tracing(config: &Config) {
         // for internal crates and essential dependencies.
         Err(_) => EnvFilter::new(
             "INFO,\
+            tower_http=DEBUG,\
             objectstore=TRACE,\
             objectstore_service=TRACE,\
             objectstore_types=TRACE,\
