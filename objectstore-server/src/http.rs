@@ -1,22 +1,27 @@
 use std::any::Any;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, MatchedPath, Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
-use axum::{Json, Router};
+use axum::{Json, RequestExt, Router};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::ObjectPath;
 use objectstore_types::Metadata;
-use sentry::integrations::tower as sentry_tower;
+use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpSocket};
+use tokio::time::Instant;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 
@@ -24,6 +29,9 @@ use crate::config::Config;
 use crate::state::ServiceState;
 
 const TCP_LISTEN_BACKLOG: u32 = 1024;
+const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
+
+static IN_FLIGHT_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Deserialize, Debug)]
 struct ContextParams {
@@ -33,10 +41,20 @@ struct ContextParams {
 
 pub fn make_app(state: ServiceState) -> axum::Router {
     let middleware = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn(emit_request_metrics))
         .layer(CatchPanicLayer::custom(handle_panic))
-        .layer(sentry_tower::NewSentryLayer::<Request>::new_from_top())
-        .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
-        .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::DEBUG)));
+        .layer(SetResponseHeaderLayer::overriding(
+            header::SERVER,
+            HeaderValue::from_static(SERVER),
+        ))
+        .layer(NewSentryLayer::new_from_top())
+        .layer(SentryHttpLayer::new().enable_transaction())
+        .layer(NormalizePathLayer::trim_trailing_slash())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_http_span)
+                .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
+        );
 
     let service_routes = Router::new().route("/", put(put_object_nokey)).route(
         "/{*key}",
@@ -45,14 +63,30 @@ pub fn make_app(state: ServiceState) -> axum::Router {
 
     Router::new()
         .nest("/v1/", service_routes)
+        .route("/health", get(health))
         .layer(middleware)
         .with_state(state)
-        // the healthcheck is added after the `layer(middleware)`,
-        // so it will not go through the middleware
-        .route("/health", get(health))
 }
 
-/// Handler function for the [`CatchPanicLayer`] middleware.
+/// Create a tracing span for an HTTP request.
+///
+/// As opposed to `DefaultMakeSpan`, this also records the client IP address if available.
+fn make_http_span(request: &Request) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri(),
+        version = ?request.version(),
+        client_addr = ?request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr)
+    )
+}
+
+/// A panic handler that logs the panic and turns it into a 500 response.
+///
+/// Use with the [`CatchPanicLayer`] middleware.
 fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     let detail = if let Some(s) = err.downcast_ref::<String>() {
         s.clone()
@@ -66,6 +100,33 @@ fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 
     let response = (StatusCode::INTERNAL_SERVER_ERROR, detail);
     response.into_response()
+}
+
+/// A middleware that logs web request timings as metrics.
+///
+/// Use this with [`from_fn`](axum::middleware::from_fn).
+async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
+    let request_start = Instant::now();
+
+    let matched_path = request.extract_parts::<MatchedPath>().await;
+    let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
+    let method = request.method().clone();
+
+    let in_flight = IN_FLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    merni::counter!("server.requests": 1, "route" => route, "method" => method.as_str());
+    merni::gauge!("server.requests.in_flight": in_flight);
+
+    let response = next.run(request).await;
+    IN_FLIGHT_REQUESTS.fetch_sub(1, Ordering::Relaxed);
+
+    merni::distribution!(
+        "server.requests.duration"@s: request_start.elapsed(),
+        "route" => route,
+        "method" => method.as_str(),
+        "status" => response.status().as_str()
+    );
+
+    response
 }
 
 fn listen(config: &Config) -> Result<TcpListener> {
@@ -85,15 +146,27 @@ fn listen(config: &Config) -> Result<TcpListener> {
     Ok(listener)
 }
 
-pub async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
+/// Runs a web server until graceful shutdown is triggered.
+///
+///
+/// This function creates a future that runs the server. The future must be spawned or awaited for
+/// the server to continue running.
+///
+/// Use [`make_app`] to create the application router.
+async fn serve(listener: TcpListener, app: axum::Router) -> Result<()> {
     let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
-    axum::serve(listener, app.into_make_service())
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, service)
         .with_graceful_shutdown(guard.wait_owned())
         .await?;
 
     Ok(())
 }
 
+/// Runs the objectstore HTTP server.
+///
+/// This function creates a future that runs the server. The future must be spawned or awaited for
+/// the server to continue running.
 pub async fn server(state: ServiceState) -> Result<()> {
     merni::counter!("server.start": 1);
     let listener = listen(&state.config)?;
