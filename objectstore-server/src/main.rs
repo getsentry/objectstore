@@ -16,10 +16,14 @@ use objectstore_server::observability::{
 use objectstore_server::state::State;
 
 fn main() -> Result<()> {
+    let config = Config::from_env()?;
+
+    // Sentry should be initialized before creating the async runtime
+    let _sentry_guard = maybe_initialize_sentry(&config);
+
     let runtime = tokio::runtime::Runtime::new()?;
     let _runtime_guard = runtime.enter();
 
-    let config = Config::from_env()?;
     initialize_tracing(&config);
     tracing::info!("Starting service");
     tracing::debug!(?config);
@@ -29,7 +33,6 @@ fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let _sentry_guard = maybe_initialize_sentry(&config);
     let metrics_guard = maybe_initialize_metrics(&config)?;
 
     runtime.block_on(async move {
