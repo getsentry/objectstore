@@ -76,16 +76,22 @@ pub fn make_app(state: ServiceState) -> App {
 ///
 /// As opposed to `DefaultMakeSpan`, this also records the client IP address if available.
 fn make_http_span(request: &Request) -> tracing::Span {
-    tracing::debug_span!(
+    let span = tracing::debug_span!(
         "request",
         method = %request.method(),
         uri = %request.uri(),
         version = ?request.version(),
-        client_addr = ?request
-            .extensions()
-            .get::<axum::extract::ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr)
-    )
+        client_addr = tracing::field::Empty,
+    );
+
+    if let Some(ConnectInfo(addr)) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+    {
+        span.record("client_addr", tracing::field::display(addr.ip()));
+    }
+
+    span
 }
 
 /// A panic handler that logs the panic and turns it into a 500 response.
