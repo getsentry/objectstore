@@ -17,7 +17,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Workload {
     pub name: String,
-    #[serde(default)]
+    #[serde(default = "default_concurrency")]
     pub concurrency: usize,
     #[serde(default = "default_organizations")]
     pub organizations: u64,
@@ -26,6 +26,10 @@ pub struct Workload {
     pub file_sizes: FileSizes,
     #[serde(default)]
     pub actions: Actions,
+}
+
+fn default_concurrency() -> usize {
+    std::thread::available_parallelism().unwrap().get()
 }
 
 fn default_organizations() -> u64 {
