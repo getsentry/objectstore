@@ -34,10 +34,16 @@ fn main() -> Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     let metrics_guard = maybe_initialize_metrics(&config)?;
+    let metrics_handle = async move {
+        match metrics_guard {
+            Some(metrics_guard) => metrics_guard.flush(None).await,
+            None => Ok(()),
+        }
+    };
 
     runtime.block_on(async move {
         let state = State::new(config).await?;
-        tokio::spawn(http::server(state));
+        let server_handle = tokio::spawn(http::server(state));
 
         elegant_departure::tokio::depart()
             .on_termination()
@@ -46,11 +52,11 @@ fn main() -> Result<()> {
             .on_signal(SignalKind::quit())
             .await;
 
-        if let Some(metrics_guard) = metrics_guard {
-            metrics_guard.flush(None).await?;
-        }
+        let (server_result, metrics_result) = tokio::join!(server_handle, metrics_handle);
+        server_result??;
+        metrics_result?;
 
-        tracing::info!("shutting down");
+        tracing::info!("shutdown complete");
 
         Ok(())
     })

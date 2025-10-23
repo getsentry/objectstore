@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -20,6 +20,8 @@ use tokio::net::{TcpListener, TcpSocket};
 use tokio::time::Instant;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::metrics::InFlightRequestsLayer;
+use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
@@ -27,49 +29,94 @@ use tracing::Level;
 use crate::config::Config;
 use crate::state::ServiceState;
 
+/// The maximum backlog for TCP listen sockets before refusing connections.
 const TCP_LISTEN_BACKLOG: u32 = 1024;
+
+/// Interval for emitting the in-flight requests gauge metric.
+const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
-static IN_FLIGHT_REQUESTS: AtomicUsize = AtomicUsize::new(0);
-
-pub type App = axum::Router;
-
-#[derive(Deserialize, Debug)]
-struct ContextParams {
-    pub scope: String,
-    pub usecase: String,
+/// The objectstore web server application.
+#[derive(Debug)]
+pub struct App {
+    router: axum::Router,
+    in_flight_requests: InFlightRequestsCounter,
 }
 
-pub fn make_app(state: ServiceState) -> App {
-    // Build the router middleware into a single service which runs _after_ routing. Service
-    // builder order defines layers added first will be called first. This means:
-    //  - Requests go from top to bottom
-    //  - Responses go from bottom to top
-    let middleware = ServiceBuilder::new()
-        .layer(axum::middleware::from_fn(emit_request_metrics))
-        .layer(CatchPanicLayer::custom(handle_panic))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::SERVER,
-            HeaderValue::from_static(SERVER),
-        ))
-        .layer(NewSentryLayer::new_from_top())
-        .layer(SentryHttpLayer::new().enable_transaction())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(make_http_span)
-                .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
+impl App {
+    /// Creates a new application router for the given service state.
+    ///
+    /// This function sets up the middleware and routes for the application. Use [`serve`] to run
+    /// the server.
+    pub fn new(state: ServiceState) -> Self {
+        let (in_flight_layer, in_flight_requests) = InFlightRequestsLayer::pair();
+
+        // Build the router middleware into a single service which runs _after_ routing. Service
+        // builder order defines layers added first will be called first. This means:
+        //  - Requests go from top to bottom
+        //  - Responses go from bottom to top
+        let middleware = ServiceBuilder::new()
+            .layer(axum::middleware::from_fn(emit_request_metrics))
+            .layer(in_flight_layer)
+            .layer(CatchPanicLayer::custom(handle_panic))
+            .layer(SetResponseHeaderLayer::overriding(
+                header::SERVER,
+                HeaderValue::from_static(SERVER),
+            ))
+            .layer(NewSentryLayer::new_from_top())
+            .layer(SentryHttpLayer::new().enable_transaction())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_http_span)
+                    .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
+            );
+
+        let service_routes = Router::new().route("/", put(put_object_nokey)).route(
+            "/{*key}",
+            put(put_object).get(get_object).delete(delete_object),
         );
 
-    let service_routes = Router::new().route("/", put(put_object_nokey)).route(
-        "/{*key}",
-        put(put_object).get(get_object).delete(delete_object),
-    );
+        let router = Router::new()
+            .nest("/v1/", service_routes)
+            .route("/health", get(health))
+            .layer(middleware)
+            .with_state(state);
 
-    Router::new()
-        .nest("/v1/", service_routes)
-        .route("/health", get(health))
-        .layer(middleware)
-        .with_state(state)
+        App {
+            router,
+            in_flight_requests,
+        }
+    }
+
+    /// Runs a web server until graceful shutdown is triggered.
+    ///
+    ///
+    /// This function creates a future that runs the server. The future must be spawned or awaited for
+    /// the server to continue running.
+    ///
+    /// Use [`make_app`] to create the application router.
+    pub async fn serve(self, listener: TcpListener) -> Result<()> {
+        let Self {
+            router,
+            in_flight_requests,
+        } = self;
+
+        let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
+        let service =
+            ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(router);
+
+        let server = axum::serve(listener, service).with_graceful_shutdown(guard.wait_owned());
+        let emitter = in_flight_requests.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
+            merni::gauge!("server.in_flight_requests": count);
+        });
+
+        let (serve_result, _) = tokio::join!(server, emitter);
+        serve_result?;
+
+        Ok(())
+    }
 }
 
 /// Create a tracing span for an HTTP request.
@@ -121,16 +168,9 @@ async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let method = request.method().clone();
-
-    // `fetch_add` returns the previous value, so we add 1. We consider this sufficiently accurate
-    // since we only need to get a rough order of magnitude.
-    let in_flight = IN_FLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
-
     merni::counter!("server.requests": 1, "route" => route, "method" => method.as_str());
-    merni::gauge!("server.requests.in_flight": in_flight);
 
     let response = next.run(request).await;
-    IN_FLIGHT_REQUESTS.fetch_sub(1, Ordering::Relaxed);
 
     merni::distribution!(
         "server.requests.duration"@s: request_start.elapsed(),
@@ -159,23 +199,6 @@ fn listen(config: &Config) -> Result<TcpListener> {
     Ok(listener)
 }
 
-/// Runs a web server until graceful shutdown is triggered.
-///
-///
-/// This function creates a future that runs the server. The future must be spawned or awaited for
-/// the server to continue running.
-///
-/// Use [`make_app`] to create the application router.
-async fn serve(listener: TcpListener, app: App) -> Result<()> {
-    let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
-    let service = ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(app);
-    axum::serve(listener, service)
-        .with_graceful_shutdown(guard.wait_owned())
-        .await?;
-
-    Ok(())
-}
-
 /// Runs the objectstore HTTP server.
 ///
 /// This function creates a future that runs the server. The future must be spawned or awaited for
@@ -183,13 +206,17 @@ async fn serve(listener: TcpListener, app: App) -> Result<()> {
 pub async fn server(state: ServiceState) -> Result<()> {
     merni::counter!("server.start": 1);
     let listener = listen(&state.config)?;
-
-    let app = make_app(state);
-    serve(listener, app).await
+    App::new(state).serve(listener).await
 }
 
 async fn health() -> impl IntoResponse {
     "OK"
+}
+
+#[derive(Deserialize, Debug)]
+struct ContextParams {
+    pub scope: String,
+    pub usecase: String,
 }
 
 #[derive(Debug, Serialize)]

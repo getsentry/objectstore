@@ -1823,7 +1823,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
- "axum",
  "bytes",
  "futures-util",
  "objectstore-server",
@@ -3370,6 +3369,7 @@ dependencies = [
  "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
