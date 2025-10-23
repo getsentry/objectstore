@@ -3,7 +3,7 @@ use std::net::{SocketAddr, TcpListener};
 use bytes::BytesMut;
 use futures_util::TryStreamExt;
 use objectstore_server::config::{Config, Storage};
-use objectstore_server::http::make_app;
+use objectstore_server::http::App;
 use objectstore_server::state::State;
 use tempfile::TempDir;
 
@@ -102,11 +102,11 @@ impl TestServer {
         };
 
         let state = State::new(config).await.unwrap();
-        let router = make_app(state);
+        let app = App::new(state);
 
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router).await.unwrap();
+            app.serve(listener).await.unwrap();
         });
 
         Self {
