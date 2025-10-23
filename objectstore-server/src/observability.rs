@@ -35,6 +35,7 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
         sample_rate: config.sample_rate,
         traces_sample_rate: config.traces_sample_rate,
         enable_logs: true,
+        debug: config.debug,
         ..Default::default()
     }))
 }

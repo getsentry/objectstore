@@ -75,6 +75,7 @@ pub struct Sentry {
     pub server_name: Option<Cow<'static, str>>,
     pub sample_rate: f32,
     pub traces_sample_rate: f32,
+    pub debug: bool,
 }
 
 impl Sentry {
@@ -91,6 +92,7 @@ impl Default for Sentry {
             server_name: None,
             sample_rate: 1.0,
             traces_sample_rate: 0.01,
+            debug: false,
         }
     }
 }
