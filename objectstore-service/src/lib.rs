@@ -75,6 +75,10 @@ pub enum StorageConfig<'a> {
         instance_name: &'a str,
         /// The BigTable table name.
         table_name: &'a str,
+        /// The number of concurrent connections to BigTable.
+        ///
+        /// Defaults to 2x the number of worker threads.
+        connections: Option<usize>,
     },
 }
 
@@ -247,12 +251,14 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             project_id,
             instance_name,
             table_name,
+            connections,
         } => Box::new(
             backend::bigtable::BigTableBackend::new(
                 endpoint,
                 project_id,
                 instance_name,
                 table_name,
+                connections,
             )
             .await?,
         ),

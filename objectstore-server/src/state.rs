@@ -36,11 +36,13 @@ fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
             project_id,
             instance_name,
             table_name,
+            connections,
         } => StorageConfig::BigTable {
             endpoint: endpoint.as_deref(),
             project_id,
             instance_name,
             table_name,
+            connections: *connections,
         },
     }
 }

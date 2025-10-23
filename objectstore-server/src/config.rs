@@ -65,6 +65,7 @@ pub enum Storage {
         project_id: String,
         instance_name: String,
         table_name: String,
+        connections: Option<usize>,
     },
 }
 
