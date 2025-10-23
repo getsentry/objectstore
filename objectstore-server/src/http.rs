@@ -43,6 +43,7 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 pub struct App {
     router: axum::Router,
     in_flight_requests: InFlightRequestsCounter,
+    graceful_shutdown: bool,
 }
 
 impl App {
@@ -87,7 +88,16 @@ impl App {
         App {
             router,
             in_flight_requests,
+            graceful_shutdown: false,
         }
+    }
+
+    /// Enables or disables graceful shutdown for the server.
+    ///
+    /// By default, graceful shutdown is disabled.
+    pub fn graceful_shutdown(mut self, enable: bool) -> Self {
+        self.graceful_shutdown = enable;
+        self
     }
 
     /// Runs the web server until graceful shutdown is triggered.
@@ -98,13 +108,23 @@ impl App {
         let Self {
             router,
             in_flight_requests,
+            graceful_shutdown,
         } = self;
 
-        let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
         let service =
             ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(router);
 
-        let server = axum::serve(listener, service).with_graceful_shutdown(guard.wait_owned());
+        let server = async move {
+            if graceful_shutdown {
+                let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
+                axum::serve(listener, service)
+                    .with_graceful_shutdown(guard.wait_owned())
+                    .await
+            } else {
+                axum::serve(listener, service).await
+            }
+        };
+
         let emitter = in_flight_requests.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
             merni::gauge!("server.in_flight_requests": count);
         });
@@ -203,7 +223,11 @@ fn listen(config: &Config) -> Result<TcpListener> {
 pub async fn server(state: ServiceState) -> Result<()> {
     merni::counter!("server.start": 1);
     let listener = listen(&state.config)?;
-    App::new(state).serve(listener).await
+
+    App::new(state)
+        .graceful_shutdown(true)
+        .serve(listener)
+        .await
 }
 
 async fn health() -> impl IntoResponse {
