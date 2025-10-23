@@ -1691,9 +1691,9 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "merni"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca50719ac9c7b19557790224da2e61c6a6e5400ab6b8a350a9f7260b08a8d029"
+checksum = "549b0247ff3afd12d65008bf99ad9a6f143b77f101cb707db10c66c78536fa72"
 dependencies = [
  "crossbeam-utils",
  "reqwest",
