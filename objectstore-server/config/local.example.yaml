@@ -13,12 +13,12 @@ logging:
   level: trace
   format: auto
 
-sentry:
-  dsn: https://6b76fb2a5dc1164849cd797b75b6d879@o447951.ingest.us.sentry.io/4508694563782656
-  sample_rate: 1.0
-  traces_sample_rate: 1.0
-  environment: development
-  debug: true
+# sentry:
+#   dsn: http://<key>@localhost:8000/1
+#   sample_rate: 1.0
+#   traces_sample_rate: 1.0
+#   environment: development
+#   debug: true
 
 metric_tags:
   sentry_region: development
