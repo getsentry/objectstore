@@ -57,6 +57,7 @@ impl BigTableBackend {
         project_id: &str,
         instance_name: &str,
         table_name: &str,
+        connections: Option<usize>,
     ) -> Result<Self> {
         let bigtable = if let Some(endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
@@ -68,15 +69,15 @@ impl BigTableBackend {
             )?
         } else {
             let token_provider = gcp_auth::provider().await?;
-            // TODO on channel_size: Idle connections are automatically closed in “a few minutes”.
+            // TODO on connections: Idle connections are automatically closed in “a few minutes”.
             // We need to make sure that on longer idle periods the channels are re-opened.
-            let channel_size = 2 * Handle::current().metrics().num_workers();
+            let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
 
             BigTableConnection::new_with_token_provider(
                 project_id,
                 instance_name,
                 false, // is_read_only
-                channel_size,
+                connections,
                 Some(CONNECT_TIMEOUT),
                 token_provider.clone(),
             )?
@@ -340,6 +341,7 @@ mod tests {
             "testing",
             "objectstore",
             "objectstore",
+            None,
         )
         .await
     }
