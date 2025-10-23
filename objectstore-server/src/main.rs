@@ -24,7 +24,12 @@ fn main() -> Result<()> {
     // Sentry should be initialized before creating the async runtime
     let _sentry_guard = maybe_initialize_sentry(&config);
 
-    let runtime = tokio::runtime::Runtime::new()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("main-rt")
+        .enable_all()
+        .worker_threads(config.runtime.worker_threads)
+        .build()?;
+
     let _runtime_guard = runtime.enter();
 
     initialize_tracing(&config);

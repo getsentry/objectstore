@@ -70,6 +70,21 @@ pub enum Storage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Runtime {
+    /// Number of worker threads for the server runtime.
+    pub worker_threads: usize,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            worker_threads: num_cpus::get(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Sentry {
     pub dsn: Option<SecretBox<ConfigSecret>>,
     pub environment: Option<Cow<'static, str>>,
@@ -208,7 +223,10 @@ pub struct Config {
     pub high_volume_storage: Storage,
     pub long_term_storage: Storage,
 
-    // others
+    // server
+    pub runtime: Runtime,
+
+    // observability
     pub logging: Logging,
     pub sentry: Sentry,
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
@@ -227,6 +245,7 @@ impl Default for Config {
                 path: PathBuf::from("data"),
             },
 
+            runtime: Runtime::default(),
             logging: Logging::default(),
             sentry: Sentry::default(),
             datadog_key: None,
