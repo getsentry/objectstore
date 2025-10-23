@@ -48,8 +48,8 @@ pub struct App {
 impl App {
     /// Creates a new application router for the given service state.
     ///
-    /// This function sets up the middleware and routes for the application. Use [`serve`] to run
-    /// the server.
+    /// The applications sets up middlewares and routes for the objectstore web API. Use
+    /// [`serve`](Self::serve) to run the server future.
     pub fn new(state: ServiceState) -> Self {
         let (in_flight_layer, in_flight_requests) = InFlightRequestsLayer::pair();
 
@@ -90,13 +90,10 @@ impl App {
         }
     }
 
-    /// Runs a web server until graceful shutdown is triggered.
-    ///
+    /// Runs the web server until graceful shutdown is triggered.
     ///
     /// This function creates a future that runs the server. The future must be spawned or awaited for
     /// the server to continue running.
-    ///
-    /// Use [`make_app`] to create the application router.
     pub async fn serve(self, listener: TcpListener) -> Result<()> {
         let Self {
             router,
