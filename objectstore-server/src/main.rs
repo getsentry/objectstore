@@ -15,6 +15,9 @@ use objectstore_server::observability::{
 };
 use objectstore_server::state::State;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<()> {
     let config = Config::from_env()?;
 
