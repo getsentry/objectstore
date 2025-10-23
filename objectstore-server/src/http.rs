@@ -126,7 +126,7 @@ impl App {
         };
 
         let emitter = in_flight_requests.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
-            merni::gauge!("server.in_flight_requests": count);
+            merni::gauge!("server.requests.in_flight": count);
         });
 
         let (serve_result, _) = tokio::join!(server, emitter);
