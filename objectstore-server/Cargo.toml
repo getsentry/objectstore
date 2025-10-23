@@ -15,6 +15,7 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
+num_cpus = "1.17.0"
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
