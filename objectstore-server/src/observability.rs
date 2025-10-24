@@ -37,10 +37,10 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
             let propagate_traces = config.propagate_traces;
             let traces_sample_rate = config.traces_sample_rate;
             Some(std::sync::Arc::new(move |ctx| {
-                if propagate_traces
-                    && (Some(true) == ctx.sampled() || ctx.operation() == "http.server")
-                {
+                if propagate_traces && ctx.operation() == "http.server" {
                     1.0
+                } else if let Some(sampled) = ctx.sampled() {
+                    f32::from(sampled)
                 } else {
                     traces_sample_rate
                 }
