@@ -33,7 +33,19 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
         environment: config.environment.clone(),
         server_name: config.server_name.clone(),
         sample_rate: config.sample_rate,
-        traces_sample_rate: config.traces_sample_rate,
+        traces_sampler: {
+            let propagate_traces = config.propagate_traces;
+            let traces_sample_rate = config.traces_sample_rate;
+            Some(std::sync::Arc::new(move |ctx| {
+                if propagate_traces
+                    && (Some(true) == ctx.sampled() || ctx.operation() == "http.server")
+                {
+                    1.0
+                } else {
+                    traces_sample_rate
+                }
+            }))
+        },
         enable_logs: true,
         debug: config.debug,
         ..Default::default()

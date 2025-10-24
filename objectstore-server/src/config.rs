@@ -91,6 +91,10 @@ pub struct Sentry {
     pub server_name: Option<Cow<'static, str>>,
     pub sample_rate: f32,
     pub traces_sample_rate: f32,
+    /// If true, sample all traces generated from incoming HTTP requests.
+    /// If false, then the SDK will mirror the sampling decision contained in the `sampled` flag of the incoming trace,
+    /// which in practice could be really low.
+    pub propagate_traces: bool,
     pub debug: bool,
 }
 
@@ -108,6 +112,7 @@ impl Default for Sentry {
             server_name: None,
             sample_rate: 1.0,
             traces_sample_rate: 0.01,
+            propagate_traces: false,
             debug: false,
         }
     }
