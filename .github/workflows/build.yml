@@ -129,7 +129,7 @@ jobs:
       id-token: write
 
     env:
-      REGISTRY: us-central1-docker.pkg.dev/sentryio/objectstore/image
+      REGISTRY: us-docker.pkg.dev/sentryio/objectstore-mr/image
 
     steps:
       - name: Google Auth
@@ -145,7 +145,7 @@ jobs:
           version: ">= 390.0.0"
 
       - name: Configure docker
-        run: gcloud auth configure-docker us-central1-docker.pkg.dev
+        run: gcloud auth configure-docker us-docker.pkg.dev
 
       - *download
       - *assemble
