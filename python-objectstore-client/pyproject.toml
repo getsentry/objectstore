@@ -1,11 +1,7 @@
 [project]
-name = "python-objectstore-client"
+name = "objectstore-client"
 version = "0.1.0"
 description = "Python client for the Sentry Objectstore service"
 readme = "README.md"
 requires-python = ">=3.11.11"
 dependencies = []
-
-[[tool.uv.index]]
-url = "https://pypi.devinfra.sentry.io/simple"
-default = true

@@ -3,5 +3,14 @@ name = "objectstore"
 version = "0.1.0"
 requires-python = ">=3.13"
 
+[[tool.uv.index]]
+url = "https://pypi.devinfra.sentry.io/simple"
+default = true
+
+[tool.uv.workspace]
+members = [
+    "python-objectstore-client",
+]
+
 [dependency-groups]
 dev = ["devservices>=1.2.2"]
