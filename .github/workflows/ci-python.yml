@@ -33,16 +33,16 @@ jobs:
           install-cmd: uv sync --frozen --active
 
       - name: Run black
-        run: uv run black --check --diff python-objectstore-client
+        run: black --check --diff python-objectstore-client
 
       - name: Run isort
-        run: uv run isort --check-only --diff python-objectstore-client
+        run: isort --check-only --diff python-objectstore-client
 
       - name: Run flake8
-        run: uv run flake8 python-objectstore-client
+        run: flake8 python-objectstore-client
 
       - name: Run mypy
-        run: uv run mypy python-objectstore-client
+        run: mypy python-objectstore-client
 
   test:
     name: Test
@@ -62,4 +62,4 @@ jobs:
           install-cmd: uv sync --frozen --active
 
       - name: Run tests
-        run: pytest
+        run: pytest python-objectstore-client
