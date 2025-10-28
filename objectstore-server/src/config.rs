@@ -91,6 +91,9 @@ pub struct Sentry {
     pub server_name: Option<Cow<'static, str>>,
     pub sample_rate: f32,
     pub traces_sample_rate: f32,
+    /// If true (default), then the SDK will inherit the sampling decision contained in the `sampled` flag of the incoming trace.
+    /// If false, ignore the incoming sampling decision and always use `traces_sample_rate` instead.
+    pub inherit_sampling_decision: bool,
     pub debug: bool,
 }
 
@@ -108,6 +111,7 @@ impl Default for Sentry {
             server_name: None,
             sample_rate: 1.0,
             traces_sample_rate: 0.01,
+            inherit_sampling_decision: true,
             debug: false,
         }
     }

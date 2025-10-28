@@ -33,7 +33,19 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
         environment: config.environment.clone(),
         server_name: config.server_name.clone(),
         sample_rate: config.sample_rate,
-        traces_sample_rate: config.traces_sample_rate,
+        traces_sampler: {
+            let traces_sample_rate = config.traces_sample_rate;
+            let inherit_sampling_decision = config.inherit_sampling_decision;
+            Some(std::sync::Arc::new(move |ctx| {
+                if let Some(sampled) = ctx.sampled()
+                    && inherit_sampling_decision
+                {
+                    f32::from(sampled)
+                } else {
+                    traces_sample_rate
+                }
+            }))
+        },
         enable_logs: true,
         debug: config.debug,
         ..Default::default()
