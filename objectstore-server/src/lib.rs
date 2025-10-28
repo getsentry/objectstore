@@ -4,6 +4,8 @@
 //! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
 
 pub mod config;
+pub mod endpoints;
+pub mod error;
 pub mod http;
 pub mod observability;
 pub mod state;

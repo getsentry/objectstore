@@ -1,21 +1,14 @@
 use std::any::Any;
-use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::body::Body;
-use axum::extract::{ConnectInfo, MatchedPath, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, MatchedPath, Request};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
-use axum::{Json, RequestExt, Router, ServiceExt};
-use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::ObjectPath;
-use objectstore_types::Metadata;
+use axum::{RequestExt, ServiceExt};
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
-use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::time::Instant;
 use tower::ServiceBuilder;
@@ -27,6 +20,7 @@ use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 
 use crate::config::Config;
+use crate::endpoints;
 use crate::state::ServiceState;
 
 /// The maximum backlog for TCP listen sockets before refusing connections.
@@ -37,6 +31,20 @@ const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
+
+/// Runs the objectstore HTTP server.
+///
+/// This function creates a future that runs the server. The future must be spawned or awaited for
+/// the server to continue running.
+pub async fn server(state: ServiceState) -> Result<()> {
+    merni::counter!("server.start": 1);
+    let listener = listen(&state.config)?;
+
+    App::new(state)
+        .graceful_shutdown(true)
+        .serve(listener)
+        .await
+}
 
 /// The objectstore web server application.
 #[derive(Debug)]
@@ -74,16 +82,7 @@ impl App {
                     .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
             );
 
-        let service_routes = Router::new().route("/", put(put_object_nokey)).route(
-            "/{*key}",
-            put(put_object).get(get_object).delete(delete_object),
-        );
-
-        let router = Router::new()
-            .nest("/v1/", service_routes)
-            .route("/health", get(health))
-            .layer(middleware)
-            .with_state(state);
+        let router = endpoints::routes().layer(middleware).with_state(state);
 
         App {
             router,
@@ -214,167 +213,4 @@ fn listen(config: &Config) -> Result<TcpListener> {
     tracing::info!("HTTP server listening on {addr}");
 
     Ok(listener)
-}
-
-/// Runs the objectstore HTTP server.
-///
-/// This function creates a future that runs the server. The future must be spawned or awaited for
-/// the server to continue running.
-pub async fn server(state: ServiceState) -> Result<()> {
-    merni::counter!("server.start": 1);
-    let listener = listen(&state.config)?;
-
-    App::new(state)
-        .graceful_shutdown(true)
-        .serve(listener)
-        .await
-}
-
-async fn health() -> impl IntoResponse {
-    "OK"
-}
-
-#[derive(Deserialize, Debug)]
-struct ContextParams {
-    pub scope: String,
-    pub usecase: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PutBlobResponse {
-    key: String,
-}
-
-async fn put_object_nokey(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    headers: HeaderMap,
-    body: Body,
-) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key: uuid::Uuid::new_v4().to_string(),
-    };
-    populate_sentry_scope(&path);
-    let metadata = Metadata::from_headers(&headers, "")?;
-
-    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
-
-    Ok(Json(PutBlobResponse {
-        key: key.key.to_string(),
-    }))
-}
-
-async fn put_object(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
-    headers: HeaderMap,
-    body: Body,
-) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
-    populate_sentry_scope(&path);
-    let metadata = Metadata::from_headers(&headers, "")?;
-
-    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
-
-    Ok(Json(PutBlobResponse {
-        key: key.key.to_string(),
-    }))
-}
-
-async fn get_object(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
-) -> error::Result<Response> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
-    populate_sentry_scope(&path);
-
-    let Some((metadata, stream)) = state.service.get_object(&path).await? else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
-    };
-
-    let headers = metadata.to_headers("", false)?;
-    Ok((headers, Body::from_stream(stream)).into_response())
-}
-
-async fn delete_object(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
-) -> error::Result<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
-    populate_sentry_scope(&path);
-
-    state.service.delete_object(&path).await?;
-
-    Ok(())
-}
-
-fn populate_sentry_scope(path: &ObjectPath) {
-    sentry::configure_scope(|s| {
-        s.set_tag("usecase", path.usecase.clone());
-        s.set_extra("scope", path.scope.clone().into());
-        s.set_extra("key", path.key.clone().into());
-    });
-}
-
-mod error {
-    // This is mostly adapted from <https://github.com/tokio-rs/axum/blob/main/examples/anyhow-error-response/src/main.rs>
-
-    use axum::http::StatusCode;
-    use axum::response::{IntoResponse, Response};
-
-    pub enum AnyhowResponse {
-        Error(anyhow::Error),
-        Response(Response),
-    }
-
-    pub type Result<T> = std::result::Result<T, AnyhowResponse>;
-
-    impl IntoResponse for AnyhowResponse {
-        fn into_response(self) -> Response {
-            match self {
-                AnyhowResponse::Error(error) => {
-                    tracing::error!(
-                        error = error.as_ref() as &dyn std::error::Error,
-                        "error handling request"
-                    );
-
-                    // TODO: Support more nuanced return codes for validation errors etc. See
-                    // Relay's ApiErrorResponse and BadStoreRequest as examples.
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }
-                AnyhowResponse::Response(response) => response,
-            }
-        }
-    }
-
-    impl From<Response> for AnyhowResponse {
-        fn from(response: Response) -> Self {
-            Self::Response(response)
-        }
-    }
-
-    impl From<anyhow::Error> for AnyhowResponse {
-        fn from(err: anyhow::Error) -> Self {
-            Self::Error(err)
-        }
-    }
 }
