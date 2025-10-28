@@ -9,7 +9,7 @@ async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 objectstore-types = { workspace = true }
-reqwest = { workspace = true, features = ["stream", "json"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
 serde = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
@@ -21,3 +21,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "full"] }
 uuid = { version = "1.18.0", features = ["v7"] }
 zstd = "0.13.3"
+
+[features]
+default = ["hickory-dns"]
+hickory-dns = ["reqwest/hickory-dns"]
