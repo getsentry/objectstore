@@ -1,3 +1,6 @@
+# This pre-commit config is mainly aimed at formatting and linting the Python files in python-objectstore-client.
+# However, pre-commit requires this file to be placed at the root of the repository.
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -14,6 +17,7 @@ repos:
         args: ["--allow-multiple-documents"]
       - id: check-toml
       - id: detect-private-key
+
   - repo: local
     hooks:
       - id: black
