@@ -92,7 +92,7 @@ pub struct Sentry {
     pub sample_rate: f32,
     pub traces_sample_rate: f32,
     /// If true (default), then the SDK will inherit the sampling decision contained in the `sampled` flag of the incoming trace.
-    /// If false, ignore the incoming sampling decision and use `traces_sample_rate` instead.
+    /// If false, ignore the incoming sampling decision and always use `traces_sample_rate` instead.
     pub inherit_sampling_decision: bool,
     pub debug: bool,
 }
