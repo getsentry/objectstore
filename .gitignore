@@ -9,3 +9,5 @@ profile.json.gz
 
 # vim swap files
 .*.sw*
+
+**/__pycache__
