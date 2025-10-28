@@ -1,0 +1,41 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+      - id: check-toml
+      - id: detect-private-key
+  - repo: local
+    hooks:
+      - id: black
+        name: black
+        entry: .venv/bin/black
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: isort
+        name: isort
+        entry: .venv/bin/isort
+        language: system
+        types: [python]
+      - id: flake8
+        name: flake8
+        entry: .venv/bin/flake8
+        language: system
+        types: [python]
+        require_serial: true
+      - id: mypy
+        name: mypy
+        entry: .venv/bin/mypy
+        language: system
+        types: [python]
+        require_serial: true

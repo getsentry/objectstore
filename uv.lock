@@ -35,6 +35,14 @@ wheels = [
 ]
 
 [[package]]
+name = "cfgv"
+version = "3.4.0"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/cfgv-3.4.0-py2.py3-none-any.whl", hash = "sha256:b7265b1f29fd3316bfcd2b330d63d024f2bfd8bcb8b0272f8e19a504856c48f9" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
@@ -69,6 +77,22 @@ wheels = [
 ]
 
 [[package]]
+name = "distlib"
+version = "0.3.9"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/distlib-0.3.9-py2.py3-none-any.whl", hash = "sha256:47f8c22fd27c27e25a65601af709b38e4f0a45ea4fc2e710f65755fa8caaaf87" },
+]
+
+[[package]]
+name = "filelock"
+version = "3.19.1"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/filelock-3.19.1-py3-none-any.whl", hash = "sha256:d38e30481def20772f5baf097c122c3babc4fcdb7e14e57049eb9d88c6dc017d" },
+]
+
+[[package]]
 name = "flake8"
 version = "7.3.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
@@ -79,6 +103,14 @@ dependencies = [
 ]
 wheels = [
     { url = "https://pypi.devinfra.sentry.io/wheels/flake8-7.3.0-py2.py3-none-any.whl", hash = "sha256:b9696257b9ce8beb888cdbe31cf885c90d31928fe202be0889a7cdafad32f01e" },
+]
+
+[[package]]
+name = "identify"
+version = "2.6.9"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/identify-2.6.9-py2.py3-none-any.whl", hash = "sha256:c98b4322da415a8e5a70ff6e51fbc2d2932c015532d77e9f8537b4ba7813b150" },
 ]
 
 [[package]]
@@ -130,6 +162,14 @@ wheels = [
 ]
 
 [[package]]
+name = "nodeenv"
+version = "1.9.1"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/nodeenv-1.9.1-py2.py3-none-any.whl", hash = "sha256:ba11c9782d29c27c70ffbdda2d7415098754709be8a7056d79a737cd901155c9" },
+]
+
+[[package]]
 name = "objectstore"
 version = "0.1.0"
 source = { virtual = "." }
@@ -137,12 +177,16 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "devservices" },
+    { name = "pre-commit" },
 ]
 
 [package.metadata]
 
 [package.metadata.requires-dev]
-dev = [{ name = "devservices", specifier = ">=1.2.2" }]
+dev = [
+    { name = "devservices", specifier = ">=1.2.2" },
+    { name = "pre-commit", specifier = ">=4.2.0" },
+]
 
 [[package]]
 name = "objectstore-client"
@@ -199,6 +243,21 @@ version = "1.5.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
     { url = "https://pypi.devinfra.sentry.io/wheels/pluggy-1.5.0-py3-none-any.whl", hash = "sha256:44e1ad92c8ca002de6377e165f3e0f1be63266ab4d554740532335b9d75ea669" },
+]
+
+[[package]]
+name = "pre-commit"
+version = "4.2.0"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+dependencies = [
+    { name = "cfgv" },
+    { name = "identify" },
+    { name = "nodeenv" },
+    { name = "pyyaml" },
+    { name = "virtualenv" },
+]
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/pre_commit-4.2.0-py2.py3-none-any.whl", hash = "sha256:a009ca7205f1eb497d10b845e52c838a98b6cdd2102a6c8e4540e94ee75c58bd" },
 ]
 
 [[package]]
@@ -299,4 +358,17 @@ version = "2.5.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
     { url = "https://pypi.devinfra.sentry.io/wheels/urllib3-2.5.0-py3-none-any.whl", hash = "sha256:e6b01673c0fa6a13e374b50871808eb3bf7046c4b125b216f6bf1cc604cff0dc" },
+]
+
+[[package]]
+name = "virtualenv"
+version = "20.29.3"
+source = { registry = "https://pypi.devinfra.sentry.io/simple" }
+dependencies = [
+    { name = "distlib" },
+    { name = "filelock" },
+    { name = "platformdirs" },
+]
+wheels = [
+    { url = "https://pypi.devinfra.sentry.io/wheels/virtualenv-20.29.3-py3-none-any.whl", hash = "sha256:3e3d00f5807e83b234dfb6122bf37cfadf4be216c53a49ac059d02414f819170" },
 ]
