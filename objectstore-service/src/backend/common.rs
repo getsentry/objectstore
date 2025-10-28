@@ -40,6 +40,7 @@ pub trait Backend: Debug + Send + Sync + 'static {
 pub fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .hickory_dns(true)
         .build()
         .expect("Client::new()")
 }
