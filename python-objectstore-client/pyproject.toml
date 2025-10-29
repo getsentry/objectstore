@@ -16,7 +16,7 @@ dev = [
     "black>=25.1.0",
     "isort>=5.13.2",
     "flake8>=7.3.0",
-    "mypy>=1.17.1; sys_platform != 'win32'",
+    "mypy>=1.17.1",
 ]
 
 [tool.mypy]
