@@ -198,7 +198,7 @@ dev = [
     { name = "black" },
     { name = "flake8" },
     { name = "isort" },
-    { name = "mypy" },
+    { name = "mypy", marker = "sys_platform != 'win32'" },
     { name = "pytest" },
 ]
 
@@ -209,7 +209,7 @@ dev = [
     { name = "black", specifier = ">=25.1.0" },
     { name = "flake8", specifier = ">=7.3.0" },
     { name = "isort", specifier = ">=5.13.2" },
-    { name = "mypy", specifier = ">=1.17.1" },
+    { name = "mypy", marker = "sys_platform != 'win32'", specifier = ">=1.17.1" },
     { name = "pytest", specifier = ">=8.3.3" },
 ]
 
