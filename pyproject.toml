@@ -5,6 +5,7 @@ requires-python = ">=3.13"
 
 [[tool.uv.index]]
 url = "https://pypi.devinfra.sentry.io/simple"
+default = true
 
 [tool.uv.workspace]
 members = [
