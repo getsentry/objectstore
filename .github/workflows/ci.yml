@@ -47,6 +47,27 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Format
+        run: uv run ruff format
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Run mypy
+        run: uv run mypy .
+
   test_all:
     name: Test (all features)
     runs-on: ubuntu-latest
@@ -88,6 +109,21 @@ jobs:
 
       - name: Run Tests
         run: cargo test --workspace --all-features
+
+  test-python:
+    name: Test Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Run tests
+        run: uv run pytest python-objectstore-client
 
   docs:
     name: Cargo Docs
