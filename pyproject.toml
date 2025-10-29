@@ -3,6 +3,9 @@ name = "objectstore"
 version = "0.1.0"
 requires-python = ">=3.13"
 
+[tool.uv]
+required-version = "==0.9.3"
+
 [tool.uv.workspace]
 members = [
     "python-objectstore-client",
@@ -11,5 +14,19 @@ members = [
 [dependency-groups]
 dev = [
     "devservices>=1.2.2",
+    "mypy>=1.17.1",
+    "ruff>=0.14.2",
     "pre-commit>=4.2.0",
 ]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"] # pycodestyle, pyflakes, isort, pyupgrade
+
+[tool.mypy]
+no_implicit_reexport = true
+warn_unreachable = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+local_partial_types = true
+disallow_any_generics = true
+disallow_untyped_defs = true

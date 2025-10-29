@@ -19,26 +19,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
-        with:
-          version: '0.9.3'
-          enable-cache: false # we just cache the venv-dir directly in action-setup-venv
 
-      - uses: getsentry/action-setup-venv@0958463ee0e02b9e8aa8f8e031afae1f84b80881 # v3.0.0
-        with:
-          cache-dependency-path: uv.lock
-          install-cmd: uv sync --all-packages --all-groups --frozen --active
-
-      - name: Run black
-        run: black --check --diff python-objectstore-client
-
-      - name: Run isort
-        run: isort --check-only --diff python-objectstore-client
-
-      - name: Run flake8
-        run: flake8 python-objectstore-client
-
+      - name: Run ruff check
+        run: ruff check
+      - name: Run ruff format
+        run: ruff format
       - name: Run mypy
-        run: mypy python-objectstore-client
+        run: mypy .
 
   test:
     strategy:
