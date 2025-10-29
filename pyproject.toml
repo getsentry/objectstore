@@ -17,6 +17,3 @@ dev = [
     "devservices>=1.2.2",
     "pre-commit>=4.2.0",
 ]
-
-[tool.flake8]
-extend-ignore = ["E501", "E203"]
