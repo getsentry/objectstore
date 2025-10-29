@@ -66,21 +66,12 @@ class NoOpMetricsBackend(MetricsBackend):
         value: Union[int, float] = 1,
         tags: Tags | None = None,
     ) -> None:
-        """
-        Increments a counter metric by a given value.
-        """
         pass
 
     def gauge(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
-        """
-        Sets a gauge metric to the given value.
-        """
         pass
 
     def timing(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
-        """
-        Records a timing metric.
-        """
         pass
 
     def distribution(
@@ -90,9 +81,6 @@ class NoOpMetricsBackend(MetricsBackend):
         tags: Tags | None = None,
         unit: str | None = None,
     ) -> None:
-        """
-        Records a distribution metric.
-        """
         pass
 
 
