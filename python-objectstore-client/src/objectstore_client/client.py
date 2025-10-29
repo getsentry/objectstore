@@ -41,7 +41,6 @@ class ClientBuilder:
         self,
         objectstore_base_url: str,
         usecase: str,
-        options: dict | None = None,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
     ):
@@ -50,7 +49,6 @@ class ClientBuilder:
         self._default_compression: Compression = "zstd"
         self._propagate_traces = propagate_traces
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
-        _ = options
 
     def _make_client(self, scope: str) -> Client:
         pool = urllib3.connectionpool.connection_from_url(self._base_url)
@@ -98,7 +96,7 @@ class Client:
             return dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
         return {}
 
-    def _make_url(self, id: str | None, full=False) -> str:
+    def _make_url(self, id: str | None, full: bool = False) -> str:
         base_path = f"/v1/{id}" if id else "/v1/"
         qs = urlencode({"usecase": self._usecase, "scope": self._scope})
         if full:
@@ -143,7 +141,9 @@ class Client:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
-        with measure_storage_operation(self._metrics_backend, "put", self._usecase) as metric_emitter:
+        with measure_storage_operation(
+            self._metrics_backend, "put", self._usecase
+        ) as metric_emitter:
             response = self._pool.request(
                 "PUT",
                 self._make_url(id),
@@ -187,7 +187,9 @@ class Client:
 
         if metadata.compression and decompress:
             if metadata.compression != "zstd":
-                raise NotImplementedError("Transparent decoding of anything but `zstd` is not implemented yet")
+                raise NotImplementedError(
+                    "Transparent decoding of anything but `zstd` is not implemented yet"
+                )
 
             metadata.compression = None
             dctx = zstandard.ZstdDecompressor()
@@ -205,7 +207,7 @@ class Client:
         """
         return self._make_url(id, full=True)
 
-    def delete(self, id: str):
+    def delete(self, id: str) -> None:
         """
         Deletes the blob with the given `id`.
         """
@@ -227,7 +229,7 @@ class ClientError(Exception):
         self.response = response
 
 
-def raise_for_status(response: urllib3.BaseHTTPResponse):
+def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
     if response.status >= 400:
         res = str(response.data or response.read())
         raise ClientError(

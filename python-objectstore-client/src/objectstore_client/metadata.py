@@ -5,7 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Iterable, Iterator, Literal, TypeVar, cast
+from typing import Literal, cast
 
 Compression = Literal["zstd"]
 
@@ -74,28 +74,6 @@ def format_timedelta(delta: timedelta) -> str:
     return output
 
 
-T = TypeVar("T")
-
-
-def itertools_batched(iterable: Iterable[T], n: int, strict: bool = False) -> Iterator[tuple[T, ...]]:
-    """
-    Vendored version of `itertools.batched`, not available in Python 3.11.
-
-    Batch data from the iterable into tuples of length n. The last batch may be shorter than n.
-
-    If strict is true, will raise a ValueError if the final batch is shorter than n.
-
-    Loops over the input iterable and accumulates data into tuples up to size n. The input is consumed lazily, just enough to fill a batch. The result is yielded as soon as the batch is full or when the input iterable is exhausted:
-    """
-    if n < 1:
-        raise ValueError("n must be at least one")
-    iterator = iter(iterable)
-    while batch := tuple(itertools.islice(iterator, n)):
-        if strict and len(batch) < n:
-            raise ValueError("final batch is shorter than n")
-        yield batch
-
-
 TIME_SPLIT = re.compile(r"[^\W\d_]+|\d+")
 
 
@@ -103,7 +81,7 @@ def parse_timedelta(delta: str) -> timedelta:
     words = TIME_SPLIT.findall(delta)
     seconds = 0
 
-    for num, unit in itertools_batched(words, n=2, strict=True):
+    for num, unit in itertools.batched(words, n=2, strict=True):
         num = int(num)
         multiplier = 0
 
