@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.13.1"
 
 [tool.uv]
-required-version = "==0.9.3"
+required-version = "==0.9.3" # keep in sync with devenv/config.ini
 
 [tool.uv.workspace]
 members = [
