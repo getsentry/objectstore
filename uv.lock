@@ -191,7 +191,7 @@ dev = [
 [[package]]
 name = "objectstore-client"
 version = "0.1.0"
-source = { virtual = "python-objectstore-client" }
+source = { editable = "python-objectstore-client" }
 
 [package.dev-dependencies]
 dev = [
