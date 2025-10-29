@@ -177,7 +177,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "devservices" },
-    { name = "pre-commit" },
+    { name = "pre-commit", marker = "sys_platform != 'win32'" },
 ]
 
 [package.metadata]
@@ -185,7 +185,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "devservices", specifier = ">=1.2.2" },
-    { name = "pre-commit", specifier = ">=4.2.0" },
+    { name = "pre-commit", marker = "sys_platform != 'win32'", specifier = ">=4.2.0" },
 ]
 
 [[package]]
