@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Iterable, Iterator, Literal, TypeVar, cast
 
-T = TypeVar("T")
-
 Compression = Literal["zstd"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
@@ -76,7 +74,7 @@ def format_timedelta(delta: timedelta) -> str:
     return output
 
 
-TIME_SPLIT = re.compile(r"[^\W\d_]+|\d+")
+T = TypeVar("T")
 
 
 def itertools_batched(iterable: Iterable[T], n: int, strict: bool = False) -> Iterator[tuple[T, ...]]:
@@ -96,6 +94,9 @@ def itertools_batched(iterable: Iterable[T], n: int, strict: bool = False) -> It
         if strict and len(batch) < n:
             raise ValueError("final batch is shorter than n")
         yield batch
+
+
+TIME_SPLIT = re.compile(r"[^\W\d_]+|\d+")
 
 
 def parse_timedelta(delta: str) -> timedelta:
