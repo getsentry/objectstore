@@ -191,3 +191,9 @@ cargo run --release -p stresstest -- -c stresstest/config/example.yaml
 Similar to the objectstore server, you can find example configuration files in
 the `config` subfolder. Copy and save your own files there, as they will not be
 tracked by git.
+
+## License
+
+Like Sentry, Objectstore is licensed under the FSL. See the `LICENSE.md` file
+and [this blog post](https://blog.sentry.io/introducing-the-functional-source-license-freedom-without-free-riding/)
+for more information.
