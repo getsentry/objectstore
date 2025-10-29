@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //!
-//! ```
+//! ```no_run
 //! use objectstore_client::ClientBuilder;
 //!
 //! #[tokio::main]
