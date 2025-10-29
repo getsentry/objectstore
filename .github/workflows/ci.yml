@@ -60,13 +60,13 @@ jobs:
         run: uv sync --all-packages --all-groups
 
       - name: Format
-        run: ruff format
+        run: uv run ruff format
 
       - name: Lint
-        run: ruff check
+        run: uv run ruff check
 
       - name: Run mypy
-        run: mypy .
+        run: uv run mypy .
 
   test_all:
     name: Test (all features)
@@ -123,7 +123,7 @@ jobs:
         run: uv sync --all-packages --all-groups
 
       - name: Run tests
-        run: pytest python-objectstore-client
+        run: uv run pytest python-objectstore-client
 
   docs:
     name: Cargo Docs
