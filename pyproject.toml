@@ -1,7 +1,7 @@
 [project]
 name = "objectstore"
 version = "0.1.0"
-requires-python = ">=3.11.9"
+requires-python = ">=3.13"
 
 [tool.uv.workspace]
 members = [

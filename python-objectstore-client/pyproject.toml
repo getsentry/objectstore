@@ -3,7 +3,7 @@ name = "objectstore-client"
 version = "0.1.0"
 description = "Python client for the Sentry Objectstore service"
 readme = "README.md"
-requires-python = ">=3.11.9"
+requires-python = ">=3.13"
 dependencies = []
 
 [build-system]
@@ -33,7 +33,7 @@ disallow_untyped_defs = true
 
 [tool.black]
 line-length = 200
-target-version = ['py311']
+target-version = ['py313']
 
 [tool.isort]
 profile = "black"
