@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import time
 from abc import abstractmethod
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
-from typing import Mapping, Protocol, Union, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 Tags = Mapping[str, str]
 
@@ -19,7 +19,7 @@ class MetricsBackend(Protocol):
     def increment(
         self,
         name: str,
-        value: Union[int, float] = 1,
+        value: int | float = 1,
         tags: Tags | None = None,
     ) -> None:
         """
@@ -28,16 +28,9 @@ class MetricsBackend(Protocol):
         raise NotImplementedError
 
     @abstractmethod
-    def gauge(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
+    def gauge(self, name: str, value: int | float, tags: Tags | None = None) -> None:
         """
         Sets a gauge metric to the given value.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def timing(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
-        """
-        Records a timing metric.
         """
         raise NotImplementedError
 
@@ -45,7 +38,7 @@ class MetricsBackend(Protocol):
     def distribution(
         self,
         name: str,
-        value: Union[int, float],
+        value: int | float,
         tags: Tags | None = None,
         unit: str | None = None,
     ) -> None:
@@ -63,21 +56,18 @@ class NoOpMetricsBackend(MetricsBackend):
     def increment(
         self,
         name: str,
-        value: Union[int, float] = 1,
+        value: int | float = 1,
         tags: Tags | None = None,
     ) -> None:
         pass
 
-    def gauge(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
-        pass
-
-    def timing(self, name: str, value: Union[int, float], tags: Tags | None = None) -> None:
+    def gauge(self, name: str, value: int | float, tags: Tags | None = None) -> None:
         pass
 
     def distribution(
         self,
         name: str,
-        value: Union[int, float],
+        value: int | float,
         tags: Tags | None = None,
         unit: str | None = None,
     ) -> None:
@@ -99,17 +89,23 @@ class StorageMetricEmitter:
 
     def record_latency(self, elapsed: float) -> None:
         tags = {"usecase": self.usecase}
-        self.backend.timing(f"storage.{self.operation}.latency", elapsed, tags=tags)
+        self.backend.distribution(
+            f"storage.{self.operation}.latency", elapsed, tags=tags
+        )
         self.elapsed = elapsed
 
     def record_uncompressed_size(self, value: int) -> None:
         tags = {"usecase": self.usecase, "compression": "none"}
-        self.backend.distribution(f"storage.{self.operation}.size", value, tags=tags, unit="byte")
+        self.backend.distribution(
+            f"storage.{self.operation}.size", value, tags=tags, unit="byte"
+        )
         self.uncompressed_size = value
 
     def record_compressed_size(self, value: int, compression: str = "unknown") -> None:
         tags = {"usecase": self.usecase, "compression": compression}
-        self.backend.distribution(f"storage.{self.operation}.size", value, tags=tags, unit="byte")
+        self.backend.distribution(
+            f"storage.{self.operation}.size", value, tags=tags, unit="byte"
+        )
         self.compressed_size = value
         self.compression = compression
 
@@ -136,7 +132,9 @@ class StorageMetricEmitter:
 
         for size, compression in sizes:
             tags = {"usecase": self.usecase, "compression": compression}
-            self.backend.distribution(f"storage.{self.operation}.throughput", size / self.elapsed, tags=tags)
+            self.backend.distribution(
+                f"storage.{self.operation}.throughput", size / self.elapsed, tags=tags
+            )
             self.backend.distribution(
                 f"storage.{self.operation}.inverse_throughput",
                 self.elapsed / size,
