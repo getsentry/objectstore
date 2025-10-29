@@ -19,6 +19,9 @@ jobs:
 
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
 
+      - name: Install dependencies
+      - run: uv sync --all-packages --all-groups
+
       - name: Format
         run: uv run ruff format
 
@@ -36,6 +39,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install dependencies
+      - run: uv sync --all-packages --all-groups
 
       - name: Run tests
         run: uv run pytest python-objectstore-client
