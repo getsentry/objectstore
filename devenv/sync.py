@@ -1,5 +1,6 @@
-from devenv import constants
 from devenv.lib import config, uv
+
+from devenv import constants
 
 
 def main(context: dict[str, str]) -> int:
