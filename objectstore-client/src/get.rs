@@ -1,6 +1,7 @@
 use std::{fmt, io};
 
 use async_compression::tokio::bufread::ZstdDecoder;
+use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
 use reqwest::StatusCode;
@@ -19,6 +20,21 @@ pub struct GetResult {
     /// The response stream.
     pub stream: ClientStream,
 }
+
+impl GetResult {
+    /// Loads the object payload fully into memory.
+    pub async fn payload(self) -> anyhow::Result<bytes::Bytes> {
+        let bytes: BytesMut = self.stream.try_collect().await?;
+        Ok(bytes.freeze())
+    }
+
+    /// Loads the object payload fully into memory and interprets it as UTF-8 text.
+    pub async fn text(self) -> anyhow::Result<String> {
+        let bytes = self.payload().await?;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+}
+
 impl fmt::Debug for GetResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GetResult")
