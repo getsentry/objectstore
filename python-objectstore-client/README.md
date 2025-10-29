@@ -1,4 +1,4 @@
-# objectstore-client
+# Objectstore Client
 
 ## Usage
 

@@ -36,6 +36,7 @@ impl ClientBuilder {
     pub fn new(service_url: &str, usecase: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            // hickory-dns: Controlled by the `reqwest/hickory-dns` feature flag
             // we are dealing with de/compression ourselves:
             .no_brotli()
             .no_deflate()
