@@ -20,12 +20,14 @@ jobs:
 
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
 
-      - name: Run ruff check
-        run: ruff check
-      - name: Run ruff format
-        run: ruff format
+      - name: Format
+        run: uv run ruff format
+
+      - name: Lint
+        run: uv run ruff check
+
       - name: Run mypy
-        run: mypy .
+        run: uv run mypy .
 
   test:
     strategy:
