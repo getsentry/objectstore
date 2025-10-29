@@ -23,13 +23,13 @@ jobs:
       - run: uv sync --all-packages --all-groups
 
       - name: Format
-        run: uv run ruff format
+        run: ruff format
 
       - name: Lint
-        run: uv run ruff check
+        run: ruff check
 
       - name: Run mypy
-        run: uv run mypy .
+        run: mypy .
 
   test:
     name: Test
