@@ -8,7 +8,8 @@ cbt() {
   command cbt -project testing -instance objectstore "$@"
 }
 
-until cbt ls > /dev/null 2>&1; do
+for _ in {1..4}; do
+  cbt ls >/dev/null 2>&1 && break
   sleep 1
 done
 

@@ -106,7 +106,6 @@ jobs:
         with:
           key: ${{ github.job }}
 
-      # TODO: Use devservices and remove setup-bigtable.sh
       - name: Setup BigTable
         run: ./scripts/setup-bigtable.sh bigtable-emulator
 
