@@ -110,7 +110,13 @@ jobs:
             docker push $REGISTRY:${{ github.sha }}-$PLATFORM
           done
 
-          for TAG in ${{ github.sha }} latest; do
+          # Push nightly on main branch - releases are tagged by craft.
+          TAGS="${{ github.sha }}"
+          if [[ "${{ github.ref }}" != refs/heads/release/* ]]; then
+            TAGS="$TAGS nightly"
+          fi
+
+          for TAG in $TAGS; do
             docker manifest create $REGISTRY:$TAG \
               --amend $REGISTRY:${{ github.sha }}-amd64 \
               --amend $REGISTRY:${{ github.sha }}-arm64

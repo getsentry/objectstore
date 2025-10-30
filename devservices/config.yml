@@ -20,7 +20,7 @@ x-programs:
 
 services:
   objectstore:
-    image: ghcr.io/getsentry/objectstore:latest
+    image: ghcr.io/getsentry/objectstore:nightly
     environment:
       FSS_HIGH_VOLUME_STORAGE__TYPE: "filesystem"
       FSS_HIGH_VOLUME_STORAGE__PATH: "/data"
