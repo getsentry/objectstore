@@ -78,7 +78,7 @@ jobs:
     needs: [build]
 
     # Intentionally never publish on pull requests
-    # if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' }}
 
     permissions:
       packages: write
@@ -129,7 +129,7 @@ jobs:
     needs: [build]
 
     # Intentionally never publish on pull requests
-    # if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' }}
 
     permissions:
       id-token: write
