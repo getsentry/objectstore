@@ -164,5 +164,4 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          path: clients/python/dist/*
           if-no-files-found: 'error'
