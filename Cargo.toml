@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["objectstore-*", "stresstest"]
+members = ["objectstore-*", "clients/rust", "stresstest"]
 default-members = ["objectstore-server"]
 
 [profile.dev]
@@ -21,7 +21,7 @@ debug = true
 lto = "thin"
 
 [workspace.dependencies]
-objectstore-client = { path = "objectstore-client" }
+objectstore-client = { path = "clients/rust" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }
 objectstore-types = { path = "objectstore-types" }

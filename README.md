@@ -11,13 +11,12 @@ utilities to manage stored data.
 
 The platform is split into the following core components:
 
-- `objectstore-client`: The Rust client library SDK, which exposes
-  high-performance blob storage access. A Python library is planned but not yet
-  available.
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
   functionality from the internal services. This crate creates the `objectstore`
   binary.
 - `objectstore-service`: The core object storage logic.
+- `clients`: The Rust and Python client library SDKs, which expose
+  high-performance blob storage access.
 
 Additionally, it contains a number of utilities:
 

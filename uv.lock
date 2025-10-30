@@ -159,7 +159,7 @@ dev = [
 [[package]]
 name = "objectstore-client"
 version = "0.1.0"
-source = { editable = "python-objectstore-client" }
+source = { editable = "clients/python" }
 dependencies = [
     { name = "sentry-sdk" },
     { name = "urllib3" },

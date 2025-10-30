@@ -122,7 +122,7 @@ jobs:
         run: uv sync --all-packages --all-groups
 
       - name: Run tests
-        run: uv run pytest python-objectstore-client
+        run: uv run pytest clients/python
 
   docs:
     name: Cargo Docs
