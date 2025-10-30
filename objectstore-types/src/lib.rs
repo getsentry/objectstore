@@ -59,6 +59,11 @@ impl ExpirationPolicy {
             ExpirationPolicy::Manual => false,
         }
     }
+
+    /// Returns `true` if this policy is `Manual`.
+    pub fn is_manual(&self) -> bool {
+        *self == ExpirationPolicy::Manual
+    }
 }
 impl fmt::Display for ExpirationPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -138,18 +143,23 @@ impl FromStr for Compression {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Metadata {
     /// The expiration policy of the object.
-    // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
+    #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
+    /// The content type of the object, if known.
+    pub content_type: Option<String>,
+
     /// The compression algorithm used for this object, if any.
-    // #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
-    /// Some arbitrary user-provided metadata.
-    pub custom: BTreeMap<String, String>,
-
     /// Size of the data in bytes, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
+
+    /// Some arbitrary user-provided metadata.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom: BTreeMap<String, String>,
 }
 
 impl Metadata {
@@ -160,7 +170,10 @@ impl Metadata {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
-            if name == header::CONTENT_ENCODING {
+            if name == header::CONTENT_TYPE {
+                let content_type = value.to_str()?;
+                metadata.content_type = Some(content_type.into());
+            } else if name == header::CONTENT_ENCODING {
                 let compression = value.to_str()?;
                 metadata.compression = Some(Compression::from_str(compression)?);
             } else if let Some(name) = name.as_str().strip_prefix(prefix) {
@@ -183,22 +196,35 @@ impl Metadata {
     /// If the `with_expiration` parameter is set, it will additionally resolve the expiration policy
     /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
     pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> anyhow::Result<HeaderMap> {
+        let Self {
+            content_type,
+            compression,
+            expiration_policy,
+            size: _,
+            custom,
+        } = self;
+
         let mut headers = HeaderMap::new();
 
-        if let Some(compression) = self.compression {
+        if let Some(content_type) = content_type {
+            headers.append(header::CONTENT_TYPE, content_type.parse()?);
+        }
+
+        if let Some(compression) = compression {
             headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
         }
-        if self.expiration_policy != ExpirationPolicy::Manual {
+
+        if *expiration_policy != ExpirationPolicy::Manual {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
-            headers.append(name, self.expiration_policy.to_string().parse()?);
+            headers.append(name, expiration_policy.to_string().parse()?);
             if with_expiration {
-                let expires_in = self.expiration_policy.expires_in().unwrap_or_default();
+                let expires_in = expiration_policy.expires_in().unwrap_or_default();
                 let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
                 headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
             }
         }
 
-        for (key, value) in &self.custom {
+        for (key, value) in custom {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_META_PREFIX}{key}"))?;
             headers.append(name, value.parse()?);
         }
