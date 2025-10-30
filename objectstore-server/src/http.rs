@@ -113,9 +113,14 @@ impl App {
         let service =
             ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(router);
 
-        let server = async move {
-            if graceful_shutdown {
-                let guard = elegant_departure::get_shutdown_guard().shutdown_on_drop();
+        let guard = if graceful_shutdown {
+            Some(elegant_departure::get_shutdown_guard())
+        } else {
+            None
+        };
+
+        let server = async {
+            if let Some(ref guard) = guard {
                 axum::serve(listener, service)
                     .with_graceful_shutdown(guard.wait_owned())
                     .await
