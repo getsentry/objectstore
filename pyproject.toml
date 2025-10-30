@@ -8,7 +8,7 @@ required-version = "==0.9.3" # keep in sync with devenv/config.ini
 
 [tool.uv.workspace]
 members = [
-    "python-objectstore-client",
+    "clients/python",
 ]
 
 [dependency-groups]
