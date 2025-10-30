@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Python client for the Sentry Objectstore service"
 readme = "README.md"
 requires-python = ">=3.13.1"
-dependencies = []
+dependencies = [
+    "sentry-sdk>=2.42.1",
+    "urllib3>=2.5.0",
+    "zstandard>=0.18.0",
+]
 
 [build-system]
 requires = ["uv_build"]
