@@ -1,0 +1,19 @@
+changelogPolicy: auto
+
+targets:
+  - name: github
+
+  - name: crates
+    includeNames: /^objectstore-client$/
+
+  - name: pypi
+    includeNames: /^dist\/.*/
+
+  - name: sentry-pypi
+    includeNames: /^dist\/.*/
+    internalPypiRepo: getsentry/pypi
+
+requireNames:
+  - /^objectstore-client$/
+  - /^dist\/.*.whl$/
+  - /^dist\/.*.tar.gz$/
