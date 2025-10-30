@@ -97,9 +97,9 @@ Devservices continue to run in the background until explicitly stopped. If you
 prefer to start containers manually, please check `devservices/config.yml` for
 the required images and configuration, such as port mapping.
 
-For **Google BigTable**, you additionally need to provision table into the test
-instance. Run `scripts/setup-bigtable.sh` to do that. Use this configuration to
-connect (recommended as high-volume backend):
+For **Google BigTable**, we automatically create a table with the required
+column families. Use this configuration to connect (recommended as high-volume
+backend):
 
 ```yaml
 high_volume_storage:
