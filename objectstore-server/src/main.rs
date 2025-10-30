@@ -1,6 +1,6 @@
 //! The storage server component.
 //!
-//! This builds on top of the [`objectstore-service`], and exposes the underlying storage layer as
+//! This builds on top of the [`objectstore_service`], and exposes the underlying storage layer as
 //! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
