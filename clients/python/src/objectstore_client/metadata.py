@@ -28,7 +28,7 @@ ExpirationPolicy = TimeToIdle | TimeToLive
 
 @dataclass
 class Metadata:
-    content_type: str | None = None
+    content_type: str | None
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
     custom: dict[str, str]
