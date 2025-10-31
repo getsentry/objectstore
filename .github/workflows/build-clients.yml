@@ -23,5 +23,6 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
+          name: ${{ github.sha }}
           path: dist/*
           if-no-files-found: 'error'
