@@ -35,6 +35,7 @@ class Metadata:
 
     @classmethod
     def from_headers(cls, headers: Mapping[str, str]) -> Metadata:
+        content_type = "application/octet-stream"
         compression = None
         expiration_policy = None
         custom_metadata = {}
