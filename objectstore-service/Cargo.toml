@@ -13,7 +13,6 @@ publish = false
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bigtable_rs = "0.2.18"
-bincode = { version = "2.0.1", features = ["serde"] }
 bytes = { workspace = true }
 data-encoding = "2.9.0"
 futures-util = { workspace = true }
