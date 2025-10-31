@@ -15,6 +15,11 @@ cd $ROOT_DIR
 cd clients/rust
 
 perl -pi -e "s/^version = \".*?\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+cd $ROOT_DIR/objectstore-types
+
+perl -pi -e "s/^version = \".*?\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
 cargo metadata --format-version 1 >/dev/null # update `Cargo.lock`
 
 # ==================== PY ====================
