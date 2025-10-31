@@ -22,7 +22,7 @@ jobs:
         run: uv build --package objectstore-client
 
       - uses: actions/upload-artifact@v5
-        name: ${{ github.sha }}
         with:
+          name: ${{ github.sha }}
           path: dist/*
           if-no-files-found: 'error'
