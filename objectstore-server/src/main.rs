@@ -1,6 +1,6 @@
 //! The storage server component.
 //!
-//! This builds on top of the [`objectstore-service`], and exposes the underlying storage layer as
+//! This builds on top of the [`objectstore_service`], and exposes the underlying storage layer as
 //! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
@@ -42,16 +42,15 @@ fn main() -> Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     let metrics_guard = maybe_initialize_metrics(&config)?;
-    let metrics_handle = async move {
-        match metrics_guard {
-            Some(metrics_guard) => metrics_guard.flush(None).await,
-            None => Ok(()),
-        }
-    };
 
     runtime.block_on(async move {
         let state = State::new(config).await?;
         let server_handle = tokio::spawn(http::server(state));
+
+        tokio::spawn(async move {
+            elegant_departure::get_shutdown_guard().wait().await;
+            tracing::info!("shutting down ...");
+        });
 
         elegant_departure::tokio::depart()
             .on_termination()
@@ -60,9 +59,16 @@ fn main() -> Result<()> {
             .on_signal(SignalKind::quit())
             .await;
 
-        let (server_result, metrics_result) = tokio::join!(server_handle, metrics_handle);
-        server_result??;
-        metrics_result?;
+        if let Err(error) = server_handle.await.map_err(From::from).flatten() {
+            tracing::error!(
+                error = error.as_ref() as &dyn std::error::Error,
+                "web server failed"
+            );
+        }
+
+        if let Some(metrics_guard) = metrics_guard {
+            metrics_guard.flush(None).await.ok();
+        }
 
         tracing::info!("shutdown complete");
 

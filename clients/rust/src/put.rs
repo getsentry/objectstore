@@ -18,6 +18,7 @@ use crate::{Client, ClientStream};
 impl Client {
     fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
         let metadata = Metadata {
+            expiration_policy: self.default_expiration_policy,
             compression: Some(self.default_compression),
             ..Default::default()
         };

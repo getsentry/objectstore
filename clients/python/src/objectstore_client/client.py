@@ -43,10 +43,16 @@ class ClientBuilder:
         usecase: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
+        default_expiration_policy: ExpirationPolicy | None = None,
     ):
         self._base_url = objectstore_base_url
         self._usecase = usecase
         self._default_compression: Compression = "zstd"
+        self._default_expiration_policy = (
+            format_expiration(default_expiration_policy)
+            if default_expiration_policy
+            else None
+        )
         self._propagate_traces = propagate_traces
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
 
@@ -55,6 +61,7 @@ class ClientBuilder:
         return Client(
             pool,
             self._default_compression,
+            self._default_expiration_policy,
             self._usecase,
             scope,
             self._propagate_traces,
@@ -79,6 +86,7 @@ class Client:
         self,
         pool: HTTPConnectionPool,
         default_compression: Compression,
+        default_expiration_policy: str | None,
         usecase: str,
         scope: str,
         propagate_traces: bool,
@@ -86,6 +94,7 @@ class Client:
     ):
         self._pool = pool
         self._default_compression = default_compression
+        self._default_expiration_policy = default_expiration_policy
         self._usecase = usecase
         self._scope = scope
         self._propagate_traces = propagate_traces
@@ -140,6 +149,8 @@ class Client:
 
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+        elif self._default_expiration_policy:
+            headers[HEADER_EXPIRATION] = self._default_expiration_policy
 
         if metadata:
             for k, v in metadata.items():
