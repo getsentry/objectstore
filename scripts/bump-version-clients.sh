@@ -20,7 +20,7 @@ cd objectstore-types
 perl -pi -e "s/^version = \".*?\"/version = \"$NEW_VERSION\"/" Cargo.toml
 
 cd $ROOT_DIR
-sed -i '' "/^objectstore-types.*path.*objectstore-types/s/version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+sed -i "/^objectstore-types.*path.*objectstore-types/s/version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" Cargo.toml
 
 cargo metadata --format-version 1 >/dev/null # update `Cargo.lock`
 
