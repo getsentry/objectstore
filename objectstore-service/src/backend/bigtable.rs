@@ -13,8 +13,6 @@ use crate::backend::common::{Backend, BackendStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Config for bincode encoding and decoding.
-const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
@@ -23,7 +21,7 @@ const REQUEST_RETRY_COUNT: usize = 2;
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
-/// Column that stores metadata in bincode.
+/// Column that stores metadata in JSON.
 const COLUMN_METADATA: &[u8] = b"m";
 /// Column family that uses timestamp-based garbage collection.
 ///
@@ -170,8 +168,7 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                // TODO: Do we really want bincode here?
-                value: bincode::serde::encode_to_vec(metadata, BC_CONFIG)?,
+                value: serde_json::to_vec(metadata).with_context(|| "failed to encode metadata")?,
             }),
         ];
         self.mutate(path, mutations, action).await
@@ -254,7 +251,8 @@ impl Backend for BigTableBackend {
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
-                    metadata = bincode::serde::decode_from_slice(&cell.value, BC_CONFIG)?.0;
+                    metadata = serde_json::from_slice(&cell.value)
+                        .with_context(|| "failed to decode metadata")?;
                 }
                 _ => {
                     // TODO: Log unknown column
