@@ -33,9 +33,15 @@ const CUSTOM_META_PREFIX: &str = "x-snme-";
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GcsObject {
+    /// Content-Type of the object data. If an object is stored without a Content-Type, it is served
+    /// as application/octet-stream.
+    #[serde(default = "objectstore_types::default_content_type")]
+    pub content_type: Cow<'static, str>,
+
     /// Content encoding, used to store [`Metadata::compression`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_encoding: Option<String>,
+
     /// Custom time stamp used for time-based expiration.
     #[serde(
         default,
@@ -43,9 +49,6 @@ struct GcsObject {
         with = "humantime_serde"
     )]
     pub custom_time: Option<SystemTime>,
-    /// User-provided metadata, including our built-in metadata.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<GcsMetaKey, String>,
 
     /// The `Content-Length` of the data in bytes. GCS returns this as a string.
     ///
@@ -53,6 +56,10 @@ struct GcsObject {
     /// without having to stream it.
     #[serde(default)]
     pub size: Option<String>,
+
+    /// User-provided metadata, including our built-in metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<GcsMetaKey, String>,
 }
 
 impl GcsObject {
@@ -102,6 +109,7 @@ impl GcsObject {
             .transpose()?
             .unwrap_or_default();
 
+        let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
 
@@ -116,6 +124,7 @@ impl GcsObject {
         }
 
         Ok(Metadata {
+            content_type,
             expiration_policy,
             compression,
             custom,
@@ -448,6 +457,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -463,6 +473,7 @@ mod tests {
         let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
 
         Ok(())
@@ -495,6 +506,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
@@ -506,6 +518,7 @@ mod tests {
             .await?;
 
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -532,6 +545,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: Default::default(),
@@ -559,6 +573,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
@@ -584,6 +599,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),

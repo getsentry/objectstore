@@ -372,6 +372,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -387,6 +388,7 @@ mod tests {
         let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
 
         Ok(())
@@ -419,6 +421,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
@@ -430,6 +433,7 @@ mod tests {
             .await?;
 
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -456,6 +460,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: Default::default(),
@@ -483,6 +488,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),
@@ -508,6 +514,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             compression: None,
             custom: Default::default(),

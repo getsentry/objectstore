@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
@@ -24,6 +25,9 @@ pub const HEADER_META_PREFIX: &str = "x-snme-";
 pub const PARAM_SCOPE: &str = "scope";
 /// HTTP request query parameter that contains the request usecase.
 pub const PARAM_USECASE: &str = "usecase";
+
+/// The default content type for objects without a known content type.
+pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// The per-object expiration policy
 ///
@@ -147,7 +151,8 @@ pub struct Metadata {
     pub expiration_policy: ExpirationPolicy,
 
     /// The content type of the object, if known.
-    pub content_type: Option<String>,
+    #[serde(default = "default_content_type")]
+    pub content_type: Cow<'static, str>,
 
     /// The compression algorithm used for this object, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,7 +177,7 @@ impl Metadata {
         for (name, value) in headers {
             if name == header::CONTENT_TYPE {
                 let content_type = value.to_str()?;
-                metadata.content_type = Some(content_type.into());
+                metadata.content_type = content_type.to_owned().into();
             } else if name == header::CONTENT_ENCODING {
                 let compression = value.to_str()?;
                 metadata.compression = Some(Compression::from_str(compression)?);
@@ -205,10 +210,7 @@ impl Metadata {
         } = self;
 
         let mut headers = HeaderMap::new();
-
-        if let Some(content_type) = content_type {
-            headers.append(header::CONTENT_TYPE, content_type.parse()?);
-        }
+        headers.append(header::CONTENT_TYPE, content_type.parse()?);
 
         if let Some(compression) = compression {
             headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
@@ -231,4 +233,9 @@ impl Metadata {
 
         Ok(headers)
     }
+}
+
+/// Returns the default content type, which is "application/octet-stream".
+pub fn default_content_type() -> Cow<'static, str> {
+    DEFAULT_CONTENT_TYPE.into()
 }

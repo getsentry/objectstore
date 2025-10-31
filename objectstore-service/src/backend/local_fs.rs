@@ -155,6 +155,7 @@ mod tests {
             key: "testing".into(),
         };
         let metadata = Metadata {
+            content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
