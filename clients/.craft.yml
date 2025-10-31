@@ -1,4 +1,5 @@
 changelogPolicy: auto
+preReleaseCommand: ../scripts/bump-version-clients.sh
 
 targets:
   - name: github
