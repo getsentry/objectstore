@@ -28,23 +28,34 @@ ExpirationPolicy = TimeToIdle | TimeToLive
 
 @dataclass
 class Metadata:
+    content_type: str | None
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
     custom: dict[str, str]
 
     @classmethod
     def from_headers(cls, headers: Mapping[str, str]) -> Metadata:
+        content_type = "application/octet-stream"
         compression = None
         expiration_policy = None
         custom_metadata = {}
+
         for k, v in headers.items():
-            if k == "content-encoding":
+            if k == "content-type":
+                content_type = v
+            elif k == "content-encoding":
                 compression = cast(Compression | None, v)
             elif k == HEADER_EXPIRATION:
                 expiration_policy = parse_expiration(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
-        return Metadata(compression, expiration_policy, custom_metadata)
+
+        return Metadata(
+            content_type=content_type,
+            compression=compression,
+            expiration_policy=expiration_policy,
+            custom=custom_metadata,
+        )
 
 
 def format_expiration(expiration_policy: ExpirationPolicy) -> str:

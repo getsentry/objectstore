@@ -118,6 +118,7 @@ class Client:
         contents: bytes | IO[bytes],
         id: str | None = None,
         compression: Compression | Literal["none"] | None = None,
+        content_type: str | None = None,
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
     ) -> str:
@@ -142,6 +143,9 @@ class Client:
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
             headers["Content-Encoding"] = "zstd"
+
+        if content_type:
+            headers["Content-Type"] = content_type
 
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
