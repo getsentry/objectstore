@@ -309,7 +309,7 @@ impl Backend for GcsBackend {
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
-                    .mime_str("application/octet-stream")?,
+                    .mime_str(&metadata.content_type)?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
