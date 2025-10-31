@@ -51,7 +51,8 @@ class Server:
         )
         if not server_bin.exists():
             pytest.fail(
-                "objectstore-server binary not found.Please run `cargo build` first"
+                "objectstore-server binary not found. "
+                "Please run `cargo build --locked` first"
             )
 
         self._url = f"http://{addr}"

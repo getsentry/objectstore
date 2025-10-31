@@ -130,7 +130,7 @@ jobs:
           key: ${{ github.job }}
 
       - name: Build server binary
-        run: cargo build --release --locked
+        run: cargo build --locked
 
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
 
