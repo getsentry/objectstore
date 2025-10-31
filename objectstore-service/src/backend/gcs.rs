@@ -66,6 +66,7 @@ impl GcsObject {
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         let mut gcs_object = GcsObject {
+            content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
             ..Default::default()
         };
