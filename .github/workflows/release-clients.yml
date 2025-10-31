@@ -13,10 +13,7 @@ on:
         description: Target branch to merge into. Uses the default branch as a fallback (optional)
         required: false
   pull_request:
-    branches:
-      - lcian/feat/client-release-setup-clean
-    types:
-      - labeled
+    types: [labeled]
 
 permissions:
   contents: read
