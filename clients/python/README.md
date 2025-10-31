@@ -12,7 +12,7 @@ import datetime
 from objectstore_client import ClientBuilder, NoOpMetricsBackend, TimeToLive
 
 client_builder = ClientBuilder(
-    "http://localhost:8888"
+    "http://localhost:8888",
     "my_usecase",
     metrics_backend=NoOpMetricsBackend(),  # optionally, provide your own MetricsBackend implementation
 )
