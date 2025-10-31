@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/**
+      - lcian/feat/client-release-setup-clean
 
 permissions:
   contents: read
