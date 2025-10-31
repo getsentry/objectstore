@@ -47,12 +47,11 @@ class Server:
         addr = f"127.0.0.1:{port}"
 
         server_bin = (
-            Path(__file__).resolve().parents[3] / "target" / "release" / "objectstore"
+            Path(__file__).resolve().parents[3] / "target" / "debug" / "objectstore"
         )
         if not server_bin.exists():
             pytest.fail(
-                "objectstore-server binary not found."
-                "Please run `cargo build --release --locked` first"
+                "objectstore-server binary not found.Please run `cargo build` first"
             )
 
         self._url = f"http://{addr}"
