@@ -116,6 +116,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ github.job }}
+
+      - name: Build server binary
+        run: cargo build --release --locked
+
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
 
       - name: Install dependencies
