@@ -373,10 +373,8 @@ mod tests {
         let path = make_key();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -421,11 +419,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -433,11 +428,8 @@ mod tests {
             .await?;
 
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -459,13 +451,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let path = make_key();
-        let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
-            custom: Default::default(),
-            size: None,
-        };
+        let metadata = Metadata::default();
 
         backend
             .put_object(&path, &metadata, make_stream(b"hello, world"))
@@ -488,11 +474,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -514,11 +497,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend

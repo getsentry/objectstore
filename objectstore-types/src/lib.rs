@@ -144,26 +144,26 @@ impl FromStr for Compression {
 ///
 /// This includes special metadata like the expiration policy and compression used,
 /// as well as arbitrary user-provided metadata.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct Metadata {
     /// The expiration policy of the object.
-    // #[serde(default, skip_serializing_if = "ExpirationPolicy::is_manual")]
+    // #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
     /// The content type of the object, if known.
-    #[serde(default = "default_content_type")]
     pub content_type: Cow<'static, str>,
 
     /// The compression algorithm used for this object, if any.
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
     /// Size of the data in bytes, if known.
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
     /// Some arbitrary user-provided metadata.
-    // #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 }
 
@@ -235,7 +235,14 @@ impl Metadata {
     }
 }
 
-/// Returns the default content type, which is "application/octet-stream".
-pub fn default_content_type() -> Cow<'static, str> {
-    DEFAULT_CONTENT_TYPE.into()
+impl Default for Metadata {
+    fn default() -> Self {
+        Self {
+            expiration_policy: ExpirationPolicy::Manual,
+            content_type: DEFAULT_CONTENT_TYPE.into(),
+            compression: None,
+            size: None,
+            custom: BTreeMap::new(),
+        }
+    }
 }

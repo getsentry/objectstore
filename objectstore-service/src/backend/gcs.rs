@@ -30,12 +30,11 @@ const CUSTOM_META_PREFIX: &str = "x-snme-";
 /// This is the representation of the object resource in GCS JSON API without its payload. Where no
 /// dedicated fields are available, we encode both built-in and custom metadata in the `metadata`
 /// field.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GcsObject {
     /// Content-Type of the object data. If an object is stored without a Content-Type, it is served
     /// as application/octet-stream.
-    #[serde(default = "objectstore_types::default_content_type")]
     pub content_type: Cow<'static, str>,
 
     /// Content encoding, used to store [`Metadata::compression`].
@@ -54,7 +53,6 @@ struct GcsObject {
     ///
     /// GCS sets this in metadata responses. We can use it to know the size of an object
     /// without having to stream it.
-    #[serde(default)]
     pub size: Option<String>,
 
     /// User-provided metadata, including our built-in metadata.
@@ -68,7 +66,9 @@ impl GcsObject {
         let mut gcs_object = GcsObject {
             content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
-            ..Default::default()
+            content_encoding: None,
+            custom_time: None,
+            metadata: BTreeMap::new(),
         };
 
         // For time-based expiration, set the `customTime` field. The bucket must have a
@@ -507,11 +507,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -519,11 +516,8 @@ mod tests {
             .await?;
 
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -545,13 +539,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let path = make_key();
-        let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
-            custom: Default::default(),
-            size: None,
-        };
+        let metadata = Metadata::default();
 
         backend
             .put_object(&path, &metadata, make_stream(b"hello, world"))
@@ -574,11 +562,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -600,11 +585,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            content_type: objectstore_types::default_content_type(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend
