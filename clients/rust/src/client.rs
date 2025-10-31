@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use objectstore_types::ExpirationPolicy;
 use reqwest::header::HeaderName;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
@@ -19,10 +20,11 @@ const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"
 pub struct ClientBuilder {
     service_url: Arc<str>,
     client: reqwest::Client,
+    propagate_traces: bool,
 
     usecase: Arc<str>,
     default_compression: Compression,
-    propagate_traces: bool,
+    default_expiration_policy: ExpirationPolicy,
 }
 
 impl ClientBuilder {
@@ -47,16 +49,23 @@ impl ClientBuilder {
         Ok(Self {
             service_url: service_url.trim_end_matches('/').into(),
             client,
+            propagate_traces: false,
 
             usecase: usecase.into(),
             default_compression: Compression::Zstd,
-            propagate_traces: false,
+            default_expiration_policy: ExpirationPolicy::Manual,
         })
     }
 
     /// This changes the default compression used for uploads.
     pub fn default_compression(mut self, compression: Compression) -> Self {
         self.default_compression = compression;
+        self
+    }
+
+    /// This sets a default expiration policy used for uploads.
+    pub fn default_expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
+        self.default_expiration_policy = expiration_policy;
         self
     }
 
@@ -71,11 +80,12 @@ impl ClientBuilder {
         Client {
             service_url: self.service_url.clone(),
             http: self.client.clone(),
+            propagate_traces: self.propagate_traces,
 
             usecase: self.usecase.clone(),
             scope,
             default_compression: self.default_compression,
-            propagate_traces: self.propagate_traces,
+            default_expiration_policy: self.default_expiration_policy,
         }
     }
 
@@ -98,6 +108,7 @@ impl ClientBuilder {
 pub struct Client {
     pub(crate) http: reqwest::Client,
     pub(crate) service_url: Arc<str>,
+    propagate_traces: bool,
 
     pub(crate) usecase: Arc<str>,
 
@@ -113,8 +124,7 @@ pub struct Client {
     /// characters.
     pub(crate) scope: String,
     pub(crate) default_compression: Compression,
-
-    propagate_traces: bool,
+    pub(crate) default_expiration_policy: ExpirationPolicy,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
