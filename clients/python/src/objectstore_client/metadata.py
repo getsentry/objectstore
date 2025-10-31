@@ -38,6 +38,7 @@ class Metadata:
         compression = None
         expiration_policy = None
         custom_metadata = {}
+
         for k, v in headers.items():
             if k == "content-type":
                 content_type = v
@@ -47,7 +48,13 @@ class Metadata:
                 expiration_policy = parse_expiration(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
-        return Metadata(content_type, compression, expiration_policy, custom_metadata)
+
+        return Metadata(
+            content_type=content_type,
+            compression=compression,
+            expiration_policy=expiration_policy,
+            custom=custom_metadata,
+        )
 
 
 def format_expiration(expiration_policy: ExpirationPolicy) -> str:

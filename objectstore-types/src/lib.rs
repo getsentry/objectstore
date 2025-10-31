@@ -147,7 +147,7 @@ impl FromStr for Compression {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Metadata {
     /// The expiration policy of the object.
-    #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
+    #[serde(default, skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
     /// The content type of the object, if known.
@@ -155,15 +155,15 @@ pub struct Metadata {
     pub content_type: Cow<'static, str>,
 
     /// The compression algorithm used for this object, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
     /// Size of the data in bytes, if known.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
     /// Some arbitrary user-provided metadata.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 }
 
