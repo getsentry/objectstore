@@ -93,7 +93,7 @@ def server_url() -> Generator[str]:
 
 def test_full_cycle(server_url: str) -> None:
     client = ClientBuilder(server_url, "test-usecase").for_organization(12345)
-    data = b"write read test"
+    data = b"test data"
 
     object_key = client.put(data)
     assert object_key is not None
