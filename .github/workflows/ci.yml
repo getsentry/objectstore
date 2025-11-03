@@ -126,8 +126,6 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ github.job }}
 
       - name: Build server binary
         run: cargo build --locked
