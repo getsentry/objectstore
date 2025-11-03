@@ -162,7 +162,9 @@ jobs:
           key: ${{ github.job }}
 
       - name: Build Rust Docs
-        run: cargo doc --workspace --all-features --no-deps
+        run: |
+          cargo doc --workspace --all-features --no-deps
+          echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
         env:
           RUSTDOCFLAGS: -Dwarnings
 
@@ -195,4 +197,4 @@ jobs:
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
-        if: github.head_ref == 'lcian/combined-api-docs'
+        if: github.ref == 'refs/heads/main'
