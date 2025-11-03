@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
@@ -44,6 +45,12 @@ impl ClientBuilder {
             .no_deflate()
             .no_gzip()
             .no_zstd()
+            // The read timeout "applies to each read operation", so should work fine for larger
+            // transfers that are split into multiple chunks.
+            // We define both as 500ms which is still very conservative, given that we are in the same network,
+            // and expect our backends to respond in <100ms.
+            .connect_timeout(Duration::from_millis(500))
+            .read_timeout(Duration::from_millis(500))
             .build()?;
 
         Ok(Self {

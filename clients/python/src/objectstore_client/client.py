@@ -57,7 +57,18 @@ class ClientBuilder:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
 
     def _make_client(self, scope: str) -> Client:
-        pool = urllib3.connectionpool.connection_from_url(self._base_url)
+        # We only retry connection problems, as we cannot rewind our compression stream.
+        retries = urllib3.Retry(connect=3, redirect=5)
+        # The read timeout is defined to be "between consecutive read operations",
+        # which should mean one chunk of the response, with a large response being
+        # split into multiple chunks.
+        # We define both as 500ms which is still very conservative,
+        # given that we are in the same network,
+        # and expect our backends to respond in <100ms.
+        timeout = urllib3.Timeout(connect=0.5, read=0.5)
+        pool = urllib3.connectionpool.connection_from_url(
+            self._base_url, retries=retries, timeout=timeout
+        )
         return Client(
             pool,
             self._default_compression,
