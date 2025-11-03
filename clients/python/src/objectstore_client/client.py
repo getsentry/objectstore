@@ -51,14 +51,14 @@ class ClientBuilder:
         self._usecase = usecase
 
         # We only retry connection problems, as we cannot rewind our compression stream.
-        self._retries = retries or urllib3.Retry(connect=3, redirect=5)
+        self._retries = retries or urllib3.Retry(connect=3, redirect=5, read=0)
         # The read timeout is defined to be "between consecutive read operations",
         # which should mean one chunk of the response, with a large response being
         # split into multiple chunks.
         # We define both as 500ms which is still very conservative,
         # given that we are in the same network,
         # and expect our backends to respond in <100ms.
-        self._timeout =  timeout or urllib3.Timeout(connect=0.5, read=0.5)
+        self._timeout = timeout or urllib3.Timeout(connect=0.5, read=0.5)
 
         self._default_compression: Compression = "zstd"
         self._default_expiration_policy = (
