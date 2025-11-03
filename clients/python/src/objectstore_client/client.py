@@ -58,7 +58,7 @@ class ClientBuilder:
         # We define both as 500ms which is still very conservative,
         # given that we are in the same network,
         # and expect our backends to respond in <100ms.
-        self._timeout =  timeout or urllib3.Timeout(connect=0.5, read=0.5)
+        self._timeout = timeout or urllib3.Timeout(connect=0.5, read=0.5)
 
         self._default_compression: Compression = "zstd"
         self._default_expiration_policy = (
