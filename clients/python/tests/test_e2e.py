@@ -105,3 +105,17 @@ def test_full_cycle(server_url: str) -> None:
 
     with pytest.raises(ClientError, check=lambda e: e.status == 404):
         client.get(object_key)
+
+
+def test_connect_timeout() -> None:
+    # this server accepts the connection
+    # (even though the backlog is 0 and we never call `accept`),
+    # but will never reply with anything, thus causing a read timeout
+    s = socket.create_server(("127.0.0.1", 0), backlog=0)
+    addr = s.getsockname()
+    url = f"http://127.0.0.1:{addr[1]}"
+
+    timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
+    client = ClientBuilder(url, "test-usecase", timeout=timeout).for_organization(12345)
+    with pytest.raises(urllib3.exceptions.MaxRetryError):
+        client.put(b"foo")
