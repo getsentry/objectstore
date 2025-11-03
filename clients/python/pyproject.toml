@@ -1,6 +1,6 @@
 [project]
 name = "objectstore-client"
-version = "0.0.1"
+version = "0.0.3"
 description = "Client SDK for Objectstore, the Sentry object storage platform"
 readme = "README.md"
 authors = [
