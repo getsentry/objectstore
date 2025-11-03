@@ -2,7 +2,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
-use bincode::error::DecodeError;
 use futures_util::StreamExt;
 use objectstore_types::Metadata;
 use tokio::fs::OpenOptions;
@@ -11,8 +10,6 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::ObjectPath;
 use crate::backend::common::{Backend, BackendStream};
-
-const BC_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -51,8 +48,9 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata = bincode::serde::encode_to_vec(metadata, BC_CONFIG)?;
-        writer.write_all(&metadata).await?;
+        let metadata_json = serde_json::to_string(metadata)?;
+        writer.write_all(metadata_json.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
 
         tokio::io::copy(&mut reader, &mut writer).await?;
         writer.flush().await?;
@@ -81,36 +79,9 @@ impl Backend for LocalFsBackend {
         };
 
         let mut reader = BufReader::new(file);
-        let mut metadata_buf = vec![];
-        // TODO populate size in our metadata
-        let metadata = loop {
-            let reader_buf = reader.fill_buf().await?;
-            let buf = if metadata_buf.is_empty() {
-                reader_buf
-            } else {
-                metadata_buf.extend_from_slice(reader_buf);
-                &metadata_buf
-            };
-
-            match bincode::serde::decode_from_slice(buf, BC_CONFIG) {
-                Ok((metadata, read)) => {
-                    let read = if metadata_buf.is_empty() {
-                        read
-                    } else {
-                        let prev_consumed = metadata_buf.len() - reader_buf.len();
-                        read - prev_consumed
-                    };
-                    reader.consume(read);
-                    break metadata;
-                }
-                Err(DecodeError::UnexpectedEnd { .. }) => {
-                    metadata_buf.extend_from_slice(reader_buf);
-                    let len = reader_buf.len();
-                    reader.consume(len);
-                }
-                Err(err) => Err(err)?,
-            }
-        };
+        let mut metadata_line = String::new();
+        reader.read_line(&mut metadata_line).await?;
+        let metadata: Metadata = serde_json::from_str(metadata_line.trim_end())?;
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
