@@ -2,6 +2,9 @@
 name = "objectstore"
 version = "0.1.0"
 requires-python = ">=3.13"
+dependencies = [
+    "packaging>=25.0",
+]
 
 [tool.uv]
 required-version = "==0.9.3" # keep in sync with devenv/config.ini
@@ -18,6 +21,10 @@ dev = [
     "mypy>=1.17.1",
     "ruff>=0.14.2",
     "pre-commit>=4.2.0",
+]
+docs = [
+    "sphinx>=8.1.3",
+    "sphinx-rtd-theme>=3.0.1",
 ]
 
 [tool.ruff.lint]
