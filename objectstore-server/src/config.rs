@@ -354,25 +354,30 @@ mod tests {
             )
             .unwrap();
 
-        let args = Args {
-            config: Some(tempfile.path().into()),
-        };
-        let config = Config::from_args(args).unwrap();
+        figment::Jail::expect_with(|_jail| {
+            let args = Args {
+                config: Some(tempfile.path().into()),
+            };
+            let config = Config::from_args(args).unwrap();
 
-        let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage else {
-            panic!("expected s3 storage");
-        };
-        assert_eq!(endpoint, "http://localhost:8888");
-        assert_eq!(bucket, "whatever");
+            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            else {
+                panic!("expected s3 storage");
+            };
+            assert_eq!(endpoint, "http://localhost:8888");
+            assert_eq!(bucket, "whatever");
 
-        assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
-        assert_eq!(config.sentry.environment.as_deref(), Some("production"));
-        assert_eq!(
-            config.sentry.server_name.as_deref(),
-            Some("objectstore-deadbeef")
-        );
-        assert_eq!(config.sentry.sample_rate, 0.5);
-        assert_eq!(config.sentry.traces_sample_rate, 0.5);
+            assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
+            assert_eq!(config.sentry.environment.as_deref(), Some("production"));
+            assert_eq!(
+                config.sentry.server_name.as_deref(),
+                Some("objectstore-deadbeef")
+            );
+            assert_eq!(config.sentry.sample_rate, 0.5);
+            assert_eq!(config.sentry.traces_sample_rate, 0.5);
+
+            Ok(())
+        });
     }
 
     #[test]
@@ -388,6 +393,7 @@ mod tests {
             "#,
             )
             .unwrap();
+
         figment::Jail::expect_with(|jail| {
             jail.set_env("fss_long_term_storage__endpoint", "http://localhost:9001");
 
