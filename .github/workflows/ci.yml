@@ -139,7 +139,7 @@ jobs:
         run: uv run pytest clients/python
 
   docs:
-    name: Build Documentation
+    name: Build and Publish Documentation
     runs-on: ubuntu-latest
 
     permissions:
