@@ -176,7 +176,7 @@ jobs:
       - name: Build Python Docs
         run: |
           mkdir -p docs/_build
-          uv run sphinx-apidoc -o clients/python/docs/ clients/python/src/ --force --module-first
+          uv run sphinx-apidoc -o clients/python/docs/ clients/python/src/ --force --module-first --no-toc
           uv run sphinx-build -vv -W -b html clients/python/docs/ docs/_build
 
       - name: Setup combined docs directory
