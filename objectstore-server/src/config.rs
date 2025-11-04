@@ -1,15 +1,15 @@
-//! Configuration module for the objectstore server.
+//! Configuration for the objectstore server.
 //!
 //! This module provides the configuration system for the objectstore HTTP server. Configuration can
 //! be loaded from multiple sources with the following precedence (highest to lowest):
 //!
 //! 1. Environment variables (prefixed with `FSS_`)
 //! 2. YAML configuration file (specified via `-c` or `--config` flag)
-//! 3. Default values
+//! 3. Defaults
 //!
 //! See [`Config`] for a description of all configuration fields and their defaults.
 //!
-//! # Environment Variable Format
+//! # Environment Variables
 //!
 //! Environment variables use `FSS_` as a prefix and double underscores (`__`) to denote nested
 //! configuration structures. For example:
@@ -18,7 +18,7 @@
 //! - `FSS_LONG_TERM_STORAGE__TYPE=filesystem` sets the storage type
 //! - `FSS_LONG_TERM_STORAGE__PATH=/data` sets the bucket name
 //!
-//! # YAML Configuration Example
+//! # YAML Configuration File
 //!
 //! Configuration can also be provided via a YAML file. The above configuration in YAML format would
 //! look like this:
@@ -88,7 +88,7 @@ impl Zeroize for ConfigSecret {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Storage {
-    /// Local filesystem storage backend.
+    /// Local filesystem storage backend (type `"filesystem"`).
     ///
     /// Stores objects as files on the local filesystem. Suitable for development, testing,
     /// and single-server deployments.
@@ -113,7 +113,7 @@ pub enum Storage {
         path: PathBuf,
     },
 
-    /// S3-compatible storage backend.
+    /// S3-compatible storage backend (type `"s3compatible"`).
     ///
     /// Supports Amazon S3 and other S3-compatible services. Authentication is handled via
     /// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
@@ -143,7 +143,7 @@ pub enum Storage {
         bucket: String,
     },
 
-    /// Google Cloud Storage backend.
+    /// Google Cloud Storage backend (type `"gcs"`).
     ///
     /// Stores objects in Google Cloud Storage (GCS). Authentication uses Application Default
     /// Credentials (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS`
@@ -182,7 +182,7 @@ pub enum Storage {
         bucket: String,
     },
 
-    /// Google Cloud Bigtable backend.
+    /// Google Cloud Bigtable backend (type `"bigtable"`).
     ///
     /// Stores objects in Google Cloud Bigtable, a NoSQL wide-column database. This backend is
     /// optimized for high-throughput, low-latency workloads with small objects. Authentication uses
@@ -715,6 +715,14 @@ pub struct Config {
     /// Each tag is set individually:
     /// - `FSS_METRIC_TAGS__FOO=foo`
     /// - `FSS_METRIC_TAGS__BAR=bar`
+    ///
+    /// # YAML Example
+    ///
+    /// ```yaml
+    /// metric_tags:
+    ///   foo: foo
+    ///   bar: bar
+    /// ```
     pub metric_tags: BTreeMap<String, String>,
 }
 
