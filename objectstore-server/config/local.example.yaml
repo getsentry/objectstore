@@ -21,4 +21,5 @@ logging:
 
 metrics:
   # datadog_key: <API_KEY>
-  sentry_region: development
+  tags:
+    sentry_region: development
