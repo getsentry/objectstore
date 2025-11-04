@@ -23,6 +23,78 @@ Additionally, it contains a number of utilities:
 - `stresstest`: A stresstest binary that can run various workloads against
   storage backends.
 
+## Usage
+
+Objectstore consists of a stateless service that connects to one or more storage
+backends, and client libraries for Python and Rust. To use objectstore,
+configure the desired backends, run the service, and connect to it using one of
+the provided clients.
+
+### Configuration
+
+The objectstore service is configured through a configuration file and
+environment variables. If both are provided, environment variables take
+precedence and override the configuration file settings. See the [config docs]
+for a complete list of available backends and options.
+
+An example configuration file that uses the local file system for storage can be
+found in this [example file].
+
+[config docs]: https://getsentry.github.io/rust/objectstore/objectstore_server/config/index.html
+[example file]: objectstore-server/config/local.example.yaml
+
+### Docker
+
+A pre-built Docker container is published at `ghcr.io/getsentry/objectstore`,
+supporting both `amd64` and `arm64` architectures. To run the container, mount
+your configuration file and data volume:
+
+```sh
+docker run -d \
+  --name objectstore \
+  --volume ./config.yaml:/etc/objectstore/config.yaml \
+  --volume data-volume:/data \
+  --publish 127.0.0.1:8888:8888 \
+  ghcr.io/getsentry/objectstore:latest \
+  -c /etc/objectstore/config.yaml
+```
+
+The command above assumes a configuration file named `config.yaml` in the current
+directory and publishes the service on port `8888`. Adjust the volume mount path
+and port mapping as needed for your setup.
+
+### Devservices
+
+For Sentry development environments, we provide a [devservice] that can be
+referenced from any project that needs to run objectstore. To use it, add the
+following to the `dependencies` section in your `devservices/config.yml`:
+
+```yaml
+objectstore:
+  description: Storage for files and blobs
+  remote:
+    repo_name: objectstore
+    branch: main
+    repo_link: https://github.com/getsentry/objectstore.git
+    mode: containerized
+```
+
+In the Sentry backend, objectstore is integrated and can be started using
+`devservices up --mode=objectstore`.
+
+[devservice]: https://develop.sentry.dev/development-infrastructure/devservices/
+
+### Clients
+
+To integrate objectstore into your application, you can either use the HTTP API
+directly or leverage one of the higher-level client SDKs. We provide official
+client libraries for both [Python] and [Rust], which handle connection
+management, retries, and compression for you. Refer to the SDK documentation
+for detailed setup and usage instructions.
+
+[Python]: https://getsentry.github.io/python/
+[Rust]: https://getsentry.github.io/rust/
+
 ## Building
 
 Ensure `protoc` and the latest stable Rust toolchain are installed on your
