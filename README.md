@@ -80,7 +80,8 @@ objectstore:
 ```
 
 In the Sentry backend, objectstore is integrated and can be started using
-`devservices up --mode=objectstore`.
+`devservices up --mode=objectstore`. No additional configuration is necessary,
+simply import a client from `sentry.objectstore`.
 
 [devservice]: https://develop.sentry.dev/development-infrastructure/devservices/
 
