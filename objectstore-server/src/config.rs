@@ -92,6 +92,14 @@ pub enum Storage {
     ///
     /// Stores objects as files on the local filesystem. Suitable for development, testing,
     /// and single-server deployments.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// long_term_storage:
+    ///   type: filesystem
+    ///   path: /data
+    /// ```
     FileSystem {
         /// Directory path for storing objects.
         ///
@@ -115,8 +123,19 @@ pub enum Storage {
 
     /// S3-compatible storage backend (type `"s3compatible"`).
     ///
-    /// Supports Amazon S3 and other S3-compatible services. Authentication is handled via
+    /// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
     /// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
+    ///
+    /// [Amazon S3]: https://aws.amazon.com/s3/
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// long_term_storage:
+    ///   type: s3compatible
+    ///   endpoint: https://s3.amazonaws.com
+    ///   bucket: my-bucket
+    /// ```
     S3Compatible {
         /// S3 endpoint URL.
         ///
@@ -143,7 +162,7 @@ pub enum Storage {
         bucket: String,
     },
 
-    /// Google Cloud Storage backend (type `"gcs"`).
+    /// [Google Cloud Storage] backend (type `"gcs"`).
     ///
     /// Stores objects in Google Cloud Storage (GCS). Authentication uses Application Default
     /// Credentials (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS`
@@ -152,6 +171,16 @@ pub enum Storage {
     /// **Note**: The bucket must be pre-created with the following lifecycle policy:
     /// - `daysSinceCustomTime`: 1 day
     /// - `action`: delete
+    ///
+    /// [Google Cloud Storage]: https://cloud.google.com/storage
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// long_term_storage:
+    ///   type: gcs
+    ///   bucket: objectstore-bucket
+    /// ```
     Gcs {
         /// Optional custom GCS endpoint URL.
         ///
@@ -182,7 +211,7 @@ pub enum Storage {
         bucket: String,
     },
 
-    /// Google Cloud Bigtable backend (type `"bigtable"`).
+    /// [Google Bigtable] backend (type `"bigtable"`).
     ///
     /// Stores objects in Google Cloud Bigtable, a NoSQL wide-column database. This backend is
     /// optimized for high-throughput, low-latency workloads with small objects. Authentication uses
@@ -192,6 +221,18 @@ pub enum Storage {
     /// following column families:
     /// - `fg`: timestamp-based garbage collection (`maxage=1s`)
     /// - `fm`: manual garbage collection (`no GC policy`)
+    ///
+    /// [Google Bigtable]: https://cloud.google.com/bigtable
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// high_volume_storage:
+    ///   type: bigtable
+    ///   project_id: my-project
+    ///   instance_name: objectstore
+    ///   table_name: objectstore
+    /// ```
     BigTable {
         /// Optional custom Bigtable endpoint.
         ///
