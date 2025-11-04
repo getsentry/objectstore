@@ -9,18 +9,15 @@ use crate::config::{Config, LogFormat};
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 
 pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
-    config
-        .datadog_key
-        .as_ref()
-        .map(|api_key| {
-            let mut builder =
-                merni::datadog(api_key.expose_secret().as_str()).prefix("objectstore.");
-            for (k, v) in &config.metric_tags {
-                builder = builder.global_tag(k, v);
-            }
-            builder.try_init()
-        })
-        .transpose()
+    let Some(ref api_key) = config.metrics.datadog_key else {
+        return Ok(None);
+    };
+
+    let mut builder = merni::datadog(api_key.expose_secret().as_str()).prefix("objectstore.");
+    for (k, v) in &config.metrics.tags {
+        builder = builder.global_tag(k, v);
+    }
+    builder.try_init().map(Some)
 }
 
 pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
