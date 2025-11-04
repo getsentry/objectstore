@@ -185,7 +185,7 @@ jobs:
           mkdir -p gh-pages/python
           cp -r target/doc/* gh-pages/rust/
           cp -r docs/_build/* gh-pages/python/
-          echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/">Rust Server and Client documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
+          echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/objectstore_server">Rust Server documentation</a></li><li><a href="rust/objectstore_client">Rust Client documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
