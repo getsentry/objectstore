@@ -171,21 +171,21 @@ jobs:
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
 
       - name: Install Python dependencies
-        run: uv sync --all-packages --all-groups --group docs
+        run: uv sync --all-packages --all-groups
 
       - name: Build Python Docs
         run: |
-          mkdir -p docs/_build
+          mkdir -p docs/
           uv run sphinx-apidoc -o clients/python/docs/ clients/python/src/ --force --module-first
-          uv run sphinx-build -vv -W -b html clients/python/docs/ docs/_build
+          uv run sphinx-build -vv -W -b html clients/python/docs/ docs/
 
       - name: Setup combined docs directory
         run: |
           mkdir -p gh-pages/rust
           mkdir -p gh-pages/python
           cp -r target/doc/* gh-pages/rust/
-          cp -r docs/_build/* gh-pages/python/
-          echo '<h1>Objectstore API Documentation</h1><ul><li><a href="rust/">Rust Server and Client documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
+          cp -r docs/* gh-pages/python/
+          echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/">Rust Server and Client documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
