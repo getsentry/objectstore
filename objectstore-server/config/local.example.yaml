@@ -19,5 +19,6 @@ logging:
 #   traces_sample_rate: 1.0
 #   environment: development
 
-metric_tags:
+metrics:
+  # datadog_key: <API_KEY>
   sentry_region: development

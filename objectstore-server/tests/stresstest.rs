@@ -41,7 +41,7 @@ async fn test_basic() {
         )
         .env("FSS_LOGGING__LEVEL", "warn");
     if let Ok(datadog_key) = std::env::var("DD_API_KEY") {
-        cmd.env("FSS_datadog_key", datadog_key);
+        cmd.env("FSS_metrics__datadog_key", datadog_key);
     }
     let child = cmd
         .stdout(Stdio::inherit())

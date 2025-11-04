@@ -637,7 +637,7 @@ pub struct Metrics {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_DATADOG_KEY`
+    /// `FSS_METRICS__DATADOG_KEY`
     ///
     /// [API key]: https://docs.datadoghq.com/account_management/api-app-keys/#api-keys
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
@@ -654,15 +654,16 @@ pub struct Metrics {
     /// # Environment Variables
     ///
     /// Each tag is set individually:
-    /// - `FSS_METRIC_TAGS__FOO=foo`
-    /// - `FSS_METRIC_TAGS__BAR=bar`
+    /// - `FSS_METRICS__TAGS__FOO=foo`
+    /// - `FSS_METRICS__TAGS__BAR=bar`
     ///
     /// # YAML Example
     ///
     /// ```yaml
-    /// metric_tags:
-    ///   foo: foo
-    ///   bar: bar
+    /// metrics:
+    ///   tags:
+    ///     foo: foo
+    ///     bar: bar
     /// ```
     pub tags: BTreeMap<String, String>,
 }
@@ -878,8 +879,8 @@ mod tests {
             jail.set_env("fss_long_term_storage__type", "s3compatible");
             jail.set_env("fss_long_term_storage__endpoint", "http://localhost:8888");
             jail.set_env("fss_long_term_storage__bucket", "whatever");
-            jail.set_env("fss_metric_tags__foo", "bar");
-            jail.set_env("fss_metric_tags__baz", "qux");
+            jail.set_env("fss_metrics__tags__foo", "bar");
+            jail.set_env("fss_metrics__tags__baz", "qux");
             jail.set_env("fss_sentry__dsn", "abcde");
             jail.set_env("fss_sentry__sample_rate", "0.5");
             jail.set_env("fss_sentry__environment", "production");
