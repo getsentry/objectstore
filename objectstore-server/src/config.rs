@@ -621,6 +621,53 @@ impl Default for Logging {
     }
 }
 
+/// Metrics configuration.
+///
+/// Configures submission of internal metrics to Datadog.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Metrics {
+    /// Datadog [API key] for metrics.
+    ///
+    /// When provided, enables metrics reporting to Datadog. Metrics include request counts,
+    /// latencies, storage operations, and more. The key is kept secret and redacted from logs.
+    ///
+    /// # Default
+    ///
+    /// `None` (Datadog metrics disabled)
+    ///
+    /// # Environment Variable
+    ///
+    /// `FSS_METRICS__DATADOG_KEY`
+    ///
+    /// [API key]: https://docs.datadoghq.com/account_management/api-app-keys/#api-keys
+    pub datadog_key: Option<SecretBox<ConfigSecret>>,
+
+    /// Global tags applied to all metrics.
+    ///
+    /// Key-value pairs that are attached to every metric sent to Datadog. Useful for
+    /// identifying the environment, region, or other deployment-specific information.
+    ///
+    /// # Default
+    ///
+    /// Empty (no tags)
+    ///
+    /// # Environment Variables
+    ///
+    /// Each tag is set individually:
+    /// - `FSS_METRICS__TAGS__FOO=foo`
+    /// - `FSS_METRICS__TAGS__BAR=bar`
+    ///
+    /// # YAML Example
+    ///
+    /// ```yaml
+    /// metrics:
+    ///   tags:
+    ///     foo: foo
+    ///     bar: bar
+    /// ```
+    pub tags: BTreeMap<String, String>,
+}
+
 /// Main configuration struct for the objectstore server.
 ///
 /// This is the top-level configuration that combines all server settings including networking,
@@ -728,43 +775,11 @@ pub struct Config {
     /// See [`Sentry`] for configuration options.
     pub sentry: Sentry,
 
-    /// Datadog API key for metrics.
+    /// Internal metrics configuration.
     ///
-    /// When provided, enables metrics reporting to Datadog. Metrics include request counts,
-    /// latencies, storage operations, and more. The key is kept secret and redacted from logs.
-    ///
-    /// # Default
-    ///
-    /// `None` (Datadog metrics disabled)
-    ///
-    /// # Environment Variable
-    ///
-    /// `FSS_DATADOG_KEY`
-    pub datadog_key: Option<SecretBox<ConfigSecret>>,
-
-    /// Global tags applied to all metrics.
-    ///
-    /// Key-value pairs that are attached to every metric sent to Datadog. Useful for
-    /// identifying the environment, region, or other deployment-specific information.
-    ///
-    /// # Default
-    ///
-    /// Empty (no tags)
-    ///
-    /// # Environment Variables
-    ///
-    /// Each tag is set individually:
-    /// - `FSS_METRIC_TAGS__FOO=foo`
-    /// - `FSS_METRIC_TAGS__BAR=bar`
-    ///
-    /// # YAML Example
-    ///
-    /// ```yaml
-    /// metric_tags:
-    ///   foo: foo
-    ///   bar: bar
-    /// ```
-    pub metric_tags: BTreeMap<String, String>,
+    /// Optional configuration for submitting internal metrics to Datadog. See [`Metrics`] for
+    /// configuration options.
+    pub metrics: Metrics,
 }
 
 impl Default for Config {
@@ -782,8 +797,7 @@ impl Default for Config {
             runtime: Runtime::default(),
             logging: Logging::default(),
             sentry: Sentry::default(),
-            datadog_key: None,
-            metric_tags: Default::default(),
+            metrics: Metrics::default(),
         }
     }
 }
@@ -865,8 +879,8 @@ mod tests {
             jail.set_env("fss_long_term_storage__type", "s3compatible");
             jail.set_env("fss_long_term_storage__endpoint", "http://localhost:8888");
             jail.set_env("fss_long_term_storage__bucket", "whatever");
-            jail.set_env("fss_metric_tags__foo", "bar");
-            jail.set_env("fss_metric_tags__baz", "qux");
+            jail.set_env("fss_metrics__tags__foo", "bar");
+            jail.set_env("fss_metrics__tags__baz", "qux");
             jail.set_env("fss_sentry__dsn", "abcde");
             jail.set_env("fss_sentry__sample_rate", "0.5");
             jail.set_env("fss_sentry__environment", "production");
@@ -883,7 +897,7 @@ mod tests {
             assert_eq!(endpoint, "http://localhost:8888");
             assert_eq!(bucket, "whatever");
             assert_eq!(
-                config.metric_tags,
+                config.metrics.tags,
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
             );
 
