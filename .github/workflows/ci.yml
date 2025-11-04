@@ -139,7 +139,7 @@ jobs:
         run: uv run pytest clients/python
 
   docs:
-    name: Cargo Docs
+    name: Build and Publish Documentation
     runs-on: ubuntu-latest
 
     permissions:
@@ -161,12 +161,31 @@ jobs:
         with:
           key: ${{ github.job }}
 
-      - name: Build Docs
-        run: cargo doc --workspace --all-features --no-deps
+      - name: Build Rust Docs
+        run: |
+          cargo doc --workspace --all-features --no-deps
+          echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-      - run: echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Build Python Docs
+        run: |
+          mkdir -p docs/_build
+          uv run sphinx-apidoc -o clients/python/docs/ clients/python/src/ --force --module-first --no-toc
+          uv run sphinx-build -vv -W -b html clients/python/docs/ docs/_build
+
+      - name: Setup combined docs directory
+        run: |
+          mkdir -p gh-pages/rust
+          mkdir -p gh-pages/python
+          cp -r target/doc/* gh-pages/rust/
+          cp -r docs/_build/* gh-pages/python/
+          echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/objectstore_server">Rust Server Documentation</a></li><li><a href="rust/objectstore_client">Rust Client Documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -174,7 +193,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "target/doc"
+          path: "gh-pages"
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
