@@ -7,7 +7,7 @@ This package provides a Python Client to interact with the Objectstore service.
    :maxdepth: 2
    :caption: Contents:
 
-   modules
+   objectstore_client
 
 Indices and tables
 ==================
