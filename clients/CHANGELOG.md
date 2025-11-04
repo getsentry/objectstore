@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.5
+
+### Various fixes & improvements
+
+- build(py-client): Downgrade urllib3 requirement (#179) by @lcian
+
 ## 0.0.4
 
 ### Various fixes & improvements
