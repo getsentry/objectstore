@@ -40,7 +40,7 @@ for a complete list of available backends and options.
 An example configuration file that uses the local file system for storage can be
 found in this [example file].
 
-[config docs]: https://getsentry.github.io/rust/objectstore/objectstore_server/config/index.html
+[config docs]: https://getsentry.github.io/objectstore/rust/objectstore_server/config/
 [example file]: objectstore-server/config/local.example.yaml
 
 ### Docker
@@ -93,8 +93,8 @@ client libraries for both [Python] and [Rust], which handle connection
 management, retries, and compression for you. Refer to the SDK documentation
 for detailed setup and usage instructions.
 
-[Python]: https://getsentry.github.io/python/
-[Rust]: https://getsentry.github.io/rust/
+[Python]: https://getsentry.github.io/objectstore/python/
+[Rust]: https://getsentry.github.io/objectstore/rust/objectstore_client/
 
 ## Building
 
