@@ -181,7 +181,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "sentry-sdk", specifier = ">=2.42.1" },
-    { name = "urllib3", specifier = ">=2.5.0" },
+    { name = "urllib3", specifier = ">=2.2.2" },
     { name = "zstandard", specifier = ">=0.18.0" },
 ]
 
