@@ -38,8 +38,7 @@ class Usecase:
     An identifier for a workload in Objectstore, along with defaults to use for all
     operations within that usecase.
 
-    Usecases need to be statically defined in Objectstore's configuration file, which is
-    loaded by the server at initialization time.
+    Usecases need to be statically defined in Objectstore's configuration.
     Objectstore can make decisions based on the usecase. For example, choosing the most
     suitable storage backend.
     """
