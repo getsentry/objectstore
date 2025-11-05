@@ -64,7 +64,8 @@ SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_")
 class Scope:
     """
     A (possibly nested) namespace within a usecase, given as a sequence of key-value
-    pairs. Order of the components matters.
+    pairs passed as kwargs.
+    The emtpy scope is not admitted. Order of the components matters.
 
     The admitted characters for keys and values are: `[A-Za-z0-9_-]`.
 
