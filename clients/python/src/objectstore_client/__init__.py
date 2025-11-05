@@ -1,4 +1,4 @@
-from objectstore_client.client import Client, ClientBuilder, ClientError, GetResult
+from objectstore_client.client import Client, ClientError, GetResult, Objectstore
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,

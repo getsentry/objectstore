@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal, TypeVar, cast
 
-Compression = Literal["zstd"]
+Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_META_PREFIX = "x-snme-"

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from io import BytesIO
-from typing import IO, Literal, NamedTuple, NotRequired, Self, TypedDict, cast
+from typing import IO, Literal, NamedTuple, Tuple, TypeAlias, cast
 from urllib.parse import urlencode
 
 import sentry_sdk
@@ -26,9 +27,7 @@ from objectstore_client.metrics import (
 Permission = Literal["read", "write"]
 
 
-class Scope(TypedDict):
-    organization: int
-    project: NotRequired[int]
+from types import SimpleNamespace
 
 
 class GetResult(NamedTuple):
@@ -36,84 +35,90 @@ class GetResult(NamedTuple):
     payload: IO[bytes]
 
 
-class ClientBuilder:
+class Usecase:
+    """An identifier for a workload in Objectstore, along with defaults to use for all operations within that usecase.
+
+    Usecases need to be statically defined in Objectstore's configuration file, which is loaded by the server at initialization time.
+    Objectstore can make decisions based on the usecase. For example, choosing the most suitable storage backend.
+    """
+
+    name: str
+    _default_compression: Compression
+    _default_expiration_policy: ExpirationPolicy | None
+
     def __init__(
         self,
-        objectstore_base_url: str,
-        usecase: str,
+        name: str,
+        default_compression: Compression = "zstd",
+        default_expiration_policy: ExpirationPolicy | None = None,
+    ):
+        self.name = name
+        self._default_compression = default_compression
+        self._default_expiration_policy = default_expiration_policy
+
+
+Scope: TypeAlias = Sequence[Tuple[str, str]]
+"""A (possibly nested) namespace within a usecase.
+
+Users are free to choose the scope structure that best suits their usecase.
+The combination of Usecase and Scope (order of the components matters!) will determine the physical path of the blob in the underlying storage backend.
+A natural Scope to use within Sentry is the combination of Organization and Project ID: `(("organization", org_id), ("project", project_id))`.
+"""
+
+_CONNECTION_POOL_DEFAULTS = SimpleNamespace(
+    # We only retry connection problems, as we cannot rewind our compression stream.
+    retries=urllib3.Retry(connect=3, redirect=5, read=0),
+    # The read timeout is defined to be "between consecutive read operations",
+    # which should mean one chunk of the response, with a large response being
+    # split into multiple chunks.
+    # We define both as 500ms which is still very conservative,
+    # given that we are in the same network,
+    # and expect our backends to respond in <100ms.
+    timeout=urllib3.Timeout(connect=0.5, read=0.5),
+)
+
+
+class Objectstore:
+    """A connection to the Objectstore service."""
+
+    def __init__(
+        self,
+        base_url: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
-        default_expiration_policy: ExpirationPolicy | None = None,
-        retries: urllib3.Retry | None = None,
-        timeout: urllib3.Timeout | None = None,
+        connection_kwargs: dict | None = None,
     ):
-        self._base_url = objectstore_base_url
-        self._usecase = usecase
+        connection_kwargs_to_use = vars(_CONNECTION_POOL_DEFAULTS)
+        if connection_kwargs:
+            for k, v in connection_kwargs:
+                connection_kwargs_to_use[k] = v
 
-        # We only retry connection problems, as we cannot rewind our compression stream.
-        self._retries = retries or urllib3.Retry(connect=3, redirect=5, read=0)
-        # The read timeout is defined to be "between consecutive read operations",
-        # which should mean one chunk of the response, with a large response being
-        # split into multiple chunks.
-        # We define both as 500ms which is still very conservative,
-        # given that we are in the same network,
-        # and expect our backends to respond in <100ms.
-        self._timeout = timeout or urllib3.Timeout(connect=0.5, read=0.5)
-
-        self._default_compression: Compression = "zstd"
-        self._default_expiration_policy = (
-            format_expiration(default_expiration_policy)
-            if default_expiration_policy
-            else None
+        self._pool = urllib3.connectionpool.connection_from_url(
+            base_url, **connection_kwargs_to_use
         )
-        self._propagate_traces = propagate_traces
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
+        self._propagate_traces = propagate_traces
 
-    def _make_client(self, scope: str) -> Client:
-        pool = urllib3.connectionpool.connection_from_url(
-            self._base_url, retries=self._retries, timeout=self._timeout
-        )
+    def get_client(self, usecase: Usecase, scope: Scope):
         return Client(
-            pool,
-            self._default_compression,
-            self._default_expiration_policy,
-            self._usecase,
-            scope,
-            self._propagate_traces,
-            self._metrics_backend,
+            self._pool, self._metrics_backend, self._propagate_traces, usecase, scope
         )
-
-    def default_compression(self, default_compression: Compression) -> Self:
-        self._default_compression = default_compression
-        return self
-
-    def for_organization(self, organization_id: int) -> Client:
-        return self._make_client(f"org.{organization_id}")
-
-    def for_project(self, organization_id: int, project_id: int) -> Client:
-        return self._make_client(f"org.{organization_id}/proj.{project_id}")
 
 
 class Client:
-    _default_compression: Compression
-
     def __init__(
         self,
         pool: HTTPConnectionPool,
-        default_compression: Compression,
-        default_expiration_policy: str | None,
-        usecase: str,
-        scope: str,
-        propagate_traces: bool,
         metrics_backend: MetricsBackend,
+        propagate_traces: bool,
+        usecase: Usecase,
+        scope: Scope,
     ):
         self._pool = pool
-        self._default_compression = default_compression
-        self._default_expiration_policy = default_expiration_policy
+        self._metrics_backend = metrics_backend
+        self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
-        self._propagate_traces = propagate_traces
-        self._metrics_backend = metrics_backend
 
     def _make_headers(self) -> dict[str, str]:
         if self._propagate_traces:
@@ -122,7 +127,7 @@ class Client:
 
     def _make_url(self, id: str | None, full: bool = False) -> str:
         base_path = f"/v1/{id}" if id else "/v1/"
-        qs = urlencode({"usecase": self._usecase, "scope": self._scope})
+        qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
         else:
@@ -153,7 +158,7 @@ class Client:
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
 
-        compression = compression or self._default_compression
+        compression = compression or self._usecase._default_compression
         if compression == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
@@ -162,17 +167,18 @@ class Client:
         if content_type:
             headers["Content-Type"] = content_type
 
+        expiration_policy = (
+            expiration_policy or self._usecase._default_expiration_policy
+        )
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-        elif self._default_expiration_policy:
-            headers[HEADER_EXPIRATION] = self._default_expiration_policy
 
         if metadata:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
         with measure_storage_operation(
-            self._metrics_backend, "put", self._usecase
+            self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
             response = self._pool.request(
                 "PUT",
@@ -202,7 +208,9 @@ class Client:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(self._metrics_backend, "get", self._usecase):
+        with measure_storage_operation(
+            self._metrics_backend, "get", self._usecase.name
+        ):
             response = self._pool.request(
                 "GET",
                 self._make_url(id),
@@ -243,7 +251,9 @@ class Client:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(self._metrics_backend, "delete", self._usecase):
+        with measure_storage_operation(
+            self._metrics_backend, "delete", self._usecase.name
+        ):
             response = self._pool.request(
                 "DELETE",
                 self._make_url(id),
