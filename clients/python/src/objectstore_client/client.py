@@ -66,7 +66,7 @@ class Scope:
     A (possibly nested) namespace within a usecase, given as a sequence of key-value
     pairs. Order of the components matters.
 
-    The admitted characters for keys and values are [A-Za-z0-9_-].
+    The admitted characters for keys and values are: `[A-Za-z0-9_-]`.
 
     Users are free to choose the scope structure that best suits their usecase.
     The combination of Usecase and Scope will determine the physical path of the
