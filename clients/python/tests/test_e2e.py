@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pytest
 import urllib3
-
-from objectstore_client import Objectstore, Usecase
+from objectstore_client import Objectstore, Scope, Usecase
 from objectstore_client.client import ClientError
 from objectstore_client.metadata import TimeToLive
 
@@ -97,10 +96,12 @@ def server_url() -> Generator[str]:
 def test_full_cycle(server_url: str) -> None:
     objectstore = Objectstore(server_url)
     test_usecase = Usecase(
-        "test-usecase", default_expiration_policy=TimeToLive(timedelta(days=1))
+        "test-usecase",
+        default_compression="zstd",
+        default_expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    client = objectstore.client(test_usecase, ("org", 42), ("project", 1337))
+    client = objectstore.get_client(test_usecase, Scope(organization=42, project=1337))
 
     data = b"test data"
 
@@ -116,15 +117,24 @@ def test_full_cycle(server_url: str) -> None:
         client.get(object_key)
 
 
-# def test_connect_timeout() -> None:
-#    # this server accepts the connection
-#    # (even though the backlog is 0 and we never call `accept`),
-#    # but will never reply with anything, thus causing a read timeout
-#    s = socket.create_server(("127.0.0.1", 0), backlog=0)
-#    addr = s.getsockname()
-#    url = f"http://127.0.0.1:{addr[1]}"
-#
-#    timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
-#    client = ClientBuilder(url, "test-usecase", timeout=timeout).for_organization(12345)
-#    with pytest.raises(urllib3.exceptions.MaxRetryError):
-#        client.put(b"foo")
+def test_connect_timeout() -> None:
+    # this server accepts the connection
+    # (even though the backlog is 0 and we never call `accept`),
+    # but will never reply with anything, thus causing a read timeout
+    s = socket.create_server(("127.0.0.1", 0), backlog=0)
+    addr = s.getsockname()
+    url = f"http://127.0.0.1:{addr[1]}"
+
+    timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
+
+    objectstore = Objectstore(url, timeout=timeout)
+    test_usecase = Usecase(
+        "test-usecase",
+        default_compression="zstd",
+        default_expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    client = objectstore.get_client(test_usecase, Scope(organization=12345))
+
+    with pytest.raises(urllib3.exceptions.MaxRetryError):
+        client.put(b"foo")

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import string
 from io import BytesIO
-from typing import IO, Literal, NamedTuple, Tuple, TypeAlias, cast
+from types import SimpleNamespace
+from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlencode
 
 import sentry_sdk
@@ -27,19 +28,20 @@ from objectstore_client.metrics import (
 Permission = Literal["read", "write"]
 
 
-from types import SimpleNamespace
-
-
 class GetResult(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
 
 
 class Usecase:
-    """An identifier for a workload in Objectstore, along with defaults to use for all operations within that usecase.
+    """
+    An identifier for a workload in Objectstore, along with defaults to use for all
+    operations within that usecase.
 
-    Usecases need to be statically defined in Objectstore's configuration file, which is loaded by the server at initialization time.
-    Objectstore can make decisions based on the usecase. For example, choosing the most suitable storage backend.
+    Usecases need to be statically defined in Objectstore's configuration file, which is
+    loaded by the server at initialization time.
+    Objectstore can make decisions based on the usecase. For example, choosing the most
+    suitable storage backend.
     """
 
     name: str
@@ -57,13 +59,47 @@ class Usecase:
         self._default_expiration_policy = default_expiration_policy
 
 
-Scope: TypeAlias = Sequence[Tuple[str, str]]
-"""A (possibly nested) namespace within a usecase.
+SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_")
 
-Users are free to choose the scope structure that best suits their usecase.
-The combination of Usecase and Scope (order of the components matters!) will determine the physical path of the blob in the underlying storage backend.
-A natural Scope to use within Sentry is the combination of Organization and Project ID: `(("organization", org_id), ("project", project_id))`.
-"""
+
+class Scope:
+    """
+    A (possibly nested) namespace within a usecase, given as a sequence of key-value
+    pairs. Order of the components matters.
+
+    The admitted characters for keys and values are [A-Za-z0-9_-].
+
+    Users are free to choose the scope structure that best suits their usecase.
+    The combination of Usecase and Scope will determine the physical path of the
+    blob in the underlying storage backend.
+    A natural Scope to use within Sentry is the combination of Organization and
+    Project ID: `(("organization", org_id), ("project", project_id))`.
+    """
+
+    def __init__(self, **scopes: str | int | bool):
+        if len(scopes) == 0:
+            raise ValueError("At least 1 scope is needed")
+
+        parts = []
+        for key, value in scopes.items():
+            value = str(value)
+            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in value):
+                raise ValueError(
+                    f"Invalid scope value {value}. The valid character set is: "
+                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
+                )
+
+            formatted = f"{key}.{value}"
+            parts.append(formatted)
+
+        self._str = "/".join(parts)
+
+    def __repr__(self) -> str:
+        return self._str
+
+
+# Scope: TypeAlias = Sequence[Tuple[str, object]]
+
 
 _CONNECTION_POOL_DEFAULTS = SimpleNamespace(
     # We only retry connection problems, as we cannot rewind our compression stream.
@@ -86,11 +122,11 @@ class Objectstore:
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
-        connection_kwargs: dict | None = None,
+        **connection_kwargs: Any,
     ):
         connection_kwargs_to_use = vars(_CONNECTION_POOL_DEFAULTS)
         if connection_kwargs:
-            for k, v in connection_kwargs:
+            for k, v in connection_kwargs.items():
                 connection_kwargs_to_use[k] = v
 
         self._pool = urllib3.connectionpool.connection_from_url(
@@ -99,7 +135,7 @@ class Objectstore:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
 
-    def get_client(self, usecase: Usecase, scope: Scope):
+    def get_client(self, usecase: Usecase, scope: Scope) -> Client:
         return Client(
             self._pool, self._metrics_backend, self._propagate_traces, usecase, scope
         )
@@ -127,7 +163,7 @@ class Client:
 
     def _make_url(self, id: str | None, full: bool = False) -> str:
         base_path = f"/v1/{id}" if id else "/v1/"
-        qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
+        qs = urlencode({"usecase": self._usecase.name, "scope": str(self._scope)})
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
         else:

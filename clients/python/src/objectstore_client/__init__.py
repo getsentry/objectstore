@@ -1,4 +1,11 @@
-from objectstore_client.client import Client, ClientError, GetResult, Objectstore
+from objectstore_client.client import (
+    Client,
+    ClientError,
+    GetResult,
+    Objectstore,
+    Scope,
+    Usecase,
+)
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -9,10 +16,12 @@ from objectstore_client.metadata import (
 from objectstore_client.metrics import MetricsBackend, NoOpMetricsBackend
 
 __all__ = [
+    "Objectstore",
+    "Usecase",
+    "Scope",
     "Client",
-    "ClientBuilder",
-    "ClientError",
     "GetResult",
+    "ClientError",
     "Compression",
     "ExpirationPolicy",
     "Metadata",
