@@ -97,9 +97,6 @@ class Scope:
         return self._str
 
 
-# Scope: TypeAlias = Sequence[Tuple[str, object]]
-
-
 _CONNECTION_POOL_DEFAULTS = SimpleNamespace(
     # We only retry connection problems, as we cannot rewind our compression stream.
     retries=urllib3.Retry(connect=3, redirect=5, read=0),
