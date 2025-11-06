@@ -29,7 +29,7 @@ services:
       FSS_LOGGING__LEVEL: "debug"
     command: run
     healthcheck:
-      test: /bin/entrypoint healthcheck
+      test: ["CMD", "/bin/entrypoint", "healthcheck"]
       interval: 5s
       timeout: 1s
       retries: 5
