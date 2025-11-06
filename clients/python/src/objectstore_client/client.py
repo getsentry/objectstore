@@ -33,6 +33,13 @@ class GetResult(NamedTuple):
     payload: IO[bytes]
 
 
+class RequestError(Exception):
+    def __init__(self, message: str, status: int, response: str):
+        super().__init__(message)
+        self.status = status
+        self.response = response
+
+
 class Usecase:
     """
     An identifier for a workload in Objectstore, along with defaults to use for all
@@ -305,13 +312,6 @@ class Session:
                 headers=headers,
             )
             raise_for_status(response)
-
-
-class RequestError(Exception):
-    def __init__(self, message: str, status: int, response: str):
-        super().__init__(message)
-        self.status = status
-        self.response = response
 
 
 def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
