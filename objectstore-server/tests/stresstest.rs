@@ -28,7 +28,8 @@ async fn test_basic() {
     let addr = format!("127.0.0.1:{port}");
 
     let mut cmd = Command::new(OBJECTSTORE_EXE);
-    cmd.env("FSS_HTTP_ADDR", &addr)
+    cmd.arg("run")
+        .env("FSS_HTTP_ADDR", &addr)
         .env("FSS_high_volume_storage__TYPE", "filesystem")
         .env(
             "FSS_high_volume_storage__PATH",

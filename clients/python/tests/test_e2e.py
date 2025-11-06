@@ -67,7 +67,7 @@ class Server:
             "FSS_long_term_storage__PATH": self._tempdir,
         }
 
-        self._process = subprocess.Popen([str(server_bin)], env=env)
+        self._process = subprocess.Popen([str(server_bin), "run"], env=env)
         self._wait_for_healthcheck()
 
         return self._url
