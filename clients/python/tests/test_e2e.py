@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import urllib3
-from objectstore_client import Objectstore, Scope, Usecase
+from objectstore_client import Client, Scope, Usecase
 from objectstore_client.client import RequestError, SentryScope
 from objectstore_client.metadata import TimeToLive
 
@@ -94,7 +94,7 @@ def server_url() -> Generator[str]:
 
 
 def test_full_cycle(server_url: str) -> None:
-    objectstore = Objectstore(server_url)
+    objectstore = Client(server_url)
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",
@@ -129,7 +129,7 @@ def test_connect_timeout() -> None:
 
     timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
 
-    objectstore = Objectstore(url, timeout=timeout)
+    objectstore = Client(url, timeout=timeout)
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",

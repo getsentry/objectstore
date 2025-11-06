@@ -1,6 +1,6 @@
 from objectstore_client.client import (
+    Client,
     GetResult,
-    Objectstore,
     RequestError,
     Scope,
     SentryScope,
@@ -17,7 +17,7 @@ from objectstore_client.metadata import (
 from objectstore_client.metrics import MetricsBackend, NoOpMetricsBackend
 
 __all__ = [
-    "Objectstore",
+    "Client",
     "Usecase",
     "Scope",
     "SentryScope",

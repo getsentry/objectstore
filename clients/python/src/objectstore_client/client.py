@@ -132,8 +132,8 @@ _CONNECTION_POOL_DEFAULTS = SimpleNamespace(
 )
 
 
-class Objectstore:
-    """A connection to the Objectstore service."""
+class Client:
+    """A client for Objectstore. Constructing it initializes a connection pool."""
 
     def __init__(
         self,
