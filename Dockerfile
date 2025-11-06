@@ -10,4 +10,5 @@ VOLUME ["/data"]
 ENV FSS_PATH="/data"
 
 ENTRYPOINT ["/bin/entrypoint"]
+CMD ["--help"]
 EXPOSE 8888

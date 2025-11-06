@@ -1,6 +1,7 @@
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::config::{Config, LogFormat};
@@ -8,7 +9,7 @@ use crate::config::{Config, LogFormat};
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 
-pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
+pub fn init_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     let Some(ref api_key) = config.metrics.datadog_key else {
         return Ok(None);
     };
@@ -20,7 +21,7 @@ pub fn maybe_initialize_metrics(config: &Config) -> std::io::Result<Option<merni
     builder.try_init().map(Some)
 }
 
-pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
+pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
     let dsn = config.dsn.as_ref()?;
 
@@ -49,7 +50,7 @@ pub fn maybe_initialize_sentry(config: &Config) -> Option<sentry::ClientInitGuar
     }))
 }
 
-pub fn initialize_tracing(config: &Config) {
+pub fn init_tracing(config: &Config) {
     // Same as the default filter, except it converts warnings into events
     // and also sends everything at or above INFO as logs instead of breadcrumbs.
     let sentry_layer = config.sentry.is_enabled().then(|| {
@@ -98,4 +99,15 @@ pub fn initialize_tracing(config: &Config) {
         .with(sentry_layer)
         .with(env_filter)
         .init();
+}
+
+/// Logs an error to the configured logger or `stderr` if not yet configured.
+pub fn ensure_log_error(error: &anyhow::Error) {
+    if tracing::Level::ERROR <= tracing::level_filters::STATIC_MAX_LEVEL
+        && tracing::Level::ERROR <= LevelFilter::current()
+    {
+        tracing::error!(error = error.as_ref() as &dyn std::error::Error);
+    } else {
+        eprintln!("{error:?}");
+    }
 }

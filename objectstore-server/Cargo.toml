@@ -25,6 +25,7 @@ num_cpus = "1.17.0"
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 rustls = { version = "0.23.31", default-features = false }
 sentry = { workspace = true, features = [
     "tower-axum-matched-path",
