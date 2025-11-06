@@ -97,8 +97,8 @@ def test_full_cycle(server_url: str) -> None:
     objectstore = Objectstore(server_url)
     test_usecase = Usecase(
         "test-usecase",
-        default_compression="zstd",
-        default_expiration_policy=TimeToLive(timedelta(days=1)),
+        compression="zstd",
+        expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
     client = objectstore.get_client(
@@ -132,8 +132,8 @@ def test_connect_timeout() -> None:
     objectstore = Objectstore(url, timeout=timeout)
     test_usecase = Usecase(
         "test-usecase",
-        default_compression="zstd",
-        default_expiration_policy=TimeToLive(timedelta(days=1)),
+        compression="zstd",
+        expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
     client = objectstore.get_client(

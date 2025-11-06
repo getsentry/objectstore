@@ -44,21 +44,23 @@ class Usecase:
     """
 
     name: str
-    _default_compression: Compression
-    _default_expiration_policy: ExpirationPolicy | None
+    _compression: Compression
+    _expiration_policy: ExpirationPolicy | None
 
     def __init__(
         self,
         name: str,
-        default_compression: Compression = "zstd",
-        default_expiration_policy: ExpirationPolicy | None = None,
+        compression: Compression = "zstd",
+        expiration_policy: ExpirationPolicy | None = None,
     ):
         self.name = name
-        self._default_compression = default_compression
-        self._default_expiration_policy = default_expiration_policy
+        self._compression = compression
+        self._expiration_policy = expiration_policy
 
 
-SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_")
+# URL safe characters, except for `.` which we use as separator between key and value
+# of Scope components
+SCOPE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
 
 
 class Scope:
@@ -83,10 +85,10 @@ class Scope:
         parts = []
         for key, value in scopes.items():
             value = str(value)
-            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in value):
+            if any(c not in SCOPE_ALLOWED_CHARS for c in value):
                 raise ValueError(
                     f"Invalid scope value {value}. The valid character set is: "
-                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
+                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
                 )
 
             formatted = f"{key}.{value}"
@@ -203,7 +205,7 @@ class Client:
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
 
-        compression = compression or self._usecase._default_compression
+        compression = compression or self._usecase._compression
         if compression == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
@@ -212,9 +214,7 @@ class Client:
         if content_type:
             headers["Content-Type"] = content_type
 
-        expiration_policy = (
-            expiration_policy or self._usecase._default_expiration_policy
-        )
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
 

@@ -37,8 +37,8 @@ objectstore = Objectstore(
 # This could also be stored in a global/shared variable, as you would most likely deal with a fixed number of usecases with statically defined defaults
 my_usecase = Usecase(
     "my-usecase",
-    default_compression="zstd",
-    default_expiration_policy=TimeToLive(datetime.timedelta(days=1)),
+    compression="zstd",
+    expiration_policy=TimeToLive(datetime.timedelta(days=1)),
 )
 
 # Get a client scoped to your usecase and scope
