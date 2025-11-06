@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import string
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from io import BytesIO
-from types import SimpleNamespace
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlencode
 
@@ -34,6 +35,8 @@ class GetResult(NamedTuple):
 
 
 class RequestError(Exception):
+    """Exception raised if an API call to Objectstore fails."""
+
     def __init__(self, message: str, status: int, response: str):
         super().__init__(message)
         self.status = status
@@ -119,17 +122,22 @@ class SentryScope(Scope):
             super().__init__(organization=organization)
 
 
-_CONNECTION_POOL_DEFAULTS = SimpleNamespace(
-    # We only retry connection problems, as we cannot rewind our compression stream.
-    retries=urllib3.Retry(connect=3, redirect=5, read=0),
-    # The read timeout is defined to be "between consecutive read operations",
-    # which should mean one chunk of the response, with a large response being
-    # split into multiple chunks.
-    # We define both as 500ms which is still very conservative,
-    # given that we are in the same network,
-    # and expect our backends to respond in <100ms.
-    timeout=urllib3.Timeout(connect=0.5, read=0.5),
-)
+@dataclass
+class _ConnectionDefaults:
+    retries = (urllib3.Retry(connect=3, redirect=5, read=0),)
+    """We only retry connection problems, as we cannot rewind our compression stream."""
+
+    timeout = (urllib3.Timeout(connect=0.5, read=0.5),)
+    """
+    The read timeout is defined to be "between consecutive read operations",
+    which should mean one chunk of the response, with a large response being
+    split into multiple chunks.
+    We define both as 500ms which is still very conservative,
+    given that we are in the same network, and expect our backends to respond in <100ms.
+    """
+
+
+_CONNECTION_DEFAULTS = asdict(_ConnectionDefaults())
 
 
 class Client:
@@ -140,15 +148,15 @@ class Client:
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
-        **connection_kwargs: Any,
+        urllib3_connection_kwargs: Mapping[str, Any] | None = None,
     ):
-        connection_kwargs_to_use = vars(_CONNECTION_POOL_DEFAULTS)
-        if connection_kwargs:
-            for k, v in connection_kwargs.items():
-                connection_kwargs_to_use[k] = v
+        connection_kwargs = {}
+        if urllib3_connection_kwargs:
+            connection_kwargs = {**urllib3_connection_kwargs}
+        connection_kwargs = {**connection_kwargs, **_CONNECTION_DEFAULTS}
 
         self._pool = urllib3.connectionpool.connection_from_url(
-            base_url, **connection_kwargs_to_use
+            base_url, **connection_kwargs
         )
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
