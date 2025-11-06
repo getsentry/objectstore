@@ -49,10 +49,16 @@ client = objectstore.get_client(my_usecase, SentryScope(organization=42, project
 client = objectstore.get_client(
     my_usecase, Scope(organization=42, project=1337, app_slug="email_app")
 )
-# In that case, please still incorporate `organization` and/or `project` as the first two components if it's reasonable to do so.
+# In that case, please still incorporate `organization` and/or `project` as the first two components if it's reasonable to do so
+
+# These operations will raise an exception on failure
 
 object_id = client.put(
     b"Hello, world!",
+    # You can pass in your own identifier for the object to decide where to store the file.
+    # Otherwise, Objectstore will pick a random one and return it.
+    # A put request to an existing identifier overwrites the contents and metadata.
+    # id="hello",
     metadata={"key": "value"},
     # Overrides the default defined at the Usecase level
     expiration_policy=TimeToIdle(datetime.timedelta(days=30)),
