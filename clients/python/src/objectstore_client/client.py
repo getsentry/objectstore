@@ -146,13 +146,13 @@ class Objectstore:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
 
-    def get_client(self, usecase: Usecase, scope: Scope) -> Client:
-        return Client(
+    def get_client(self, usecase: Usecase, scope: Scope) -> Session:
+        return Session(
             self._pool, self._metrics_backend, self._propagate_traces, usecase, scope
         )
 
 
-class Client:
+class Session:
     def __init__(
         self,
         pool: HTTPConnectionPool,

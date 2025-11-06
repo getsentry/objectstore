@@ -1,10 +1,10 @@
 from objectstore_client.client import (
-    Client,
     ClientError,
     GetResult,
     Objectstore,
     Scope,
     SentryScope,
+    Session,
     Usecase,
 )
 from objectstore_client.metadata import (
@@ -21,7 +21,7 @@ __all__ = [
     "Usecase",
     "Scope",
     "SentryScope",
-    "Client",
+    "Session",
     "GetResult",
     "ClientError",
     "Compression",
