@@ -150,10 +150,9 @@ class Client:
         propagate_traces: bool = False,
         urllib3_connection_kwargs: Mapping[str, Any] | None = None,
     ):
-        connection_kwargs = {}
+        connection_kwargs = _CONNECTION_DEFAULTS
         if urllib3_connection_kwargs:
-            connection_kwargs = {**urllib3_connection_kwargs}
-        connection_kwargs = {**connection_kwargs, **_CONNECTION_DEFAULTS}
+            connection_kwargs = {**connection_kwargs, **urllib3_connection_kwargs}
 
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs
