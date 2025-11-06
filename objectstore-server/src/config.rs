@@ -16,7 +16,7 @@
 //!
 //! - `OS__HTTP_ADDR=0.0.0.0:8888` sets the HTTP server address
 //! - `OS__LONG_TERM_STORAGE__TYPE=filesystem` sets the storage type
-//! - `OS__LONG_TERM_STORAGE__PATH=/data` sets the bucket name
+//! - `OS__LONG_TERM_STORAGE__PATH=/data` sets the directory name
 //!
 //! # YAML Configuration File
 //!
@@ -712,7 +712,7 @@ pub struct Config {
     ///
     /// # Default
     ///
-    /// Filesystem storage in `./data` directory
+    /// Filesystem storage in `./data/high-volume` directory
     ///
     /// # Environment Variables
     ///
@@ -743,7 +743,7 @@ pub struct Config {
     ///
     /// # Default
     ///
-    /// Filesystem storage in `./data` directory
+    /// Filesystem storage in `./data/long-term` directory
     ///
     /// # Environment Variables
     ///
@@ -789,10 +789,10 @@ impl Default for Config {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
             high_volume_storage: Storage::FileSystem {
-                path: PathBuf::from("data"),
+                path: PathBuf::from("data/high-volume"),
             },
             long_term_storage: Storage::FileSystem {
-                path: PathBuf::from("data"),
+                path: PathBuf::from("data/long-term"),
             },
 
             runtime: Runtime::default(),

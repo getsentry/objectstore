@@ -235,9 +235,9 @@ cargo run -- -c objectstore-server/config/local.example.yaml run
 
 # Option 2: Environment variables
 export OS__HIGH_VOLUME_STORAGE__TYPE=filesystem
-export OS__HIGH_VOLUME_STORAGE__PATH=data
+export OS__HIGH_VOLUME_STORAGE__PATH=data/high-volume
 export OS__LONG_TERM_STORAGE__TYPE=filesystem
-export OS__LONG_TERM_STORAGE__PATH=data
+export OS__LONG_TERM_STORAGE__PATH=data/long-term
 cargo run -- run
 ```
 

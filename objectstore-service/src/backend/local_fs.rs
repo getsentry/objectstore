@@ -126,6 +126,7 @@ mod tests {
             key: "testing".into(),
         };
         let metadata = Metadata {
+            is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             compression: Some(Compression::Zstd),
