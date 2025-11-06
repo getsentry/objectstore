@@ -307,7 +307,7 @@ class Session:
             raise_for_status(response)
 
 
-class ClientError(Exception):
+class RequestError(Exception):
     def __init__(self, message: str, status: int, response: str):
         super().__init__(message)
         self.status = status
@@ -317,7 +317,7 @@ class ClientError(Exception):
 def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
     if response.status >= 400:
         res = str(response.data or response.read())
-        raise ClientError(
+        raise RequestError(
             f"Objectstore request failed with status {response.status}",
             response.status,
             res,

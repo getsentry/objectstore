@@ -1,7 +1,7 @@
 from objectstore_client.client import (
-    ClientError,
     GetResult,
     Objectstore,
+    RequestError,
     Scope,
     SentryScope,
     Session,
@@ -23,7 +23,7 @@ __all__ = [
     "SentryScope",
     "Session",
     "GetResult",
-    "ClientError",
+    "RequestError",
     "Compression",
     "ExpirationPolicy",
     "Metadata",

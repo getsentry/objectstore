@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import urllib3
 from objectstore_client import Objectstore, Scope, Usecase
-from objectstore_client.client import ClientError, SentryScope
+from objectstore_client.client import RequestError, SentryScope
 from objectstore_client.metadata import TimeToLive
 
 
@@ -115,7 +115,7 @@ def test_full_cycle(server_url: str) -> None:
 
     client.delete(object_key)
 
-    with pytest.raises(ClientError, check=lambda e: e.status == 404):
+    with pytest.raises(RequestError, check=lambda e: e.status == 404):
         client.get(object_key)
 
 
