@@ -9,19 +9,53 @@ downloads are done as efficiently as possible.
 ```python
 import datetime
 
-from objectstore_client import ClientBuilder, NoOpMetricsBackend, TimeToLive
+import urllib3
 
-client_builder = ClientBuilder(
-    "http://localhost:8888",
-    "my_usecase",
-    metrics_backend=NoOpMetricsBackend(),  # optionally, provide your own MetricsBackend implementation
+from objectstore_client import (
+    NoOpMetricsBackend,
+    Objectstore,
+    Scope,
+    SentryScope,
+    TimeToIdle,
+    TimeToLive,
+    Usecase,
 )
-client = client_builder.for_project(42, 424242)
+
+# This can be stored in a global variable and reused, as it contains params that should likely remain the same across all uses
+objectstore = Objectstore(
+    "http://localhost:8888",
+    # You can bring your own metrics backend to record things like latency, throughput, and payload sizes
+    metrics_backend=NoOpMetricsBackend(),
+    # Enables distributed traces in Sentry
+    propagate_traces=False,
+    # Optionally, provide kwargs for urllib3.HTTPConnectionPool
+    # If you don't specify these, reasonable defaults are automatically applied
+    timeout=urllib3.Timeout(connect=0.5, read=0.5),
+    # ...
+)
+
+# This could also be stored in a global/shared variable, as you would most likely deal with a fixed number of usecases with statically defined defaults
+my_usecase = Usecase(
+    "my-usecase",
+    default_compression="zstd",
+    default_expiration_policy=TimeToLive(datetime.timedelta(days=1)),
+)
+
+# Get a client scoped to your usecase and scope
+client = objectstore.get_client(my_usecase, SentryScope(organization=42, project=1337))
+
+# We encourage using SentryScope, as it should fit most usecases.
+# You can also use an arbitrary Scope, like so:
+client = objectstore.get_client(
+    my_usecase, Scope(organization=42, project=1337, app_slug="email_app")
+)
+# In that case, please still incorporate `organization` and/or `project` as the first two components if it's reasonable to do so.
 
 object_id = client.put(
     b"Hello, world!",
     metadata={"key": "value"},
-    expiration_policy=TimeToLive(datetime.timedelta(days=1)),
+    # Overrides the default defined at the Usecase level
+    expiration_policy=TimeToIdle(datetime.timedelta(days=30)),
 )
 
 result = client.get(object_id)
