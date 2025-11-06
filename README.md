@@ -56,7 +56,7 @@ docker run -d \
   --volume data-volume:/data \
   --publish 127.0.0.1:8888:8888 \
   ghcr.io/getsentry/objectstore:latest \
-  run -c /etc/objectstore/config.yaml
+  --config /etc/objectstore/config.yaml run
 ```
 
 The command above assumes a configuration file named `config.yaml` in the current
@@ -231,7 +231,7 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 
 ```sh
 # Option 1: Configuration file
-cargo run -- run -c objectstore-server/config/local.example.yaml
+cargo run -- -c objectstore-server/config/local.example.yaml run
 
 # Option 2: Environment variables
 export FSS_HIGH_VOLUME_STORAGE__TYPE=filesystem
