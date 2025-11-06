@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
 use reqwest::header::HeaderName;
+use url::Url;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
@@ -19,13 +20,9 @@ const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"
 /// [`for_project`](Self::for_project) functions.
 #[derive(Debug)]
 pub struct ClientBuilder {
-    service_url: Arc<str>,
-    client: reqwest::Client,
+    service_url: Arc<Url>,
     propagate_traces: bool,
-
-    usecase: Arc<str>,
-    default_compression: Compression,
-    default_expiration_policy: ExpirationPolicy,
+    reqwest_builder: reqwest::ClientBuilder,
 }
 
 impl ClientBuilder {
@@ -36,45 +33,42 @@ impl ClientBuilder {
     ///
     /// In order to get or put objects, one has to create a [`Client`] using the
     /// [`for_organization`](Self::for_organization) function.
-    pub fn new(service_url: &str, usecase: &str) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
+    pub fn new(service_url: &str) -> anyhow::Result<Self> {
+        let reqwest_builder = reqwest::Client::builder()
+            // The read timeout "applies to each read operation", so should work fine for larger
+            // transfers that are split into multiple chunks.
+            // We define both as 500ms which is still very conservative, given that we are in the same network,
+            // and expect our backends to respond in <100ms.
+            // This can be overridden by the caller.
+            .connect_timeout(Duration::from_millis(500))
+            .read_timeout(Duration::from_millis(500));
+
+        let service_url = Arc::new(service_url.trim_end_matches('/').into());
+
+        Ok(Self {
+            service_url,
+            propagate_traces: false,
+            reqwest_builder,
+        })
+    }
+
+    /// Applies defaults that cannot be overridden by the caller.
+    fn apply_defaults(mut self) {
+        self.reqwest_builder = self
+            .reqwest_builder
             .user_agent(USER_AGENT)
             // hickory-dns: Controlled by the `reqwest/hickory-dns` feature flag
             // we are dealing with de/compression ourselves:
             .no_brotli()
             .no_deflate()
             .no_gzip()
-            .no_zstd()
-            // The read timeout "applies to each read operation", so should work fine for larger
-            // transfers that are split into multiple chunks.
-            // We define both as 500ms which is still very conservative, given that we are in the same network,
-            // and expect our backends to respond in <100ms.
-            .connect_timeout(Duration::from_millis(500))
-            .read_timeout(Duration::from_millis(500))
-            .build()?;
-
-        Ok(Self {
-            service_url: service_url.trim_end_matches('/').into(),
-            client,
-            propagate_traces: false,
-
-            usecase: usecase.into(),
-            default_compression: Compression::Zstd,
-            default_expiration_policy: ExpirationPolicy::Manual,
-        })
+            .no_zstd();
     }
 
-    /// This changes the default compression used for uploads.
-    pub fn default_compression(mut self, compression: Compression) -> Self {
-        self.default_compression = compression;
-        self
-    }
-
-    /// This sets a default expiration policy used for uploads.
-    pub fn default_expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
-        self.default_expiration_policy = expiration_policy;
-        self
-    }
+    // we want
+    // let session = client.session(attachments.for_project(42, 1337).add("ok", 10));
+    // let session = client.session(attachments.for_organization(42).add("ok", 10));
+    // let session = client.session(attachments.scope().add("app", "facebook"))?;
 
     /// This changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
@@ -94,19 +88,6 @@ impl ClientBuilder {
             default_compression: self.default_compression,
             default_expiration_policy: self.default_expiration_policy,
         }
-    }
-
-    /// Create a new [`Client`] and sets its `scope` based on the provided organization.
-    pub fn for_organization(&self, organization_id: u64) -> Client {
-        let scope = format!("org.{organization_id}");
-        self.make_client(scope)
-    }
-
-    /// Create a new [`Client`] and sets its `scope` based on the provided organization
-    /// and project.
-    pub fn for_project(&self, organization_id: u64, project_id: u64) -> Client {
-        let scope = format!("org.{organization_id}/proj.{project_id}");
-        self.make_client(scope)
     }
 }
 
