@@ -1983,6 +1983,7 @@ dependencies = [
  "objectstore-service",
  "objectstore-types",
  "rand",
+ "reqwest",
  "rustls",
  "secrecy",
  "sentry",

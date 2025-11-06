@@ -35,10 +35,9 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use argh::FromArgs;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -803,19 +802,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Loads configuration from command-line arguments and environment variables.
-    ///
-    /// This is a convenience method that parses command-line arguments using `argh::from_env()`
-    /// and then calls [`Config::from_args`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if configuration parsing fails or if required values are invalid.
-    pub fn from_env() -> Result<Self> {
-        let args: Args = argh::from_env();
-        Self::from_args(args)
-    }
-
     /// Loads configuration from the provided arguments.
     ///
     /// Configuration is merged in the following order (later sources override earlier ones):
@@ -829,10 +815,10 @@ impl Config {
     /// - The YAML configuration file cannot be read or parsed
     /// - Environment variables contain invalid values
     /// - Required fields are missing or invalid
-    pub fn from_args(args: Args) -> Result<Self> {
+    pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut figment = figment::Figment::from(Serialized::defaults(Config::default()));
-        if let Some(config_path) = &args.config {
-            figment = figment.merge(Yaml::file(config_path));
+        if let Some(path) = path {
+            figment = figment.merge(Yaml::file(path));
         }
         let config = figment
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
@@ -840,29 +826,6 @@ impl Config {
 
         Ok(config)
     }
-}
-
-/// Command-line arguments for the objectstore server.
-///
-/// These arguments control how the server initializes, particularly which configuration file
-/// to load. After parsing, use [`Config::from_args`] to load the full configuration.
-///
-/// # Example
-///
-/// Run the server with a custom configuration file:
-/// ```bash
-/// objectstore-server --config /etc/objectstore/config.yaml
-/// ```
-///
-/// Or using the short form:
-/// ```bash
-/// objectstore-server -c config.yaml
-/// ```
-#[derive(Debug, Default, FromArgs)]
-pub struct Args {
-    /// path to the YAML configuration file
-    #[argh(option, short = 'c')]
-    pub config: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -888,7 +851,7 @@ mod tests {
             jail.set_env("fss_sentry__traces_sample_rate", "0.5");
             jail.set_env("fss_sentry__traces_sample_rate", "0.5");
 
-            let config = Config::from_args(Args::default()).unwrap();
+            let config = Config::load(None).unwrap();
 
             let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
             else {
@@ -935,10 +898,7 @@ mod tests {
             .unwrap();
 
         figment::Jail::expect_with(|_jail| {
-            let args = Args {
-                config: Some(tempfile.path().into()),
-            };
-            let config = Config::from_args(args).unwrap();
+            let config = Config::load(Some(tempfile.path())).unwrap();
 
             let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
             else {
@@ -977,10 +937,7 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.set_env("fss_long_term_storage__endpoint", "http://localhost:9001");
 
-            let args = Args {
-                config: Some(tempfile.path().into()),
-            };
-            let config = Config::from_args(args).unwrap();
+            let config = Config::load(Some(tempfile.path())).unwrap();
 
             let Storage::S3Compatible {
                 endpoint,
