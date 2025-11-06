@@ -72,11 +72,11 @@ class Scope:
     Users are free to choose the scope structure that best suits their usecase.
     The combination of Usecase and Scope will determine the physical path of the
     blob in the underlying storage backend.
-    A natural Scope to use within Sentry is the combination of Organization and
-    Project ID: `(("organization", org_id), ("project", project_id))`.
+
+    For most usecases, [SentryScope] should be used.
     """
 
-    def __init__(self, **scopes: str | int | bool):
+    def __init__(self, **scopes: str | int | bool) -> None:
         if len(scopes) == 0:
             raise ValueError("At least 1 scope is needed")
 
@@ -96,6 +96,18 @@ class Scope:
 
     def __repr__(self) -> str:
         return self._str
+
+
+class SentryScope(Scope):
+    """
+    The recommended Scope that should fit for most usecases within Sentry.
+    """
+
+    def __init__(self, organization: int, project: int | None) -> None:
+        if project:
+            super().__init__(organization=organization, project=project)
+        else:
+            super().__init__(organization=organization)
 
 
 _CONNECTION_POOL_DEFAULTS = SimpleNamespace(

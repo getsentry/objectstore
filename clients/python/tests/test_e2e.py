@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import urllib3
 from objectstore_client import Objectstore, Scope, Usecase
-from objectstore_client.client import ClientError
+from objectstore_client.client import ClientError, SentryScope
 from objectstore_client.metadata import TimeToLive
 
 
@@ -101,7 +101,9 @@ def test_full_cycle(server_url: str) -> None:
         default_expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    client = objectstore.get_client(test_usecase, Scope(organization=42, project=1337))
+    client = objectstore.get_client(
+        test_usecase, SentryScope(organization=42, project=1337)
+    )
 
     data = b"test data"
 
@@ -134,7 +136,9 @@ def test_connect_timeout() -> None:
         default_expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    client = objectstore.get_client(test_usecase, Scope(organization=12345))
+    client = objectstore.get_client(
+        test_usecase, Scope(organization=12345, project=1337, app_slug="email_app")
+    )
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         client.put(b"foo")
