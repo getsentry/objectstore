@@ -46,10 +46,10 @@ class RequestError(Exception):
 class Usecase:
     """
     An identifier for a workload in Objectstore, along with defaults to use for all
-    operations within that usecase.
+    operations within that Usecase.
 
     Usecases need to be statically defined in Objectstore's configuration server-side.
-    Objectstore can make decisions based on the usecase. For example, choosing the most
+    Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
     """
 
@@ -131,13 +131,13 @@ class Client:
         Create a [Session] with the Objectstore server, tied to a specific [Usecase] and
         Scope.
 
-        A Scope is a (possibly nested) namespace within a usecase, given as a sequence
+        A Scope is a (possibly nested) namespace within a Usecase, given as a sequence
         of key-value pairs passed as kwargs.
         IMPORTANT: the order of the kwargs matters!
 
         The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
 
-        Users are free to choose the scope structure that best suits their usecase.
+        Users are free to choose the scope structure that best suits their Usecase.
         The combination of Usecase and Scope will determine the physical key/path of the
         blob in the underlying storage backend.
 
