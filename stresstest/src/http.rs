@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use futures::StreamExt;
-use objectstore_client::{Client, ClientBuilder, GetResult};
+use objectstore_client::{Client, ClientBuilder, GetResponse, Session, Usecase};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -14,7 +14,7 @@ use crate::workload::Payload;
 #[derive(Debug)]
 pub struct HttpRemote {
     remote: String,
-    builders: BTreeMap<String, ClientBuilder>,
+    clients: BTreeMap<String, Client>,
 }
 
 impl HttpRemote {
@@ -22,20 +22,20 @@ impl HttpRemote {
     pub fn new(remote: &str) -> Self {
         Self {
             remote: remote.to_owned(),
-            builders: BTreeMap::new(),
+            clients: BTreeMap::new(),
         }
     }
 
     pub(crate) async fn write(
         &self,
-        usecase: &str,
+        usecase: &Usecase,
         organization_id: u64,
         payload: Payload,
     ) -> anyhow::Result<String> {
-        let client = self.client(usecase, organization_id);
+        let session = self.session(usecase, organization_id);
         let stream = ReaderStream::new(payload).boxed();
 
-        client
+        session
             .put_stream(stream)
             .compression(None)
             .send()
@@ -45,13 +45,13 @@ impl HttpRemote {
 
     pub(crate) async fn read(
         &self,
-        usecase: &str,
+        usecase: &Usecase,
         organization_id: u64,
         key: &str,
         mut payload: Payload,
     ) -> anyhow::Result<()> {
-        let client = self.client(usecase, organization_id);
-        let GetResult { stream, .. } = client
+        let client = self.session(usecase, organization_id);
+        let GetResponse { stream, .. } = client
             .get(key)
             .send()
             .await?
@@ -70,20 +70,25 @@ impl HttpRemote {
         Ok(())
     }
 
-    pub(crate) async fn delete(&self, usecase: &str, organization_id: u64, key: &str) {
-        let client = self.client(usecase, organization_id);
-        client.delete(key).await.unwrap();
+    pub(crate) async fn delete(&self, usecase: &Usecase, organization_id: u64, key: &str) {
+        self.session(usecase, organization_id)
+            .delete(key)
+            .await
+            .unwrap();
     }
 
     /// Registers a new usecase that can be used by the workloads.
-    pub fn register_usecase(&mut self, usecase: &str) {
-        let builder = ClientBuilder::new(&self.remote, usecase).unwrap();
-        self.builders.insert(usecase.to_owned(), builder);
+    pub fn register_usecase(&mut self, usecase: &Usecase) {
+        let client = ClientBuilder::new(&self.remote).build().unwrap();
+        self.clients
+            .insert(usecase.name().as_ref().to_owned(), client);
     }
 
-    fn client(&self, usecase: &str, organization_id: u64) -> Client {
+    fn session(&self, usecase: &Usecase, organization_id: u64) -> Session {
         // NB: Reuse the organization ID as project ID to create unique projects. Right now, we do
         // not benefit from simulating multiple projects per org.
-        self.builders[usecase].for_project(organization_id, organization_id)
+        self.clients[usecase.name().as_ref()]
+            .session(usecase.for_project(organization_id, organization_id))
+            .unwrap()
     }
 }

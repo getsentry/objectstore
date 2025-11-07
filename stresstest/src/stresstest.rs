@@ -9,6 +9,7 @@ use anyhow::Result;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use objectstore_client::Usecase;
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -26,7 +27,7 @@ pub async fn run(
     duration: Duration,
 ) -> Result<()> {
     for workload in &workloads {
-        remote.register_usecase(&workload.name);
+        remote.register_usecase(&Usecase::new(&workload.name));
     }
 
     let remote = Arc::new(remote);
@@ -109,7 +110,9 @@ pub async fn run(
             let bar = &bar;
             async move {
                 let start = Instant::now();
-                remote.delete(usecase, *organization_id, object_key).await;
+                remote
+                    .delete(&Usecase::new(usecase), *organization_id, object_key)
+                    .await;
                 cleanup_timing
                     .lock()
                     .unwrap()
@@ -187,7 +190,7 @@ async fn run_workload(
                             let file_size = payload.len;
                             let usecase = workload.lock().unwrap().name.clone();
                             let organization_id = workload.lock().unwrap().next_organization_id();
-                            match remote.write(&usecase, organization_id, payload).await {
+                            match remote.write(&Usecase::new(&usecase), organization_id, payload).await {
                                 Ok(object_key) => {
                                     let external_id = (usecase, organization_id, object_key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
@@ -206,7 +209,7 @@ async fn run_workload(
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            match remote.read(usecase, *organization_id, object_key, payload).await {
+                            match remote.read(&Usecase::new(&usecase), *organization_id, object_key, payload).await {
                                 Ok(_) => {
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
@@ -222,7 +225,7 @@ async fn run_workload(
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.delete(usecase, *organization_id, object_key).await;
+                            remote.delete(&Usecase::new(&usecase), *organization_id, object_key).await;
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }

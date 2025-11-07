@@ -13,18 +13,36 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
-use crate::{Client, ClientStream};
+use crate::{ClientStream, Session};
 
-impl Client {
+/// The response returned from the service after uploading an object.
+#[derive(Debug, Deserialize)]
+pub struct PutResponse {
+    /// The key of the object, as stored.
+    pub key: String,
+}
+
+pub(crate) enum PutBody {
+    Buffer(Bytes),
+    Stream(ClientStream),
+}
+
+impl fmt::Debug for PutBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PutBody").finish_non_exhaustive()
+    }
+}
+
+impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
         let metadata = Metadata {
-            expiration_policy: self.default_expiration_policy,
-            compression: Some(self.default_compression),
+            expiration_policy: self.usecase.expiration,
+            compression: Some(self.usecase.compression),
             ..Default::default()
         };
 
         PutBuilder {
-            client: self,
+            session: self,
             metadata,
             body,
         }
@@ -53,19 +71,9 @@ impl Client {
 /// A PUT request builder.
 #[derive(Debug)]
 pub struct PutBuilder<'a> {
-    pub(crate) client: &'a Client,
+    session: &'a Session,
     pub(crate) metadata: Metadata,
     pub(crate) body: PutBody,
-}
-
-pub(crate) enum PutBody {
-    Buffer(Bytes),
-    Stream(ClientStream),
-}
-impl fmt::Debug for PutBody {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PutBody").finish_non_exhaustive()
-    }
 }
 
 impl PutBuilder<'_> {
@@ -100,21 +108,14 @@ impl PutBuilder<'_> {
     }
 }
 
-/// The response returned from the service after uploading an object.
-#[derive(Debug, Deserialize)]
-pub struct PutResponse {
-    /// The key of the object, as stored.
-    pub key: String,
-}
-
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> anyhow::Result<PutResponse> {
-        let put_url = format!("{}/v1/", self.client.service_url);
-        let mut builder = self.client.request(reqwest::Method::PUT, put_url)?;
+        let put_url = format!("{}v1/", self.session.service_url);
+        let mut builder = self.session.request(reqwest::Method::PUT, put_url)?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {

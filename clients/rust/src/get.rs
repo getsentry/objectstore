@@ -9,19 +9,19 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::Compression;
 
-use crate::{Client, ClientStream};
+use crate::{ClientStream, Session};
 
 /// The result from a successful [`get()`](Client::get) call.
 ///
 /// This carries the response as a stream, plus the compression algorithm of the data.
-pub struct GetResult {
+pub struct GetResponse {
     /// The metadata attached to this object, including the compression algorithm used for the payload.
     pub metadata: Metadata,
     /// The response stream.
     pub stream: ClientStream,
 }
 
-impl GetResult {
+impl GetResponse {
     /// Loads the object payload fully into memory.
     pub async fn payload(self) -> anyhow::Result<bytes::Bytes> {
         let bytes: BytesMut = self.stream.try_collect().await?;
@@ -35,7 +35,7 @@ impl GetResult {
     }
 }
 
-impl fmt::Debug for GetResult {
+impl fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GetResult")
             .field("metadata", &self.metadata)
@@ -44,24 +44,23 @@ impl fmt::Debug for GetResult {
     }
 }
 
-/// A GET request builder.
-#[derive(Debug)]
-pub struct GetBuilder<'a> {
-    client: &'a Client,
-    id: &'a str,
-
-    decompress: bool,
-}
-
-impl Client {
+impl Session {
     /// Requests the object with the given `id`.
     pub fn get<'a>(&'a self, id: &'a str) -> GetBuilder<'a> {
         GetBuilder {
-            client: self,
+            session: self,
             id,
             decompress: true,
         }
     }
+}
+
+/// A GET request builder.
+#[derive(Debug)]
+pub struct GetBuilder<'a> {
+    session: &'a Session,
+    id: &'a str,
+    decompress: bool,
 }
 
 impl GetBuilder<'_> {
@@ -73,11 +72,11 @@ impl GetBuilder<'_> {
     }
 
     /// Sends the `GET` request.
-    pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
-        let get_url = format!("{}/v1/{}", self.client.service_url, self.id);
+    pub async fn send(self) -> anyhow::Result<Option<GetResponse>> {
+        let get_url = format!("{}v1/{}", self.session.service_url, self.id);
 
         let response = self
-            .client
+            .session
             .request(reqwest::Method::GET, get_url)?
             .send()
             .await?;
@@ -97,6 +96,6 @@ impl GetBuilder<'_> {
             _ => stream.boxed(),
         };
 
-        Ok(Some(GetResult { metadata, stream }))
+        Ok(Some(GetResponse { metadata, stream }))
     }
 }

@@ -7,15 +7,16 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use objectstore_client::ClientBuilder;
+//! use objectstore_client::{ClientBuilder, Usecase};
 //!
 //! #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
-//! let client = ClientBuilder::new("http://localhost:8888/", "my-usecase")?
-//!     .for_organization(42);
+//! let client = ClientBuilder::new("http://localhost:8888/").build().unwrap();
+//! let usecase = Usecase::new("usecase");
+//! let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 //!
-//! let id = client.put("hello world").send().await?;
-//! let object = client.get(&id.key).send().await?.expect("object to exist");
+//! let id = session.put("hello world").send().await?;
+//! let object = session.get(&id.key).send().await?.expect("object to exist");
 //! assert_eq!(object.payload().await?, "hello world");
 //! # Ok(())
 //! # }
