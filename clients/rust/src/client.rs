@@ -209,6 +209,7 @@ impl Scope {
         V: std::fmt::Display,
     {
         if let Ok(ref mut inner) = self.0 {
+            // TODO: validate and turn into error on failure
             if !inner.scope.is_empty() {
                 inner.scope.push('/');
             }
