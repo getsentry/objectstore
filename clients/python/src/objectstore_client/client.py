@@ -68,7 +68,7 @@ class Usecase:
         self._expiration_policy = expiration_policy
 
 
-# Characters allowed in a Scope.
+# Characters allowed in a Scope's key and value.
 # These are the URL safe characters, except for `.` which we use as separator between
 # key and value of Scope components.
 SCOPE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
