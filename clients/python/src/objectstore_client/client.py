@@ -48,7 +48,7 @@ class Usecase:
     An identifier for a workload in Objectstore, along with defaults to use for all
     operations within that usecase.
 
-    Usecases need to be statically defined in Objectstore's configuration.
+    Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the usecase. For example, choosing the most
     suitable storage backend.
     """
@@ -68,66 +68,18 @@ class Usecase:
         self._expiration_policy = expiration_policy
 
 
-# URL safe characters, except for `.` which we use as separator between key and value
-# of Scope components
+# Characters allowed in a Scope.
+# These are the URL safe characters, except for `.` which we use as separator between
+# key and value of Scope components.
 SCOPE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
-
-
-class Scope:
-    """
-    A (possibly nested) namespace within a usecase, given as a sequence of key-value
-    pairs passed as kwargs.
-    The emtpy scope is not admitted. Order of the components matters.
-
-    The admitted characters for keys and values are: `[A-Za-z0-9_-]`.
-
-    Users are free to choose the scope structure that best suits their usecase.
-    The combination of Usecase and Scope will determine the physical path of the
-    blob in the underlying storage backend.
-
-    For most usecases, [SentryScope] should be used.
-    """
-
-    def __init__(self, **scopes: str | int | bool) -> None:
-        if len(scopes) == 0:
-            raise ValueError("At least 1 scope is needed")
-
-        parts = []
-        for key, value in scopes.items():
-            value = str(value)
-            if any(c not in SCOPE_ALLOWED_CHARS for c in value):
-                raise ValueError(
-                    f"Invalid scope value {value}. The valid character set is: "
-                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
-                )
-
-            formatted = f"{key}.{value}"
-            parts.append(formatted)
-
-        self._str = "/".join(parts)
-
-    def __repr__(self) -> str:
-        return self._str
-
-
-class SentryScope(Scope):
-    """
-    The recommended Scope that should fit for most usecases within Sentry.
-    """
-
-    def __init__(self, organization: int, project: int | None) -> None:
-        if project:
-            super().__init__(organization=organization, project=project)
-        else:
-            super().__init__(organization=organization)
 
 
 @dataclass
 class _ConnectionDefaults:
-    retries = urllib3.Retry(connect=3, redirect=5, read=0)
+    retries: urllib3.Retry = urllib3.Retry(connect=3, redirect=5, read=0)
     """We only retry connection problems, as we cannot rewind our compression stream."""
 
-    timeout = urllib3.Timeout(connect=0.5, read=0.5)
+    timeout: urllib3.Timeout = urllib3.Timeout(connect=0.5, read=0.5)
     """
     The read timeout is defined to be "between consecutive read operations",
     which should mean one chunk of the response, with a large response being
@@ -135,9 +87,6 @@ class _ConnectionDefaults:
     We define both as 500ms which is still very conservative,
     given that we are in the same network, and expect our backends to respond in <100ms.
     """
-
-
-_CONNECTION_DEFAULTS = asdict(_ConnectionDefaults())
 
 
 class Client:
@@ -152,7 +101,7 @@ class Client:
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
     ):
-        connection_kwargs_to_use = _CONNECTION_DEFAULTS.copy()
+        connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries:
             connection_kwargs_to_use["retries"] = urllib3.Retry(
@@ -177,20 +126,70 @@ class Client:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
 
-    def get_client(self, usecase: Usecase, scope: Scope) -> Session:
+    def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
+        """
+        Create a [Session] with the Objectstore server, tied to a specific [Usecase] and
+        Scope.
+
+        A Scope is a (possibly nested) namespace within a usecase, given as a sequence
+        of key-value pairs passed as kwargs.
+        IMPORTANT: the order of the kwargs matters!
+
+        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
+
+        Users are free to choose the scope structure that best suits their usecase.
+        The combination of Usecase and Scope will determine the physical key/path of the
+        blob in the underlying storage backend.
+
+        For most usecases, it's recommended to use the organization and project ID as
+        the first components of the scope, as follows:
+        ```
+        client.session(usecase, organization=organization_id, project=project_id, ...)
+        ```
+        """
+
+        parts = []
+        for key, value in scopes.items():
+            if any(c not in SCOPE_ALLOWED_CHARS for c in key):
+                raise ValueError(
+                    f"Invalid scope key {key}. The valid character set is: "
+                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
+                )
+
+            value = str(value)
+            if any(c not in SCOPE_ALLOWED_CHARS for c in value):
+                raise ValueError(
+                    f"Invalid scope value {value}. The valid character set is: "
+                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
+                )
+
+            formatted = f"{key}.{value}"
+            parts.append(formatted)
+        scope_str = "/".join(parts)
+
         return Session(
-            self._pool, self._metrics_backend, self._propagate_traces, usecase, scope
+            self._pool,
+            self._metrics_backend,
+            self._propagate_traces,
+            usecase,
+            scope_str,
         )
 
 
 class Session:
+    """
+    A session with the Objectstore server, scoped to a specific [Usecase] and Scope.
+
+    This should never be constructed directly, use [Client.session].
+    """
+
     def __init__(
         self,
         pool: HTTPConnectionPool,
         metrics_backend: MetricsBackend,
         propagate_traces: bool,
         usecase: Usecase,
-        scope: Scope,
+        scope: str,
     ):
         self._pool = pool
         self._metrics_backend = metrics_backend
@@ -205,7 +204,7 @@ class Session:
 
     def _make_url(self, id: str | None, full: bool = False) -> str:
         base_path = f"/v1/{id}" if id else "/v1/"
-        qs = urlencode({"usecase": self._usecase.name, "scope": str(self._scope)})
+        qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
         else:

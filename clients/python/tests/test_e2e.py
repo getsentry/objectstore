@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 import urllib3
-from objectstore_client import Client, Scope, Usecase
-from objectstore_client.client import RequestError, SentryScope
+from objectstore_client import Client, Usecase
+from objectstore_client.client import RequestError
 from objectstore_client.metadata import TimeToLive
 
 
@@ -94,29 +94,27 @@ def server_url() -> Generator[str]:
 
 
 def test_full_cycle(server_url: str) -> None:
-    objectstore = Client(server_url)
+    client = Client(server_url)
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    client = objectstore.get_client(
-        test_usecase, SentryScope(organization=42, project=1337)
-    )
+    session = client.session(test_usecase, organization=42, project=1337)
 
     data = b"test data"
 
-    object_key = client.put(data)
+    object_key = session.put(data)
     assert object_key is not None
 
-    retrieved = client.get(object_key)
+    retrieved = session.get(object_key)
     assert retrieved.payload.read() == data
 
-    client.delete(object_key)
+    session.delete(object_key)
 
     with pytest.raises(RequestError, check=lambda e: e.status == 404):
-        client.get(object_key)
+        session.get(object_key)
 
 
 def test_connect_timeout() -> None:
@@ -129,16 +127,16 @@ def test_connect_timeout() -> None:
 
     timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
 
-    objectstore = Client(url, timeout=timeout)
+    client = Client(url, connection_kwargs={"timeout": timeout})
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    client = objectstore.get_client(
-        test_usecase, Scope(organization=12345, project=1337, app_slug="email_app")
+    session = client.session(
+        test_usecase, organization=12345, project=1337, app_slug="email_app"
     )
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
-        client.put(b"foo")
+        session.put(b"foo")
