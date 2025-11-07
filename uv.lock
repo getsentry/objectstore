@@ -382,7 +382,7 @@ docs = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.0.5"
+version = "0.0.6"
 source = { editable = "clients/python" }
 dependencies = [
     { name = "sentry-sdk" },
