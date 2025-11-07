@@ -12,51 +12,51 @@ import datetime
 import urllib3
 
 from objectstore_client import (
+    Client,
     NoOpMetricsBackend,
-    Objectstore,
-    Scope,
-    SentryScope,
     TimeToIdle,
     TimeToLive,
     Usecase,
 )
 
-# This can be stored in a global variable and reused, as it contains params that should likely remain the same across all uses
-objectstore = Objectstore(
+# This should be stored in a global variable and reused, in order to reuse the connection
+client = Client(
     "http://localhost:8888",
-    # You can bring your own metrics backend to record things like latency, throughput, and payload sizes
+    # Optionally, bring your own metrics backend to record things like latency, throughput, and payload sizes
     metrics_backend=NoOpMetricsBackend(),
-    # Enables distributed traces in Sentry
-    propagate_traces=False,
+    # Optionally, enable distributed traces in Sentry
+    propagate_traces=True,
     # Optionally, provide kwargs for urllib3.HTTPConnectionPool
     # If you don't specify these, reasonable defaults are automatically applied
-    timeout=urllib3.Timeout(connect=0.5, read=0.5),
+    connection_kwargs={"timeout": urllib3.Timeout(connect=0.5, read=0.5)},
     # ...
 )
 
-# This could also be stored in a global/shared variable, as you would most likely deal with a fixed number of usecases with statically defined defaults
+# This could also be stored in a global/shared variable, as you will deal with a fixed number of usecases with statically defined defaults
 my_usecase = Usecase(
     "my-usecase",
+    # Optionally, define defaults for all operations within this Usecase
     compression="zstd",
     expiration_policy=TimeToLive(datetime.timedelta(days=1)),
 )
 
-# Get a client scoped to your usecase and scope
-client = objectstore.get_client(my_usecase, SentryScope(organization=42, project=1337))
-
-# We encourage using SentryScope, as it should fit most usecases.
-# You can also use an arbitrary Scope, like so:
-client = objectstore.get_client(
-    my_usecase, Scope(organization=42, project=1337, app_slug="email_app")
+# Start a Session, tied to your Usecase and a Scope.
+# A Scope is a (possibly nested) namespace within Objectstore that provides isolation within a Usecase.
+# The Scope is given as a sequence of key-value pairs through kwargs.
+# Note that order matters!
+# The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
+# You're encouraged to use the organization and project ID as the first components of the scope.
+session = client.session(
+    my_usecase, organization=42, project=1337, app_slug="email_app"
 )
-# In that case, please still incorporate `organization` and/or `project` as the first two components if it's reasonable to do so
 
 # These operations will raise an exception on failure
 
-object_id = client.put(
+# Write an object and metadata
+object_id = session.put(
     b"Hello, world!",
     # You can pass in your own identifier for the object to decide where to store the file.
-    # Otherwise, Objectstore will pick a random one and return it.
+    # Otherwise, Objectstore will pick an identifier and return it.
     # A put request to an existing identifier overwrites the contents and metadata.
     # id="hello",
     metadata={"key": "value"},
@@ -64,13 +64,15 @@ object_id = client.put(
     expiration_policy=TimeToIdle(datetime.timedelta(days=30)),
 )
 
-result = client.get(object_id)
+# Read an object and its metadata
+result = session.get(object_id)
 
 content = result.payload.read()
 assert content == b"Hello, world!"
 assert result.metadata.custom["key"] == "value"
 
-client.delete(object_id)
+# Delete an object
+session.delete(object_id)
 ```
 
 ## Development
