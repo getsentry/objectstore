@@ -80,11 +80,16 @@ impl ClientBuilder {
         self
     }
 
-    pub fn with_reqwest_builder(mut self, builder: reqwest::ClientBuilder) -> Self {
-        if let Self::Ok(ref mut inner) = self {
-            inner.reqwest_builder = builder;
-        }
-        self
+    pub fn with_reqwest_builder<F>(mut self, callback: F) -> Self
+    where
+        F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    {
+        let Self::Ok(inner) = self else { return self };
+        Self::Ok(ClientBuilderInner {
+            service_url: inner.service_url,
+            propagate_traces: inner.propagate_traces,
+            reqwest_builder: callback(inner.reqwest_builder),
+        })
     }
 
     pub fn build(self) -> anyhow::Result<Client> {
