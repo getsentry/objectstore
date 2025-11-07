@@ -50,7 +50,7 @@ session = client.session(
     my_usecase, organization=42, project=1337, app_slug="email_app"
 )
 
-# These operations will raise an exception on failure
+# The following operations will raise an exception on failure
 
 # Write an object and metadata
 object_id = session.put(
