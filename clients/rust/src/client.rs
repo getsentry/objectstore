@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,7 +152,7 @@ struct ScopeInner {
     scope: String,
 }
 
-impl Display for ScopeInner {
+impl std::fmt::Display for ScopeInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.scope)
     }
@@ -197,7 +196,7 @@ impl Scope {
 
     pub fn push<V>(mut self, key: &str, value: &V) -> Self
     where
-        V: Display,
+        V: std::fmt::Display,
     {
         if let Self::Ok(ref mut inner) = self {
             if inner.scope.len() > 0 {
