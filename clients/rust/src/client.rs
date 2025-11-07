@@ -35,14 +35,8 @@ impl ClientBuilderInner {
 }
 
 /// Builder to obtain a [`Client`].
-#[allow(private_interfaces, clippy::large_enum_variant)]
 #[derive(Debug)]
-pub enum ClientBuilder {
-    /// TODO: document
-    Ok(ClientBuilderInner),
-    /// TODO: document
-    Err(anyhow::Error),
-}
+pub struct ClientBuilder(Result<ClientBuilderInner, anyhow::Error>);
 
 impl ClientBuilder {
     /// Creates a new [`ClientBuilder`], configured with the given `service_url`.
@@ -52,7 +46,7 @@ impl ClientBuilder {
         let service_url = {
             let res = service_url.parse();
             if let Err(err) = res {
-                return Self::Err(anyhow::Error::from(err));
+                return Self(Err(anyhow::Error::from(err)));
             }
             res.unwrap()
         };
@@ -67,17 +61,17 @@ impl ClientBuilder {
             .read_timeout(Duration::from_millis(500))
             .user_agent(USER_AGENT);
 
-        Self::Ok(ClientBuilderInner {
+        Self(Ok(ClientBuilderInner {
             service_url,
             propagate_traces: false,
             reqwest_builder,
-        })
+        }))
     }
 
     /// This changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
     pub fn with_distributed_tracing(mut self, propagate_traces: bool) -> Self {
-        if let Self::Ok(ref mut inner) = self {
+        if let Ok(ref mut inner) = self.0 {
             inner.propagate_traces = propagate_traces;
         }
         self
@@ -88,27 +82,25 @@ impl ClientBuilder {
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
     {
-        let Self::Ok(inner) = self else { return self };
-        Self::Ok(ClientBuilderInner {
+        let Ok(inner) = self.0 else { return self };
+        Self(Ok(ClientBuilderInner {
             service_url: inner.service_url,
             propagate_traces: inner.propagate_traces,
             reqwest_builder: callback(inner.reqwest_builder),
-        })
+        }))
     }
 
     /// TODO: document
     pub fn build(self) -> anyhow::Result<Client> {
-        match self {
-            Self::Ok(mut inner) => {
-                inner = inner.apply_defaults();
+        self.0
+            .map(|inner| inner.apply_defaults())
+            .and_then(|inner| {
                 Ok(Client {
                     reqwest: inner.reqwest_builder.build()?,
                     service_url: Arc::new(inner.service_url),
                     propagate_traces: inner.propagate_traces,
                 })
-            }
-            ClientBuilder::Err(err) => Err(err),
-        }
+            })
     }
 }
 
@@ -177,22 +169,16 @@ impl std::fmt::Display for ScopeInner {
 }
 
 /// TODO: document
-#[allow(private_interfaces)]
 #[derive(Debug)]
-pub enum Scope {
-    /// TODO: document
-    Ok(ScopeInner),
-    /// TODO: document
-    Err(anyhow::Error),
-}
+pub struct Scope(Result<ScopeInner, anyhow::Error>);
 
 impl Scope {
     /// TODO: document
     pub fn new(usecase: Usecase) -> Self {
-        Self::Ok(ScopeInner {
+        Self(Ok(ScopeInner {
             usecase,
             scope: String::new(),
-        })
+        }))
     }
 
     fn for_organization(usecase: Usecase, organization: u64) -> Self {
@@ -201,7 +187,7 @@ impl Scope {
         let mut scope = String::with_capacity(4 + organization.len());
         scope.push_str("org.");
         scope.push_str(organization);
-        Self::Ok(ScopeInner { usecase, scope })
+        Self(Ok(ScopeInner { usecase, scope }))
     }
 
     fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
@@ -214,7 +200,7 @@ impl Scope {
         scope.push_str(organization);
         scope.push_str("/project.");
         scope.push_str(project);
-        Self::Ok(ScopeInner { usecase, scope })
+        Self(Ok(ScopeInner { usecase, scope }))
     }
 
     /// TODO: document
@@ -222,7 +208,7 @@ impl Scope {
     where
         V: std::fmt::Display,
     {
-        if let Self::Ok(ref mut inner) = self {
+        if let Ok(ref mut inner) = self.0 {
             if !inner.scope.is_empty() {
                 inner.scope.push('/');
             }
@@ -245,16 +231,13 @@ pub struct Client {
 impl Client {
     /// TODO: document
     pub fn session(&self, scope: Scope) -> anyhow::Result<Session> {
-        match scope {
-            Scope::Ok(inner) => Ok(Session {
-                service_url: Arc::clone(&self.service_url),
-                usecase: inner.usecase.clone(),
-                scope: inner.scope,
-                propagate_traces: self.propagate_traces,
-                reqwest: self.reqwest.clone(),
-            }),
-            Scope::Err(error) => Err(error),
-        }
+        scope.0.map(|inner| Session {
+            service_url: Arc::clone(&self.service_url),
+            usecase: inner.usecase.clone(),
+            scope: inner.scope,
+            propagate_traces: self.propagate_traces,
+            reqwest: self.reqwest.clone(),
+        })
     }
 }
 
