@@ -35,6 +35,7 @@ impl ClientBuilderInner {
 }
 
 /// Builder to obtain a [`Client`].
+#[allow(private_interfaces, clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ClientBuilder {
     Ok(ClientBuilderInner),
@@ -80,7 +81,7 @@ impl ClientBuilder {
         self
     }
 
-    pub fn with_reqwest_builder<F>(mut self, callback: F) -> Self
+    pub fn with_reqwest_builder<F>(self, callback: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
     {
@@ -163,6 +164,7 @@ impl std::fmt::Display for ScopeInner {
     }
 }
 
+#[allow(private_interfaces)]
 #[derive(Debug)]
 pub enum Scope {
     Ok(ScopeInner),
@@ -204,7 +206,7 @@ impl Scope {
         V: std::fmt::Display,
     {
         if let Self::Ok(ref mut inner) = self {
-            if inner.scope.len() > 0 {
+            if !inner.scope.is_empty() {
                 inner.scope.push('/');
             }
             inner.scope.push_str(key);
