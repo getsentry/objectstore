@@ -124,10 +124,10 @@ class SentryScope(Scope):
 
 @dataclass
 class _ConnectionDefaults:
-    retries = (urllib3.Retry(connect=3, redirect=5, read=0),)
+    retries = urllib3.Retry(connect=3, redirect=5, read=0)
     """We only retry connection problems, as we cannot rewind our compression stream."""
 
-    timeout = (urllib3.Timeout(connect=0.5, read=0.5),)
+    timeout = urllib3.Timeout(connect=0.5, read=0.5)
     """
     The read timeout is defined to be "between consecutive read operations",
     which should mean one chunk of the response, with a large response being
@@ -148,14 +148,31 @@ class Client:
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
-        urllib3_connection_kwargs: Mapping[str, Any] | None = None,
+        retries: int | None = None,
+        timeout_ms: float | None = None,
+        connection_kwargs: Mapping[str, Any] | None = None,
     ):
-        connection_kwargs = _CONNECTION_DEFAULTS
-        if urllib3_connection_kwargs:
-            connection_kwargs = {**connection_kwargs, **urllib3_connection_kwargs}
+        connection_kwargs_to_use = _CONNECTION_DEFAULTS.copy()
+
+        if retries:
+            connection_kwargs_to_use["retries"] = urllib3.Retry(
+                connect=retries,
+                redirect=retries,
+                # we only retry connection problems, as we cannot rewind our
+                # compression stream
+                read=0,
+            )
+
+        if timeout_ms:
+            connection_kwargs_to_use["timeout"] = urllib3.Timeout(
+                connect=timeout_ms * 100, read=timeout_ms * 100
+            )
+
+        if connection_kwargs:
+            connection_kwargs_to_use = {**connection_kwargs_to_use, **connection_kwargs}
 
         self._pool = urllib3.connectionpool.connection_from_url(
-            base_url, **connection_kwargs
+            base_url, **connection_kwargs_to_use
         )
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
