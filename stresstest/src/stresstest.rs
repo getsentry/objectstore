@@ -209,7 +209,7 @@ async fn run_workload(
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            match remote.read(&Usecase::new(&usecase), *organization_id, object_key, payload).await {
+                            match remote.read(&Usecase::new(usecase), *organization_id, object_key, payload).await {
                                 Ok(_) => {
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
@@ -225,7 +225,7 @@ async fn run_workload(
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.delete(&Usecase::new(&usecase), *organization_id, object_key).await;
+                            remote.delete(&Usecase::new(usecase), *organization_id, object_key).await;
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }
