@@ -11,7 +11,7 @@ pub use objectstore_types::Compression;
 
 use crate::{ClientStream, Session};
 
-/// The result from a successful [`get()`](Client::get) call.
+/// The result from a successful [`get()`](Session::get) call.
 ///
 /// This carries the response as a stream, plus the compression algorithm of the data.
 pub struct GetResponse {
