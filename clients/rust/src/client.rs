@@ -38,7 +38,9 @@ impl ClientBuilderInner {
 #[allow(private_interfaces, clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ClientBuilder {
+    /// TODO: document
     Ok(ClientBuilderInner),
+    /// TODO: document
     Err(anyhow::Error),
 }
 
@@ -81,6 +83,7 @@ impl ClientBuilder {
         self
     }
 
+    /// TODO: document
     pub fn with_reqwest_builder<F>(self, callback: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
@@ -93,6 +96,7 @@ impl ClientBuilder {
         })
     }
 
+    /// TODO: document
     pub fn build(self) -> anyhow::Result<Client> {
         match self {
             Self::Ok(mut inner) => {
@@ -108,6 +112,7 @@ impl ClientBuilder {
     }
 }
 
+/// TODO: document
 #[derive(Debug, Clone)]
 pub struct Usecase {
     name: Arc<str>,
@@ -116,6 +121,7 @@ pub struct Usecase {
 }
 
 impl Usecase {
+    /// TODO: document
     pub fn new(name: &str) -> Self {
         Self {
             name: Arc::from(name),
@@ -124,10 +130,12 @@ impl Usecase {
         }
     }
 
+    /// TODO: document
     pub fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
+    /// TODO: document
     pub fn with_compression(self, compression: Compression) -> Self {
         Self {
             compression,
@@ -135,18 +143,22 @@ impl Usecase {
         }
     }
 
+    /// TODO: document
     pub fn with_expiration(self, expiration: ExpirationPolicy) -> Self {
         Self { expiration, ..self }
     }
 
+    /// TODO: document
     pub fn scope(&self) -> Scope {
         Scope::new(self.clone())
     }
 
+    /// TODO: document
     pub fn for_organization(&self, organization: u64) -> Scope {
         Scope::for_organization(self.clone(), organization)
     }
 
+    /// TODO: document
     pub fn for_project(&self, organization: u64, project: u64) -> Scope {
         Scope::for_project(self.clone(), organization, project)
     }
@@ -164,14 +176,18 @@ impl std::fmt::Display for ScopeInner {
     }
 }
 
+/// TODO: document
 #[allow(private_interfaces)]
 #[derive(Debug)]
 pub enum Scope {
+    /// TODO: document
     Ok(ScopeInner),
+    /// TODO: document
     Err(anyhow::Error),
 }
 
 impl Scope {
+    /// TODO: document
     pub fn new(usecase: Usecase) -> Self {
         Self::Ok(ScopeInner {
             usecase,
@@ -201,6 +217,7 @@ impl Scope {
         Self::Ok(ScopeInner { usecase, scope })
     }
 
+    /// TODO: document
     pub fn push<V>(mut self, key: &str, value: &V) -> Self
     where
         V: std::fmt::Display,
@@ -226,6 +243,7 @@ pub struct Client {
 }
 
 impl Client {
+    /// TODO: document
     pub fn session(&self, scope: Scope) -> anyhow::Result<Session> {
         match scope {
             Scope::Ok(inner) => Ok(Session {
@@ -240,6 +258,7 @@ impl Client {
     }
 }
 
+/// TODO: document
 #[derive(Debug)]
 pub struct Session {
     pub(crate) service_url: Arc<Url>,
