@@ -36,8 +36,8 @@ impl fmt::Debug for PutBody {
 impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
         let metadata = Metadata {
-            expiration_policy: self.usecase.expiration,
-            compression: Some(self.usecase.compression),
+            expiration_policy: self.usecase.expiration(),
+            compression: Some(self.usecase.compression()),
             ..Default::default()
         };
 

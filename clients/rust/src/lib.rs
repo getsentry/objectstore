@@ -25,12 +25,14 @@
 #![warn(missing_debug_implementations)]
 
 mod client;
+mod delete;
 mod get;
 mod put;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
 pub use client::*;
+pub use delete::*;
 pub use get::*;
 pub use put::*;
 

@@ -80,7 +80,7 @@ async fn deletes_stores_stuff() {
     let body = "oh hai!";
     let stored_id = session.put(body).send().await.unwrap().key;
 
-    session.delete(&stored_id).await.unwrap();
+    session.delete(&stored_id).send().await.unwrap();
 
     let response = session.get(&stored_id).send().await.unwrap();
     assert!(response.is_none());

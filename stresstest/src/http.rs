@@ -73,6 +73,7 @@ impl HttpRemote {
     pub(crate) async fn delete(&self, usecase: &Usecase, organization_id: u64, key: &str) {
         self.session(usecase, organization_id)
             .delete(key)
+            .send()
             .await
             .unwrap();
     }
@@ -80,14 +81,13 @@ impl HttpRemote {
     /// Registers a new usecase that can be used by the workloads.
     pub fn register_usecase(&mut self, usecase: &Usecase) {
         let client = ClientBuilder::new(&self.remote).build().unwrap();
-        self.clients
-            .insert(usecase.name().as_ref().to_owned(), client);
+        self.clients.insert(usecase.name().to_owned(), client);
     }
 
     fn session(&self, usecase: &Usecase, organization_id: u64) -> Session {
         // NB: Reuse the organization ID as project ID to create unique projects. Right now, we do
         // not benefit from simulating multiple projects per org.
-        self.clients[usecase.name().as_ref()]
+        self.clients[usecase.name()]
             .session(usecase.for_project(organization_id, organization_id))
             .unwrap()
     }

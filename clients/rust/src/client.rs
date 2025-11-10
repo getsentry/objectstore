@@ -42,13 +42,10 @@ impl ClientBuilder {
     /// Creates a new [`ClientBuilder`], configured with the given `service_url`.
     /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
     /// and Scope in order to create a [`Session`].
-    pub fn new(service_url: &str) -> Self {
-        let service_url = {
-            let res = service_url.parse();
-            if let Err(err) = res {
-                return Self(Err(anyhow::Error::from(err)));
-            }
-            res.unwrap()
+    pub fn new(service_url: impl reqwest::IntoUrl) -> Self {
+        let service_url = match service_url.into_url() {
+            Ok(url) => url,
+            Err(err) => return Self(Err(anyhow::Error::from(err))),
         };
 
         let reqwest_builder = reqwest::Client::builder()
@@ -70,15 +67,29 @@ impl ClientBuilder {
 
     /// This changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
-    pub fn with_distributed_tracing(mut self, propagate_traces: bool) -> Self {
+    pub fn propagate_traces(mut self, propagate_traces: bool) -> Self {
         if let Ok(ref mut inner) = self.0 {
             inner.propagate_traces = propagate_traces;
         }
         self
     }
 
+    /// Sets both the connect and the read timeout for the reqwest Client.
+    /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    pub fn timeout(self, timeout: Duration) -> Self {
+        let Ok(inner) = self.0 else { return self };
+        Self(Ok(ClientBuilderInner {
+            service_url: inner.service_url,
+            propagate_traces: inner.propagate_traces,
+            reqwest_builder: inner
+                .reqwest_builder
+                .connect_timeout(timeout)
+                .read_timeout(timeout),
+        }))
+    }
+
     /// TODO: document
-    pub fn with_reqwest_builder<F>(self, callback: F) -> Self
+    pub fn configure_reqwest<F>(self, closure: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
     {
@@ -86,7 +97,7 @@ impl ClientBuilder {
         Self(Ok(ClientBuilderInner {
             service_url: inner.service_url,
             propagate_traces: inner.propagate_traces,
-            reqwest_builder: callback(inner.reqwest_builder),
+            reqwest_builder: closure(inner.reqwest_builder),
         }))
     }
 
@@ -97,7 +108,7 @@ impl ClientBuilder {
             .and_then(|inner| {
                 Ok(Client {
                     reqwest: inner.reqwest_builder.build()?,
-                    service_url: Arc::new(inner.service_url),
+                    service_url: inner.service_url,
                     propagate_traces: inner.propagate_traces,
                 })
             })
@@ -108,23 +119,30 @@ impl ClientBuilder {
 #[derive(Debug, Clone)]
 pub struct Usecase {
     name: Arc<str>,
-    pub(crate) compression: Compression,
-    pub(crate) expiration: ExpirationPolicy,
+    compression: Compression,
+    expiration: ExpirationPolicy,
 }
 
 impl Usecase {
     /// TODO: document
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
         Self {
-            name: Arc::from(name),
+            name: name.into(),
             compression: Compression::Zstd,
             expiration: Default::default(),
         }
     }
 
     /// TODO: document
-    pub fn name(&self) -> Arc<str> {
-        self.name.clone()
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn compression(&self) -> Compression {
+        self.compression
     }
 
     /// TODO: document
@@ -133,6 +151,12 @@ impl Usecase {
             compression,
             ..self
         }
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn expiration(&self) -> ExpirationPolicy {
+        self.expiration
     }
 
     /// TODO: document
@@ -219,13 +243,18 @@ impl Scope {
         }
         self
     }
+
+    /// TODO: document
+    pub fn session(self, client: &Client) -> anyhow::Result<Session> {
+        client.session(self)
+    }
 }
 
 /// A client for Objectstore.
 #[derive(Debug)]
 pub struct Client {
     reqwest: reqwest::Client,
-    service_url: Arc<Url>,
+    service_url: Url,
     propagate_traces: bool,
 }
 
@@ -233,7 +262,7 @@ impl Client {
     /// TODO: document
     pub fn session(&self, scope: Scope) -> anyhow::Result<Session> {
         scope.0.map(|inner| Session {
-            service_url: Arc::clone(&self.service_url),
+            service_url: Arc::new(self.service_url.clone()), // TODO: revisit
             usecase: inner.usecase.clone(),
             scope: inner.scope,
             propagate_traces: self.propagate_traces,
@@ -245,8 +274,14 @@ impl Client {
 /// TODO: document
 #[derive(Debug)]
 pub struct Session {
+    // TODO: add getters instead of pub(crate)
+    // these will probably be gone though
     pub(crate) service_url: Arc<Url>,
     pub(crate) usecase: Usecase,
+
+    // TODO: change to something like this
+    //client: Arc<Client>,
+    //inner: Arc<SessionInner>,
     scope: String,
     propagate_traces: bool,
     reqwest: reqwest::Client,
@@ -275,17 +310,5 @@ impl Session {
         }
 
         Ok(builder)
-    }
-
-    /// Deletes the object with the given `id`.
-    pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let delete_url = format!("{}v1/{id}", self.service_url);
-
-        let _response = self
-            .request(reqwest::Method::DELETE, delete_url)?
-            .send()
-            .await?;
-
-        Ok(())
     }
 }
