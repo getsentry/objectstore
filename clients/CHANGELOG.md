@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.8
+
+### Various fixes & improvements
+
+- feat(py-client): Introduce new API (#184) by @lcian
+- feat: Implement "redirect tombstones" (#186) by @Swatinem
+- ref(server): Use `OS__` as env prefix for config overrides (#192) by @jan-auer
+
 ## 0.0.7
 
 ### Various fixes & improvements
