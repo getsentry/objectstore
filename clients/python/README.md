@@ -37,7 +37,6 @@ client = Client(
 my_usecase = Usecase(
     "my-usecase",
     # Optionally, define defaults for all operations within this Usecase
-    compression="zstd",
     expiration_policy=TimeToLive(datetime.timedelta(days=1)),
 )
 

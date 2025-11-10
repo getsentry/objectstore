@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import urllib3
+import zstandard
 from objectstore_client import Client, Usecase
 from objectstore_client.client import RequestError
 from objectstore_client.metadata import TimeToLive
@@ -97,7 +98,6 @@ def test_full_cycle(server_url: str) -> None:
     client = Client(server_url)
     test_usecase = Usecase(
         "test-usecase",
-        compression="zstd",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
@@ -115,6 +115,34 @@ def test_full_cycle(server_url: str) -> None:
 
     with pytest.raises(RequestError, check=lambda e: e.status == 404):
         session.get(object_key)
+
+
+def test_full_cycle_uncompressed(server_url: str) -> None:
+    client = Client(server_url)
+    test_usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, my_scope=42, my_nested_scope="something!")
+
+    data = b"test data"
+    compressor = zstandard.ZstdCompressor()
+    compressed_data = compressor.compress(data)
+
+    object_key = session.put(compressed_data, compression="none")
+    assert object_key is not None
+
+    retrieved = session.get(object_key)
+    retrieved_data = retrieved.payload.read()
+
+    assert retrieved_data == compressed_data
+
+    decompressor = zstandard.ZstdDecompressor()
+    decompressed_data = decompressor.decompress(retrieved_data)
+
+    assert decompressed_data == data
 
 
 def test_connect_timeout() -> None:
