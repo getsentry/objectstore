@@ -149,6 +149,11 @@ class Client:
 
         parts = []
         for key, value in scopes.items():
+            if not key:
+                raise ValueError("Scope key cannot be empty")
+            if not value:
+                raise ValueError("Scope value cannot be empty")
+
             if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in key):
                 raise ValueError(
                     f"Invalid scope key {key}. The valid character set is: "
