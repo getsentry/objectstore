@@ -5,7 +5,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
-use reqwest::header::HeaderName;
 use url::Url;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
