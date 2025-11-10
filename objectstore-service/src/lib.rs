@@ -118,6 +118,13 @@ impl StorageService {
             }
         }
 
+        // There might currently be a tombstone at the given path from a previously stored object.
+        let previously_stored_object = self.0.high_volume_backend.get_object(&path).await?;
+        if is_tombstoned(&previously_stored_object) {
+            // Write the object to the other backend and keep the tombstone in place
+            backend = BackendChoice::LongTerm;
+        }
+
         let (backend_choice, backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
                 let stored_size = first_chunk.len() as u64;
@@ -147,10 +154,32 @@ impl StorageService {
                     })
                     .boxed();
 
+                // first write the object
                 self.0
                     .long_term_backend
                     .put_object(&path, metadata, stream)
                     .await?;
+
+                let redirect_metadata = Metadata {
+                    is_redirect_tombstone: Some(true),
+                    expiration_policy: metadata.expiration_policy,
+                    ..Default::default()
+                };
+                let redirect_stream = futures_util::stream::empty().boxed();
+                let redirect_request = self.0.high_volume_backend.put_object(
+                    &path,
+                    &redirect_metadata,
+                    redirect_stream,
+                );
+
+                // then we write the tombstone
+                let redirect_result = redirect_request.await;
+                if redirect_result.is_err() {
+                    // and clean up on any kind of error
+                    self.0.long_term_backend.delete_object(&path).await?;
+                }
+                redirect_result?;
+
                 (
                     "long-term",
                     self.0.long_term_backend.name(),
@@ -182,19 +211,15 @@ impl StorageService {
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let start = Instant::now();
 
-        let (result, backend_choice, backend_type) =
-            match self.0.high_volume_backend.get_object(path).await? {
-                Some(response) => (
-                    Some(response),
-                    "high-volume",
-                    self.0.high_volume_backend.name(),
-                ),
-                None => (
-                    self.0.long_term_backend.get_object(path).await?,
-                    "long-term",
-                    self.0.long_term_backend.name(),
-                ),
-            };
+        let mut backend_choice = "high-volume";
+        let mut backend_type = self.0.high_volume_backend.name();
+        let mut result = self.0.high_volume_backend.get_object(path).await?;
+
+        if is_tombstoned(&result) {
+            result = self.0.long_term_backend.get_object(path).await?;
+            backend_choice = "long-term";
+            backend_type = self.0.long_term_backend.name();
+        }
 
         merni::distribution!(
             "get.latency.pre-response"@s: start.elapsed(),
@@ -223,16 +248,33 @@ impl StorageService {
     pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
         let start = Instant::now();
 
-        let res1 = self.0.high_volume_backend.delete_object(path).await;
-        let res2 = self.0.long_term_backend.delete_object(path).await;
+        if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(path).await? {
+            if metadata.is_redirect_tombstone == Some(true) {
+                self.0.long_term_backend.delete_object(path).await?;
+            }
+            self.0.high_volume_backend.delete_object(path).await?;
+        }
 
         merni::distribution!(
             "delete.latency"@s: start.elapsed(),
             "usecase" => path.usecase
         );
 
-        res1.or(res2)
+        Ok(())
     }
+}
+
+fn is_tombstoned(result: &Option<(Metadata, BackendStream)>) -> bool {
+    matches!(
+        result,
+        Some((
+            Metadata {
+                is_redirect_tombstone: Some(true),
+                ..
+            },
+            _
+        ))
+    )
 }
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
@@ -308,26 +350,6 @@ mod tests {
         let config = StorageConfig::Gcs {
             endpoint: Some("http://localhost:8087"),
             bucket: "test-bucket", // aligned with the env var in devservices and CI
-        };
-        let service = StorageService::new(config.clone(), config).await.unwrap();
-
-        let key = service
-            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
-            .await
-            .unwrap();
-
-        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
-        let file_contents: BytesMut = stream.try_collect().await.unwrap();
-
-        assert_eq!(file_contents.as_ref(), b"oh hai!");
-    }
-
-    #[ignore = "seadweedfs is not yet set up in CI"]
-    #[tokio::test]
-    async fn works_with_seaweed() {
-        let config = StorageConfig::S3Compatible {
-            endpoint: "http://localhost:8333",
-            bucket: "whatever",
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();
 

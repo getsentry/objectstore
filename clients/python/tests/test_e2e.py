@@ -62,9 +62,9 @@ class Server:
             **os.environ,
             "OS__HTTP_ADDR": addr,
             "OS__HIGH_VOLUME_STORAGE__TYPE": "filesystem",
-            "OS__HIGH_VOLUME_STORAGE__PATH": self._tempdir,
+            "OS__HIGH_VOLUME_STORAGE__PATH": f"{self._tempdir}/high-volume",
             "OS__LONG_TERM_STORAGE__TYPE": "filesystem",
-            "OS__LONG_TERM_STORAGE__PATH": self._tempdir,
+            "OS__LONG_TERM_STORAGE__PATH": f"{self._tempdir}/long-term",
         }
 
         self._process = subprocess.Popen([str(server_bin), "run"], env=env)

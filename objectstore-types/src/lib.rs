@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
+/// The custom HTTP header that contains the serialized redirect tombstone.
+pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -177,6 +179,15 @@ impl FromStr for Compression {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Metadata {
+    /// The object/metadata denotes a "redirect key".
+    ///
+    /// This means that this particular object is just a tombstone, and the real thing
+    /// is rather found on the other backend.
+    /// In practice this means that the tombstone is stored on the "HighVolume" backend,
+    /// to avoid unnecessarily slow "not found" requests on the "LongTerm" backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_redirect_tombstone: Option<bool>,
+
     /// The expiration policy of the object.
     #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
@@ -215,6 +226,10 @@ impl Metadata {
                 if name == HEADER_EXPIRATION {
                     let expiration_policy = value.to_str()?;
                     metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
+                } else if name == HEADER_REDIRECT_TOMBSTONE {
+                    if value.to_str()? == "true" {
+                        metadata.is_redirect_tombstone = Some(true);
+                    }
                 } else if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
                     let value = value.to_str()?;
                     metadata.custom.insert(name.into(), value.into());
@@ -232,6 +247,7 @@ impl Metadata {
     /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
     pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> Result<HeaderMap, Error> {
         let Self {
+            is_redirect_tombstone,
             content_type,
             compression,
             expiration_policy,
@@ -241,6 +257,11 @@ impl Metadata {
 
         let mut headers = HeaderMap::new();
         headers.append(header::CONTENT_TYPE, content_type.parse()?);
+
+        if matches!(is_redirect_tombstone, Some(true)) {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
+            headers.append(name, "true".parse()?);
+        }
 
         if let Some(compression) = compression {
             headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
@@ -268,6 +289,7 @@ impl Metadata {
 impl Default for Metadata {
     fn default() -> Self {
         Self {
+            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::Manual,
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,

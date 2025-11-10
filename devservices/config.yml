@@ -23,9 +23,9 @@ services:
     image: ghcr.io/getsentry/objectstore:nightly
     environment:
       OS__HIGH_VOLUME_STORAGE__TYPE: "filesystem"
-      OS__HIGH_VOLUME_STORAGE__PATH: "/data"
+      OS__HIGH_VOLUME_STORAGE__PATH: "/data/high-volume"
       OS__LONG_TERM_STORAGE__TYPE: "filesystem"
-      OS__LONG_TERM_STORAGE__PATH: "/data"
+      OS__LONG_TERM_STORAGE__PATH: "/data/long-term"
       OS__LOGGING__LEVEL: "debug"
     command: run
     healthcheck:
