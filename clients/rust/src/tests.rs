@@ -15,7 +15,7 @@ use super::*;
 async fn stores_uncompressed() {
     let server = TestServer::new().await;
 
-    let client = ClientBuilder::new(&server.url("/")).build().unwrap();
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -40,7 +40,7 @@ async fn stores_uncompressed() {
 async fn uses_zstd_by_default() {
     let server = TestServer::new().await;
 
-    let client = ClientBuilder::new(&server.url("/")).build().unwrap();
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -73,7 +73,7 @@ async fn uses_zstd_by_default() {
 async fn deletes_stores_stuff() {
     let server = TestServer::new().await;
 
-    let client = ClientBuilder::new(&server.url("/")).build().unwrap();
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
