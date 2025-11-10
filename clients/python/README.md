@@ -26,10 +26,11 @@ client = Client(
     metrics_backend=NoOpMetricsBackend(),
     # Optionally, enable distributed traces in Sentry
     propagate_traces=True,
-    # Optionally, provide kwargs for urllib3.HTTPConnectionPool
-    # If you don't specify these, reasonable defaults are automatically applied
-    connection_kwargs={"timeout": urllib3.Timeout(connect=0.5, read=0.5)},
-    # ...
+    # Optionally, set timeout and retries
+    timeout_ms=500, # 500ms timeout for requests
+    retries=3,      # Number of connection retries
+    # For further customization, provide additional kwargs for urllib3.HTTPConnectionPool
+    connection_kwargs={"maxsize": 10},
 )
 
 # This could also be stored in a global/shared variable, as you will deal with a fixed number of usecases with statically defined defaults
