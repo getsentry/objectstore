@@ -71,12 +71,12 @@ class Usecase:
 # Characters allowed in a Scope's key and value.
 # These are the URL safe characters, except for `.` which we use as separator between
 # key and value of Scope components.
-SCOPE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
+SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
 
 
 @dataclass
 class _ConnectionDefaults:
-    retries: urllib3.Retry = urllib3.Retry(connect=3, redirect=5, read=0)
+    retries: urllib3.Retry = urllib3.Retry(connect=3, read=0)
     """We only retry connection problems, as we cannot rewind our compression stream."""
 
     timeout: urllib3.Timeout = urllib3.Timeout(connect=0.5, read=0.5)
@@ -106,7 +106,6 @@ class Client:
         if retries:
             connection_kwargs_to_use["retries"] = urllib3.Retry(
                 connect=retries,
-                redirect=retries,
                 # we only retry connection problems, as we cannot rewind our
                 # compression stream
                 read=0,
@@ -150,17 +149,17 @@ class Client:
 
         parts = []
         for key, value in scopes.items():
-            if any(c not in SCOPE_ALLOWED_CHARS for c in key):
+            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in key):
                 raise ValueError(
                     f"Invalid scope key {key}. The valid character set is: "
-                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
+                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
                 )
 
             value = str(value)
-            if any(c not in SCOPE_ALLOWED_CHARS for c in value):
+            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in value):
                 raise ValueError(
                     f"Invalid scope value {value}. The valid character set is: "
-                    f"{''.join(SCOPE_ALLOWED_CHARS)}"
+                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
                 )
 
             formatted = f"{key}.{value}"
