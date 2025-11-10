@@ -1933,7 +1933,6 @@ dependencies = [
 name = "objectstore-client"
 version = "0.0.5"
 dependencies = [
- "anyhow",
  "async-compression",
  "bytes",
  "futures-util",
@@ -1943,6 +1942,7 @@ dependencies = [
  "sentry",
  "serde",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
  "uuid",
@@ -2017,10 +2017,10 @@ dependencies = [
 name = "objectstore-types"
 version = "0.0.5"
 dependencies = [
- "anyhow",
  "http 1.3.1",
  "humantime",
  "serde",
+ "thiserror",
 ]
 
 [[package]]
