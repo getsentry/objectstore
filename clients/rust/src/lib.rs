@@ -10,7 +10,7 @@
 //! use objectstore_client::ClientBuilder;
 //!
 //! #[tokio::main]
-//! # async fn main() -> anyhow::Result<()> {
+//! # async fn main() -> objectstore_client::Result<()> {
 //! let client = ClientBuilder::new("http://localhost:8888/", "my-usecase")?
 //!     .for_organization(42);
 //!
@@ -24,12 +24,14 @@
 #![warn(missing_debug_implementations)]
 
 mod client;
+mod error;
 mod get;
 mod put;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
 pub use client::*;
+pub use error::*;
 pub use get::*;
 pub use put::*;
 

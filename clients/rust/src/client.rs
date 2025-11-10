@@ -5,7 +5,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
-use reqwest::header::HeaderName;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
@@ -36,7 +35,7 @@ impl ClientBuilder {
     ///
     /// In order to get or put objects, one has to create a [`Client`] using the
     /// [`for_organization`](Self::for_organization) function.
-    pub fn new(service_url: &str, usecase: &str) -> anyhow::Result<Self> {
+    pub fn new(service_url: &str, usecase: &str) -> crate::Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             // hickory-dns: Controlled by the `reqwest/hickory-dns` feature flag
@@ -142,7 +141,7 @@ impl Client {
         &self,
         method: reqwest::Method,
         uri: U,
-    ) -> anyhow::Result<reqwest::RequestBuilder> {
+    ) -> crate::Result<reqwest::RequestBuilder> {
         let mut builder = self.http.request(method, uri).query(&[
             (PARAM_SCOPE, self.scope.as_ref()),
             (PARAM_USECASE, self.usecase.as_ref()),
@@ -152,7 +151,7 @@ impl Client {
             let trace_headers =
                 sentry::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
             for (header_name, value) in trace_headers.into_iter().flatten() {
-                builder = builder.header(HeaderName::try_from(header_name)?, value);
+                builder = builder.header(header_name, value);
             }
         }
 
@@ -160,7 +159,7 @@ impl Client {
     }
 
     /// Deletes the object with the given `id`.
-    pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
+    pub async fn delete(&self, id: &str) -> crate::Result<()> {
         let delete_url = format!("{}/v1/{id}", self.service_url);
 
         let _response = self

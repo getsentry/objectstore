@@ -26,6 +26,7 @@ impl Client {
         PutBuilder {
             client: self,
             metadata,
+            key: None,
             body,
         }
     }
@@ -55,6 +56,7 @@ impl Client {
 pub struct PutBuilder<'a> {
     pub(crate) client: &'a Client,
     pub(crate) metadata: Metadata,
+    pub(crate) key: Option<String>,
     pub(crate) body: PutBody,
 }
 
@@ -69,6 +71,15 @@ impl fmt::Debug for PutBody {
 }
 
 impl PutBuilder<'_> {
+    /// Sets an explicit object key.
+    ///
+    /// If a key is specified, the object will be stored under that key. Otherwise, the objectstore
+    /// server will automatically assign a random key, which is then returned from this request.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
     /// [`None`] should be used if no compression should be performed by the client,
@@ -112,8 +123,12 @@ pub struct PutResponse {
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
-    pub async fn send(self) -> anyhow::Result<PutResponse> {
-        let put_url = format!("{}/v1/", self.client.service_url);
+    pub async fn send(self) -> crate::Result<PutResponse> {
+        let put_url = format!(
+            "{}/v1/{}",
+            self.client.service_url,
+            self.key.as_deref().unwrap_or_default()
+        );
         let mut builder = self.client.request(reqwest::Method::PUT, put_url)?;
 
         let body = match (self.metadata.compression, self.body) {

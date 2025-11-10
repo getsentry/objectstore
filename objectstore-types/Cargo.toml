@@ -10,7 +10,7 @@ edition = "2024"
 publish = true
 
 [dependencies]
-anyhow = { workspace = true }
-humantime = { workspace = true }
 http = { workspace = true }
+humantime = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }

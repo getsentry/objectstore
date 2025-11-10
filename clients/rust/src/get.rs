@@ -23,13 +23,13 @@ pub struct GetResult {
 
 impl GetResult {
     /// Loads the object payload fully into memory.
-    pub async fn payload(self) -> anyhow::Result<bytes::Bytes> {
+    pub async fn payload(self) -> crate::Result<bytes::Bytes> {
         let bytes: BytesMut = self.stream.try_collect().await?;
         Ok(bytes.freeze())
     }
 
     /// Loads the object payload fully into memory and interprets it as UTF-8 text.
-    pub async fn text(self) -> anyhow::Result<String> {
+    pub async fn text(self) -> crate::Result<String> {
         let bytes = self.payload().await?;
         Ok(String::from_utf8(bytes.to_vec())?)
     }
@@ -73,7 +73,7 @@ impl GetBuilder<'_> {
     }
 
     /// Sends the `GET` request.
-    pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
+    pub async fn send(self) -> crate::Result<Option<GetResult>> {
         let get_url = format!("{}/v1/{}", self.client.service_url, self.id);
 
         let response = self

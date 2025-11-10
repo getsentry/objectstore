@@ -29,6 +29,36 @@ pub const PARAM_USECASE: &str = "usecase";
 /// The default content type for objects without a known content type.
 pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
+/// Errors that can happen dealing with metadata
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Any problems dealing with http headers, essentially converting to/from [`str`].
+    #[error("error dealing with http headers")]
+    Header(#[from] Option<http::Error>),
+    /// The value for the expiration policy is invalid.
+    #[error("invalid expiration policy value")]
+    InvalidExpiration(#[from] Option<humantime::DurationError>),
+    /// The compression algorithm is invalid.
+    #[error("invalid compression value")]
+    InvalidCompression,
+}
+impl From<http::header::InvalidHeaderValue> for Error {
+    fn from(err: http::header::InvalidHeaderValue) -> Self {
+        Self::Header(Some(err.into()))
+    }
+}
+impl From<http::header::InvalidHeaderName> for Error {
+    fn from(err: http::header::InvalidHeaderName) -> Self {
+        Self::Header(Some(err.into()))
+    }
+}
+impl From<http::header::ToStrError> for Error {
+    fn from(_err: http::header::ToStrError) -> Self {
+        // the error happens when converting a header value back to a `str`
+        Self::Header(None)
+    }
+}
+
 /// The per-object expiration policy
 ///
 /// We support automatic time-to-live and time-to-idle policies.
@@ -83,7 +113,7 @@ impl fmt::Display for ExpirationPolicy {
     }
 }
 impl FromStr for ExpirationPolicy {
-    type Err = anyhow::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "manual" {
@@ -95,7 +125,7 @@ impl FromStr for ExpirationPolicy {
         if let Some(duration) = s.strip_prefix("tti:") {
             return Ok(ExpirationPolicy::TimeToIdle(parse_duration(duration)?));
         }
-        anyhow::bail!("invalid expiration policy")
+        Err(Error::InvalidExpiration(None))
     }
 }
 
@@ -128,15 +158,15 @@ impl fmt::Display for Compression {
 }
 
 impl FromStr for Compression {
-    type Err = anyhow::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "zstd" => Compression::Zstd,
+        match s {
+            "zstd" => Ok(Compression::Zstd),
             // "gzip" => Compression::Gzip,
             // "lz4" => Compression::Lz4,
-            _ => anyhow::bail!("unknown compression algorithm"),
-        })
+            _ => Err(Error::InvalidCompression),
+        }
     }
 }
 
@@ -171,7 +201,7 @@ impl Metadata {
     /// Extracts metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
-    pub fn from_headers(headers: &HeaderMap, prefix: &str) -> anyhow::Result<Self> {
+    pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
@@ -200,7 +230,7 @@ impl Metadata {
     /// It will prefix any non-standard headers with the given `prefix`.
     /// If the `with_expiration` parameter is set, it will additionally resolve the expiration policy
     /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
-    pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> anyhow::Result<HeaderMap> {
+    pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> Result<HeaderMap, Error> {
         let Self {
             content_type,
             compression,
