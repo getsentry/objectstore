@@ -71,7 +71,7 @@ class Usecase:
 # Characters allowed in a Scope's key and value.
 # These are the URL safe characters, except for `.` which we use as separator between
 # key and value of Scope components.
-SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+*'")
+SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+'")
 
 
 @dataclass
