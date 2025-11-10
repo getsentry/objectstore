@@ -101,7 +101,7 @@ def test_full_cycle(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, organization=42, project=1337)
+    session = client.session(test_usecase, org=42, project=1337)
 
     data = b"test data"
 
@@ -135,7 +135,7 @@ def test_connect_timeout() -> None:
     )
 
     session = client.session(
-        test_usecase, organization=12345, project=1337, app_slug="email_app"
+        test_usecase, org=12345, project=1337, app_slug="email_app"
     )
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):

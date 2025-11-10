@@ -143,7 +143,7 @@ class Client:
         For most usecases, it's recommended to use the organization and project ID as
         the first components of the scope, as follows:
         ```
-        client.session(usecase, organization=organization_id, project=project_id, ...)
+        client.session(usecase, org=organization_id, project=project_id, ...)
         ```
         """
 

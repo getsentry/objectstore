@@ -45,9 +45,9 @@ my_usecase = Usecase(
 # The Scope is given as a sequence of key-value pairs through kwargs.
 # Note that order matters!
 # The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
-# You're encouraged to use the organization and project ID as the first components of the scope.
+# You're encouraged to use the organization and project ID as the first components of the scope, as follows:
 session = client.session(
-    my_usecase, organization=42, project=1337, app_slug="email_app"
+    my_usecase, org=42, project=1337, app_slug="email_app"
 )
 
 # The following operations will raise an exception on failure
