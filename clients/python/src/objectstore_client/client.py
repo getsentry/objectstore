@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import string
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from io import BytesIO
-from typing import IO, Literal, NamedTuple, NotRequired, Self, TypedDict, cast
+from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlencode
 
 import sentry_sdk
@@ -26,94 +29,177 @@ from objectstore_client.metrics import (
 Permission = Literal["read", "write"]
 
 
-class Scope(TypedDict):
-    organization: int
-    project: NotRequired[int]
-
-
 class GetResult(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
 
 
-class ClientBuilder:
+class RequestError(Exception):
+    """Exception raised if an API call to Objectstore fails."""
+
+    def __init__(self, message: str, status: int, response: str):
+        super().__init__(message)
+        self.status = status
+        self.response = response
+
+
+class Usecase:
+    """
+    An identifier for a workload in Objectstore, along with defaults to use for all
+    operations within that Usecase.
+
+    Usecases need to be statically defined in Objectstore's configuration server-side.
+    Objectstore can make decisions based on the Usecase. For example, choosing the most
+    suitable storage backend.
+    """
+
+    name: str
+    _compression: Compression
+    _expiration_policy: ExpirationPolicy | None
+
     def __init__(
         self,
-        objectstore_base_url: str,
-        usecase: str,
-        metrics_backend: MetricsBackend | None = None,
-        propagate_traces: bool = False,
-        default_expiration_policy: ExpirationPolicy | None = None,
-        retries: urllib3.Retry | None = None,
-        timeout: urllib3.Timeout | None = None,
+        name: str,
+        compression: Compression = "zstd",
+        expiration_policy: ExpirationPolicy | None = None,
     ):
-        self._base_url = objectstore_base_url
-        self._usecase = usecase
+        self.name = name
+        self._compression = compression
+        self._expiration_policy = expiration_policy
 
-        # We only retry connection problems, as we cannot rewind our compression stream.
-        self._retries = retries or urllib3.Retry(connect=3, redirect=5, read=0)
-        # The read timeout is defined to be "between consecutive read operations",
-        # which should mean one chunk of the response, with a large response being
-        # split into multiple chunks.
-        # We define both as 500ms which is still very conservative,
-        # given that we are in the same network,
-        # and expect our backends to respond in <100ms.
-        self._timeout = timeout or urllib3.Timeout(connect=0.5, read=0.5)
 
-        self._default_compression: Compression = "zstd"
-        self._default_expiration_policy = (
-            format_expiration(default_expiration_policy)
-            if default_expiration_policy
-            else None
-        )
-        self._propagate_traces = propagate_traces
-        self._metrics_backend = metrics_backend or NoOpMetricsBackend()
+# Characters allowed in a Scope's key and value.
+# These are the URL safe characters, except for `.` which we use as separator between
+# key and value of Scope components.
+SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+'")
 
-    def _make_client(self, scope: str) -> Client:
-        pool = urllib3.connectionpool.connection_from_url(
-            self._base_url, retries=self._retries, timeout=self._timeout
-        )
-        return Client(
-            pool,
-            self._default_compression,
-            self._default_expiration_policy,
-            self._usecase,
-            scope,
-            self._propagate_traces,
-            self._metrics_backend,
-        )
 
-    def default_compression(self, default_compression: Compression) -> Self:
-        self._default_compression = default_compression
-        return self
+@dataclass
+class _ConnectionDefaults:
+    retries: urllib3.Retry = urllib3.Retry(connect=3, read=0)
+    """We only retry connection problems, as we cannot rewind our compression stream."""
 
-    def for_organization(self, organization_id: int) -> Client:
-        return self._make_client(f"org.{organization_id}")
-
-    def for_project(self, organization_id: int, project_id: int) -> Client:
-        return self._make_client(f"org.{organization_id}/proj.{project_id}")
+    timeout: urllib3.Timeout = urllib3.Timeout(connect=0.5, read=0.5)
+    """
+    The read timeout is defined to be "between consecutive read operations",
+    which should mean one chunk of the response, with a large response being
+    split into multiple chunks.
+    We define both as 500ms which is still very conservative,
+    given that we are in the same network, and expect our backends to respond in <100ms.
+    """
 
 
 class Client:
-    _default_compression: Compression
+    """A client for Objectstore. Constructing it initializes a connection pool."""
+
+    def __init__(
+        self,
+        base_url: str,
+        metrics_backend: MetricsBackend | None = None,
+        propagate_traces: bool = False,
+        retries: int | None = None,
+        timeout_ms: float | None = None,
+        connection_kwargs: Mapping[str, Any] | None = None,
+    ):
+        connection_kwargs_to_use = asdict(_ConnectionDefaults())
+
+        if retries:
+            connection_kwargs_to_use["retries"] = urllib3.Retry(
+                connect=retries,
+                # we only retry connection problems, as we cannot rewind our
+                # compression stream
+                read=0,
+            )
+
+        if timeout_ms:
+            connection_kwargs_to_use["timeout"] = urllib3.Timeout(
+                connect=timeout_ms * 100, read=timeout_ms * 100
+            )
+
+        if connection_kwargs:
+            connection_kwargs_to_use = {**connection_kwargs_to_use, **connection_kwargs}
+
+        self._pool = urllib3.connectionpool.connection_from_url(
+            base_url, **connection_kwargs_to_use
+        )
+        self._metrics_backend = metrics_backend or NoOpMetricsBackend()
+        self._propagate_traces = propagate_traces
+
+    def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
+        """
+        Create a [Session] with the Objectstore server, tied to a specific [Usecase] and
+        Scope.
+
+        A Scope is a (possibly nested) namespace within a Usecase, given as a sequence
+        of key-value pairs passed as kwargs.
+        IMPORTANT: the order of the kwargs matters!
+
+        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
+
+        Users are free to choose the scope structure that best suits their Usecase.
+        The combination of Usecase and Scope will determine the physical key/path of the
+        blob in the underlying storage backend.
+
+        For most usecases, it's recommended to use the organization and project ID as
+        the first components of the scope, as follows:
+        ```
+        client.session(usecase, org=organization_id, project=project_id, ...)
+        ```
+        """
+
+        parts = []
+        for key, value in scopes.items():
+            if not key:
+                raise ValueError("Scope key cannot be empty")
+            if not value:
+                raise ValueError("Scope value cannot be empty")
+
+            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in key):
+                raise ValueError(
+                    f"Invalid scope key {key}. The valid character set is: "
+                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
+                )
+
+            value = str(value)
+            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in value):
+                raise ValueError(
+                    f"Invalid scope value {value}. The valid character set is: "
+                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
+                )
+
+            formatted = f"{key}.{value}"
+            parts.append(formatted)
+        scope_str = "/".join(parts)
+
+        return Session(
+            self._pool,
+            self._metrics_backend,
+            self._propagate_traces,
+            usecase,
+            scope_str,
+        )
+
+
+class Session:
+    """
+    A session with the Objectstore server, scoped to a specific [Usecase] and Scope.
+
+    This should never be constructed directly, use [Client.session].
+    """
 
     def __init__(
         self,
         pool: HTTPConnectionPool,
-        default_compression: Compression,
-        default_expiration_policy: str | None,
-        usecase: str,
-        scope: str,
-        propagate_traces: bool,
         metrics_backend: MetricsBackend,
+        propagate_traces: bool,
+        usecase: Usecase,
+        scope: str,
     ):
         self._pool = pool
-        self._default_compression = default_compression
-        self._default_expiration_policy = default_expiration_policy
+        self._metrics_backend = metrics_backend
+        self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
-        self._propagate_traces = propagate_traces
-        self._metrics_backend = metrics_backend
 
     def _make_headers(self) -> dict[str, str]:
         if self._propagate_traces:
@@ -122,7 +208,7 @@ class Client:
 
     def _make_url(self, id: str | None, full: bool = False) -> str:
         base_path = f"/v1/{id}" if id else "/v1/"
-        qs = urlencode({"usecase": self._usecase, "scope": self._scope})
+        qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
         else:
@@ -153,7 +239,7 @@ class Client:
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
 
-        compression = compression or self._default_compression
+        compression = compression or self._usecase._compression
         if compression == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
@@ -162,17 +248,16 @@ class Client:
         if content_type:
             headers["Content-Type"] = content_type
 
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-        elif self._default_expiration_policy:
-            headers[HEADER_EXPIRATION] = self._default_expiration_policy
 
         if metadata:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
         with measure_storage_operation(
-            self._metrics_backend, "put", self._usecase
+            self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
             response = self._pool.request(
                 "PUT",
@@ -202,7 +287,9 @@ class Client:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(self._metrics_backend, "get", self._usecase):
+        with measure_storage_operation(
+            self._metrics_backend, "get", self._usecase.name
+        ):
             response = self._pool.request(
                 "GET",
                 self._make_url(id),
@@ -243,7 +330,9 @@ class Client:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(self._metrics_backend, "delete", self._usecase):
+        with measure_storage_operation(
+            self._metrics_backend, "delete", self._usecase.name
+        ):
             response = self._pool.request(
                 "DELETE",
                 self._make_url(id),
@@ -252,17 +341,10 @@ class Client:
             raise_for_status(response)
 
 
-class ClientError(Exception):
-    def __init__(self, message: str, status: int, response: str):
-        super().__init__(message)
-        self.status = status
-        self.response = response
-
-
 def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
     if response.status >= 400:
         res = str(response.data or response.read())
-        raise ClientError(
+        raise RequestError(
             f"Objectstore request failed with status {response.status}",
             response.status,
             res,
