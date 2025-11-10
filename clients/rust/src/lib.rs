@@ -10,7 +10,7 @@
 //! use objectstore_client::ClientBuilder;
 //!
 //! #[tokio::main]
-//! # async fn main() -> reqwest::Result<()> {
+//! # async fn main() -> objectstore_client::Result<()> {
 //! let client = ClientBuilder::new("http://localhost:8888/", "my-usecase")?
 //!     .for_organization(42);
 //!
