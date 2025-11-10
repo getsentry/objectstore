@@ -45,7 +45,7 @@ impl ClientBuilder {
     pub fn new(service_url: impl reqwest::IntoUrl) -> Self {
         let service_url = match service_url.into_url() {
             Ok(url) => url,
-            Err(err) => return Self(Err(todo!())),
+            Err(err) => return Self(Err(err.into())),
         };
 
         let reqwest_builder = reqwest::Client::builder()
