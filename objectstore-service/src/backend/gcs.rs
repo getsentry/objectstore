@@ -125,6 +125,9 @@ impl GcsObject {
         }
 
         Ok(Metadata {
+            // while "in theory" GCS could be the "high-volume" backend that stores tombstones,
+            // in practice it is not.
+            is_redirect_tombstone: None,
             content_type,
             expiration_policy,
             compression,
@@ -458,6 +461,7 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,

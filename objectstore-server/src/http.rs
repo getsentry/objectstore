@@ -2,7 +2,7 @@ use std::any::Any;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, MatchedPath, Request};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{RequestExt, ServiceExt};
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::{TcpListener, TcpSocket};
+use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -21,7 +22,7 @@ use tracing::Level;
 
 use crate::config::Config;
 use crate::endpoints;
-use crate::state::ServiceState;
+use crate::state::{ServiceState, State};
 
 /// The maximum backlog for TCP listen sockets before refusing connections.
 const TCP_LISTEN_BACKLOG: u32 = 1024;
@@ -34,16 +35,37 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
 /// Runs the objectstore HTTP server.
 ///
-/// This function creates a future that runs the server. The future must be spawned or awaited for
-/// the server to continue running.
-pub async fn server(state: ServiceState) -> Result<()> {
+/// This function initializes the server, binds to the configured address, and runs until
+/// termination is requested.
+pub async fn server(config: Config) -> Result<()> {
+    tracing::info!("Starting server");
     merni::counter!("server.start": 1);
-    let listener = listen(&state.config)?;
 
-    App::new(state)
-        .graceful_shutdown(true)
-        .serve(listener)
-        .await
+    let listener = listen(&config).context("failed to start TCP listener")?;
+    let state = State::new(config).await?;
+
+    let server_handle = tokio::spawn(async move {
+        App::new(state)
+            .graceful_shutdown(true)
+            .serve(listener)
+            .await
+    });
+
+    tokio::spawn(async move {
+        elegant_departure::get_shutdown_guard().wait().await;
+        tracing::info!("Shutting down ...");
+    });
+
+    elegant_departure::tokio::depart()
+        .on_termination()
+        .on_sigint()
+        .on_signal(SignalKind::hangup())
+        .on_signal(SignalKind::quit())
+        .await;
+
+    let server_result = server_handle.await.map_err(From::from).flatten();
+    tracing::info!("Shutdown complete");
+    server_result
 }
 
 /// The objectstore web server application.

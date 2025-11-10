@@ -5,13 +5,12 @@ description = "Client SDK for Objectstore, the Sentry object storage platform"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../../LICENSE.md"
-version = "0.0.5"
+version = "0.0.7"
 edition = "2024"
 rust-version = "1.89"
 publish = true
 
 [dependencies]
-anyhow = { workspace = true }
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -20,6 +19,7 @@ objectstore-types = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
 sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"

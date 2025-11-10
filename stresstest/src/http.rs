@@ -41,6 +41,7 @@ impl HttpRemote {
             .send()
             .await
             .map(|r| r.key)
+            .context("error writing payload")
     }
 
     pub(crate) async fn read(

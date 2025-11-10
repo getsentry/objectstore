@@ -10,7 +10,7 @@
 //! use objectstore_client::{ClientBuilder, Usecase};
 //!
 //! #[tokio::main]
-//! # async fn main() -> anyhow::Result<()> {
+//! # async fn main() -> objectstore_client::Result<()> {
 //! let client = ClientBuilder::new("http://localhost:8888/").build().unwrap();
 //! let usecase = Usecase::new("usecase");
 //! let session = client.session(usecase.for_project(12345, 1337)).unwrap();
@@ -26,6 +26,7 @@
 
 mod client;
 mod delete;
+mod error;
 mod get;
 mod put;
 
@@ -33,6 +34,7 @@ pub use objectstore_types::{Compression, ExpirationPolicy};
 
 pub use client::*;
 pub use delete::*;
+pub use error::*;
 pub use get::*;
 pub use put::*;
 

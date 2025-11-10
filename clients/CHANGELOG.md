@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.7
+
+### Various fixes & improvements
+
+- feat: Add missing PUT `key` to the Rust client, replace `anyhow` with… (#191) by @Swatinem
+
+## 0.0.6
+
+### Various fixes & improvements
+
+- ref(cli): Introduce commands and add healthcheck (#185) by @jan-auer
+- docs: Set up combined page for API docs (#178) by @lcian
+
 ## 0.0.5
 
 ### Various fixes & improvements

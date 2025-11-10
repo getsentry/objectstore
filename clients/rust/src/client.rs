@@ -36,7 +36,7 @@ impl ClientBuilderInner {
 
 /// Builder to obtain a [`Client`].
 #[derive(Debug)]
-pub struct ClientBuilder(Result<ClientBuilderInner, anyhow::Error>);
+pub struct ClientBuilder(crate::Result<ClientBuilderInner>);
 
 impl ClientBuilder {
     /// Creates a new [`ClientBuilder`], configured with the given `service_url`.
@@ -45,7 +45,7 @@ impl ClientBuilder {
     pub fn new(service_url: impl reqwest::IntoUrl) -> Self {
         let service_url = match service_url.into_url() {
             Ok(url) => url,
-            Err(err) => return Self(Err(anyhow::Error::from(err))),
+            Err(err) => return Self(Err(todo!())),
         };
 
         let reqwest_builder = reqwest::Client::builder()
@@ -102,7 +102,7 @@ impl ClientBuilder {
     }
 
     /// TODO: document
-    pub fn build(self) -> anyhow::Result<Client> {
+    pub fn build(self) -> crate::Result<Client> {
         self.0
             .map(|inner| inner.apply_defaults())
             .and_then(|inner| {
@@ -194,7 +194,7 @@ impl std::fmt::Display for ScopeInner {
 
 /// TODO: document
 #[derive(Debug)]
-pub struct Scope(Result<ScopeInner, anyhow::Error>);
+pub struct Scope(crate::Result<ScopeInner>);
 
 impl Scope {
     /// TODO: document
@@ -245,7 +245,7 @@ impl Scope {
     }
 
     /// TODO: document
-    pub fn session(self, client: &Client) -> anyhow::Result<Session> {
+    pub fn session(self, client: &Client) -> crate::Result<Session> {
         client.session(self)
     }
 }
@@ -260,7 +260,7 @@ pub struct Client {
 
 impl Client {
     /// TODO: document
-    pub fn session(&self, scope: Scope) -> anyhow::Result<Session> {
+    pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
             service_url: Arc::new(self.service_url.clone()), // TODO: revisit
             usecase: inner.usecase.clone(),
@@ -295,7 +295,7 @@ impl Session {
         &self,
         method: reqwest::Method,
         uri: U,
-    ) -> anyhow::Result<reqwest::RequestBuilder> {
+    ) -> crate::Result<reqwest::RequestBuilder> {
         let mut builder = self.reqwest.request(method, uri).query(&[
             (PARAM_SCOPE, self.scope.as_str()),
             (PARAM_USECASE, self.usecase.name.as_ref()),
@@ -305,7 +305,7 @@ impl Session {
             let trace_headers =
                 sentry_core::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
             for (header_name, value) in trace_headers.into_iter().flatten() {
-                builder = builder.header(HeaderName::try_from(header_name)?, value);
+                builder = builder.header(header_name, value);
             }
         }
 

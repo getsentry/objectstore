@@ -44,6 +44,7 @@ impl Session {
         PutBuilder {
             session: self,
             metadata,
+            key: None,
             body,
         }
     }
@@ -73,10 +74,20 @@ impl Session {
 pub struct PutBuilder<'a> {
     session: &'a Session,
     pub(crate) metadata: Metadata,
+    pub(crate) key: Option<String>,
     pub(crate) body: PutBody,
 }
 
 impl PutBuilder<'_> {
+    /// Sets an explicit object key.
+    ///
+    /// If a key is specified, the object will be stored under that key. Otherwise, the objectstore
+    /// server will automatically assign a random key, which is then returned from this request.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
     /// [`None`] should be used if no compression should be performed by the client,
@@ -113,7 +124,7 @@ impl PutBuilder<'_> {
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
-    pub async fn send(self) -> anyhow::Result<PutResponse> {
+    pub async fn send(self) -> crate::Result<PutResponse> {
         let put_url = format!("{}v1/", self.session.service_url);
         let mut builder = self.session.request(reqwest::Method::PUT, put_url)?;
 

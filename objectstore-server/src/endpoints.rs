@@ -2,6 +2,7 @@
 
 use std::io;
 
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -54,7 +55,8 @@ async fn put_object_nokey(
         key: uuid::Uuid::new_v4().to_string(),
     };
     populate_sentry_scope(&path);
-    let metadata = Metadata::from_headers(&headers, "")?;
+    let metadata =
+        Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;
@@ -77,7 +79,8 @@ async fn put_object(
         key,
     };
     populate_sentry_scope(&path);
-    let metadata = Metadata::from_headers(&headers, "")?;
+    let metadata =
+        Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;
@@ -103,7 +106,9 @@ async fn get_object(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let headers = metadata.to_headers("", false)?;
+    let headers = metadata
+        .to_headers("", false)
+        .context("extracting metadata from headers")?;
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 

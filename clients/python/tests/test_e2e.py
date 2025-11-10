@@ -6,12 +6,15 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Generator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 import urllib3
-from objectstore_client import ClientBuilder
-from objectstore_client.client import ClientError
+import zstandard
+from objectstore_client import Client, Usecase
+from objectstore_client.client import RequestError
+from objectstore_client.metadata import TimeToLive
 
 
 class Server:
@@ -60,14 +63,14 @@ class Server:
 
         env = {
             **os.environ,
-            "FSS_HTTP_ADDR": addr,
-            "FSS_high_volume_storage__TYPE": "filesystem",
-            "FSS_high_volume_storage__PATH": self._tempdir,
-            "FSS_long_term_storage__TYPE": "filesystem",
-            "FSS_long_term_storage__PATH": self._tempdir,
+            "OS__HTTP_ADDR": addr,
+            "OS__HIGH_VOLUME_STORAGE__TYPE": "filesystem",
+            "OS__HIGH_VOLUME_STORAGE__PATH": f"{self._tempdir}/high-volume",
+            "OS__LONG_TERM_STORAGE__TYPE": "filesystem",
+            "OS__LONG_TERM_STORAGE__PATH": f"{self._tempdir}/long-term",
         }
 
-        self._process = subprocess.Popen([str(server_bin)], env=env)
+        self._process = subprocess.Popen([str(server_bin), "run"], env=env)
         self._wait_for_healthcheck()
 
         return self._url
@@ -92,19 +95,54 @@ def server_url() -> Generator[str]:
 
 
 def test_full_cycle(server_url: str) -> None:
-    client = ClientBuilder(server_url, "test-usecase").for_organization(12345)
+    client = Client(server_url)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
     data = b"test data"
 
-    object_key = client.put(data)
+    object_key = session.put(data)
     assert object_key is not None
 
-    retrieved = client.get(object_key)
+    retrieved = session.get(object_key)
     assert retrieved.payload.read() == data
 
-    client.delete(object_key)
+    session.delete(object_key)
 
-    with pytest.raises(ClientError, check=lambda e: e.status == 404):
-        client.get(object_key)
+    with pytest.raises(RequestError, check=lambda e: e.status == 404):
+        session.get(object_key)
+
+
+def test_full_cycle_uncompressed(server_url: str) -> None:
+    client = Client(server_url)
+    test_usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, my_scope=42, my_nested_scope="something!")
+
+    data = b"test data"
+    compressor = zstandard.ZstdCompressor()
+    compressed_data = compressor.compress(data)
+
+    object_key = session.put(compressed_data, compression="none")
+    assert object_key is not None
+
+    retrieved = session.get(object_key)
+    retrieved_data = retrieved.payload.read()
+
+    assert retrieved_data == compressed_data
+
+    decompressor = zstandard.ZstdDecompressor()
+    decompressed_data = decompressor.decompress(retrieved_data)
+
+    assert decompressed_data == data
 
 
 def test_connect_timeout() -> None:
@@ -116,6 +154,17 @@ def test_connect_timeout() -> None:
     url = f"http://127.0.0.1:{addr[1]}"
 
     timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
-    client = ClientBuilder(url, "test-usecase", timeout=timeout).for_organization(12345)
+
+    client = Client(url, connection_kwargs={"timeout": timeout})
+    test_usecase = Usecase(
+        "test-usecase",
+        compression="zstd",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(
+        test_usecase, org=12345, project=1337, app_slug="email_app"
+    )
+
     with pytest.raises(urllib3.exceptions.MaxRetryError):
-        client.put(b"foo")
+        session.put(b"foo")

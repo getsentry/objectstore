@@ -3,11 +3,11 @@ http_addr: 0.0.0.0:18888
 
 long_term_storage:
   type: filesystem
-  path: data
+  path: data/long-term
 
 high_volume_storage:
   type: filesystem
-  path: data
+  path: data/high-volume
 
 logging:
   level: trace
