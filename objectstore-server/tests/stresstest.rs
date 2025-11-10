@@ -29,20 +29,20 @@ async fn test_basic() {
 
     let mut cmd = Command::new(OBJECTSTORE_EXE);
     cmd.arg("run")
-        .env("FSS_HTTP_ADDR", &addr)
-        .env("FSS_high_volume_storage__TYPE", "filesystem")
+        .env("OS__HTTP_ADDR", &addr)
+        .env("OS__HIGH_VOLUME_STORAGE__TYPE", "filesystem")
         .env(
-            "FSS_high_volume_storage__PATH",
+            "OS__HIGH_VOLUME_STORAGE__PATH",
             tempdir.path().display().to_string(),
         )
-        .env("FSS_long_term_storage__TYPE", "filesystem")
+        .env("OS__LONG_TERM_STORAGE__TYPE", "filesystem")
         .env(
-            "FSS_long_term_storage__PATH",
+            "OS__LONG_TERM_STORAGE__PATH",
             tempdir.path().display().to_string(),
         )
-        .env("FSS_LOGGING__LEVEL", "warn");
+        .env("OS__LOGGING__LEVEL", "warn");
     if let Ok(datadog_key) = std::env::var("DD_API_KEY") {
-        cmd.env("FSS_metrics__datadog_key", datadog_key);
+        cmd.env("OS__METRICS__DATADOG_KEY", datadog_key);
     }
     let child = cmd
         .stdout(Stdio::inherit())

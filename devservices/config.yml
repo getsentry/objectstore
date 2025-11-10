@@ -22,11 +22,11 @@ services:
   objectstore:
     image: ghcr.io/getsentry/objectstore:nightly
     environment:
-      FSS_HIGH_VOLUME_STORAGE__TYPE: "filesystem"
-      FSS_HIGH_VOLUME_STORAGE__PATH: "/data"
-      FSS_LONG_TERM_STORAGE__TYPE: "filesystem"
-      FSS_LONG_TERM_STORAGE__PATH: "/data"
-      FSS_LOGGING__LEVEL: "debug"
+      OS__HIGH_VOLUME_STORAGE__TYPE: "filesystem"
+      OS__HIGH_VOLUME_STORAGE__PATH: "/data"
+      OS__LONG_TERM_STORAGE__TYPE: "filesystem"
+      OS__LONG_TERM_STORAGE__PATH: "/data"
+      OS__LOGGING__LEVEL: "debug"
     command: run
     healthcheck:
       test: ["CMD", "/bin/entrypoint", "healthcheck"]

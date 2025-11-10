@@ -3,7 +3,7 @@
 //! This module provides the configuration system for the objectstore HTTP server. Configuration can
 //! be loaded from multiple sources with the following precedence (highest to lowest):
 //!
-//! 1. Environment variables (prefixed with `FSS_`)
+//! 1. Environment variables (prefixed with `OS__`)
 //! 2. YAML configuration file (specified via `-c` or `--config` flag)
 //! 3. Defaults
 //!
@@ -11,12 +11,12 @@
 //!
 //! # Environment Variables
 //!
-//! Environment variables use `FSS_` as a prefix and double underscores (`__`) to denote nested
+//! Environment variables use `OS__` as a prefix and double underscores (`__`) to denote nested
 //! configuration structures. For example:
 //!
-//! - `FSS_HTTP_ADDR=0.0.0.0:8888` sets the HTTP server address
-//! - `FSS_LONG_TERM_STORAGE__TYPE=filesystem` sets the storage type
-//! - `FSS_LONG_TERM_STORAGE__PATH=/data` sets the bucket name
+//! - `OS__HTTP_ADDR=0.0.0.0:8888` sets the HTTP server address
+//! - `OS__LONG_TERM_STORAGE__TYPE=filesystem` sets the storage type
+//! - `OS__LONG_TERM_STORAGE__PATH=/data` sets the bucket name
 //!
 //! # YAML Configuration File
 //!
@@ -44,7 +44,9 @@ use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 
 /// Environment variable prefix for all configuration options.
-const ENV_PREFIX: &str = "FSS_";
+const ENV_PREFIX: &str = "OS__";
+/// Legacy prefix for compatibility. Will be removed soon.
+const LEGACY_ENV_PREFIX: &str = "FSS_";
 
 /// Newtype around `String` that may protect against accidental
 /// logging of secrets in our configuration struct. Use with
@@ -111,12 +113,12 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__TYPE=filesystem`
-        /// - `FSS_HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
+        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
+        /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
         ///
         /// Or for long-term storage:
-        /// - `FSS_LONG_TERM_STORAGE__TYPE=filesystem`
-        /// - `FSS_LONG_TERM_STORAGE__PATH=/path/to/storage`
+        /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
+        /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
         path: PathBuf,
     },
 
@@ -142,12 +144,12 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__TYPE=s3compatible`
-        /// - `FSS_HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
+        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
+        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
         ///
         /// Or for long-term storage:
-        /// - `FSS_LONG_TERM_STORAGE__TYPE=s3compatible`
-        /// - `FSS_LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
+        /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
+        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
         endpoint: String,
 
         /// S3 bucket name.
@@ -156,8 +158,8 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
-        /// - `FSS_LONG_TERM_STORAGE__BUCKET=my-bucket`
+        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
+        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
         bucket: String,
     },
 
@@ -191,12 +193,12 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__TYPE=gcs`
-        /// - `FSS_HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
+        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
+        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
         ///
         /// Or for long-term storage:
-        /// - `FSS_LONG_TERM_STORAGE__TYPE=gcs`
-        /// - `FSS_LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
+        /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
+        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
         endpoint: Option<String>,
 
         /// GCS bucket name.
@@ -205,8 +207,8 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
-        /// - `FSS_LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
+        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
+        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
         bucket: String,
     },
 
@@ -243,12 +245,12 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__TYPE=bigtable`
-        /// - `FSS_HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
+        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
+        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
         ///
         /// Or for long-term storage:
-        /// - `FSS_LONG_TERM_STORAGE__TYPE=bigtable`
-        /// - `FSS_LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
+        /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
+        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
         endpoint: Option<String>,
 
         /// GCP project ID.
@@ -257,16 +259,16 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
-        /// - `FSS_LONG_TERM_STORAGE__PROJECT_ID=my-project`
+        /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
+        /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
         project_id: String,
 
         /// Bigtable instance name.
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
-        /// - `FSS_LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
+        /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
+        /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
         instance_name: String,
 
         /// Bigtable table name.
@@ -275,8 +277,8 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
-        /// - `FSS_LONG_TERM_STORAGE__TABLE_NAME=objectstore`
+        /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
+        /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
         table_name: String,
 
         /// Optional number of connections to maintain to Bigtable.
@@ -287,8 +289,8 @@ pub enum Storage {
         ///
         /// # Environment Variables
         ///
-        /// - `FSS_HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
-        /// - `FSS_LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
+        /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
+        /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
         connections: Option<usize>,
     },
 }
@@ -316,7 +318,7 @@ pub struct Runtime {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_RUNTIME__WORKER_THREADS`
+    /// `OS__RUNTIME__WORKER_THREADS`
     ///
     /// # Considerations
     ///
@@ -353,7 +355,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__DSN`
+    /// `OS__SENTRY__DSN`
     pub dsn: Option<SecretBox<ConfigSecret>>,
 
     /// Environment name for this deployment.
@@ -367,7 +369,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__ENVIRONMENT`
+    /// `OS__SENTRY__ENVIRONMENT`
     pub environment: Option<Cow<'static, str>>,
 
     /// Server name or identifier.
@@ -381,7 +383,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__SERVER_NAME`
+    /// `OS__SENTRY__SERVER_NAME`
     pub server_name: Option<Cow<'static, str>>,
 
     /// Error event sampling rate.
@@ -395,7 +397,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__SAMPLE_RATE`
+    /// `OS__SENTRY__SAMPLE_RATE`
     pub sample_rate: f32,
 
     /// Performance trace sampling rate.
@@ -412,7 +414,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__TRACES_SAMPLE_RATE`
+    /// `OS__SENTRY__TRACES_SAMPLE_RATE`
     pub traces_sample_rate: f32,
 
     /// Whether to inherit sampling decisions from incoming traces.
@@ -431,7 +433,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__INHERIT_SAMPLING_DECISION`
+    /// `OS__SENTRY__INHERIT_SAMPLING_DECISION`
     pub inherit_sampling_decision: bool,
 
     /// Enable Sentry SDK debug mode.
@@ -446,7 +448,7 @@ pub struct Sentry {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_SENTRY__DEBUG`
+    /// `OS__SENTRY__DEBUG`
     pub debug: bool,
 }
 
@@ -585,7 +587,7 @@ pub struct Logging {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_LOGGING__LEVEL`
+    /// `OS__LOGGING__LEVEL`
     ///
     /// # Considerations
     ///
@@ -607,7 +609,7 @@ pub struct Logging {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_LOGGING__FORMAT`
+    /// `OS__LOGGING__FORMAT`
     pub format: LogFormat,
 }
 
@@ -636,7 +638,7 @@ pub struct Metrics {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_METRICS__DATADOG_KEY`
+    /// `OS__METRICS__DATADOG_KEY`
     ///
     /// [API key]: https://docs.datadoghq.com/account_management/api-app-keys/#api-keys
     pub datadog_key: Option<SecretBox<ConfigSecret>>,
@@ -653,8 +655,8 @@ pub struct Metrics {
     /// # Environment Variables
     ///
     /// Each tag is set individually:
-    /// - `FSS_METRICS__TAGS__FOO=foo`
-    /// - `FSS_METRICS__TAGS__BAR=bar`
+    /// - `OS__METRICS__TAGS__FOO=foo`
+    /// - `OS__METRICS__TAGS__BAR=bar`
     ///
     /// # YAML Example
     ///
@@ -673,7 +675,7 @@ pub struct Metrics {
 /// storage backends, runtime, and observability options.
 ///
 /// Configuration is loaded with the following precedence (highest to lowest):
-/// 1. Environment variables (prefixed with `FSS_`)
+/// 1. Environment variables (prefixed with `OS__`)
 /// 2. YAML configuration file (if provided via `-c` flag)
 /// 3. Default values
 ///
@@ -693,7 +695,7 @@ pub struct Config {
     ///
     /// # Environment Variable
     ///
-    /// `FSS_HTTP_ADDR`
+    /// `OS__HTTP_ADDR`
     pub http_addr: SocketAddr,
 
     /// Storage backend for high-volume, small objects.
@@ -714,7 +716,7 @@ pub struct Config {
     ///
     /// # Environment Variables
     ///
-    /// - `FSS_HIGH_VOLUME_STORAGE__TYPE` for the backend type. See [`Storage`] for available
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE` for the backend type. See [`Storage`] for available
     ///   options.
     ///
     /// # Example
@@ -745,7 +747,7 @@ pub struct Config {
     ///
     /// # Environment Variables
     ///
-    /// - `FSS_LONG_TERM_STORAGE__TYPE` - Backend type (filesystem, s3compatible, gcs, bigtable)
+    /// - `OS__LONG_TERM_STORAGE__TYPE` - Backend type (filesystem, s3compatible, gcs, bigtable)
     /// - Additional fields depending on the type (see [`Storage`])
     ///
     /// # Example
@@ -807,7 +809,7 @@ impl Config {
     /// Configuration is merged in the following order (later sources override earlier ones):
     /// 1. Default values
     /// 2. YAML configuration file (if provided in `args`)
-    /// 3. Environment variables (prefixed with `FSS_`)
+    /// 3. Environment variables (prefixed with `OS__`)
     ///
     /// # Errors
     ///
@@ -821,6 +823,7 @@ impl Config {
             figment = figment.merge(Yaml::file(path));
         }
         let config = figment
+            .merge(Env::prefixed(LEGACY_ENV_PREFIX).split("__"))
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
             .extract()?;
 

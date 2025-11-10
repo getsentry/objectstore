@@ -7,7 +7,7 @@ COPY ${BINARY} /bin/entrypoint
 COPY --from=gcr.io/distroless/cc-debian12:nonroot --chown=nonroot:nonroot /home/nonroot /data
 
 VOLUME ["/data"]
-ENV FSS_PATH="/data"
+ENV OS__HIGH_VOLUME_STORAGE__PATH="/data"
 
 ENTRYPOINT ["/bin/entrypoint"]
 CMD ["--help"]

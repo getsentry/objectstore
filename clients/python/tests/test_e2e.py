@@ -60,11 +60,11 @@ class Server:
 
         env = {
             **os.environ,
-            "FSS_HTTP_ADDR": addr,
-            "FSS_high_volume_storage__TYPE": "filesystem",
-            "FSS_high_volume_storage__PATH": self._tempdir,
-            "FSS_long_term_storage__TYPE": "filesystem",
-            "FSS_long_term_storage__PATH": self._tempdir,
+            "OS__HTTP_ADDR": addr,
+            "OS__HIGH_VOLUME_STORAGE__TYPE": "filesystem",
+            "OS__HIGH_VOLUME_STORAGE__PATH": self._tempdir,
+            "OS__LONG_TERM_STORAGE__TYPE": "filesystem",
+            "OS__LONG_TERM_STORAGE__PATH": self._tempdir,
         }
 
         self._process = subprocess.Popen([str(server_bin), "run"], env=env)
