@@ -45,8 +45,6 @@ use tracing::level_filters::LevelFilter;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
-/// Legacy prefix for compatibility. Will be removed soon.
-const LEGACY_ENV_PREFIX: &str = "FSS_";
 
 /// Newtype around `String` that may protect against accidental
 /// logging of secrets in our configuration struct. Use with
@@ -823,7 +821,6 @@ impl Config {
             figment = figment.merge(Yaml::file(path));
         }
         let config = figment
-            .merge(Env::prefixed(LEGACY_ENV_PREFIX).split("__"))
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
             .extract()?;
 
@@ -842,17 +839,17 @@ mod tests {
     #[test]
     fn configurable_via_env() {
         figment::Jail::expect_with(|jail| {
-            jail.set_env("fss_long_term_storage__type", "s3compatible");
-            jail.set_env("fss_long_term_storage__endpoint", "http://localhost:8888");
-            jail.set_env("fss_long_term_storage__bucket", "whatever");
-            jail.set_env("fss_metrics__tags__foo", "bar");
-            jail.set_env("fss_metrics__tags__baz", "qux");
-            jail.set_env("fss_sentry__dsn", "abcde");
-            jail.set_env("fss_sentry__sample_rate", "0.5");
-            jail.set_env("fss_sentry__environment", "production");
-            jail.set_env("fss_sentry__server_name", "objectstore-deadbeef");
-            jail.set_env("fss_sentry__traces_sample_rate", "0.5");
-            jail.set_env("fss_sentry__traces_sample_rate", "0.5");
+            jail.set_env("OS__LONG_TERM_STORAGE__TYPE", "s3compatible");
+            jail.set_env("OS__LONG_TERM_STORAGE__ENDPOINT", "http://localhost:8888");
+            jail.set_env("OS__LONG_TERM_STORAGE__BUCKET", "whatever");
+            jail.set_env("OS__METRICS__TAGS__FOO", "bar");
+            jail.set_env("OS__METRICS__TAGS__BAZ", "qux");
+            jail.set_env("OS__SENTRY__DSN", "abcde");
+            jail.set_env("OS__SENTRY__SAMPLE_RATE", "0.5");
+            jail.set_env("OS__SENTRY__ENVIRONMENT", "production");
+            jail.set_env("OS__SENTRY__SERVER_NAME", "objectstore-deadbeef");
+            jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
+            jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
 
             let config = Config::load(None).unwrap();
 
@@ -938,7 +935,7 @@ mod tests {
             .unwrap();
 
         figment::Jail::expect_with(|jail| {
-            jail.set_env("fss_long_term_storage__endpoint", "http://localhost:9001");
+            jail.set_env("OS__LONG_TERM_STORAGE__ENDPOINT", "http://localhost:9001");
 
             let config = Config::load(Some(tempfile.path())).unwrap();
 
