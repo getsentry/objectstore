@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-compression",
  "bytes",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-types"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "http 1.3.1",
  "humantime",
