@@ -377,9 +377,9 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone)]
 /// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
 /// Create a Session using [`Client::session`] or [`Scope::session`].
+#[derive(Debug, Clone)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,
