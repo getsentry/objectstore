@@ -139,19 +139,19 @@ impl Usecase {
         }
     }
 
-    /// TODO: document
+    /// Returns the name of this usecase.
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// TODO: document
+    /// Returns the compression algorithm to use by default for operations within this usecase.
     #[inline]
     pub fn compression(&self) -> Compression {
         self.compression
     }
 
-    /// TODO: document
+    /// Sets the compression algorithm to use by default for operations within this usecase.
     pub fn with_compression(self, compression: Compression) -> Self {
         Self {
             compression,
@@ -159,28 +159,32 @@ impl Usecase {
         }
     }
 
-    /// TODO: document
+    /// Returns the expiration policy to use by default for operations within this usecase.
     #[inline]
     pub fn expiration(&self) -> ExpirationPolicy {
         self.expiration
     }
 
-    /// TODO: document
+    /// Sets the expiration policy to use by default for operations within this usecase.
     pub fn with_expiration(self, expiration: ExpirationPolicy) -> Self {
         Self { expiration, ..self }
     }
 
-    /// TODO: document
+    /// Creates a new custom [`Scope`].
+    ///
+    /// Add parts to it using [`Scope::push`].
+    /// Generally, [`Scope::for_organization`] and [`Scope::for_project`] should fit most usecases,
+    /// so prefer using those methods rather than creating your own custom [`Scope`].
     pub fn scope(&self) -> Scope {
         Scope::new(self.clone())
     }
 
-    /// TODO: document
+    /// Creates a new [`Scope`] tied to the given organization.
     pub fn for_organization(&self, organization: u64) -> Scope {
         Scope::for_organization(self.clone(), organization)
     }
 
-    /// TODO: document
+    /// Creates a new [`Scope`] tied to the given organization and project.
     pub fn for_project(&self, organization: u64, project: u64) -> Scope {
         Scope::for_project(self.clone(), organization, project)
     }
@@ -205,12 +209,17 @@ impl std::fmt::Display for ScopeInner {
     }
 }
 
-/// TODO: document
+/// A [`Scope`] is a sequence of key-value pairs that defines a (possibly nested) namespace within a
+/// [`Usecase`].
+///
+/// To construct a [`Scope`], use [`Usecase::for_organization`], [`Usecase::for_project`], or
+/// [`Usecase::scope`] for custom scopes.
 #[derive(Debug)]
 pub struct Scope(crate::Result<ScopeInner>);
 
 impl Scope {
-    /// TODO: document
+    /// Creates a new root-level Scope for the given usecase.
+    /// Using a custom Scope is discouraged, prefer using [`Usecase::for_organization`] or [`Usecase::for_project`] instead.
     pub fn new(usecase: Usecase) -> Self {
         Self(Ok(ScopeInner {
             usecase,
@@ -228,7 +237,7 @@ impl Scope {
         Self(Ok(ScopeInner { usecase, scope }))
     }
 
-    /// TODO: document
+    /// Extends this Scope by creating a new sub-scope nested within it.
     pub fn push<V>(self, key: &str, value: &V) -> Self
     where
         V: std::fmt::Display,
@@ -290,7 +299,11 @@ impl Scope {
         }
     }
 
-    /// TODO: document
+    /// Creates a session for this scope using the given client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid (e.g. it contains invalid characters).
     pub fn session(self, client: &Client) -> crate::Result<Session> {
         client.session(self)
     }
@@ -303,9 +316,9 @@ pub(crate) struct ClientInner {
     propagate_traces: bool,
 }
 
-/// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
+/// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
 ///
-/// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
+/// To perform CRUD operations, one has to create a Client, and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
 ///
 /// # Example
@@ -351,7 +364,11 @@ impl Client {
         ClientBuilder::new(service_url)
     }
 
-    /// TODO: document
+    /// Creates a session for the given scope using this client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid (e.g. it contains invalid characters).
     pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
             scope: inner.into(),
@@ -360,8 +377,9 @@ impl Client {
     }
 }
 
-/// TODO: document
 #[derive(Debug, Clone)]
+/// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
+/// Create a Session using [`Client::session`] or [`Scope::session`].
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,

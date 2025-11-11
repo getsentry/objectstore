@@ -7,17 +7,31 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use objectstore_client::{ClientBuilder, Usecase};
+//! use std::time::Duration;
+//! use std::sync::LazyLock;
+//! use objectstore_client::{ClientBuilder, Usecase, Client, Compression};
+//!
+//! static OBJECTSTORE_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+//!     ClientBuilder::new("http://localhost:8888/")
+//!         // Optionally, propagate tracing headers to use distributed tracing in Sentry
+//!         .propagate_traces(true)
+//!         // Customize the reqwest::ClientBuilder
+//!         .configure_reqwest(|builder| {
+//!             builder.pool_idle_timeout(Duration::from_secs(90))
+//!                    .pool_max_idle_per_host(10)
+//!         })
+//!         .build()
+//!         .expect("Failed to build Objectstore client")
+//! });
+//!
+//! static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
+//!     Usecase::new("attachments")
+//! });
 //!
 //! #[tokio::main]
 //! # async fn main() -> objectstore_client::Result<()> {
-//! let client = ClientBuilder::new("http://localhost:8888/").build().unwrap();
-//! let usecase = Usecase::new("usecase");
-//! let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-//!
-//! let response = session.put("hello world").send().await?;
-//! let object = session.get(&response.key).send().await?.expect("object to exist");
-//! assert_eq!(object.payload().await?, "hello world");
+//!     let session = OBJECTSTORE_CLIENT.session(ATTACHMENTS.for_project(42, 1337))?;
+//!     session.put("Hello, world!").send().await?;
 //! # Ok(())
 //! # }
 //! ```
