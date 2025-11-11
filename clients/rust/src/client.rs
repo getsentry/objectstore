@@ -78,15 +78,12 @@ impl ClientBuilder {
     /// Sets both the connect and the read timeout for the [`reqwest::Client`].
     /// For more fine-grained configuration, use [`Self::configure_reqwest`].
     pub fn timeout(self, timeout: Duration) -> Self {
-        let Ok(inner) = self.0 else { return self };
-        Self(Ok(ClientBuilderInner {
-            service_url: inner.service_url,
-            propagate_traces: inner.propagate_traces,
-            reqwest_builder: inner
-                .reqwest_builder
-                .connect_timeout(timeout)
-                .read_timeout(timeout),
-        }))
+        let Ok(mut inner) = self.0 else { return self };
+        inner.reqwest_builder = inner
+            .reqwest_builder
+            .connect_timeout(timeout)
+            .read_timeout(timeout);
+        Self(Ok(inner))
     }
 
     /// Calls the closure with the underlying [`reqwest::ClientBuilder`].
