@@ -333,6 +333,27 @@ impl ClientInner {
 ///
 /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
+///
+/// # Example
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use objectstore_client::{Client, Usecase};
+///
+/// # async fn example() -> objectstore_client::Result<()> {
+/// let client = Client::builder("http://localhost:8888/")
+///     .timeout(Duration::from_secs(1))
+///     .propagate_traces(true)
+///     .build()?;
+/// let usecase = Usecase::new("my_app");
+///
+/// let session = client.session(usecase.for_project(12345, 1337))?;
+///
+/// let response = session.put("hello world").send().await?;
+///
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Client {
     inner: Arc<ClientInner>,
