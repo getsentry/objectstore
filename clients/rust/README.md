@@ -12,8 +12,8 @@ use objectstore_client::ClientBuilder;
 let client = ClientBuilder::new("http://localhost:8888/", "my-usecase")?
     .for_organization(42);
 
-let id = client.put("hello world").send().await?;
-let object = client.get(&id.key).send().await?.expect("object to exist");
+let response = client.put("hello world").send().await?;
+let object = client.get(&response.key).send().await?.expect("object to exist");
 assert_eq!(object.payload().await?, "hello world");
 ```
 

@@ -15,8 +15,8 @@
 //! let usecase = Usecase::new("usecase");
 //! let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 //!
-//! let id = session.put("hello world").send().await?;
-//! let object = session.get(&id.key).send().await?.expect("object to exist");
+//! let response = session.put("hello world").send().await?;
+//! let object = session.get(&response.key).send().await?.expect("object to exist");
 //! assert_eq!(object.payload().await?, "hello world");
 //! # Ok(())
 //! # }

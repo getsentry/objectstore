@@ -45,11 +45,11 @@ impl fmt::Debug for GetResponse {
 }
 
 impl Session {
-    /// Requests the object with the given `id`.
-    pub fn get(&self, id: &str) -> GetBuilder {
+    /// Requests the object with the given `key`.
+    pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
             session: self.clone(),
-            id: id.to_owned(),
+            key: key.to_owned(),
             decompress: true,
         }
     }
@@ -59,7 +59,7 @@ impl Session {
 #[derive(Debug)]
 pub struct GetBuilder {
     session: Session,
-    id: String,
+    key: String,
     decompress: bool,
 }
 
@@ -75,7 +75,7 @@ impl GetBuilder {
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
         let response = self
             .session
-            .request(reqwest::Method::GET, &self.id)?
+            .request(reqwest::Method::GET, &self.key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {

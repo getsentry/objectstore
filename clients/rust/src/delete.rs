@@ -4,11 +4,11 @@ use crate::Session;
 pub type DeleteResponse = ();
 
 impl Session {
-    /// Deletes the object with the given `id`.
-    pub fn delete(&self, id: &str) -> DeleteBuilder {
+    /// Deletes the object with the given `key`.
+    pub fn delete(&self, key: &str) -> DeleteBuilder {
         DeleteBuilder {
             session: self.clone(),
-            id: id.to_owned(),
+            key: key.to_owned(),
         }
     }
 }
@@ -17,14 +17,14 @@ impl Session {
 #[derive(Debug)]
 pub struct DeleteBuilder {
     session: Session,
-    id: String,
+    key: String,
 }
 
 impl DeleteBuilder {
     /// Sends the `DELETE` request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
         self.session
-            .request(reqwest::Method::DELETE, &self.id)?
+            .request(reqwest::Method::DELETE, &self.key)?
             .send()
             .await?;
         Ok(())
