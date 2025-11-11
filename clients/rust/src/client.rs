@@ -191,7 +191,7 @@ impl Usecase {
     /// Creates a new custom [`Scope`].
     ///
     /// Add parts to it using [`Scope::push`].
-    /// Generally, [`Scope::for_organization`] and [`Scope::for_project`] should fit most usecases,
+    /// Generally, [`Usecase::for_organization`] and [`Usecase::for_project`] should fit most usecases,
     /// so prefer using those methods rather than creating your own custom [`Scope`].
     pub fn scope(&self) -> Scope {
         Scope::new(self.clone())
