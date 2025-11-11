@@ -68,6 +68,8 @@ impl ClientBuilder {
 
     /// Changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
+    ///
+    /// By default, tracing headers will not be propagated.
     pub fn propagate_traces(mut self, propagate_traces: bool) -> Self {
         if let Ok(ref mut inner) = self.0 {
             inner.propagate_traces = propagate_traces;
@@ -77,6 +79,8 @@ impl ClientBuilder {
 
     /// Sets both the connect and the read timeout for the [`reqwest::Client`].
     /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    ///
+    /// By default, a connect and read timeout of 500ms is set.
     pub fn timeout(self, timeout: Duration) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.reqwest_builder = inner
@@ -87,6 +91,8 @@ impl ClientBuilder {
     }
 
     /// Calls the closure with the underlying [`reqwest::ClientBuilder`].
+    ///
+    /// By default, the ClientBuilder is configured to create a reqwest Client with a connect and read timeout of 500ms and a user agent identifying this library.
     pub fn configure_reqwest<F>(self, closure: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
@@ -126,7 +132,7 @@ impl ClientBuilder {
 pub struct Usecase {
     name: Arc<str>,
     compression: Compression,
-    expiration: ExpirationPolicy,
+    expiration_policy: ExpirationPolicy,
 }
 
 impl Usecase {
@@ -135,7 +141,7 @@ impl Usecase {
         Self {
             name: name.into(),
             compression: Compression::Zstd,
-            expiration: Default::default(),
+            expiration_policy: Default::default(),
         }
     }
 
@@ -145,13 +151,17 @@ impl Usecase {
         &self.name
     }
 
-    /// Returns the compression algorithm to use by default for operations within this usecase.
+    /// Returns the compression algorithm to use for operations within this usecase.
     #[inline]
     pub fn compression(&self) -> Compression {
         self.compression
     }
 
-    /// Sets the compression algorithm to use by default for operations within this usecase.
+    /// Sets the compression algorithm to use for operations within this usecase.
+    ///
+    /// It's still possible to override this default on each operation's builder.
+    ///
+    /// By default, [`Compression::Zstd`] is used.
     pub fn with_compression(self, compression: Compression) -> Self {
         Self {
             compression,
@@ -161,13 +171,21 @@ impl Usecase {
 
     /// Returns the expiration policy to use by default for operations within this usecase.
     #[inline]
-    pub fn expiration(&self) -> ExpirationPolicy {
-        self.expiration
+    pub fn expiration_policy(&self) -> ExpirationPolicy {
+        self.expiration_policy
     }
 
-    /// Sets the expiration policy to use by default for operations within this usecase.
-    pub fn with_expiration(self, expiration: ExpirationPolicy) -> Self {
-        Self { expiration, ..self }
+    /// Sets the expiration policy to use for operations within this usecase.
+    ///
+    /// It's still possible to override this default on each operation's builder.
+    ///
+    /// By default, [`ExpirationPolicy::Manual`] is used, meaning that objects won't automatically
+    /// expire.
+    pub fn with_expiration_policy(self, expiration_policy: ExpirationPolicy) -> Self {
+        Self {
+            expiration_policy,
+            ..self
+        }
     }
 
     /// Creates a new custom [`Scope`].
