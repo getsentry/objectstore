@@ -115,9 +115,11 @@ impl ClientBuilder {
             .map(|inner| inner.apply_defaults())
             .and_then(|inner| {
                 Ok(Client {
-                    reqwest: inner.reqwest_builder.build()?,
-                    service_url: inner.service_url,
-                    propagate_traces: inner.propagate_traces,
+                    inner: Arc::new(ClientInner {
+                        reqwest: inner.reqwest_builder.build()?,
+                        service_url: inner.service_url,
+                        propagate_traces: inner.propagate_traces,
+                    }),
                 })
             })
     }
@@ -315,15 +317,28 @@ impl Scope {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ClientInner {
+    reqwest: reqwest::Client,
+    service_url: Url,
+    propagate_traces: bool,
+}
+
+impl ClientInner {
+    /// TODO: document
+    #[inline]
+    pub(crate) fn service_url(&self) -> &Url {
+        &self.service_url
+    }
+}
+
 /// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
 ///
 /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
 #[derive(Debug, Clone)]
 pub struct Client {
-    reqwest: reqwest::Client,
-    service_url: Url,
-    propagate_traces: bool,
+    inner: Arc<ClientInner>,
 }
 
 impl Client {
@@ -336,14 +351,8 @@ impl Client {
     pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
             scope: inner.into(),
-            client: self.clone().into(),
+            client: self.inner.clone(),
         })
-    }
-
-    /// TODO: document
-    #[inline]
-    pub fn service_url(&self) -> &Url {
-        &self.service_url
     }
 }
 
@@ -351,7 +360,7 @@ impl Client {
 #[derive(Debug)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
-    pub(crate) client: Arc<Client>,
+    pub(crate) client: Arc<ClientInner>,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
