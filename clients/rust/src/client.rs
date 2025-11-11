@@ -360,7 +360,7 @@ impl Client {
 }
 
 /// TODO: document
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,
