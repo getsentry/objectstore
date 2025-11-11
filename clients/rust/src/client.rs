@@ -1,6 +1,6 @@
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fmt::Display, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
@@ -138,9 +138,9 @@ pub struct Usecase {
 
 impl Usecase {
     /// Creates a new Usecase.
-    pub fn new(name: impl Display) -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
-            name: name.to_string().into(),
+            name: name.into(),
             compression: Compression::Zstd,
             expiration: Default::default(),
         }

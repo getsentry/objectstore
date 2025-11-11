@@ -37,7 +37,7 @@ impl GetResponse {
 
 impl fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GetResult")
+        f.debug_struct("GetResponse")
             .field("metadata", &self.metadata)
             .field("stream", &format_args!("[Stream]"))
             .finish()

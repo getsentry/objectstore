@@ -86,6 +86,26 @@ async fn deletes_stores_stuff() {
     assert!(response.is_none());
 }
 
+#[tokio::test]
+async fn stores_under_given_key() {
+    let server = TestServer::new().await;
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let body = "oh hai!";
+    let stored_id = session
+        .put(body)
+        .key("test-key123!!")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    assert_eq!(stored_id, "test-key123!!");
+}
+
 #[derive(Debug)]
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
