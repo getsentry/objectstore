@@ -34,7 +34,7 @@ impl ClientBuilderInner {
 }
 
 /// Builder to create a [`Client`].
-#[must_use]
+#[must_use = "call .build() on this ClientBuilder to create a Client"]
 #[derive(Debug)]
 pub struct ClientBuilder(crate::Result<ClientBuilderInner>);
 
