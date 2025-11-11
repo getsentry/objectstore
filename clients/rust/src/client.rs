@@ -1,6 +1,6 @@
-use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fmt::Display, io};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
@@ -33,12 +33,14 @@ impl ClientBuilderInner {
     }
 }
 
-/// Builder to obtain a [`Client`].
+/// Builder to create a [`Client`].
+#[must_use]
 #[derive(Debug)]
 pub struct ClientBuilder(crate::Result<ClientBuilderInner>);
 
 impl ClientBuilder {
     /// Creates a new [`ClientBuilder`], configured with the given `service_url`.
+    ///
     /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
     /// and Scope in order to create a [`Session`].
     pub fn new(service_url: impl reqwest::IntoUrl) -> Self {
@@ -64,7 +66,7 @@ impl ClientBuilder {
         }))
     }
 
-    /// This changes whether the `sentry-trace` header will be sent to Objectstore
+    /// Changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
     pub fn propagate_traces(mut self, propagate_traces: bool) -> Self {
         if let Ok(ref mut inner) = self.0 {
@@ -73,7 +75,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets both the connect and the read timeout for the reqwest Client.
+    /// Sets both the connect and the read timeout for the [`reqwest::Client`].
     /// For more fine-grained configuration, use [`Self::configure_reqwest`].
     pub fn timeout(self, timeout: Duration) -> Self {
         let Ok(inner) = self.0 else { return self };
@@ -87,7 +89,7 @@ impl ClientBuilder {
         }))
     }
 
-    /// TODO: document
+    /// Calls the closure with the underlying [`reqwest::ClientBuilder`].
     pub fn configure_reqwest<F>(self, closure: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
@@ -100,7 +102,14 @@ impl ClientBuilder {
         }))
     }
 
-    /// TODO: document
+    /// Returns a [`Client`] that uses this [`ClientBuilder`] configuration.
+    ///
+    /// # Errors
+    ///
+    /// This method fails if:
+    /// - the given `service_url` is invalid
+    /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
+    /// more information on when this can happen.
     pub fn build(self) -> crate::Result<Client> {
         self.0
             .map(|inner| inner.apply_defaults())
@@ -114,7 +123,12 @@ impl ClientBuilder {
     }
 }
 
-/// TODO: document
+/// An identifier for a workload in Objectstore, along with defaults to use for all
+/// operations within that Usecase.
+///
+/// Usecases need to be statically defined in Objectstore's configuration server-side.
+/// Objectstore can make decisions based on the Usecase. For example, choosing the most
+/// suitable storage backend.
 #[derive(Debug, Clone)]
 pub struct Usecase {
     name: Arc<str>,
@@ -123,10 +137,10 @@ pub struct Usecase {
 }
 
 impl Usecase {
-    /// TODO: document
-    pub fn new(name: impl Into<Arc<str>>) -> Self {
+    /// Creates a new Usecase.
+    pub fn new(name: impl Display) -> Self {
         Self {
-            name: name.into(),
+            name: name.to_string().into(),
             compression: Compression::Zstd,
             expiration: Default::default(),
         }
@@ -249,7 +263,10 @@ impl Scope {
     }
 }
 
-/// A client for Objectstore.
+/// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
+///
+/// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
+/// and Scope in order to create a [`Session`].
 #[derive(Debug)]
 pub struct Client {
     reqwest: reqwest::Client,
@@ -258,6 +275,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// Convenience function to create a [`ClientBuilder`].
+    pub fn builder(service_url: impl reqwest::IntoUrl) -> ClientBuilder {
+        ClientBuilder::new(service_url)
+    }
+
     /// TODO: document
     pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
@@ -279,6 +301,7 @@ pub struct Session {
     pub(crate) usecase: Usecase,
 
     // TODO: change to something like this
+    // TODO: FR
     //client: Arc<Client>,
     //inner: Arc<SessionInner>,
     scope: String,
