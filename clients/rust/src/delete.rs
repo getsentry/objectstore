@@ -5,19 +5,22 @@ pub type DeleteResponse = ();
 
 impl Session {
     /// Deletes the object with the given `id`.
-    pub fn delete<'a>(&'a self, id: &'a str) -> DeleteBuilder<'a> {
-        DeleteBuilder { session: self, id }
+    pub fn delete(&self, id: &str) -> DeleteBuilder {
+        DeleteBuilder {
+            session: self.clone(),
+            id: id.to_owned(),
+        }
     }
 }
 
 /// A DELETE request builder.
 #[derive(Debug)]
-pub struct DeleteBuilder<'a> {
-    session: &'a Session,
-    id: &'a str,
+pub struct DeleteBuilder {
+    session: Session,
+    id: String,
 }
 
-impl DeleteBuilder<'_> {
+impl DeleteBuilder {
     /// Sends the `DELETE` request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
         self.session

@@ -34,7 +34,7 @@ impl fmt::Debug for PutBody {
 }
 
 impl Session {
-    fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
+    fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration(),
             compression: Some(self.scope.usecase().compression()),
@@ -42,7 +42,7 @@ impl Session {
         };
 
         PutBuilder {
-            session: self,
+            session: self.clone(),
             metadata,
             key: None,
             body,
@@ -50,17 +50,17 @@ impl Session {
     }
 
     /// Creates a PUT request for a [`Bytes`]-like type.
-    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder<'_> {
+    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder {
         self.put_body(PutBody::Buffer(body.into()))
     }
 
     /// Creates a PUT request with a stream.
-    pub fn put_stream(&self, body: ClientStream) -> PutBuilder<'_> {
+    pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
     /// Creates a PUT request with an [`AsyncRead`] type.
-    pub fn put_read<R>(&self, body: R) -> PutBuilder<'_>
+    pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
@@ -71,14 +71,14 @@ impl Session {
 
 /// A PUT request builder.
 #[derive(Debug)]
-pub struct PutBuilder<'a> {
-    session: &'a Session,
-    pub(crate) metadata: Metadata,
-    pub(crate) key: Option<String>,
-    pub(crate) body: PutBody,
+pub struct PutBuilder {
+    session: Session,
+    metadata: Metadata,
+    key: Option<String>,
+    body: PutBody,
 }
 
-impl PutBuilder<'_> {
+impl PutBuilder {
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the objectstore
@@ -122,10 +122,13 @@ impl PutBuilder<'_> {
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
-impl PutBuilder<'_> {
+impl PutBuilder {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let mut builder = self.session.request(reqwest::Method::PUT, self.key.as_deref().unwrap_or_default())?;
+        let mut builder = self.session.request(
+            reqwest::Method::PUT,
+            self.key.as_deref().unwrap_or_default(),
+        )?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {

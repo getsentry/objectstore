@@ -46,10 +46,10 @@ impl fmt::Debug for GetResponse {
 
 impl Session {
     /// Requests the object with the given `id`.
-    pub fn get<'a>(&'a self, id: &'a str) -> GetBuilder<'a> {
+    pub fn get(&self, id: &str) -> GetBuilder {
         GetBuilder {
-            session: self,
-            id,
+            session: self.clone(),
+            id: id.to_owned(),
             decompress: true,
         }
     }
@@ -57,13 +57,13 @@ impl Session {
 
 /// A GET request builder.
 #[derive(Debug)]
-pub struct GetBuilder<'a> {
-    session: &'a Session,
-    id: &'a str,
+pub struct GetBuilder {
+    session: Session,
+    id: String,
     decompress: bool,
 }
 
-impl GetBuilder<'_> {
+impl GetBuilder {
     /// Indicates whether the request should automatically handle decompression of known algorithms,
     /// or rather return the payload as it is stored, along with the compression algorithm it is stored in.
     pub fn decompress(mut self, decompress: bool) -> Self {
