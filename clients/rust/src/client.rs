@@ -109,7 +109,7 @@ impl ClientBuilder {
     /// This method fails if:
     /// - the given `service_url` is invalid
     /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
-    /// more information on when this can happen.
+    ///   more information on when this can happen.
     pub fn build(self) -> crate::Result<Client> {
         self.0
             .map(|inner| inner.apply_defaults())
@@ -194,9 +194,16 @@ impl Usecase {
 }
 
 #[derive(Debug)]
-struct ScopeInner {
+pub(crate) struct ScopeInner {
     usecase: Usecase,
     scope: String,
+}
+
+impl ScopeInner {
+    #[inline]
+    pub(crate) fn usecase(&self) -> &Usecase {
+        &self.usecase
+    }
 }
 
 impl std::fmt::Display for ScopeInner {
@@ -312,7 +319,7 @@ impl Scope {
 ///
 /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     reqwest: reqwest::Client,
     service_url: Url,
@@ -328,30 +335,23 @@ impl Client {
     /// TODO: document
     pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
-            service_url: Arc::new(self.service_url.clone()), // TODO: revisit
-            usecase: inner.usecase.clone(),
-            scope: inner.scope,
-            propagate_traces: self.propagate_traces,
-            reqwest: self.reqwest.clone(),
+            scope: inner.into(),
+            client: self.clone().into(),
         })
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn service_url(&self) -> &Url {
+        &self.service_url
     }
 }
 
 /// TODO: document
 #[derive(Debug)]
 pub struct Session {
-    // TODO: add getters instead of pub(crate)
-    // these will probably be gone though
-    pub(crate) service_url: Arc<Url>,
-    pub(crate) usecase: Usecase,
-
-    // TODO: change to something like this
-    // TODO: FR
-    //client: Arc<Client>,
-    //inner: Arc<SessionInner>,
-    scope: String,
-    propagate_traces: bool,
-    reqwest: reqwest::Client,
+    pub(crate) scope: Arc<ScopeInner>,
+    pub(crate) client: Arc<Client>,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
@@ -363,12 +363,12 @@ impl Session {
         method: reqwest::Method,
         uri: U,
     ) -> crate::Result<reqwest::RequestBuilder> {
-        let mut builder = self.reqwest.request(method, uri).query(&[
-            (PARAM_SCOPE, self.scope.as_str()),
-            (PARAM_USECASE, self.usecase.name.as_ref()),
+        let mut builder = self.client.reqwest.request(method, uri).query(&[
+            (PARAM_SCOPE, self.scope.scope.as_str()),
+            (PARAM_USECASE, self.scope.usecase.name.as_ref()),
         ]);
 
-        if self.propagate_traces {
+        if self.client.propagate_traces {
             let trace_headers =
                 sentry_core::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
             for (header_name, value) in trace_headers.into_iter().flatten() {

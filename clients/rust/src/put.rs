@@ -36,8 +36,8 @@ impl fmt::Debug for PutBody {
 impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
         let metadata = Metadata {
-            expiration_policy: self.usecase.expiration(),
-            compression: Some(self.usecase.compression()),
+            expiration_policy: self.scope.usecase().expiration(),
+            compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
 
@@ -125,7 +125,7 @@ impl PutBuilder<'_> {
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let put_url = format!("{}v1/", self.session.service_url);
+        let put_url = format!("{}v1/", self.session.client.service_url());
         let mut builder = self.session.request(reqwest::Method::PUT, put_url)?;
 
         let body = match (self.metadata.compression, self.body) {

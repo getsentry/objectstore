@@ -20,7 +20,7 @@ pub struct DeleteBuilder<'a> {
 impl DeleteBuilder<'_> {
     /// Sends the `DELETE` request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
-        let delete_url = format!("{}v1/{}", self.session.service_url, self.id);
+        let delete_url = format!("{}v1/{}", self.session.client.service_url(), self.id);
         self.session
             .request(reqwest::Method::DELETE, delete_url)?
             .send()
