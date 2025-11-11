@@ -222,24 +222,12 @@ impl Scope {
     }
 
     fn for_organization(usecase: Usecase, organization: u64) -> Self {
-        let mut buf = itoa::Buffer::new();
-        let organization = buf.format(organization);
-        let mut scope = String::with_capacity(4 + organization.len());
-        scope.push_str("org.");
-        scope.push_str(organization);
+        let scope = format!("org.{}", organization);
         Self(Ok(ScopeInner { usecase, scope }))
     }
 
     fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
-        let mut buf = itoa::Buffer::new();
-        let organization = buf.format(organization);
-        let mut buf = itoa::Buffer::new();
-        let project = buf.format(project);
-        let mut scope = String::with_capacity(4 + organization.len() + 9 + project.len());
-        scope.push_str("org.");
-        scope.push_str(organization);
-        scope.push_str("/project.");
-        scope.push_str(project);
+        let scope = format!("org.{}/project.{}", organization, project);
         Self(Ok(ScopeInner { usecase, scope }))
     }
 

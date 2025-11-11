@@ -14,7 +14,6 @@ publish = true
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
-itoa = "1.0.15"
 objectstore-types = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
 sentry-core = { version = ">=0.41", features = ["client"] }

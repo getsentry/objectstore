@@ -1936,7 +1936,6 @@ dependencies = [
  "async-compression",
  "bytes",
  "futures-util",
- "itoa",
  "objectstore-server",
  "objectstore-types",
  "reqwest",
