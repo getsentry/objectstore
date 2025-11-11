@@ -238,6 +238,6 @@ jobs:
       - uses: getsentry/action-validate-gocd-pipelines@v1
         if: steps.changes.outputs.gocd == 'true'
         with:
-          configrepo: objectstore__master
+          configrepo: objectstore__main
           gocd_access_token: ${{ secrets.GOCD_ACCESS_TOKEN }}
           google_oidc_token: ${{ steps.auth.outputs.id_token }}
