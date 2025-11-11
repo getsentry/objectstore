@@ -91,12 +91,9 @@ impl ClientBuilder {
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
     {
-        let Ok(inner) = self.0 else { return self };
-        Self(Ok(ClientBuilderInner {
-            service_url: inner.service_url,
-            propagate_traces: inner.propagate_traces,
-            reqwest_builder: closure(inner.reqwest_builder),
-        }))
+        let Ok(mut inner) = self.0 else { return self };
+        inner.reqwest_builder = closure(inner.reqwest_builder);
+        Self(Ok(inner))
     }
 
     /// Returns a [`Client`] that uses this [`ClientBuilder`] configuration.
