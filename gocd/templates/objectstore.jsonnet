@@ -8,7 +8,7 @@ local pipedream_config = {
   name: 'objectstore',
   auto_deploy: false,
   materials: {
-    relay_repo: {
+    objectstore_repo: {
       git: 'git@github.com:getsentry/objectstore.git',
       shallow_clone: true,
       branch: 'main',

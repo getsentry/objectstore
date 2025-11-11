@@ -25,7 +25,7 @@ function(region) {
   group: 'objectstore',
   lock_behavior: 'unlockWhenFinished',
   materials: {
-    relay_repo: {
+    objectstore_repo: {
       git: 'git@github.com:getsentry/objectstore.git',
       shallow_clone: true,
       branch: 'main',
