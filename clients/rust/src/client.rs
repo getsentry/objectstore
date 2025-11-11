@@ -241,20 +241,65 @@ impl Scope {
     }
 
     /// TODO: document
-    pub fn push<V>(mut self, key: &str, value: &V) -> Self
+    pub fn push<V>(self, key: &str, value: &V) -> Self
     where
         V: std::fmt::Display,
     {
-        if let Ok(ref mut inner) = self.0 {
-            // TODO: validate and turn into error on failure
+        let result = self.0.and_then(|mut inner| {
+            Self::validate_key(key)?;
+
+            let value = value.to_string();
+            Self::validate_value(&value)?;
+
             if !inner.scope.is_empty() {
                 inner.scope.push('/');
             }
             inner.scope.push_str(key);
             inner.scope.push('.');
-            inner.scope.push_str(value.to_string().as_str());
+            inner.scope.push_str(&value);
+
+            Ok(inner)
+        });
+
+        Self(result)
+    }
+
+    /// Characters allowed in a Scope's key and value.
+    /// These are the URL safe characters, except for `.` which we use as separator between
+    /// key and value of Scope components.
+    const ALLOWED_CHARS: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
+
+    /// Validates that a scope key contains only allowed characters and is not empty.
+    fn validate_key(key: &str) -> crate::Result<()> {
+        if key.is_empty() {
+            return Err(crate::Error::InvalidScope {
+                message: "Scope key cannot be empty".to_string(),
+            });
         }
-        self
+        if key.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
+            Ok(())
+        } else {
+            Err(crate::Error::InvalidScope {
+                message: format!("Invalid scope key '{key}'."),
+            })
+        }
+    }
+
+    /// Validates that a scope value contains only allowed characters and is not empty.
+    fn validate_value(value: &str) -> crate::Result<()> {
+        if value.is_empty() {
+            return Err(crate::Error::InvalidScope {
+                message: "Scope value cannot be empty".to_string(),
+            });
+        }
+        if value.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
+            Ok(())
+        } else {
+            Err(crate::Error::InvalidScope {
+                message: format!("Invalid scope value '{value}'."),
+            })
+        }
     }
 
     /// TODO: document
