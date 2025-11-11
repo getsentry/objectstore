@@ -19,6 +19,12 @@ pub enum Error {
         /// The validation error message.
         message: String,
     },
+    /// Error when URL manipulation fails.
+    #[error("{message}")]
+    InvalidUrl {
+        /// The URL error message.
+        message: String,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

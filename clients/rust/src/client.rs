@@ -306,14 +306,6 @@ pub(crate) struct ClientInner {
     propagate_traces: bool,
 }
 
-impl ClientInner {
-    /// TODO: document
-    #[inline]
-    pub(crate) fn service_url(&self) -> &Url {
-        &self.service_url
-    }
-}
-
 /// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
 ///
 /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
@@ -370,12 +362,19 @@ pub struct Session {
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {
-    pub(crate) fn request<U: reqwest::IntoUrl>(
+    pub(crate) fn request(
         &self,
         method: reqwest::Method,
-        uri: U,
+        resource_id: &str,
     ) -> crate::Result<reqwest::RequestBuilder> {
-        let mut builder = self.client.reqwest.request(method, uri).query(&[
+        let mut url = self.client.service_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| crate::Error::InvalidUrl {
+                message: format!("The URL {} cannot be a base", self.client.service_url),
+            })?
+            .extend(&["v1", resource_id]);
+
+        let mut builder = self.client.reqwest.request(method, url).query(&[
             (PARAM_SCOPE, self.scope.scope.as_str()),
             (PARAM_USECASE, self.scope.usecase.name.as_ref()),
         ]);

@@ -125,12 +125,7 @@ impl PutBuilder<'_> {
 impl PutBuilder<'_> {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let put_url = format!(
-            "{}v1/{}",
-            self.session.client.service_url(),
-            self.key.as_deref().unwrap_or_default()
-        );
-        let mut builder = self.session.request(reqwest::Method::PUT, put_url)?;
+        let mut builder = self.session.request(reqwest::Method::PUT, self.key.as_deref().unwrap_or_default())?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
