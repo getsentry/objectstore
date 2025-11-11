@@ -198,3 +198,46 @@ jobs:
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
         if: github.ref == 'refs/heads/main'
+
+  validate_gocd:
+    if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+    name: Validate GoCD Pipelines
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - uses: actions/checkout@v5.0.0
+
+      - uses: getsentry/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        id: changes
+        with:
+          filters: |
+            gocd:
+              - 'gocd/**'
+
+      - id: "auth"
+        if: steps.changes.outputs.gocd == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: "projects/868781662168/locations/global/workloadIdentityPools/prod-github/providers/github-oidc-pool"
+          service_account: "gha-gocd-api@sac-prod-sa.iam.gserviceaccount.com"
+          token_format: "id_token"
+          id_token_audience: "610575311308-9bsjtgqg4jm01mt058rncpopujgk3627.apps.googleusercontent.com"
+          id_token_include_email: true
+
+      - uses: getsentry/action-gocd-jsonnet@v1
+        if: steps.changes.outputs.gocd == 'true'
+        with:
+          jb-install: true
+          jsonnet-dir: gocd/templates
+          generated-dir: gocd/generated-pipelines
+
+      - uses: getsentry/action-validate-gocd-pipelines@v1
+        if: steps.changes.outputs.gocd == 'true'
+        with:
+          configrepo: objectstore__master
+          gocd_access_token: ${{ secrets.GOCD_ACCESS_TOKEN }}
+          google_oidc_token: ${{ steps.auth.outputs.id_token }}
