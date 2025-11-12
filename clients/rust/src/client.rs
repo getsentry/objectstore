@@ -337,6 +337,14 @@ pub struct Client {
 }
 
 impl Client {
+    /// Creates a new [`Client`], configured with the given `service_url` and default
+    /// configuration.
+    ///
+    /// Use [`Client::builder`] for more fine-grained configuration.
+    pub fn new(service_url: impl reqwest::IntoUrl) -> crate::Result<Client> {
+        ClientBuilder::new(service_url).build()
+    }
+
     /// Convenience function to create a [`ClientBuilder`].
     pub fn builder(service_url: impl reqwest::IntoUrl) -> ClientBuilder {
         ClientBuilder::new(service_url)
