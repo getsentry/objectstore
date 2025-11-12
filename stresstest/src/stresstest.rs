@@ -21,15 +21,7 @@ use crate::workload::{Action, Workload, WorkloadMode};
 ///
 /// The function runs all workloads concurrently, then prints metrics and finally deletes all
 /// objects from the remote.
-pub async fn run(
-    mut remote: HttpRemote,
-    workloads: Vec<Workload>,
-    duration: Duration,
-) -> Result<()> {
-    for workload in &workloads {
-        remote.register_usecase(&Usecase::new(workload.name.as_str()));
-    }
-
+pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duration) -> Result<()> {
     let remote = Arc::new(remote);
 
     let bar = ProgressBar::new_spinner()
