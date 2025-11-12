@@ -20,6 +20,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 
+use crate::auth;
 use crate::config::Config;
 use crate::endpoints;
 use crate::state::{ServiceState, State};
@@ -95,6 +96,10 @@ impl App {
             .layer(SetResponseHeaderLayer::overriding(
                 header::SERVER,
                 HeaderValue::from_static(SERVER),
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth::authorize,
             ))
             .layer(NewSentryLayer::new_from_top())
             .layer(SentryHttpLayer::new().enable_transaction())
