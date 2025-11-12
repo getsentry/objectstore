@@ -11,6 +11,9 @@ def guess_mime_type(contents: bytes | IO[bytes]) -> str | None:
 
     Reads up to 261 bytes from the beginning of the content to determine
     the MIME type using file header signatures.
+
+    To guess the MIME type from a filename, use `mimetypes.guess_type`,
+    which is part of the standard library.
     """
 
     if isinstance(contents, bytes):
