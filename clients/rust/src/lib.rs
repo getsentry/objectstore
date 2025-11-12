@@ -9,10 +9,10 @@
 //! ```no_run
 //! use std::time::Duration;
 //! use std::sync::LazyLock;
-//! use objectstore_client::{ClientBuilder, Usecase, Client, Compression};
+//! use objectstore_client::{Usecase, Client, Compression};
 //!
 //! static OBJECTSTORE_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-//!     ClientBuilder::new("http://localhost:8888/")
+//!     Client::builder("http://localhost:8888/")
 //!         // Optionally, propagate tracing headers to use distributed tracing in Sentry
 //!         .propagate_traces(true)
 //!         // Customize the reqwest::ClientBuilder
