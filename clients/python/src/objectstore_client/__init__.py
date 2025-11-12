@@ -1,4 +1,10 @@
-from objectstore_client.client import Client, GetResult, RequestError, Session, Usecase
+from objectstore_client.client import (
+    Client,
+    GetResponse,
+    RequestError,
+    Session,
+    Usecase,
+)
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -12,7 +18,7 @@ __all__ = [
     "Client",
     "Usecase",
     "Session",
-    "GetResult",
+    "GetResponse",
     "RequestError",
     "Compression",
     "ExpirationPolicy",
