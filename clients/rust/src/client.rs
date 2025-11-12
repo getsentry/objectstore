@@ -105,17 +105,14 @@ impl ClientBuilder {
     /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
     ///   more information on when this can happen.
     pub fn build(self) -> crate::Result<Client> {
-        self.0
-            .map(|inner| inner.apply_defaults())
-            .and_then(|inner| {
-                Ok(Client {
-                    inner: Arc::new(ClientInner {
-                        reqwest: inner.reqwest_builder.build()?,
-                        service_url: inner.service_url,
-                        propagate_traces: inner.propagate_traces,
-                    }),
-                })
-            })
+        let inner = self.0?.apply_defaults();
+        Ok(Client {
+            inner: Arc::new(ClientInner {
+                reqwest: inner.reqwest_builder.build()?,
+                service_url: inner.service_url,
+                propagate_traces: inner.propagate_traces,
+            }),
+        })
     }
 }
 
