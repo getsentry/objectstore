@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.9
+
+### Various fixes & improvements
+
+- feat(rust-client): Introduce new API (#190) by @lcian
+
 ## 0.0.8
 
 ### Various fixes & improvements
