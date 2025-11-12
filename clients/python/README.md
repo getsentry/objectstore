@@ -53,7 +53,7 @@ session = client.session(
 # The following operations will raise an exception on failure
 
 # Write an object and metadata
-object_id = session.put(
+object_key = session.put(
     b"Hello, world!",
     # You can pass in your own identifier for the object to decide where to store the file.
     # Otherwise, Objectstore will pick an identifier and return it.
@@ -65,14 +65,14 @@ object_id = session.put(
 )
 
 # Read an object and its metadata
-result = session.get(object_id)
+result = session.get(object_key)
 
 content = result.payload.read()
 assert content == b"Hello, world!"
 assert result.metadata.custom["key"] == "value"
 
 # Delete an object
-session.delete(object_id)
+session.delete(object_key)
 ```
 
 ## Development

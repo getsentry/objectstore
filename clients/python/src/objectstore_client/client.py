@@ -29,7 +29,7 @@ from objectstore_client.metrics import (
 Permission = Literal["read", "write"]
 
 
-class GetResult(NamedTuple):
+class GetResponse(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
 
@@ -206,8 +206,8 @@ class Session:
             return dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
         return {}
 
-    def _make_url(self, id: str | None, full: bool = False) -> str:
-        base_path = f"/v1/{id}" if id else "/v1/"
+    def _make_url(self, key: str | None, full: bool = False) -> str:
+        base_path = f"/v1/{key}" if key else "/v1/"
         qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
@@ -217,7 +217,7 @@ class Session:
     def put(
         self,
         contents: bytes | IO[bytes],
-        id: str | None = None,
+        key: str | None = None,
         compression: Compression | Literal["none"] | None = None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -226,7 +226,7 @@ class Session:
         """
         Uploads the given `contents` to blob storage.
 
-        If no `id` is provided, one will be automatically generated and returned
+        If no `key` is provided, one will be automatically generated and returned
         from this function.
 
         The client will select the configured `default_compression` if none is given
@@ -261,7 +261,7 @@ class Session:
         ) as metric_emitter:
             response = self._pool.request(
                 "PUT",
-                self._make_url(id),
+                self._make_url(key),
                 body=body,
                 headers=headers,
                 preload_content=True,
@@ -277,9 +277,9 @@ class Session:
                 metric_emitter.record_compressed_size(body.tell(), compression)
             return res["key"]
 
-    def get(self, id: str, decompress: bool = True) -> GetResult:
+    def get(self, key: str, decompress: bool = True) -> GetResponse:
         """
-        This fetches the blob with the given `id`, returning an `IO` stream that
+        This fetches the blob with the given `key`, returning an `IO` stream that
         can be read.
 
         By default, content that was uploaded compressed will be automatically
@@ -292,7 +292,7 @@ class Session:
         ):
             response = self._pool.request(
                 "GET",
-                self._make_url(id),
+                self._make_url(key),
                 preload_content=False,
                 decode_content=False,
                 headers=headers,
@@ -312,21 +312,21 @@ class Session:
             dctx = zstandard.ZstdDecompressor()
             stream = dctx.stream_reader(stream, read_across_frames=True)
 
-        return GetResult(metadata, stream)
+        return GetResponse(metadata, stream)
 
-    def object_url(self, id: str) -> str:
+    def object_url(self, key: str) -> str:
         """
-        Generates a GET url to the object with the given `id`.
+        Generates a GET url to the object with the given `key`.
 
         This can then be used by downstream services to fetch the given object.
         NOTE however that the service does not strictly follow HTTP semantics,
         in particular in relation to `Accept-Encoding`.
         """
-        return self._make_url(id, full=True)
+        return self._make_url(key, full=True)
 
-    def delete(self, id: str) -> None:
+    def delete(self, key: str) -> None:
         """
-        Deletes the blob with the given `id`.
+        Deletes the blob with the given `key`.
         """
 
         headers = self._make_headers()
@@ -335,7 +335,7 @@ class Session:
         ):
             response = self._pool.request(
                 "DELETE",
-                self._make_url(id),
+                self._make_url(key),
                 headers=headers,
             )
             raise_for_status(response)
