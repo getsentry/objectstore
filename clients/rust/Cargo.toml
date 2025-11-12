@@ -16,11 +16,13 @@ bytes = { workspace = true }
 futures-util = { workspace = true }
 objectstore-types = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
-sentry = { workspace = true }
+sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+# See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211
+tokio = "1.45.0"
 tokio-util = { workspace = true, features = ["io"] }
+url = "2.5.7"
 
 [dev-dependencies]
 objectstore-server = { workspace = true }

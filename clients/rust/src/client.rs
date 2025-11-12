@@ -5,168 +5,397 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
+use url::Url;
 
 pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
-/// Service for storing and retrieving objects.
-///
-/// The Service contains the base configuration to connect to a service.
-/// It has to be further initialized with credentials using the
-/// [`for_organization`](Self::for_organization) and
-/// [`for_project`](Self::for_project) functions.
 #[derive(Debug)]
-pub struct ClientBuilder {
-    service_url: Arc<str>,
-    client: reqwest::Client,
+struct ClientBuilderInner {
+    service_url: Url,
     propagate_traces: bool,
-
-    usecase: Arc<str>,
-    default_compression: Compression,
-    default_expiration_policy: ExpirationPolicy,
+    reqwest_builder: reqwest::ClientBuilder,
 }
 
-impl ClientBuilder {
-    /// Creates a new [`ClientBuilder`].
-    ///
-    /// This service instance is configured to target the given `service_url`.
-    /// It is also scoped for the given `usecase`.
-    ///
-    /// In order to get or put objects, one has to create a [`Client`] using the
-    /// [`for_organization`](Self::for_organization) function.
-    pub fn new(service_url: &str, usecase: &str) -> crate::Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
+impl ClientBuilderInner {
+    /// Applies defaults that cannot be overridden by the caller.
+    fn apply_defaults(mut self) -> Self {
+        self.reqwest_builder = self
+            .reqwest_builder
             // hickory-dns: Controlled by the `reqwest/hickory-dns` feature flag
             // we are dealing with de/compression ourselves:
             .no_brotli()
             .no_deflate()
             .no_gzip()
-            .no_zstd()
+            .no_zstd();
+        self
+    }
+}
+
+/// Builder to create a [`Client`].
+#[must_use = "call .build() on this ClientBuilder to create a Client"]
+#[derive(Debug)]
+pub struct ClientBuilder(crate::Result<ClientBuilderInner>);
+
+impl ClientBuilder {
+    /// Creates a new [`ClientBuilder`], configured with the given `service_url`.
+    ///
+    /// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
+    /// and Scope in order to create a [`Session`].
+    pub fn new(service_url: impl reqwest::IntoUrl) -> Self {
+        let service_url = match service_url.into_url() {
+            Ok(url) => url,
+            Err(err) => return Self(Err(err.into())),
+        };
+
+        let reqwest_builder = reqwest::Client::builder()
             // The read timeout "applies to each read operation", so should work fine for larger
             // transfers that are split into multiple chunks.
             // We define both as 500ms which is still very conservative, given that we are in the same network,
             // and expect our backends to respond in <100ms.
+            // This can be overridden by the caller.
             .connect_timeout(Duration::from_millis(500))
             .read_timeout(Duration::from_millis(500))
-            .build()?;
+            .user_agent(USER_AGENT);
 
-        Ok(Self {
-            service_url: service_url.trim_end_matches('/').into(),
-            client,
+        Self(Ok(ClientBuilderInner {
+            service_url,
             propagate_traces: false,
-
-            usecase: usecase.into(),
-            default_compression: Compression::Zstd,
-            default_expiration_policy: ExpirationPolicy::Manual,
-        })
+            reqwest_builder,
+        }))
     }
 
-    /// This changes the default compression used for uploads.
-    pub fn default_compression(mut self, compression: Compression) -> Self {
-        self.default_compression = compression;
-        self
-    }
-
-    /// This sets a default expiration policy used for uploads.
-    pub fn default_expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
-        self.default_expiration_policy = expiration_policy;
-        self
-    }
-
-    /// This changes whether the `sentry-trace` header will be sent to Objectstore
+    /// Changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
-    pub fn with_distributed_tracing(mut self, propagate_traces: bool) -> Self {
-        self.propagate_traces = propagate_traces;
+    pub fn propagate_traces(mut self, propagate_traces: bool) -> Self {
+        if let Ok(ref mut inner) = self.0 {
+            inner.propagate_traces = propagate_traces;
+        }
         self
     }
 
-    fn make_client(&self, scope: String) -> Client {
-        Client {
-            service_url: self.service_url.clone(),
-            http: self.client.clone(),
-            propagate_traces: self.propagate_traces,
-
-            usecase: self.usecase.clone(),
-            scope,
-            default_compression: self.default_compression,
-            default_expiration_policy: self.default_expiration_policy,
-        }
+    /// Sets both the connect and the read timeout for the [`reqwest::Client`].
+    /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    pub fn timeout(self, timeout: Duration) -> Self {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.reqwest_builder = inner
+            .reqwest_builder
+            .connect_timeout(timeout)
+            .read_timeout(timeout);
+        Self(Ok(inner))
     }
 
-    /// Create a new [`Client`] and sets its `scope` based on the provided organization.
-    pub fn for_organization(&self, organization_id: u64) -> Client {
-        let scope = format!("org.{organization_id}");
-        self.make_client(scope)
+    /// Calls the closure with the underlying [`reqwest::ClientBuilder`].
+    pub fn configure_reqwest<F>(self, closure: F) -> Self
+    where
+        F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.reqwest_builder = closure(inner.reqwest_builder);
+        Self(Ok(inner))
     }
 
-    /// Create a new [`Client`] and sets its `scope` based on the provided organization
-    /// and project.
-    pub fn for_project(&self, organization_id: u64, project_id: u64) -> Client {
-        let scope = format!("org.{organization_id}/proj.{project_id}");
-        self.make_client(scope)
+    /// Returns a [`Client`] that uses this [`ClientBuilder`] configuration.
+    ///
+    /// # Errors
+    ///
+    /// This method fails if:
+    /// - the given `service_url` is invalid
+    /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
+    ///   more information on when this can happen.
+    pub fn build(self) -> crate::Result<Client> {
+        let inner = self.0?.apply_defaults();
+        Ok(Client {
+            inner: Arc::new(ClientInner {
+                reqwest: inner.reqwest_builder.build()?,
+                service_url: inner.service_url,
+                propagate_traces: inner.propagate_traces,
+            }),
+        })
     }
 }
 
-/// A scoped objectstore client that can access objects in a specific use case and scope.
+/// An identifier for a workload in Objectstore, along with defaults to use for all
+/// operations within that Usecase.
+///
+/// Usecases need to be statically defined in Objectstore's configuration server-side.
+/// Objectstore can make decisions based on the Usecase. For example, choosing the most
+/// suitable storage backend.
+#[derive(Debug, Clone)]
+pub struct Usecase {
+    name: Arc<str>,
+    compression: Compression,
+    expiration: ExpirationPolicy,
+}
+
+impl Usecase {
+    /// Creates a new Usecase.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            compression: Compression::Zstd,
+            expiration: Default::default(),
+        }
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    /// TODO: document
+    pub fn with_compression(self, compression: Compression) -> Self {
+        Self {
+            compression,
+            ..self
+        }
+    }
+
+    /// TODO: document
+    #[inline]
+    pub fn expiration(&self) -> ExpirationPolicy {
+        self.expiration
+    }
+
+    /// TODO: document
+    pub fn with_expiration(self, expiration: ExpirationPolicy) -> Self {
+        Self { expiration, ..self }
+    }
+
+    /// TODO: document
+    pub fn scope(&self) -> Scope {
+        Scope::new(self.clone())
+    }
+
+    /// TODO: document
+    pub fn for_organization(&self, organization: u64) -> Scope {
+        Scope::for_organization(self.clone(), organization)
+    }
+
+    /// TODO: document
+    pub fn for_project(&self, organization: u64, project: u64) -> Scope {
+        Scope::for_project(self.clone(), organization, project)
+    }
+}
+
 #[derive(Debug)]
-pub struct Client {
-    pub(crate) http: reqwest::Client,
-    pub(crate) service_url: Arc<str>,
+pub(crate) struct ScopeInner {
+    usecase: Usecase,
+    scope: String,
+}
+
+impl ScopeInner {
+    #[inline]
+    pub(crate) fn usecase(&self) -> &Usecase {
+        &self.usecase
+    }
+}
+
+impl std::fmt::Display for ScopeInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.scope)
+    }
+}
+
+/// TODO: document
+#[derive(Debug)]
+pub struct Scope(crate::Result<ScopeInner>);
+
+impl Scope {
+    /// TODO: document
+    pub fn new(usecase: Usecase) -> Self {
+        Self(Ok(ScopeInner {
+            usecase,
+            scope: String::new(),
+        }))
+    }
+
+    fn for_organization(usecase: Usecase, organization: u64) -> Self {
+        let scope = format!("org.{}", organization);
+        Self(Ok(ScopeInner { usecase, scope }))
+    }
+
+    fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
+        let scope = format!("org.{}/project.{}", organization, project);
+        Self(Ok(ScopeInner { usecase, scope }))
+    }
+
+    /// TODO: document
+    pub fn push<V>(self, key: &str, value: &V) -> Self
+    where
+        V: std::fmt::Display,
+    {
+        let result = self.0.and_then(|mut inner| {
+            Self::validate_key(key)?;
+
+            let value = value.to_string();
+            Self::validate_value(&value)?;
+
+            if !inner.scope.is_empty() {
+                inner.scope.push('/');
+            }
+            inner.scope.push_str(key);
+            inner.scope.push('.');
+            inner.scope.push_str(&value);
+
+            Ok(inner)
+        });
+
+        Self(result)
+    }
+
+    /// Characters allowed in a Scope's key and value.
+    /// These are the URL safe characters, except for `.` which we use as separator between
+    /// key and value of Scope components.
+    const ALLOWED_CHARS: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
+
+    /// Validates that a scope key contains only allowed characters and is not empty.
+    fn validate_key(key: &str) -> crate::Result<()> {
+        if key.is_empty() {
+            return Err(crate::Error::InvalidScope {
+                message: "Scope key cannot be empty".to_string(),
+            });
+        }
+        if key.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
+            Ok(())
+        } else {
+            Err(crate::Error::InvalidScope {
+                message: format!("Invalid scope key '{key}'."),
+            })
+        }
+    }
+
+    /// Validates that a scope value contains only allowed characters and is not empty.
+    fn validate_value(value: &str) -> crate::Result<()> {
+        if value.is_empty() {
+            return Err(crate::Error::InvalidScope {
+                message: "Scope value cannot be empty".to_string(),
+            });
+        }
+        if value.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
+            Ok(())
+        } else {
+            Err(crate::Error::InvalidScope {
+                message: format!("Invalid scope value '{value}'."),
+            })
+        }
+    }
+
+    /// TODO: document
+    pub fn session(self, client: &Client) -> crate::Result<Session> {
+        client.session(self)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientInner {
+    reqwest: reqwest::Client,
+    service_url: Url,
     propagate_traces: bool,
+}
 
-    pub(crate) usecase: Arc<str>,
+/// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
+///
+/// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
+/// and Scope in order to create a [`Session`].
+///
+/// # Example
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use objectstore_client::{Client, Usecase};
+///
+/// # async fn example() -> objectstore_client::Result<()> {
+/// let client = Client::builder("http://localhost:8888/")
+///     .timeout(Duration::from_secs(1))
+///     .propagate_traces(true)
+///     .build()?;
+/// let usecase = Usecase::new("my_app");
+///
+/// let session = client.session(usecase.for_project(12345, 1337))?;
+///
+/// let response = session.put("hello world").send().await?;
+///
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Client {
+    inner: Arc<ClientInner>,
+}
 
-    /// The scope that this client operates within.
+impl Client {
+    /// Creates a new [`Client`], configured with the given `service_url` and default
+    /// configuration.
     ///
-    /// Scopes are expected to be serialized ordered lists of key/value pairs. Each
-    /// pair is serialized with a `.` character between the key and value, and with
-    /// a `/` character between each pair. For example:
-    /// - `org.123/proj.456`
-    /// - `state.washington/city.seattle`
+    /// Use [`Client::builder`] for more fine-grained configuration.
     ///
-    /// It is recommended that both keys and values be restricted to alphanumeric
-    /// characters.
-    pub(crate) scope: String,
-    pub(crate) default_compression: Compression,
-    pub(crate) default_expiration_policy: ExpirationPolicy,
+    /// # Errors
+    ///
+    /// This method fails if [`ClientBuilder::build`] fails.
+    pub fn new(service_url: impl reqwest::IntoUrl) -> crate::Result<Client> {
+        ClientBuilder::new(service_url).build()
+    }
+
+    /// Convenience function to create a [`ClientBuilder`].
+    pub fn builder(service_url: impl reqwest::IntoUrl) -> ClientBuilder {
+        ClientBuilder::new(service_url)
+    }
+
+    /// TODO: document
+    pub fn session(&self, scope: Scope) -> crate::Result<Session> {
+        scope.0.map(|inner| Session {
+            scope: inner.into(),
+            client: self.inner.clone(),
+        })
+    }
+}
+
+/// TODO: document
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub(crate) scope: Arc<ScopeInner>,
+    pub(crate) client: Arc<ClientInner>,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
-impl Client {
-    pub(crate) fn request<U: reqwest::IntoUrl>(
+impl Session {
+    pub(crate) fn request(
         &self,
         method: reqwest::Method,
-        uri: U,
+        resource_id: &str,
     ) -> crate::Result<reqwest::RequestBuilder> {
-        let mut builder = self.http.request(method, uri).query(&[
-            (PARAM_SCOPE, self.scope.as_ref()),
-            (PARAM_USECASE, self.usecase.as_ref()),
+        let mut url = self.client.service_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| crate::Error::InvalidUrl {
+                message: format!("The URL {} cannot be a base", self.client.service_url),
+            })?
+            .extend(&["v1", resource_id]);
+
+        let mut builder = self.client.reqwest.request(method, url).query(&[
+            (PARAM_SCOPE, self.scope.scope.as_str()),
+            (PARAM_USECASE, self.scope.usecase.name.as_ref()),
         ]);
 
-        if self.propagate_traces {
+        if self.client.propagate_traces {
             let trace_headers =
-                sentry::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
+                sentry_core::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
             for (header_name, value) in trace_headers.into_iter().flatten() {
                 builder = builder.header(header_name, value);
             }
         }
 
         Ok(builder)
-    }
-
-    /// Deletes the object with the given `id`.
-    pub async fn delete(&self, id: &str) -> crate::Result<()> {
-        let delete_url = format!("{}/v1/{id}", self.service_url);
-
-        let _response = self
-            .request(reqwest::Method::DELETE, delete_url)?
-            .send()
-            .await?;
-
-        Ok(())
     }
 }

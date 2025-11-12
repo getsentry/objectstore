@@ -13,6 +13,18 @@ pub enum Error {
     /// Errors handling metadata, such as serializing it to/from HTTP headers.
     #[error(transparent)]
     Metadata(#[from] objectstore_types::Error),
+    /// Error when scope validation fails.
+    #[error("{message}")]
+    InvalidScope {
+        /// The validation error message.
+        message: String,
+    },
+    /// Error when URL manipulation fails.
+    #[error("{message}")]
+    InvalidUrl {
+        /// The URL error message.
+        message: String,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

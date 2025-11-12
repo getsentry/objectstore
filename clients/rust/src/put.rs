@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
@@ -13,18 +13,36 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
-use crate::{Client, ClientStream};
+use crate::{ClientStream, Session};
 
-impl Client {
-    fn put_body(&self, body: PutBody) -> PutBuilder<'_> {
+/// The response returned from the service after uploading an object.
+#[derive(Debug, Deserialize)]
+pub struct PutResponse {
+    /// The key of the object, as stored.
+    pub key: String,
+}
+
+pub(crate) enum PutBody {
+    Buffer(Bytes),
+    Stream(ClientStream),
+}
+
+impl fmt::Debug for PutBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PutBody").finish_non_exhaustive()
+    }
+}
+
+impl Session {
+    fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
-            expiration_policy: self.default_expiration_policy,
-            compression: Some(self.default_compression),
+            expiration_policy: self.scope.usecase().expiration(),
+            compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
 
         PutBuilder {
-            client: self,
+            session: self.clone(),
             metadata,
             key: None,
             body,
@@ -32,17 +50,17 @@ impl Client {
     }
 
     /// Creates a PUT request for a [`Bytes`]-like type.
-    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder<'_> {
+    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder {
         self.put_body(PutBody::Buffer(body.into()))
     }
 
     /// Creates a PUT request with a stream.
-    pub fn put_stream(&self, body: ClientStream) -> PutBuilder<'_> {
+    pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
     /// Creates a PUT request with an [`AsyncRead`] type.
-    pub fn put_read<R>(&self, body: R) -> PutBuilder<'_>
+    pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
@@ -53,24 +71,14 @@ impl Client {
 
 /// A PUT request builder.
 #[derive(Debug)]
-pub struct PutBuilder<'a> {
-    pub(crate) client: &'a Client,
-    pub(crate) metadata: Metadata,
-    pub(crate) key: Option<String>,
-    pub(crate) body: PutBody,
+pub struct PutBuilder {
+    session: Session,
+    metadata: Metadata,
+    key: Option<String>,
+    body: PutBody,
 }
 
-pub(crate) enum PutBody {
-    Buffer(Bytes),
-    Stream(ClientStream),
-}
-impl fmt::Debug for PutBody {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PutBody").finish_non_exhaustive()
-    }
-}
-
-impl PutBuilder<'_> {
+impl PutBuilder {
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the objectstore
@@ -96,6 +104,12 @@ impl PutBuilder<'_> {
         self
     }
 
+    /// Sets the content type of the object to be uploaded.
+    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
+        self.metadata.content_type = content_type.into();
+        self
+    }
+
     /// This sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.
@@ -111,25 +125,16 @@ impl PutBuilder<'_> {
     }
 }
 
-/// The response returned from the service after uploading an object.
-#[derive(Debug, Deserialize)]
-pub struct PutResponse {
-    /// The key of the object, as stored.
-    pub key: String,
-}
-
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
-impl PutBuilder<'_> {
+impl PutBuilder {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let put_url = format!(
-            "{}/v1/{}",
-            self.client.service_url,
-            self.key.as_deref().unwrap_or_default()
-        );
-        let mut builder = self.client.request(reqwest::Method::PUT, put_url)?;
+        let mut builder = self.session.request(
+            reqwest::Method::PUT,
+            self.key.as_deref().unwrap_or_default(),
+        )?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
