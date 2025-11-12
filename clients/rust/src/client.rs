@@ -341,6 +341,10 @@ impl Client {
     /// configuration.
     ///
     /// Use [`Client::builder`] for more fine-grained configuration.
+    ///
+    /// # Errors
+    ///
+    /// This method fails if [`ClientBuilder::build`] fails.
     pub fn new(service_url: impl reqwest::IntoUrl) -> crate::Result<Client> {
         ClientBuilder::new(service_url).build()
     }
