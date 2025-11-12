@@ -237,6 +237,7 @@ pub struct Scope(crate::Result<ScopeInner>);
 
 impl Scope {
     /// Creates a new root-level Scope for the given usecase.
+    ///
     /// Using a custom Scope is discouraged, prefer using [`Usecase::for_organization`] or [`Usecase::for_project`] instead.
     pub fn new(usecase: Usecase) -> Self {
         Self(Ok(ScopeInner {
@@ -396,6 +397,7 @@ impl Client {
 }
 
 /// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
+///
 /// Create a Session using [`Client::session`] or [`Scope::session`].
 #[derive(Debug, Clone)]
 pub struct Session {

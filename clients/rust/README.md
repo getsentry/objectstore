@@ -11,7 +11,7 @@ use objectstore_client::{Client, Usecase};
 
 let client = Client::builder("http://localhost:8888/").build()?;
 
-let usecase = Usecase::new("attachments").for_project(42, 1337).session(&client)?;
+let session = Usecase::new("attachments").for_project(42, 1337).session(&client)?;
 
 let response = session.put("hello world").send().await?;
 
