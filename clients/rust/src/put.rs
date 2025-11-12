@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
@@ -101,6 +101,12 @@ impl PutBuilder {
     /// Sets the expiration policy of the object to be uploaded.
     pub fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
         self.metadata.expiration_policy = expiration_policy;
+        self
+    }
+
+    /// Sets the content type of the object to be uploaded.
+    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
+        self.metadata.content_type = content_type.into();
         self
     }
 
