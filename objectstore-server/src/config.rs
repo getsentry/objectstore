@@ -32,7 +32,7 @@
 //! ```
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,8 @@ use figment::providers::{Env, Format, Serialized, Yaml};
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
+
+use crate::auth::Permission;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
@@ -667,6 +669,44 @@ pub struct Metrics {
     pub tags: BTreeMap<String, String>,
 }
 
+/// A key that may be used to verify a request's `Authorization` header and its
+/// associated permissions. May contain multiple key versions to facilitate rotation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuthZVerificationKey {
+    /// Versions of this key's key material which may be used to verify signatures.
+    ///
+    /// If a key is being rotated, the old and new versions of that key should both be
+    /// configured so objectstore can verify signatures while the updated key is still
+    /// rolling out. Otherwise, this should only contain the most recent version of a key.
+    pub key_versions: Vec<SecretBox<ConfigSecret>>,
+
+    /// The maximum set of permissions that this key's signer is authorized to grant.
+    ///
+    /// If a request's `Authorization` header grants full permission but it was signed by
+    /// a key that is only allowed to grant read permission, then the request only has
+    /// read permission.
+    #[serde(default)]
+    pub max_permissions: HashSet<Permission>,
+}
+
+/// Configuration for content-based authorization.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct AuthZ {
+    /// Whether to enforce content-based authorization or not.
+    ///
+    /// If this is set to `false`, checks are still performed but failures will not result
+    /// in `403 Unauthorized` responses.
+    pub enforce: bool,
+
+    /// Keys that may be used to verify a request's `Authorization` header.
+    ///
+    /// This field is a container that is keyed on a key's ID. When verifying a JWT
+    /// from the `Authorization` header, the `kid` field should be read from the JWT
+    /// header and used to index into this map to select the appropriate key.
+    #[serde(default)]
+    pub keys: BTreeMap<String, AuthZVerificationKey>,
+}
+
 /// Main configuration struct for the objectstore server.
 ///
 /// This is the top-level configuration that combines all server settings including networking,
@@ -779,6 +819,12 @@ pub struct Config {
     /// Optional configuration for submitting internal metrics to Datadog. See [`Metrics`] for
     /// configuration options.
     pub metrics: Metrics,
+
+    /// Content-based authorization configuration.
+    ///
+    /// Controls the verification and enforcement of content-based access control based on the
+    /// JWT in a request's `Authorization` header.
+    pub auth: AuthZ,
 }
 
 impl Default for Config {
@@ -797,6 +843,7 @@ impl Default for Config {
             logging: Logging::default(),
             sentry: Sentry::default(),
             metrics: Metrics::default(),
+            auth: AuthZ::default(),
         }
     }
 }
@@ -948,6 +995,90 @@ mod tests {
             };
             // Env should overwrite the yaml config
             assert_eq!(endpoint, "http://localhost:9001");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_auth_with_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__AUTH__ENFORCE", "true");
+            jail.set_env(
+                "OS__AUTH__KEYS",
+                r#"{kid1={key_versions=["abcde","fghij","this is a test\n  multiline string\nend of string\n"],max_permissions=["object.read", "object.write"],}, kid2={key_versions=["12345"],}}"#,
+            );
+
+            let config = Config::load(None).unwrap();
+
+            assert!(config.auth.enforce);
+
+            let kid1 = config.auth.keys.get("kid1").unwrap();
+            assert_eq!(kid1.key_versions[0].expose_secret().as_str(), "abcde");
+            assert_eq!(kid1.key_versions[1].expose_secret().as_str(), "fghij");
+            assert_eq!(
+                kid1.key_versions[2].expose_secret().as_str(),
+                "this is a test\n  multiline string\nend of string\n"
+            );
+            assert_eq!(
+                kid1.max_permissions,
+                HashSet::from([Permission::ObjectRead, Permission::ObjectWrite])
+            );
+
+            let kid2 = config.auth.keys.get("kid2").unwrap();
+            assert_eq!(kid2.key_versions[0].expose_secret().as_str(), "12345");
+            assert_eq!(kid2.max_permissions, HashSet::new());
+
+            Ok(())
+        });
+    }
+    #[test]
+    fn configure_auth_with_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            auth:
+                enforce: true
+                keys:
+                    kid1:
+                        key_versions:
+                            - "abcde"
+                            - "fghij"
+                            - |
+                              this is a test
+                                multiline string
+                              end of string
+                        max_permissions:
+                            - "object.read"
+                            - "object.write"
+                    kid2:
+                        key_versions:
+                            - "12345"
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            assert!(config.auth.enforce);
+
+            let kid1 = config.auth.keys.get("kid1").unwrap();
+            assert_eq!(kid1.key_versions[0].expose_secret().as_str(), "abcde");
+            assert_eq!(kid1.key_versions[1].expose_secret().as_str(), "fghij");
+            assert_eq!(
+                kid1.key_versions[2].expose_secret().as_str(),
+                "this is a test\n  multiline string\nend of string\n"
+            );
+            assert_eq!(
+                kid1.max_permissions,
+                HashSet::from([Permission::ObjectRead, Permission::ObjectWrite])
+            );
+
+            let kid2 = config.auth.keys.get("kid2").unwrap();
+            assert_eq!(kid2.key_versions[0].expose_secret().as_str(), "12345");
+            assert_eq!(kid2.max_permissions, HashSet::new());
 
             Ok(())
         });
