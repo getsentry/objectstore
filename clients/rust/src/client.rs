@@ -68,6 +68,8 @@ impl ClientBuilder {
 
     /// Changes whether the `sentry-trace` header will be sent to Objectstore
     /// to take advantage of Sentry's distributed tracing.
+    ///
+    /// By default, tracing headers will not be propagated.
     pub fn propagate_traces(mut self, propagate_traces: bool) -> Self {
         if let Ok(ref mut inner) = self.0 {
             inner.propagate_traces = propagate_traces;
@@ -77,6 +79,8 @@ impl ClientBuilder {
 
     /// Sets both the connect and the read timeout for the [`reqwest::Client`].
     /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    ///
+    /// By default, a connect and read timeout of 500ms is set.
     pub fn timeout(self, timeout: Duration) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.reqwest_builder = inner
@@ -87,6 +91,8 @@ impl ClientBuilder {
     }
 
     /// Calls the closure with the underlying [`reqwest::ClientBuilder`].
+    ///
+    /// By default, the ClientBuilder is configured to create a reqwest Client with a connect and read timeout of 500ms and a user agent identifying this library.
     pub fn configure_reqwest<F>(self, closure: F) -> Self
     where
         F: FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
@@ -126,7 +132,7 @@ impl ClientBuilder {
 pub struct Usecase {
     name: Arc<str>,
     compression: Compression,
-    expiration: ExpirationPolicy,
+    expiration_policy: ExpirationPolicy,
 }
 
 impl Usecase {
@@ -135,23 +141,27 @@ impl Usecase {
         Self {
             name: name.into(),
             compression: Compression::Zstd,
-            expiration: Default::default(),
+            expiration_policy: Default::default(),
         }
     }
 
-    /// TODO: document
+    /// Returns the name of this usecase.
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// TODO: document
+    /// Returns the compression algorithm to use for operations within this usecase.
     #[inline]
     pub fn compression(&self) -> Compression {
         self.compression
     }
 
-    /// TODO: document
+    /// Sets the compression algorithm to use for operations within this usecase.
+    ///
+    /// It's still possible to override this default on each operation's builder.
+    ///
+    /// By default, [`Compression::Zstd`] is used.
     pub fn with_compression(self, compression: Compression) -> Self {
         Self {
             compression,
@@ -159,28 +169,41 @@ impl Usecase {
         }
     }
 
-    /// TODO: document
+    /// Returns the expiration policy to use by default for operations within this usecase.
     #[inline]
-    pub fn expiration(&self) -> ExpirationPolicy {
-        self.expiration
+    pub fn expiration_policy(&self) -> ExpirationPolicy {
+        self.expiration_policy
     }
 
-    /// TODO: document
-    pub fn with_expiration(self, expiration: ExpirationPolicy) -> Self {
-        Self { expiration, ..self }
+    /// Sets the expiration policy to use for operations within this usecase.
+    ///
+    /// It's still possible to override this default on each operation's builder.
+    ///
+    /// By default, [`ExpirationPolicy::Manual`] is used, meaning that objects won't automatically
+    /// expire.
+    pub fn with_expiration_policy(self, expiration_policy: ExpirationPolicy) -> Self {
+        Self {
+            expiration_policy,
+            ..self
+        }
     }
 
-    /// TODO: document
+    /// Creates a new custom [`Scope`].
+    ///
+    /// Add parts to it using [`Scope::push`].
+    ///
+    /// Generally, [`Usecase::for_organization`] and [`Usecase::for_project`] should fit most usecases,
+    /// so prefer using those methods rather than creating your own custom [`Scope`].
     pub fn scope(&self) -> Scope {
         Scope::new(self.clone())
     }
 
-    /// TODO: document
+    /// Creates a new [`Scope`] tied to the given organization.
     pub fn for_organization(&self, organization: u64) -> Scope {
         Scope::for_organization(self.clone(), organization)
     }
 
-    /// TODO: document
+    /// Creates a new [`Scope`] tied to the given organization and project.
     pub fn for_project(&self, organization: u64, project: u64) -> Scope {
         Scope::for_project(self.clone(), organization, project)
     }
@@ -205,12 +228,18 @@ impl std::fmt::Display for ScopeInner {
     }
 }
 
-/// TODO: document
+/// A [`Scope`] is a sequence of key-value pairs that defines a (possibly nested) namespace within a
+/// [`Usecase`].
+///
+/// To construct a [`Scope`], use [`Usecase::for_organization`], [`Usecase::for_project`], or
+/// [`Usecase::scope`] for custom scopes.
 #[derive(Debug)]
 pub struct Scope(crate::Result<ScopeInner>);
 
 impl Scope {
-    /// TODO: document
+    /// Creates a new root-level Scope for the given usecase.
+    ///
+    /// Using a custom Scope is discouraged, prefer using [`Usecase::for_organization`] or [`Usecase::for_project`] instead.
     pub fn new(usecase: Usecase) -> Self {
         Self(Ok(ScopeInner {
             usecase,
@@ -228,7 +257,7 @@ impl Scope {
         Self(Ok(ScopeInner { usecase, scope }))
     }
 
-    /// TODO: document
+    /// Extends this Scope by creating a new sub-scope nested within it.
     pub fn push<V>(self, key: &str, value: &V) -> Self
     where
         V: std::fmt::Display,
@@ -290,7 +319,11 @@ impl Scope {
         }
     }
 
-    /// TODO: document
+    /// Creates a session for this scope using the given client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid (e.g. it contains invalid characters).
     pub fn session(self, client: &Client) -> crate::Result<Session> {
         client.session(self)
     }
@@ -303,9 +336,9 @@ pub(crate) struct ClientInner {
     propagate_traces: bool,
 }
 
-/// A client for Objectstore. Use [`Client::builder`] to get configure and construct this.
+/// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
 ///
-/// To perform CRUD operations, one has to create a [`Client`], and then scope it to a [`Usecase`]
+/// To perform CRUD operations, one has to create a Client, and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
 ///
 /// # Example
@@ -351,7 +384,11 @@ impl Client {
         ClientBuilder::new(service_url)
     }
 
-    /// TODO: document
+    /// Creates a session for the given scope using this client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid (e.g. it contains invalid characters).
     pub fn session(&self, scope: Scope) -> crate::Result<Session> {
         scope.0.map(|inner| Session {
             scope: inner.into(),
@@ -360,7 +397,9 @@ impl Client {
     }
 }
 
-/// TODO: document
+/// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
+///
+/// Create a Session using [`Client::session`] or [`Scope::session`].
 #[derive(Debug, Clone)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,

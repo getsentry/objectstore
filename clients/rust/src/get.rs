@@ -66,6 +66,8 @@ pub struct GetBuilder {
 impl GetBuilder {
     /// Indicates whether the request should automatically handle decompression of known algorithms,
     /// or rather return the payload as it is stored, along with the compression algorithm it is stored in.
+    ///
+    /// By default, automatic decompression is enabled.
     pub fn decompress(mut self, decompress: bool) -> Self {
         self.decompress = decompress;
         self

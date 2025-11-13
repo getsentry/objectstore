@@ -36,7 +36,7 @@ impl fmt::Debug for PutBody {
 impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
-            expiration_policy: self.scope.usecase().expiration(),
+            expiration_policy: self.scope.usecase().expiration_policy(),
             compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
@@ -81,7 +81,7 @@ pub struct PutBuilder {
 impl PutBuilder {
     /// Sets an explicit object key.
     ///
-    /// If a key is specified, the object will be stored under that key. Otherwise, the objectstore
+    /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
     /// server will automatically assign a random key, which is then returned from this request.
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
@@ -93,12 +93,16 @@ impl PutBuilder {
     /// [`None`] should be used if no compression should be performed by the client,
     /// either because the payload is uncompressible (such as a media format), or if the user
     /// will handle any kind of compression, without the clients knowledge.
+    ///
+    /// By default, the compression algorithm set on this Session's Usecase is used.
     pub fn compression(mut self, compression: impl Into<Option<Compression>>) -> Self {
         self.metadata.compression = compression.into();
         self
     }
 
     /// Sets the expiration policy of the object to be uploaded.
+    ///
+    /// By default, the expiration policy set on this Session's Usecase is used.
     pub fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
         self.metadata.expiration_policy = expiration_policy;
         self

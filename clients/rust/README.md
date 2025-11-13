@@ -1,21 +1,93 @@
 # Objectstore Client
 
-The client is used to interface with the objectstore backend. It handles
+The client is used to interface with the Objectstore backend. It handles
 responsibilities like transparent compression, and making sure that uploads and
 downloads are done as efficiently as possible.
 
 ## Usage
 
+Here's a basic example that shows how to use this client:
+
 ```rust
-use objectstore_client::ClientBuilder;
+use objectstore_client::{Client, Usecase, Result};
 
-let client = ClientBuilder::new("http://localhost:8888/", "my-usecase")?
-    .for_organization(42);
+async fn example_basic() -> Result<()> {
+    let client = Client::new("http://localhost:8888/")?;
+    let session = Usecase::new("attachments")
+        .for_project(42, 1337)
+        .session(&client)?;
 
-let response = client.put("hello world").send().await?;
-let object = client.get(&response.key).send().await?.expect("object to exist");
-assert_eq!(object.payload().await?, "hello world");
+    let response = session.put("Hello, world!")
+        .send()
+        .await
+        .expect("put to succeed");
+
+    let object = session
+        .get(&response.key)
+        .send()
+        .await?
+        .expect("object to exist");
+    assert_eq!(object.payload().await?, "hello world");
+
+    session
+        .delete(&response.key)
+        .send()
+        .await
+        .expect("delete to succeed");
+
+    Ok(())
+}
 ```
+
+In practice, you would most likely want to store the `Client` and `Usecase`
+in something like a `static` and reuse them, like so:
+
+```rust
+use std::time::Duration;
+use std::sync::LazyLock;
+use objectstore_client::{Client, Compression, Usecase, Result};
+
+static OBJECTSTORE_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder("http://localhost:8888/")
+        // Optionally, propagate tracing headers to use distributed tracing in Sentry
+        .propagate_traces(true)
+        // Customize the `reqwest::ClientBuilder`
+        .configure_reqwest(|builder| {
+            builder.pool_idle_timeout(Duration::from_secs(90))
+                   .pool_max_idle_per_host(10)
+        })
+        .build()
+        .expect("Objectstore client to build successfully")
+});
+
+static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
+    Usecase::new("attachments")
+});
+
+async fn example() -> Result<()> {
+    let session = OBJECTSTORE_CLIENT
+        .session(ATTACHMENTS.for_project(42, 1337))?;
+
+    let response = session.put("Hello, world!").send().await?;
+
+    let object = session
+        .get(&response.key)
+        .send()
+        .await?
+        .expect("object to exist");
+    assert_eq!(object.payload().await?, "hello world");
+
+    session
+        .delete(&response.key)
+        .send()
+        .await
+        .expect("deletion to succeed");
+
+    Ok(())
+}
+```
+
+See the [API docs](https://getsentry.github.io/objectstore/rust/objectstore_client/) for more in-depth documentation.
 
 ## License
 
