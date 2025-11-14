@@ -234,6 +234,9 @@ class Session:
         This can be overridden by explicitly giving a `compression` argument.
         Providing `"none"` as the argument will instruct the client to not apply
         any compression to this upload, which is useful for uncompressible formats.
+
+        You can use the utility function `objectstore_client.utils.guess_mime_type`
+        to attempt to guess a `content_type` based on magic bytes.
         """
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
