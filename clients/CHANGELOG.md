@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.10
+
+### Various fixes & improvements
+
+- feat(rust-client): Add a util to guess MIME type (#200) by @lcian
+- feat(py-client): Add a util to guess MIME type (#197) by @lcian
+- docs(rust-client): Add some more docs for new Rust API (#194) by @lcian
+- ref(py-client): Rename a couple things (#196) by @lcian
+
 ## 0.0.9
 
 ### Various fixes & improvements
