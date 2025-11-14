@@ -43,6 +43,9 @@ pub enum Error {
     /// The compression algorithm is invalid.
     #[error("invalid compression value")]
     InvalidCompression,
+    /// The content type is invalid.
+    #[error("invalid content type")]
+    InvalidContentType(#[from] Option<mediatype::MediaTypeError>),
 }
 impl From<http::header::InvalidHeaderValue> for Error {
     fn from(err: http::header::InvalidHeaderValue) -> Self {
@@ -219,6 +222,7 @@ impl Metadata {
             // standard headers
             if name == header::CONTENT_TYPE {
                 let content_type = value.to_str()?;
+                validate_content_type(content_type)?;
                 metadata.content_type = content_type.to_owned().into();
                 continue;
             }
@@ -301,6 +305,13 @@ impl Metadata {
 
         Ok(headers)
     }
+}
+
+/// Validates that `content_type` is a valid [IANA Media
+/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
+fn validate_content_type(content_type: &str) -> Result<(), Error> {
+    mediatype::MediaType::parse(content_type)?;
+    Ok(())
 }
 
 impl Default for Metadata {

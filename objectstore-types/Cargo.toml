@@ -12,5 +12,6 @@ publish = true
 [dependencies]
 http = { workspace = true }
 humantime = { workspace = true }
+mediatype = "0.21.0"
 serde = { workspace = true }
 thiserror = { workspace = true }
