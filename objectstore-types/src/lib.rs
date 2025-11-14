@@ -45,7 +45,7 @@ pub enum Error {
     InvalidCompression,
     /// The content type is invalid.
     #[error("invalid content type")]
-    InvalidContentType(#[from] Option<mediatype::MediaTypeError>),
+    InvalidContentType(#[from] mediatype::MediaTypeError),
 }
 impl From<http::header::InvalidHeaderValue> for Error {
     fn from(err: http::header::InvalidHeaderValue) -> Self {
