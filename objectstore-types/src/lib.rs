@@ -23,11 +23,6 @@ pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
-/// HTTP request query parameter that contains the request scope.
-pub const PARAM_SCOPE: &str = "scope";
-/// HTTP request query parameter that contains the request usecase.
-pub const PARAM_USECASE: &str = "usecase";
-
 /// The default content type for objects without a known content type.
 pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
