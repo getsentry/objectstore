@@ -7,6 +7,7 @@ mod delete;
 mod error;
 mod get;
 mod put;
+pub mod utils;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
