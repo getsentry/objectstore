@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
-from urllib.parse import urlencode
 
 import sentry_sdk
 import urllib3
@@ -207,12 +206,11 @@ class Session:
         return {}
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
-        base_path = f"/v1/{key}" if key else "/v1/"
-        qs = urlencode({"usecase": self._usecase.name, "scope": self._scope})
+        base_path = f"/v1/{self._usecase.name}/{self._scope}/data/{key or ''}"
         if full:
-            return f"http://{self._pool.host}:{self._pool.port}{base_path}?{qs}"
+            return f"http://{self._pool.host}:{self._pool.port}{base_path}"
         else:
-            return f"{base_path}?{qs}"
+            return f"{base_path}"
 
     def put(
         self,
