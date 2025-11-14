@@ -7,7 +7,7 @@ use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
 use url::Url;
 
-pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
+pub use objectstore_types::Compression;
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -420,12 +420,15 @@ impl Session {
             .map_err(|_| crate::Error::InvalidUrl {
                 message: format!("The URL {} cannot be a base", self.client.service_url),
             })?
-            .extend(&["v1", resource_id]);
+            .extend(&[
+                "v1",
+                self.scope.usecase.name.as_ref(),
+                self.scope.scope.as_str(),
+                "data",
+                resource_id,
+            ]);
 
-        let mut builder = self.client.reqwest.request(method, url).query(&[
-            (PARAM_SCOPE, self.scope.scope.as_str()),
-            (PARAM_USECASE, self.scope.usecase.name.as_ref()),
-        ]);
+        let mut builder = self.client.reqwest.request(method, url);
 
         if self.client.propagate_traces {
             let trace_headers =

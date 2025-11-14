@@ -321,7 +321,7 @@ mod tests {
     fn make_path() -> ObjectPath {
         ObjectPath {
             usecase: "testing".into(),
-            scope: "testing".into(),
+            scope: vec!["testing".into()],
             key: "testing".into(),
         }
     }
