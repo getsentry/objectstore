@@ -164,3 +164,153 @@ impl Backend for S3CompatibleBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{StreamExt, TryStreamExt};
+    use objectstore_types::ExpirationPolicy;
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    // NB: Not run any of these tests, you need to have a S3 emulator running. This is done
+    // automatically in CI.
+    //
+    // Refer to the readme for how to set up the emulator.
+
+    async fn create_test_backend() -> Result<S3CompatibleBackend> {
+        Ok(S3CompatibleBackend::new(S3CompatibleBackendConfig {
+            bucket: "test-bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://localhost:8088".into()),
+            extra_headers: HeaderMap::new(),
+            request_timeout: Some(Duration::from_secs(60)),
+            path_style: Some(true),
+            access_key: Some("test-key".into()),
+            secret_key: Some("test-secret".into()),
+            security_token: None,
+            session_token: None,
+        }))
+    }
+    fn make_stream(contents: &[u8]) -> BackendStream {
+        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
+    }
+
+    async fn read_to_vec(mut stream: BackendStream) -> Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        while let Some(chunk) = stream.try_next().await? {
+            payload.extend(&chunk);
+        }
+        Ok(payload)
+    }
+
+    fn make_key() -> ObjectPath {
+        ObjectPath {
+            usecase: "testing".into(),
+            scope: "testing".into(),
+            key: Uuid::new_v4().to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_key();
+        let metadata = Metadata {
+            is_redirect_tombstone: None,
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::Manual,
+            compression: None,
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            size: None,
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.content_type, metadata.content_type);
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_key();
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_key();
+        backend.delete_object(&path).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_key();
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello"))
+            .await?;
+
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+
+        let payload = read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_after_delete() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let path = make_key();
+        let metadata = Metadata::default();
+
+        backend
+            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        backend.delete_object(&path).await?;
+
+        let result = backend.get_object(&path).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+}
