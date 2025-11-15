@@ -106,7 +106,7 @@ jobs:
             docker push $REGISTRY:$SHA_TAG-$PLATFORM
           done
 
-          for TAG in $SHA_TAG latest; do
+          for TAG in $SHA_TAG nightly; do
             docker manifest create $REGISTRY:$TAG \
               --amend $REGISTRY:$SHA_TAG-amd64 \
               --amend $REGISTRY:$SHA_TAG-arm64
