@@ -34,6 +34,9 @@ pub struct Args {
     pub config: PathBuf,
 }
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Args = argh::from_env();

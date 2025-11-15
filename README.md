@@ -11,18 +11,90 @@ utilities to manage stored data.
 
 The platform is split into the following core components:
 
-- `objectstore-client`: The Rust client library SDK, which exposes
-  high-performance blob storage access. A Python library is planned but not yet
-  available.
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
   functionality from the internal services. This crate creates the `objectstore`
   binary.
 - `objectstore-service`: The core object storage logic.
+- `clients`: The Rust and Python client library SDKs, which expose
+  high-performance blob storage access.
 
 Additionally, it contains a number of utilities:
 
 - `stresstest`: A stresstest binary that can run various workloads against
   storage backends.
+
+## Usage
+
+Objectstore consists of a stateless service that connects to one or more storage
+backends, and client libraries for Python and Rust. To use objectstore,
+configure the desired backends, run the service, and connect to it using one of
+the provided clients.
+
+### Configuration
+
+The objectstore service is configured through a configuration file and
+environment variables. If both are provided, environment variables take
+precedence and override the configuration file settings. See the [config docs]
+for a complete list of available backends and options.
+
+An example configuration file that uses the local file system for storage can be
+found in this [example file].
+
+[config docs]: https://getsentry.github.io/objectstore/rust/objectstore_server/config/
+[example file]: objectstore-server/config/local.example.yaml
+
+### Docker
+
+A pre-built Docker container is published at `ghcr.io/getsentry/objectstore`,
+supporting both `amd64` and `arm64` architectures. To run the container, mount
+your configuration file and data volume:
+
+```sh
+docker run -d \
+  --name objectstore \
+  --volume ./config.yaml:/etc/objectstore/config.yaml \
+  --volume data-volume:/data \
+  --publish 127.0.0.1:8888:8888 \
+  ghcr.io/getsentry/objectstore:latest \
+  --config /etc/objectstore/config.yaml run
+```
+
+The command above assumes a configuration file named `config.yaml` in the current
+directory and publishes the service on port `8888`. Adjust the volume mount path
+and port mapping as needed for your setup.
+
+### Devservices
+
+For Sentry development environments, we provide a [devservice] that can be
+referenced from any project that needs to run objectstore. To use it, add the
+following to the `dependencies` section in your `devservices/config.yml`:
+
+```yaml
+objectstore:
+  description: Storage for files and blobs
+  remote:
+    repo_name: objectstore
+    branch: main
+    repo_link: https://github.com/getsentry/objectstore.git
+    mode: containerized
+```
+
+In the Sentry backend, objectstore is integrated and can be started using
+`devservices up --mode=objectstore`. No additional configuration is necessary,
+simply import a client from `sentry.objectstore`.
+
+[devservice]: https://develop.sentry.dev/development-infrastructure/devservices/
+
+### Clients
+
+To integrate objectstore into your application, you can either use the HTTP API
+directly or leverage one of the higher-level client SDKs. We provide official
+client libraries for both [Python] and [Rust], which handle connection
+management, retries, and compression for you. Refer to the SDK documentation
+for detailed setup and usage instructions.
+
+[Python]: https://getsentry.github.io/objectstore/python/
+[Rust]: https://getsentry.github.io/objectstore/rust/objectstore_client/
 
 ## Building
 
@@ -98,6 +170,30 @@ Devservices continue to run in the background until explicitly stopped. If you
 prefer to start containers manually, please check `devservices/config.yml` for
 the required images and configuration, such as port mapping.
 
+For **Google BigTable**, we automatically create a table with the required
+column families. Use this configuration to connect (recommended as high-volume
+backend):
+
+```yaml
+high_volume_storage:
+  type: bigtable
+  endpoint: localhost:8086
+  project_id: testing
+  instance_name: objectstore
+  table_name: objectstore
+```
+
+For **Google Cloud Storage** (GCS), a test bucket is already configured in the
+dev container. Use this configuration to connect (recommended as long-term
+backend):
+
+```yaml
+long_term_storage:
+  type: gcs
+  endpoint: http://localhost:8087
+  bucket: test-bucket
+```
+
 ### Editor Setup
 
 We recommend using **Visual Studio Code** with the recommended extensions. The
@@ -135,15 +231,18 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 
 ```sh
 # Option 1: Configuration file
-cargo run -- -c path/to/config.yml
+cargo run -- -c objectstore-server/config/local.example.yaml run
 
 # Option 2: Environment variables
-export FSS_HIGH_VOLUME_STORAGE__TYPE=filesystem
-export FSS_HIGH_VOLUME_STORAGE__PATH=data
-export FSS_LONG_TERM_STORAGE__TYPE=filesystem
-export FSS_LONG_TERM_STORAGE__PATH=data
-cargo run
+export OS__HIGH_VOLUME_STORAGE__TYPE=filesystem
+export OS__HIGH_VOLUME_STORAGE__PATH=data/high-volume
+export OS__LONG_TERM_STORAGE__TYPE=filesystem
+export OS__LONG_TERM_STORAGE__PATH=data/long-term
+cargo run -- run
 ```
+
+You can copy and save additional config files into next to the examples in
+`objectstore-server/config`. All other files are ignored by git.
 
 ### Tests
 
@@ -158,5 +257,15 @@ cargo test --workspace --all-features
 Run the stresstest binary against the running server with:
 
 ```sh
-cargo run --release -p stresstest
+cargo run --release -p stresstest -- -c stresstest/config/example.yaml
 ```
+
+Similar to the objectstore server, you can find example configuration files in
+the `config` subfolder. Copy and save your own files there, as they will not be
+tracked by git.
+
+## License
+
+Like Sentry, Objectstore is licensed under the FSL. See the `LICENSE.md` file
+and [this blog post](https://blog.sentry.io/introducing-the-functional-source-license-freedom-without-free-riding/)
+for more information.

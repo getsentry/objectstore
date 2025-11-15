@@ -1,10 +1,16 @@
 [package]
 name = "objectstore-types"
-version = "0.1.0"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Shared types for the Objectstore client and server"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.0.10"
 edition = "2024"
+publish = true
 
 [dependencies]
-anyhow = { workspace = true }
-humantime = { workspace = true }
 http = { workspace = true }
+humantime = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }

@@ -1,7 +1,13 @@
 [package]
 name = "stresstest"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Tool for generating file storage load against Objectstore servers"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 anyhow = { workspace = true }
@@ -11,11 +17,17 @@ bytesize = { version = "2.0.1", features = ["serde"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 humantime-serde = { workspace = true }
-jsonwebtoken = { workspace = true }
+indicatif = "0.18.0"
+mimalloc = { workspace = true }
 objectstore-client = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
 rand_distr = "0.5.1"
-reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+reqwest = { workspace = true, features = [
+    "hickory-dns",
+    "json",
+    "stream",
+    "multipart",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34-deprecated"

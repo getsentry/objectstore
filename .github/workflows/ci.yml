@@ -3,13 +3,16 @@ name: CI
 on:
   push:
     branches:
+      - main
       - release/**
 
   pull_request:
-  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -44,7 +47,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-  test_all:
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Format
+        run: uv run ruff format
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Run mypy
+        run: uv run mypy .
+
+  test-all:
     name: Test (all features)
     runs-on: ubuntu-latest
 
@@ -56,8 +80,10 @@ jobs:
           docker run -d \
             --name bigtable-emulator \
             -p 8086:8086 \
+            -e BIGTABLE_EMULATOR_HOST=localhost:8086 \
+            -v $PWD/devservices/run-bigtable.sh:/run-bigtable.sh \
             google/cloud-sdk \
-            gcloud beta emulators bigtable start --host-port=0.0.0.0:8086
+            /run-bigtable.sh
 
       - name: Start GCS Emulator
         run: |
@@ -83,12 +109,40 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --all-features
 
+  test-python:
+    name: Test Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build server binary
+        run: cargo build --locked
+
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Run tests
+        run: uv run pytest clients/python
+
   docs:
-    name: Cargo Docs
+    name: Build and Publish Documentation
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
       pages: write
       id-token: write
 
@@ -107,12 +161,31 @@ jobs:
         with:
           key: ${{ github.job }}
 
-      - name: Build Docs
-        run: cargo doc --workspace --all-features --no-deps
+      - name: Build Rust Docs
+        run: |
+          cargo doc --workspace --all-features --no-deps
+          echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-      - run: echo '<meta http-equiv="refresh" content="0; url=objectstore/" />Redirecting to <a href="objectstore/">objectstore</a>' > target/doc/index.html
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages --all-groups
+
+      - name: Build Python Docs
+        run: |
+          mkdir -p docs/_build
+          uv run sphinx-apidoc -o clients/python/docs/ clients/python/src/ --force --module-first --no-toc
+          uv run sphinx-build -vv -W -b html clients/python/docs/ docs/_build
+
+      - name: Setup combined docs directory
+        run: |
+          mkdir -p gh-pages/rust
+          mkdir -p gh-pages/python
+          cp -r target/doc/* gh-pages/rust/
+          cp -r docs/_build/* gh-pages/python/
+          echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/objectstore_server">Rust Server Documentation</a></li><li><a href="rust/objectstore_client">Rust Client Documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -120,8 +193,51 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "target/doc"
+          path: "gh-pages"
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
         if: github.ref == 'refs/heads/main'
+
+  validate_gocd:
+    if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+    name: Validate GoCD Pipelines
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - uses: actions/checkout@v5.0.0
+
+      - uses: getsentry/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        id: changes
+        with:
+          filters: |
+            gocd:
+              - 'gocd/**'
+
+      - id: "auth"
+        if: steps.changes.outputs.gocd == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: "projects/868781662168/locations/global/workloadIdentityPools/prod-github/providers/github-oidc-pool"
+          service_account: "gha-gocd-api@sac-prod-sa.iam.gserviceaccount.com"
+          token_format: "id_token"
+          id_token_audience: "610575311308-9bsjtgqg4jm01mt058rncpopujgk3627.apps.googleusercontent.com"
+          id_token_include_email: true
+
+      - uses: getsentry/action-gocd-jsonnet@v1
+        if: steps.changes.outputs.gocd == 'true'
+        with:
+          jb-install: true
+          jsonnet-dir: gocd/templates
+          generated-dir: gocd/generated-pipelines
+
+      - uses: getsentry/action-validate-gocd-pipelines@v1
+        if: steps.changes.outputs.gocd == 'true'
+        with:
+          configrepo: objectstore__main
+          gocd_access_token: ${{ secrets.GOCD_ACCESS_TOKEN }}
+          google_oidc_token: ${{ steps.auth.outputs.id_token }}

@@ -1,0 +1,22 @@
+[project]
+name = "objectstore-client"
+version = "0.0.10"
+description = "Client SDK for Objectstore, the Sentry object storage platform"
+readme = "README.md"
+authors = [
+    {name = "Sentry", email = "oss@sentry.io"},
+]
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.11"
+dependencies = [
+    "sentry-sdk>=2.42.1",
+    "urllib3>=2.2.2",
+    "zstandard>=0.18.0",
+    "filetype>=1.2.0",
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"

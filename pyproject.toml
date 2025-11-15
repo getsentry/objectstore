@@ -1,0 +1,37 @@
+[project]
+name = "objectstore"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.uv]
+required-version = "==0.9.3" # keep in sync with devenv/config.ini
+
+[tool.uv.workspace]
+members = [
+    "clients/python",
+]
+
+[dependency-groups]
+dev = [
+    "devservices>=1.2.2",
+    "pytest>=8.3.3",
+    "mypy>=1.17.1",
+    "ruff>=0.14.2",
+    "pre-commit>=4.2.0",
+]
+docs = [
+    "sphinx>=8.1.3",
+    "sphinx-rtd-theme>=3.0.1",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"] # pycodestyle, pyflakes, isort, pyupgrade
+
+[tool.mypy]
+no_implicit_reexport = true
+warn_unreachable = true
+warn_redundant_casts = true
+local_partial_types = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+warn_unused_configs = true

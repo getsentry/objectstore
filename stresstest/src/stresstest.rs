@@ -8,6 +8,8 @@ use anyhow::Result;
 
 use bytesize::ByteSize;
 use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
+use objectstore_client::Usecase;
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -19,16 +21,13 @@ use crate::workload::{Action, Workload, WorkloadMode};
 ///
 /// The function runs all workloads concurrently, then prints metrics and finally deletes all
 /// objects from the remote.
-pub async fn run(
-    mut remote: HttpRemote,
-    workloads: Vec<Workload>,
-    duration: Duration,
-) -> Result<()> {
-    for workload in &workloads {
-        remote.register_usecase(&workload.name);
-    }
-
+pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duration) -> Result<()> {
     let remote = Arc::new(remote);
+
+    let bar = ProgressBar::new_spinner()
+        .with_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}")?)
+        .with_message("Running stresstest:");
+    bar.enable_steady_tick(Duration::from_millis(100));
 
     // run the workloads concurrently
     let tasks: Vec<_> = workloads
@@ -40,6 +39,7 @@ pub async fn run(
         .collect();
 
     let finished_tasks = futures::future::join_all(tasks).await;
+    bar.finish_and_clear();
 
     let mut total_metrics = WorkloadMetrics::default();
     let workloads = finished_tasks.into_iter().map(|task| {
@@ -78,11 +78,20 @@ pub async fn run(
 
     let workloads: Vec<_> = workloads.collect();
     let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
-    let files_to_cleanup = workloads.into_iter().flat_map(|mut w| w.external_files());
+    let files_to_cleanup = workloads.iter().flat_map(|w| w.external_files());
+    let cleanup_count = workloads.iter().flat_map(|w| w.external_files()).count();
 
     println!();
     println!("{}", "## TOTALS".bold());
     print_metrics(&total_metrics, duration);
+    println!();
+
+    let bar = ProgressBar::new(cleanup_count as u64)
+        .with_message("Deleting remaining files...")
+        .with_style(ProgressStyle::with_template(
+            "{msg}\n{wide_bar} {pos}/{len}",
+        )?);
+    bar.enable_steady_tick(Duration::from_millis(100));
 
     let start = Instant::now();
     let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
@@ -90,20 +99,31 @@ pub async fn run(
         .for_each_concurrent(max_concurrency, |(usecase, organization_id, object_key)| {
             let remote = remote.clone();
             let cleanup_timing = cleanup_timing.clone();
+            let bar = &bar;
             async move {
                 let start = Instant::now();
-                remote.delete(&usecase, organization_id, &object_key).await;
+                remote
+                    .delete(
+                        &Usecase::new(usecase.as_str()),
+                        *organization_id,
+                        object_key,
+                    )
+                    .await;
                 cleanup_timing
                     .lock()
                     .unwrap()
                     .add(start.elapsed().as_secs_f64());
+
+                bar.inc(1);
             }
         })
         .await;
+
+    bar.finish_and_clear();
+
     let cleanup_duration = start.elapsed();
     let cleanup_timing = cleanup_timing.lock().unwrap();
 
-    println!();
     println!(
         "{} ({} files, concurrency: {})",
         "## CLEANUP".bold(),
@@ -166,7 +186,7 @@ async fn run_workload(
                             let file_size = payload.len;
                             let usecase = workload.lock().unwrap().name.clone();
                             let organization_id = workload.lock().unwrap().next_organization_id();
-                            match remote.write(&usecase, organization_id, payload).await {
+                            match remote.write(&Usecase::new(usecase.as_str()), organization_id, payload).await {
                                 Ok(object_key) => {
                                     let external_id = (usecase, organization_id, object_key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
@@ -185,7 +205,7 @@ async fn run_workload(
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            match remote.read(usecase, *organization_id, object_key, payload).await {
+                            match remote.read(&Usecase::new(usecase.as_str()), *organization_id, object_key, payload).await {
                                 Ok(_) => {
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
@@ -201,7 +221,7 @@ async fn run_workload(
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.delete(usecase, *organization_id, object_key).await;
+                            remote.delete(&Usecase::new(usecase.as_str()), *organization_id, object_key).await;
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }

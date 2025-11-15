@@ -1,7 +1,14 @@
 [package]
 name = "objectstore-server"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Web server application of Objectstore, the Sentry object storage platform"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
+publish = false
 
 [dependencies]
 anyhow = { workspace = true }
@@ -13,9 +20,12 @@ elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = { workspace = true }
 merni = { workspace = true }
+mimalloc = { workspace = true }
+num_cpus = "1.17.0"
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 rustls = { version = "0.23.31", default-features = false }
 sentry = { workspace = true, features = [
     "tower-axum-matched-path",
@@ -31,6 +41,8 @@ tokio-stream = { workspace = true }
 tower = { version = "0.5.2" }
 tower-http = { version = "0.6.6", default-features = false, features = [
     "catch-panic",
+    "metrics",
+    "set-header",
     "trace",
 ] }
 tracing = { workspace = true }

@@ -1,6 +1,7 @@
 use std::{fmt, io};
 
 use async_compression::tokio::bufread::ZstdDecoder;
+use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
 use reqwest::StatusCode;
@@ -8,61 +9,75 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::Compression;
 
-use crate::{Client, ClientStream};
+use crate::{ClientStream, Session};
 
-/// The result from a successful [`get()`](Client::get) call.
+/// The result from a successful [`get()`](Session::get) call.
 ///
 /// This carries the response as a stream, plus the compression algorithm of the data.
-pub struct GetResult {
+pub struct GetResponse {
     /// The metadata attached to this object, including the compression algorithm used for the payload.
     pub metadata: Metadata,
     /// The response stream.
     pub stream: ClientStream,
 }
-impl fmt::Debug for GetResult {
+
+impl GetResponse {
+    /// Loads the object payload fully into memory.
+    pub async fn payload(self) -> crate::Result<bytes::Bytes> {
+        let bytes: BytesMut = self.stream.try_collect().await?;
+        Ok(bytes.freeze())
+    }
+
+    /// Loads the object payload fully into memory and interprets it as UTF-8 text.
+    pub async fn text(self) -> crate::Result<String> {
+        let bytes = self.payload().await?;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+}
+
+impl fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GetResult")
+        f.debug_struct("GetResponse")
             .field("metadata", &self.metadata)
             .field("stream", &format_args!("[Stream]"))
             .finish()
     }
 }
 
-/// A GET request builder.
-#[derive(Debug)]
-pub struct GetBuilder<'a> {
-    client: &'a Client,
-    id: &'a str,
-
-    decompress: bool,
-}
-
-impl Client {
-    /// Requests the object with the given `id`.
-    pub fn get<'a>(&'a self, id: &'a str) -> GetBuilder<'a> {
+impl Session {
+    /// Requests the object with the given `key`.
+    pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
-            client: self,
-            id,
+            session: self.clone(),
+            key: key.to_owned(),
             decompress: true,
         }
     }
 }
 
-impl GetBuilder<'_> {
+/// A GET request builder.
+#[derive(Debug)]
+pub struct GetBuilder {
+    session: Session,
+    key: String,
+    decompress: bool,
+}
+
+impl GetBuilder {
     /// Indicates whether the request should automatically handle decompression of known algorithms,
     /// or rather return the payload as it is stored, along with the compression algorithm it is stored in.
+    ///
+    /// By default, automatic decompression is enabled.
     pub fn decompress(mut self, decompress: bool) -> Self {
         self.decompress = decompress;
         self
     }
 
     /// Sends the `GET` request.
-    pub async fn send(self) -> anyhow::Result<Option<GetResult>> {
-        let get_url = format!("{}/v1/{}", self.client.service_url, self.id);
-
+    pub async fn send(self) -> crate::Result<Option<GetResponse>> {
         let response = self
-            .client
-            .request(reqwest::Method::GET, get_url)?
+            .session
+            .request(reqwest::Method::GET, &self.key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -81,6 +96,6 @@ impl GetBuilder<'_> {
             _ => stream.boxed(),
         };
 
-        Ok(Some(GetResult { metadata, stream }))
+        Ok(Some(GetResponse { metadata, stream }))
     }
 }

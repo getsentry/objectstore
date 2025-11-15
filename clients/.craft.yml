@@ -1,0 +1,13 @@
+changelogPolicy: auto
+preReleaseCommand: ../scripts/bump-version-clients.sh
+
+targets:
+  - name: github
+  - name: crates
+  - name: pypi
+  - name: sentry-pypi
+    internalPypiRepo: getsentry/pypi
+
+requireNames:
+  - /.*objectstore_client.*whl$/
+  - /.*objectstore_client.*tar\.gz$/

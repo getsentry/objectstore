@@ -1,0 +1,28 @@
+name: Build Python client
+
+on:
+  push:
+    branches:
+      - release/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and upload artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+
+      - name: Build artifacts
+        run: uv build --package objectstore-client
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ github.sha }}
+          path: dist/*
+          if-no-files-found: 'error'

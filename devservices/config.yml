@@ -20,13 +20,19 @@ x-programs:
 
 services:
   objectstore:
-    image: ghcr.io/getsentry/objectstore:latest
+    image: ghcr.io/getsentry/objectstore:nightly
     environment:
-      FSS_HIGH_VOLUME_STORAGE__TYPE: "filesystem"
-      FSS_HIGH_VOLUME_STORAGE__PATH: "/data"
-      FSS_LONG_TERM_STORAGE__TYPE: "filesystem"
-      FSS_LONG_TERM_STORAGE__PATH: "/data"
-      FSS_LOGGING__LEVEL: "debug"
+      OS__HIGH_VOLUME_STORAGE__TYPE: "filesystem"
+      OS__HIGH_VOLUME_STORAGE__PATH: "/data/high-volume"
+      OS__LONG_TERM_STORAGE__TYPE: "filesystem"
+      OS__LONG_TERM_STORAGE__PATH: "/data/long-term"
+      OS__LOGGING__LEVEL: "debug"
+    command: run
+    healthcheck:
+      test: ["CMD", "/bin/entrypoint", "healthcheck"]
+      interval: 5s
+      timeout: 1s
+      retries: 5
     ports:
       - 127.0.0.1:8888:8888
     volumes:
@@ -38,15 +44,18 @@ services:
     restart: unless-stopped
   bigtable:
     image: google/cloud-sdk
-    command:
-      - "gcloud"
-      - "beta"
-      - "emulators"
-      - "bigtable"
-      - "start"
-      - "--host-port=0.0.0.0:8086"
+    command: /run-bigtable.sh
+    environment:
+      BIGTABLE_EMULATOR_HOST: localhost:8086
+    healthcheck:
+      test: cbt -project testing -instance objectstore count objectstore
+      interval: 5s
+      timeout: 1s
+      retries: 5
     ports:
       - 127.0.0.1:8086:8086
+    volumes:
+      - ./run-bigtable.sh:/run-bigtable.sh
     networks:
       - devservices
     labels:
@@ -56,6 +65,11 @@ services:
     image: gcr.io/cloud-devrel-public-resources/storage-testbench:latest
     environment:
       GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME: test-bucket
+    healthcheck:
+      test: curl -f http://localhost:9000
+      interval: 5s
+      timeout: 1s
+      retries: 5
     ports:
       - 127.0.0.1:8087:9000
     networks:

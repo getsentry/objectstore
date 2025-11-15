@@ -11,7 +11,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::ObjectPath;
-use crate::backend::{Backend, BackendStream};
+use crate::backend::common::{self, Backend, BackendStream};
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -30,12 +30,17 @@ const CUSTOM_META_PREFIX: &str = "x-snme-";
 /// This is the representation of the object resource in GCS JSON API without its payload. Where no
 /// dedicated fields are available, we encode both built-in and custom metadata in the `metadata`
 /// field.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GcsObject {
+    /// Content-Type of the object data. If an object is stored without a Content-Type, it is served
+    /// as application/octet-stream.
+    pub content_type: Cow<'static, str>,
+
     /// Content encoding, used to store [`Metadata::compression`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_encoding: Option<String>,
+
     /// Custom time stamp used for time-based expiration.
     #[serde(
         default,
@@ -43,24 +48,27 @@ struct GcsObject {
         with = "humantime_serde"
     )]
     pub custom_time: Option<SystemTime>,
-    /// User-provided metadata, including our built-in metadata.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<GcsMetaKey, String>,
 
     /// The `Content-Length` of the data in bytes. GCS returns this as a string.
     ///
     /// GCS sets this in metadata responses. We can use it to know the size of an object
     /// without having to stream it.
-    #[serde(default)]
     pub size: Option<String>,
+
+    /// User-provided metadata, including our built-in metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<GcsMetaKey, String>,
 }
 
 impl GcsObject {
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         let mut gcs_object = GcsObject {
+            content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
-            ..Default::default()
+            content_encoding: None,
+            custom_time: None,
+            metadata: BTreeMap::new(),
         };
 
         // For time-based expiration, set the `customTime` field. The bucket must have a
@@ -102,6 +110,7 @@ impl GcsObject {
             .transpose()?
             .unwrap_or_default();
 
+        let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
 
@@ -116,6 +125,10 @@ impl GcsObject {
         }
 
         Ok(Metadata {
+            // while "in theory" GCS could be the "high-volume" backend that stores tombstones,
+            // in practice it is not.
+            is_redirect_tombstone: None,
+            content_type,
             expiration_policy,
             compression,
             custom,
@@ -199,7 +212,7 @@ impl GcsBackend {
         };
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: common::reqwest_client(),
             endpoint: endpoint.parse().context("invalid GCS endpoint URL")?,
             bucket: bucket.to_string(),
             token_provider,
@@ -299,7 +312,7 @@ impl Backend for GcsBackend {
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
-                    .mime_str("application/octet-stream")?,
+                    .mime_str(&metadata.content_type)?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -448,6 +461,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
+            is_redirect_tombstone: None,
+            content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -463,6 +478,7 @@ mod tests {
         let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
+        assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
 
         Ok(())
@@ -495,10 +511,8 @@ mod tests {
 
         let path = make_key();
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -506,10 +520,8 @@ mod tests {
             .await?;
 
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -531,12 +543,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let path = make_key();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::Manual,
-            compression: None,
-            custom: Default::default(),
-            size: None,
-        };
+        let metadata = Metadata::default();
 
         backend
             .put_object(&path, &metadata, make_stream(b"hello, world"))
@@ -560,9 +567,7 @@ mod tests {
         let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend
@@ -585,9 +590,7 @@ mod tests {
         let path = make_key();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            compression: None,
-            custom: Default::default(),
-            size: None,
+            ..Default::default()
         };
 
         backend

@@ -1,14 +1,18 @@
 [package]
 name = "objectstore-service"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Storage and backend logic of Objectstore, the Sentry object storage platform"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-# https://github.com/liufuyang/bigtable_rs/pull/119
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", branch = "admin" }
-bincode = { version = "2.0.1", features = ["serde"] }
+bigtable_rs = "0.2.18"
 bytes = { workspace = true }
 data-encoding = "2.9.0"
 futures-util = { workspace = true }
@@ -17,17 +21,19 @@ humantime = { workspace = true }
 humantime-serde = { workspace = true }
 merni = { workspace = true }
 objectstore-types = { workspace = true }
-reqwest = { workspace = true, features = ["stream", "multipart", "json"] }
+reqwest = { workspace = true, features = [
+    "hickory-dns",
+    "stream",
+    "multipart",
+    "json",
+] }
 sentry = { workspace = true, features = ["anyhow"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-watto = "0.2.0"
-zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

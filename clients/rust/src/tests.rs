@@ -3,25 +3,33 @@ use std::net::{SocketAddr, TcpListener};
 use bytes::BytesMut;
 use futures_util::TryStreamExt;
 use objectstore_server::config::{Config, Storage};
-use objectstore_server::http::make_app;
+use objectstore_server::http::App;
 use objectstore_server::state::State;
 use tempfile::TempDir;
 
-use crate::get::GetResult;
+use crate::get::GetResponse;
 
 use super::*;
 
 #[tokio::test]
 async fn stores_uncompressed() {
     let server = TestServer::new().await;
-    let client = ClientBuilder::new(&server.url("/"), "test")
-        .unwrap()
-        .for_organization(12345);
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = client.put(body).compression(None).send().await.unwrap().key;
 
-    let GetResult { metadata, stream } = client.get(&stored_id).send().await.unwrap().unwrap();
+    let stored_id = session
+        .put(body)
+        .compression(None)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let GetResponse { metadata, stream } = session.get(&stored_id).send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(metadata.compression, None);
@@ -31,15 +39,16 @@ async fn stores_uncompressed() {
 #[tokio::test]
 async fn uses_zstd_by_default() {
     let server = TestServer::new().await;
-    let client = ClientBuilder::new(&server.url("/"), "test")
-        .unwrap()
-        .for_organization(12345);
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = client.put(body).send().await.unwrap().key;
+    let stored_id = session.put(body).send().await.unwrap().key;
 
     // when the user indicates that it can deal with zstd, it gets zstd
-    let GetResult { metadata, stream } = client
+    let GetResponse { metadata, stream } = session
         .get(&stored_id)
         .decompress(false)
         .send()
@@ -53,7 +62,7 @@ async fn uses_zstd_by_default() {
     assert_eq!(&decompressed, b"oh hai!");
 
     // otherwise, the client does the decompression
-    let GetResult { metadata, stream } = client.get(&stored_id).send().await.unwrap().unwrap();
+    let GetResponse { metadata, stream } = session.get(&stored_id).send().await.unwrap().unwrap();
     let received: BytesMut = stream.try_collect().await.unwrap();
 
     assert_eq!(metadata.compression, None);
@@ -63,17 +72,38 @@ async fn uses_zstd_by_default() {
 #[tokio::test]
 async fn deletes_stores_stuff() {
     let server = TestServer::new().await;
-    let client = ClientBuilder::new(&server.url("/"), "test")
-        .unwrap()
-        .for_organization(12345);
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = client.put(body).send().await.unwrap().key;
+    let stored_id = session.put(body).send().await.unwrap().key;
 
-    client.delete(&stored_id).await.unwrap();
+    session.delete(&stored_id).send().await.unwrap();
 
-    let response = client.get(&stored_id).send().await.unwrap();
+    let response = session.get(&stored_id).send().await.unwrap();
     assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn stores_under_given_key() {
+    let server = TestServer::new().await;
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let body = "oh hai!";
+    let stored_id = session
+        .put(body)
+        .key("test-key123!!")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    assert_eq!(stored_id, "test-key123!!");
 }
 
 #[derive(Debug)]
@@ -102,11 +132,11 @@ impl TestServer {
         };
 
         let state = State::new(config).await.unwrap();
-        let router = make_app(state);
+        let app = App::new(state);
 
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router).await.unwrap();
+            app.serve(listener).await.unwrap();
         });
 
         Self {
