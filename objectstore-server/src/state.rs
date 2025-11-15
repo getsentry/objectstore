@@ -24,9 +24,30 @@ impl State {
 fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
     match config {
         Storage::FileSystem { path } => StorageConfig::FileSystem { path },
-        Storage::S3Compatible { endpoint, bucket } => {
-            StorageConfig::S3Compatible { endpoint, bucket }
-        }
+        Storage::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            use_path_style,
+            access_key,
+            secret_key,
+            security_token,
+            session_token,
+            request_timeout_secs,
+        } => StorageConfig::S3Compatible {
+            endpoint: endpoint.as_deref(),
+            bucket,
+            region,
+            use_path_style: match use_path_style {
+                Some(value) => *value,
+                None => false,
+            },
+            access_key: access_key.as_deref(),
+            secret_key: secret_key.as_deref(),
+            security_token: security_token.as_deref(),
+            session_token: session_token.as_deref(),
+            request_timeout_secs: *request_timeout_secs,
+        },
         Storage::Gcs { endpoint, bucket } => StorageConfig::Gcs {
             endpoint: endpoint.as_deref(),
             bucket,
