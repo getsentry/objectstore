@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install Rust Toolchain
         run: |
@@ -28,11 +28,11 @@ jobs:
           rustup component add clippy rustfmt rust-docs --toolchain stable
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ${{ github.job }}
 
@@ -52,9 +52,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install dependencies
         run: uv sync --all-packages --all-groups
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Start Bigtable Emulator
         run: |
@@ -98,11 +98,11 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ${{ github.job }}
 
@@ -114,23 +114,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: Build server binary
         run: cargo build --locked
 
-      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install dependencies
         run: uv sync --all-packages --all-groups
@@ -147,17 +147,17 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install Rust Toolchain
         run: rustup toolchain install stable --profile minimal --component rust-docs --no-self-update
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ${{ github.job }}
 
@@ -168,7 +168,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install Python dependencies
         run: uv sync --all-packages --all-groups
@@ -188,15 +188,15 @@ jobs:
           echo '<h1>Objectstore</h1><p>Objectstore is a data storage platform for blobs, files, and other unstructured data at Sentry. See the <a href="https://github.com/getsentry/objectstore">Repository</a> and its <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a> for more information.</p><h2>API Documentation</h2><ul><li><a href="rust/objectstore_server">Rust Server Documentation</a></li><li><a href="rust/objectstore_client">Rust Client Documentation</a></li><li><a href="python/">Python Client Documentation</a></li></ul>' > gh-pages/index.html
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: "gh-pages"
 
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
         if: github.ref == 'refs/heads/main'
 
   validate_gocd:
@@ -209,7 +209,7 @@ jobs:
       id-token: "write"
 
     steps:
-      - uses: actions/checkout@v5.0.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - uses: getsentry/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
         id: changes
@@ -220,7 +220,7 @@ jobs:
 
       - id: "auth"
         if: steps.changes.outputs.gocd == 'true'
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: "projects/868781662168/locations/global/workloadIdentityPools/prod-github/providers/github-oidc-pool"
           service_account: "gha-gocd-api@sac-prod-sa.iam.gserviceaccount.com"
@@ -228,14 +228,14 @@ jobs:
           id_token_audience: "610575311308-9bsjtgqg4jm01mt058rncpopujgk3627.apps.googleusercontent.com"
           id_token_include_email: true
 
-      - uses: getsentry/action-gocd-jsonnet@v1
+      - uses: getsentry/action-gocd-jsonnet@3aec6fd54ac8d2fecfe700360f5d020e6902ba2d # v1.1.0
         if: steps.changes.outputs.gocd == 'true'
         with:
           jb-install: true
           jsonnet-dir: gocd/templates
           generated-dir: gocd/generated-pipelines
 
-      - uses: getsentry/action-validate-gocd-pipelines@v1
+      - uses: getsentry/action-validate-gocd-pipelines@5662a2b631d4e2aa1bfc21e878f9e131c31c40c1 # v1.0.0
         if: steps.changes.outputs.gocd == 'true'
         with:
           configrepo: objectstore__main
