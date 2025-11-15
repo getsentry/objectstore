@@ -1,131 +1,117 @@
-use std::time::{Duration, SystemTime};
-use std::{fmt, io};
+use std::fmt;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::{ExpirationPolicy, Metadata};
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
+use anyhow::Result;
+use bytes::Bytes;
+use futures::stream;
+use objectstore_types::Metadata;
+use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use s3::creds::Credentials;
+use s3::request::ResponseData;
+use s3::{Bucket, Region};
+use tokio_util::io::StreamReader;
 
-use crate::backend::common::{self, Backend, BackendStream};
+use crate::backend::common::{Backend, BackendStream};
 use crate::path::ObjectPath;
 
-/// Prefix used for custom metadata in headers for the GCS backend.
-///
-/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogmeta>
-const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
-/// Header used to store the expiration time for GCS using the `daysSinceCustomTime` lifecycle
-/// condition.
-///
-/// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
-const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
-/// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
-
-pub trait Token: Send + Sync {
-    fn as_str(&self) -> &str;
+pub struct S3CompatibleBackend {
+    bucket: Box<Bucket>,
 }
 
-pub trait TokenProvider: Send + Sync + 'static {
-    fn get_token(&self) -> impl Future<Output = Result<impl Token>> + Send;
+pub struct S3CompatibleBackendConfig {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    #[allow(dead_code)]
+    pub extra_headers: HeaderMap,
+    pub request_timeout: Option<Duration>,
+    pub path_style: Option<bool>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub security_token: Option<String>,
+    pub session_token: Option<String>,
 }
 
-// this only exists because we have to provide *some* kind of provider
-#[derive(Debug)]
-pub struct NoToken;
-
-impl TokenProvider for NoToken {
-    #[allow(refining_impl_trait_internal)] // otherwise, returning `!` will not implement the required traits
-    async fn get_token(&self) -> Result<NoToken> {
-        unimplemented!()
-    }
-}
-impl Token for NoToken {
-    fn as_str(&self) -> &str {
-        unimplemented!()
-    }
-}
-
-pub struct S3CompatibleBackend<T> {
-    client: reqwest::Client,
-
-    endpoint: String,
-    bucket: String,
-
-    token_provider: Option<T>,
-}
-
-impl<T> S3CompatibleBackend<T> {
-    /// Creates a new S3 compatible backend bound to the given bucket.
-    #[expect(dead_code)]
-    pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
+impl Default for S3CompatibleBackendConfig {
+    fn default() -> Self {
         Self {
-            client: common::reqwest_client(),
-            endpoint: endpoint.into(),
-            bucket: bucket.into(),
-            token_provider: Some(token_provider),
+            bucket: String::new(),
+            region: String::new(),
+            endpoint: None,
+            extra_headers: HeaderMap::new(),
+            request_timeout: None,
+            path_style: None,
+            access_key: None,
+            secret_key: None,
+            security_token: None,
+            session_token: None,
         }
-    }
-
-    /// Formats the S3 object URL for the given key.
-    fn object_url(&self, path: &ObjectPath) -> String {
-        format!("{}/{}/{path}", self.endpoint, self.bucket)
     }
 }
 
-impl<T> S3CompatibleBackend<T>
-where
-    T: TokenProvider,
-{
-    /// Creates a request builder with the appropriate authentication.
-    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
-        let mut builder = self.client.request(method, url);
-        if let Some(provider) = &self.token_provider {
-            builder = builder.bearer_auth(provider.get_token().await?.as_str());
+impl S3CompatibleBackend {
+    /// Creates a new S3 compatible backend bound to the given bucket.
+    pub fn new(config: S3CompatibleBackendConfig) -> Self {
+        let credentials = Credentials::new(
+            config.access_key.as_deref(),
+            config.secret_key.as_deref(),
+            config.security_token.as_deref(),
+            config.session_token.as_deref(),
+            None,
+        )
+        .unwrap();
+
+        let mut bucket = Bucket::new(
+            config.bucket.as_str(),
+            Region::Custom {
+                region: config.region.clone(),
+                endpoint: match config.endpoint {
+                    Some(endpoint) => endpoint,
+                    None => format!("s3-{}.amazonaws.com", config.region),
+                },
+            },
+            credentials,
+        )
+        .unwrap();
+
+        if let Some(path_style) = config.path_style
+            && path_style
+        {
+            bucket = bucket.with_path_style();
         }
-        Ok(builder)
+
+        if let Some(request_timeout) = config.request_timeout {
+            bucket = bucket.with_request_timeout(request_timeout).unwrap();
+        }
+
+        Self { bucket }
     }
 
-    /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, path: &ObjectPath, metadata: &Metadata) -> Result<()> {
-        // NB: Meta updates require copy + REPLACE along with *all* metadata. See
-        // https://cloud.google.com/storage/docs/xml-api/put-object-copy
-        self.request(Method::PUT, self.object_url(path))
-            .await?
-            .header("x-goog-copy-source", format!("/{}/{path}", self.bucket))
-            .header("x-goog-metadata-directive", "REPLACE")
-            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to update expiration time for object with TTI")?;
+    async fn handle_get_object_response(
+        &self,
+        _path: &ObjectPath,
+        response: ResponseData,
+    ) -> Result<Option<(Metadata, BackendStream)>> {
+        let metadata = Metadata::from_hashmap(response.headers(), "").unwrap_or_default();
+        let bytes = Bytes::from(response.to_vec());
+        let stream: BackendStream = Box::pin(stream::iter(std::iter::once(Ok(bytes))));
 
-        Ok(())
+        Ok(Some((metadata, stream)))
     }
 }
 
-impl<T> fmt::Debug for S3CompatibleBackend<T> {
+impl fmt::Debug for S3CompatibleBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S3Compatible")
-            .field("client", &self.client)
-            .field("endpoint", &self.endpoint)
-            .field("bucket", &self.bucket)
+            .field("bucket", &self.bucket.name())
+            .field("endpoint", &self.bucket.host())
             .finish_non_exhaustive()
     }
 }
 
-impl S3CompatibleBackend<NoToken> {
-    pub fn without_token(endpoint: &str, bucket: &str) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            endpoint: endpoint.into(),
-            bucket: bucket.into(),
-            token_provider: None,
-        }
-    }
-}
-
 #[async_trait::async_trait]
-impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
+impl Backend for S3CompatibleBackend {
     fn name(&self) -> &'static str {
         "s3-compatible"
     }
@@ -138,14 +124,22 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         stream: BackendStream,
     ) -> Result<()> {
         tracing::debug!("Writing to s3_compatible backend");
-        self.request(Method::PUT, self.object_url(path))
-            .await?
-            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
-            .body(Body::wrap_stream(stream))
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to put object")?;
+        let header_map = metadata
+            .custom
+            .iter()
+            .filter_map(|(key, value)| {
+                let name = key.parse::<HeaderName>().ok()?;
+                let val = value.parse::<HeaderValue>().ok()?;
+                Some((name, val))
+            })
+            .collect::<HeaderMap>();
+
+        self.bucket
+            .put_object_stream_builder(path.to_string())
+            .with_content_type(metadata.content_type.as_ref())
+            .with_headers(header_map)
+            .execute_stream(&mut StreamReader::new(stream))
+            .await?;
 
         Ok(())
     }
@@ -153,62 +147,20 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
-        let object_url = self.object_url(path);
 
-        let response = self.request(Method::GET, &object_url).await?.send().await?;
-        if response.status() == StatusCode::NOT_FOUND {
+        let response = self.bucket.get_object(path.to_string()).await?;
+        if response.status_code() == StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
             return Ok(None);
         }
 
-        let response = response
-            .error_for_status()
-            .context("failed to get object")?;
-
-        let headers = response.headers();
-        // TODO: Populate size in metadata
-        let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
-
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // TODO: Inject the access time from the request.
-            let access_time = SystemTime::now();
-
-            let expire_at = headers
-                .get(GCS_CUSTOM_TIME)
-                .and_then(|s| s.to_str().ok())
-                .and_then(|s| humantime::parse_rfc3339(s).ok())
-                .unwrap_or(access_time);
-
-            if expire_at < access_time + tti - TTI_DEBOUNCE {
-                // This serializes a new custom-time internally.
-                self.update_metadata(path, &metadata).await?;
-            }
-        }
-
-        // TODO: the object *GET* should probably also contain the expiration time?
-
-        let stream = response.bytes_stream().map_err(io::Error::other);
-        Ok(Some((metadata, stream.boxed())))
+        return self.handle_get_object_response(path, response).await;
     }
 
     #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
         tracing::debug!("Deleting from s3_compatible backend");
-        let response = self
-            .request(Method::DELETE, self.object_url(path))
-            .await?
-            .send()
-            .await?;
-
-        // Do not error for objects that do not exist.
-        if response.status() != StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
-            response
-                .error_for_status()
-                .context("failed to delete object")?;
-        }
-
+        self.bucket.delete_object(path.to_string()).await?;
         Ok(())
     }
 }
