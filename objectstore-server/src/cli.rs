@@ -22,6 +22,7 @@ struct Args {
 enum Command {
     Run(RunCommand),
     Healthcheck(HealthcheckCommand),
+    Version(VersionCommand),
 }
 
 /// run the objectstore web server
@@ -37,9 +38,21 @@ struct RunCommand {}
 #[argh(subcommand, name = "healthcheck")]
 struct HealthcheckCommand {}
 
+/// print the objectstore server version
+#[derive(Default, Debug, FromArgs)]
+#[argh(subcommand, name = "version")]
+struct VersionCommand {}
+
 /// Bootstrap the runtime and execute the CLI command.
 pub fn execute() -> Result<()> {
     let args: Args = argh::from_env();
+
+    // Special switch to just print the version and exit.
+    if let Command::Version(_) = args.command {
+        println!("{}", env!("OBJECTSTORE_RELEASE"));
+        return Ok(());
+    }
+
     let config = Config::load(args.config.as_deref())?;
 
     // Ensure a rustls crypto provider is installed, required on distroless.
@@ -66,6 +79,7 @@ pub fn execute() -> Result<()> {
         match args.command {
             Command::Run(RunCommand {}) => http::server(config).await,
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
+            Command::Version(VersionCommand {}) => unreachable!(),
         }
     });
 
