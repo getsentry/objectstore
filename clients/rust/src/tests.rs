@@ -34,6 +34,7 @@ async fn stores_uncompressed() {
 
     assert_eq!(metadata.compression, None);
     assert_eq!(received.as_ref(), b"oh hai!");
+    assert!(metadata.creation_time.is_some());
 }
 
 #[tokio::test]

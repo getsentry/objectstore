@@ -1,6 +1,7 @@
 //! Contains all HTTP endpoint handlers.
 
 use std::io;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use axum::body::Body;
@@ -55,8 +56,10 @@ async fn put_object_nokey(
         key: uuid::Uuid::new_v4().to_string(),
     };
     populate_sentry_scope(&path);
-    let metadata =
+
+    let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
+    metadata.creation_time = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;
@@ -79,8 +82,10 @@ async fn put_object(
         key,
     };
     populate_sentry_scope(&path);
-    let metadata =
+
+    let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
+    metadata.creation_time = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;

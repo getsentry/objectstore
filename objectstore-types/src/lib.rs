@@ -13,13 +13,17 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use http::header::{self, HeaderMap, HeaderName};
-use humantime::{format_duration, format_rfc3339_seconds, parse_duration};
+use humantime::{
+    format_duration, format_rfc3339_micros, format_rfc3339_seconds, parse_duration, parse_rfc3339,
+};
 use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
 /// The custom HTTP header that contains the serialized redirect tombstone.
 pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
+/// The custom HTTP header that contains the object creation time.
+pub const HEADER_CREATION_TIME: &str = "x-sn-creation-time";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -46,6 +50,9 @@ pub enum Error {
     /// The content type is invalid.
     #[error("invalid content type")]
     InvalidContentType(#[from] mediatype::MediaTypeError),
+    /// The creation time is invalid.
+    #[error("invalid creation time")]
+    InvalidCreationTime(#[from] humantime::TimestampError),
 }
 impl From<http::header::InvalidHeaderValue> for Error {
     fn from(err: http::header::InvalidHeaderValue) -> Self {
@@ -195,6 +202,10 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
+    /// The creation time of the object, if known. This is populated by the server at object creation time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_time: Option<SystemTime>,
+
     /// The content type of the object, if known.
     pub content_type: Cow<'static, str>,
 
@@ -247,6 +258,11 @@ impl Metadata {
                                 metadata.is_redirect_tombstone = Some(true);
                             }
                         }
+                        HEADER_CREATION_TIME => {
+                            let timestamp = value.to_str()?;
+                            let time = parse_rfc3339(timestamp)?;
+                            metadata.creation_time = Some(time);
+                        }
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
@@ -273,6 +289,7 @@ impl Metadata {
             content_type,
             compression,
             expiration_policy,
+            creation_time,
             size: _,
             custom,
         } = self;
@@ -299,6 +316,11 @@ impl Metadata {
                 headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
             }
         }
+        if let Some(time) = creation_time {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_CREATION_TIME}"))?;
+            let timestamp = format_rfc3339_micros(*time);
+            headers.append(name, timestamp.to_string().parse()?);
+        }
 
         // customer-provided metadata
         for (key, value) in custom {
@@ -322,6 +344,7 @@ impl Default for Metadata {
         Self {
             is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::Manual,
+            creation_time: None,
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
             size: None,
