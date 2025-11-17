@@ -7,7 +7,7 @@
 #![warn(missing_debug_implementations)]
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -251,6 +251,37 @@ impl Metadata {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    /// Extracts metadata from the given [`HashMap`].
+    ///
+    /// A prefix can be also be provided which is being stripped from custom non-standard headers.
+    pub fn from_hashmap(hash_map: HashMap<String, String>, prefix: &str) -> Result<Self, Error> {
+        let mut metadata = Metadata::default();
+
+        for (key, value) in hash_map {
+            if key.to_lowercase() == header::CONTENT_TYPE.as_str() {
+                let content_type = value.as_str();
+                metadata.content_type = content_type.to_owned().into();
+            } else if key.to_lowercase() == header::CONTENT_ENCODING.as_str() {
+                let compression = value.as_str();
+                metadata.compression = Some(Compression::from_str(compression)?);
+            } else if let Some(name) = key.strip_prefix(prefix) {
+                if name == HEADER_EXPIRATION {
+                    let expiration_policy = value.as_str();
+                    metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
+                } else if name == HEADER_REDIRECT_TOMBSTONE {
+                    if value.as_str() == "true" {
+                        metadata.is_redirect_tombstone = Some(true);
+                    }
+                } else if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
+                    let value = value.as_str();
+                    metadata.custom.insert(name.into(), value.into());
                 }
             }
         }

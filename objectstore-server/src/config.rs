@@ -150,7 +150,7 @@ pub enum Storage {
         /// Or for long-term storage:
         /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
         /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// S3 bucket name.
         ///
@@ -161,6 +161,62 @@ pub enum Storage {
         /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
         /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
         bucket: String,
+
+        /// S3 region name.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__REGION=us-east-1`
+        /// - `OS__LONG_TERM_STORAGE__REGION=us-east-1`
+        region: String,
+
+        /// Whether to use path-style URLs for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__USE_PATH_STYLE=true`
+        /// - `OS__LONG_TERM_STORAGE__USE_PATH_STYLE=true`
+        use_path_style: Option<bool>,
+
+        /// Optional access key for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__ACCESS_KEY=my-access-key`
+        /// - `OS__LONG_TERM_STORAGE__ACCESS_KEY=my-access-key`
+        access_key: Option<String>,
+
+        /// Optional secret key for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__SECRET_KEY=my-secret-key`
+        /// - `OS__LONG_TERM_STORAGE__SECRET_KEY=my-secret-key`
+        secret_key: Option<String>,
+
+        /// Optional security token for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__SECURITY_TOKEN=my-security-token`
+        /// - `OS__LONG_TERM_STORAGE__SECURITY_TOKEN=my-security-token`
+        security_token: Option<String>,
+
+        /// Optional session token for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__SESSION_TOKEN=my-session-token`
+        /// - `OS__LONG_TERM_STORAGE__SESSION_TOKEN=my-session-token`
+        session_token: Option<String>,
+
+        /// Optional request timeout for the S3-compatible storage.
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__REQUEST_TIMEOUT_SECS=30`
+        /// - `OS__LONG_TERM_STORAGE__REQUEST_TIMEOUT_SECS=30`
+        request_timeout_secs: Option<u64>,
     },
 
     /// [Google Cloud Storage] backend (type `"gcs"`).
@@ -889,6 +945,13 @@ mod tests {
             jail.set_env("OS__LONG_TERM_STORAGE__TYPE", "s3compatible");
             jail.set_env("OS__LONG_TERM_STORAGE__ENDPOINT", "http://localhost:8888");
             jail.set_env("OS__LONG_TERM_STORAGE__BUCKET", "whatever");
+            jail.set_env("OS__LONG_TERM_STORAGE__REGION", "us-east-1");
+            jail.set_env("OS__LONG_TERM_STORAGE__USE_PATH_STYLE", "true");
+            jail.set_env("OS__LONG_TERM_STORAGE__ACCESS_KEY", "my-access-key");
+            jail.set_env("OS__LONG_TERM_STORAGE__SECRET_KEY", "my-secret-key");
+            jail.set_env("OS__LONG_TERM_STORAGE__SECURITY_TOKEN", "my-security-token");
+            jail.set_env("OS__LONG_TERM_STORAGE__SESSION_TOKEN", "my-session-token");
+            jail.set_env("OS__LONG_TERM_STORAGE__REQUEST_TIMEOUT_SECS", "30");
             jail.set_env("OS__METRICS__TAGS__FOO", "bar");
             jail.set_env("OS__METRICS__TAGS__BAZ", "qux");
             jail.set_env("OS__SENTRY__DSN", "abcde");
@@ -900,12 +963,30 @@ mod tests {
 
             let config = Config::load(None).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            let Storage::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                use_path_style,
+                access_key,
+                secret_key,
+                security_token,
+                session_token,
+                request_timeout_secs,
+            } = &dbg!(&config).long_term_storage
             else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
+            assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
             assert_eq!(bucket, "whatever");
+            assert_eq!(region, "us-east-1");
+            assert_eq!(*use_path_style, Some(true));
+            assert_eq!(access_key.as_deref(), Some("my-access-key"));
+            assert_eq!(secret_key.as_deref(), Some("my-secret-key"));
+            assert_eq!(security_token.as_deref(), Some("my-security-token"));
+            assert_eq!(session_token.as_deref(), Some("my-session-token"));
+            assert_eq!(*request_timeout_secs, Some(30));
+
             assert_eq!(
                 config.metrics.tags,
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
@@ -934,6 +1015,13 @@ mod tests {
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
+                region: us-east-1
+                use_path_style: true
+                access_key: my-access-key
+                secret_key: my-secret-key
+                security_token: my-security-token
+                session_token: my-session-token
+                request_timeout_secs: 30
             sentry:
                 dsn: abcde
                 environment: production
@@ -947,12 +1035,29 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            let Storage::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                use_path_style,
+                access_key,
+                secret_key,
+                security_token,
+                session_token,
+                request_timeout_secs,
+            } = &dbg!(&config).long_term_storage
             else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
+            assert_eq!(endpoint.as_deref(), Some("http://localhost:8888"));
             assert_eq!(bucket, "whatever");
+            assert_eq!(region, "us-east-1");
+            assert_eq!(*use_path_style, Some(true));
+            assert_eq!(access_key.as_deref(), Some("my-access-key"));
+            assert_eq!(secret_key.as_deref(), Some("my-secret-key"));
+            assert_eq!(security_token.as_deref(), Some("my-security-token"));
+            assert_eq!(session_token.as_deref(), Some("my-session-token"));
+            assert_eq!(*request_timeout_secs, Some(30));
 
             assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
             assert_eq!(config.sentry.environment.as_deref(), Some("production"));
@@ -989,12 +1094,19 @@ mod tests {
             let Storage::S3Compatible {
                 endpoint,
                 bucket: _bucket,
+                region: _,
+                use_path_style: _,
+                access_key: _,
+                secret_key: _,
+                security_token: _,
+                session_token: _,
+                request_timeout_secs: _,
             } = &dbg!(&config).long_term_storage
             else {
                 panic!("expected s3 storage");
             };
             // Env should overwrite the yaml config
-            assert_eq!(endpoint, "http://localhost:9001");
+            assert_eq!(endpoint.as_deref(), Some("http://localhost:9001"));
 
             Ok(())
         });

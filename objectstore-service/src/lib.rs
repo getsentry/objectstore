@@ -15,9 +15,10 @@ use objectstore_types::Metadata;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::backend::common::{BackendStream, BoxedBackend};
+use crate::backend::s3_compatible::S3CompatibleBackendConfig;
 
 pub use path::*;
 
@@ -49,10 +50,24 @@ pub enum StorageConfig<'a> {
     },
     /// Use an S3-compatible storage backend.
     S3Compatible {
-        /// Optional endpoint URL for the S3-compatible storage.
-        endpoint: &'a str,
+        /// The name of the region to use.
+        region: &'a str,
         /// The name of the bucket to use.
         bucket: &'a str,
+        /// Optional endpoint URL for the S3-compatible storage.
+        endpoint: Option<&'a str>,
+        /// Whether to use path-style URLs for the S3-compatible storage.
+        use_path_style: bool,
+        /// Optional access key for the S3-compatible storage.
+        access_key: Option<&'a str>,
+        /// Optional secret key for the S3-compatible storage.
+        secret_key: Option<&'a str>,
+        /// Optional security token for the S3-compatible storage.
+        security_token: Option<&'a str>,
+        /// Optional session token for the S3-compatible storage.
+        session_token: Option<&'a str>,
+        /// Optional request timeout for the S3-compatible storage.
+        request_timeout_secs: Option<u64>,
     },
     /// Use Google Cloud Storage as storage backend.
     Gcs {
@@ -282,9 +297,30 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
         StorageConfig::FileSystem { path } => {
             Box::new(backend::local_fs::LocalFsBackend::new(path))
         }
-        StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
-            backend::s3_compatible::S3CompatibleBackend::without_token(endpoint, bucket),
-        ),
+        StorageConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            use_path_style,
+            access_key,
+            secret_key,
+            security_token,
+            session_token,
+            request_timeout_secs,
+        } => Box::new(backend::s3_compatible::S3CompatibleBackend::new(
+            S3CompatibleBackendConfig {
+                bucket: bucket.to_string(),
+                region: region.to_string(),
+                endpoint: endpoint.map(|s| s.to_string()),
+                extra_headers: reqwest::header::HeaderMap::new(),
+                request_timeout: request_timeout_secs.map(Duration::from_secs),
+                path_style: Some(use_path_style),
+                access_key: access_key.map(|s| s.to_string()),
+                secret_key: secret_key.map(|s| s.to_string()),
+                security_token: security_token.map(|s| s.to_string()),
+                session_token: session_token.map(|s| s.to_string()),
+            },
+        )),
         StorageConfig::Gcs { endpoint, bucket } => {
             Box::new(backend::gcs::GcsBackend::new(endpoint, bucket).await?)
         }

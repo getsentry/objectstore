@@ -93,6 +93,23 @@ jobs:
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
             gcr.io/cloud-devrel-public-resources/storage-testbench:latest
 
+      - name: Start S3-compatible Emulator
+        run: |
+          docker run -d \
+            --name s3-emulator \
+            -p 8088:9000 \
+            -e MINIO_ROOT_USER=test-key \
+            -e MINIO_ROOT_PASSWORD=test-secret \
+            --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:9000/minio/health/live" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-retries 5 \
+            docker.io/minio/minio:edge-cicd@sha256:29e8e51691d11e779468f275002779b221fd3902518d103e35c8a8bb2ef0f3ea
+
+          apt-get update
+          apt-get install -y s3cmd
+          s3cmd --access_key=test-key --secret_key=test-secret --host=localhost:8088 --no-ssl mb s3://test-bucket
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
