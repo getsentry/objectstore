@@ -3,7 +3,7 @@ local gocdtasks = import 'github.com/getsentry/gocd-jsonnet/libs/gocd-tasks.libs
 
 local deploy_canary(region) = [
   {
-    'deploy-primary': {
+    'deploy-canary': {
       fetch_materials: true,
       jobs: {
         create_sentry_release: {
@@ -12,7 +12,6 @@ local deploy_canary(region) = [
             SENTRY_PROJECT: 'objectstore',
             SENTRY_AUTH_TOKEN: '{{SECRET:[devinfra-sentryio][token]}}',
             SENTRY_ENVIRONMENT: region + '-canary',
-            K8S_ENVIRONMENT: 'canary',
           },
           timeout: 60,
           elastic_profile_id: 'objectstore',
@@ -24,6 +23,7 @@ local deploy_canary(region) = [
           timeout: 300,
           elastic_profile_id: 'objectstore',
           environment_variables: {
+            K8S_ENVIRONMENT: 'canary',
             PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
           },
           tasks: [
