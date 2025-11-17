@@ -64,7 +64,7 @@ jobs:
       - name: Test Image
         run: |
           docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
-          docker run --rm ${{ matrix.platform }} --help | grep -q '^Usage: entrypoint'
+          docker run --rm ${{ matrix.platform }} version | grep -q '^objectstore@'
 
       - name: Upload Image
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -155,3 +155,44 @@ jobs:
 
       - *download
       - *assemble
+
+  gocd-artifacts:
+    name: Upload Build Artifacts for GoCD
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    # Intentionally never publish on pull requests
+    if: ${{ github.event_name != 'pull_request' }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/868781662168/locations/global/workloadIdentityPools/prod-github/providers/github-oidc-pool
+          service_account: gha-gcr-push@sac-prod-sa.iam.gserviceaccount.com
+
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db" # v3.0.1
+        with:
+          version: ">= 390.0.0"
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: objectstore-amd64
+          path: /tmp
+
+      - name: Extract and upload artifacts
+        run: |
+          docker load --input /tmp/objectstore-amd64.tar
+          docker run --rm amd64 version > /tmp/release-name
+
+          gsutil -m cp /tmp/release-name \
+            "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/${{ github.sha }}/"

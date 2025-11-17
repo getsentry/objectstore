@@ -6,6 +6,19 @@ local deploy_primary(region) = [
     'deploy-primary': {
       fetch_materials: true,
       jobs: {
+        create_sentry_release: {
+          environment_variables: {
+            SENTRY_ORG: 'sentry',
+            SENTRY_PROJECT: 'objectstore',
+            SENTRY_AUTH_TOKEN: '{{SECRET:[devinfra-sentryio][token]}}',
+            SENTRY_ENVIRONMENT: region,
+          },
+          timeout: 60,
+          elastic_profile_id: 'objectstore',
+          tasks: [
+            gocdtasks.script(importstr '../bash/create-sentry-release.sh'),
+          ],
+        },
         deploy: {
           timeout: 300,
           elastic_profile_id: 'objectstore',
