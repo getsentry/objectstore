@@ -89,6 +89,13 @@ impl GcsObject {
             );
         }
 
+        if let Some(creation_time) = metadata.creation_time {
+            gcs_object.metadata.insert(
+                GcsMetaKey::CreationTime,
+                humantime::format_rfc3339_micros(creation_time).to_string(),
+            );
+        }
+
         for (key, value) in &metadata.custom {
             gcs_object
                 .metadata
@@ -110,6 +117,12 @@ impl GcsObject {
             .transpose()?
             .unwrap_or_default();
 
+        let creation_time = self
+            .metadata
+            .remove(&GcsMetaKey::CreationTime)
+            .map(|s| humantime::parse_rfc3339(&s))
+            .transpose()?;
+
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
@@ -130,6 +143,7 @@ impl GcsObject {
             is_redirect_tombstone: None,
             content_type,
             expiration_policy,
+            creation_time,
             compression,
             custom,
             size,
@@ -142,6 +156,8 @@ impl GcsObject {
 enum GcsMetaKey {
     /// Built-in metadata key for [`Metadata::expiration_policy`].
     Expiration,
+    /// Built-in metadata key for [`Metadata::creation_time`].
+    CreationTime,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -158,6 +174,7 @@ impl std::str::FromStr for GcsMetaKey {
 
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
+            Some("creation-time") => GcsMetaKey::CreationTime,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -171,6 +188,7 @@ impl fmt::Display for GcsMetaKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
+            Self::CreationTime => write!(f, "{BUILTIN_META_PREFIX}creation-time"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -464,6 +482,7 @@ mod tests {
             is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
+            creation_time: Some(SystemTime::now()),
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             size: None,
