@@ -216,39 +216,42 @@ impl Metadata {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
-            // standard headers
-            if name == header::CONTENT_TYPE {
-                let content_type = value.to_str()?;
-                metadata.content_type = content_type.to_owned().into();
-                continue;
-            }
-            if name == header::CONTENT_ENCODING {
-                let compression = value.to_str()?;
-                metadata.compression = Some(Compression::from_str(compression)?);
-                continue;
-            }
-
-            let Some(name) = name.as_str().strip_prefix(prefix) else {
-                continue;
-            };
-
-            // Objectstore first-class metadata
-            if name == HEADER_EXPIRATION {
-                let expiration_policy = value.to_str()?;
-                metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
-                continue;
-            }
-            if name == HEADER_REDIRECT_TOMBSTONE {
-                if value.to_str()? == "true" {
-                    metadata.is_redirect_tombstone = Some(true);
+            match *name {
+                // standard HTTP headers
+                header::CONTENT_TYPE => {
+                    let content_type = value.to_str()?;
+                    metadata.content_type = content_type.to_owned().into();
                 }
-                continue;
-            }
+                header::CONTENT_ENCODING => {
+                    let compression = value.to_str()?;
+                    metadata.compression = Some(Compression::from_str(compression)?);
+                }
+                _ => {
+                    let Some(name) = name.as_str().strip_prefix(prefix) else {
+                        continue;
+                    };
 
-            // customer-provided metadata
-            if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
-                let value = value.to_str()?;
-                metadata.custom.insert(name.into(), value.into());
+                    match name {
+                        // Objectstore first-class metadata
+                        HEADER_EXPIRATION => {
+                            let expiration_policy = value.to_str()?;
+                            metadata.expiration_policy =
+                                ExpirationPolicy::from_str(expiration_policy)?;
+                        }
+                        HEADER_REDIRECT_TOMBSTONE => {
+                            if value.to_str()? == "true" {
+                                metadata.is_redirect_tombstone = Some(true);
+                            }
+                        }
+                        _ => {
+                            // customer-provided metadata
+                            if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
+                                let value = value.to_str()?;
+                                metadata.custom.insert(name.into(), value.into());
+                            }
+                        }
+                    }
+                }
             }
         }
 
