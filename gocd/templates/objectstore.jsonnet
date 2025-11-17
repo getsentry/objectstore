@@ -15,6 +15,12 @@ local pipedream_config = {
       destination: 'objectstore',
     },
   },
+  exclude_regions: [
+    'customer-1',
+    'customer-2',
+    'customer-4',
+    'customer-7',
+  ],
   rollback: {
     material_name: 'objectstore_repo',
     stage: 'deploy-primary',
