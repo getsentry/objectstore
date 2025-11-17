@@ -371,6 +371,7 @@ mod tests {
         let path = make_key();
         let metadata = Metadata {
             content_type: "text/plain".into(),
+            creation_time: Some(SystemTime::now()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
         };
