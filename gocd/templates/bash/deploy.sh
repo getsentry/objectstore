@@ -5,7 +5,7 @@ eval $(regions-project-env-vars --region="${SENTRY_REGION}")
 /devinfra/scripts/get-cluster-credentials
 
 LABEL_SELECTOR="service=objectstore"
-if [[ -n "$K8S_ENVIRONMENT-}" ]]; then
+if [[ -n "${K8S_ENVIRONMENT:-}" ]]; then
   LABEL_SELECTOR="$LABEL_SELECTOR,environment=$K8S_ENVIRONMENT"
 fi
 
