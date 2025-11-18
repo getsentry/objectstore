@@ -468,7 +468,7 @@ mod tests {
     fn make_key() -> ObjectPath {
         ObjectPath {
             usecase: "testing".into(),
-            scope: "testing".into(),
+            scope: vec!["testing".into()],
             key: Uuid::new_v4().to_string(),
         }
     }

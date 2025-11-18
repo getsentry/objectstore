@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -13,14 +13,14 @@ use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::ObjectPath;
 use objectstore_types::Metadata;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::ApiResult;
 use crate::state::ServiceState;
 
 pub fn routes() -> Router<ServiceState> {
-    let service_routes = Router::new().route("/", put(put_object_nokey)).route(
-        "/{*key}",
+    let service_routes = Router::new().route(
+        "/{*path}",
         put(put_object).get(get_object).delete(delete_object),
     );
 
@@ -33,54 +33,17 @@ async fn health() -> impl IntoResponse {
     "OK"
 }
 
-#[derive(Deserialize, Debug)]
-struct ContextParams {
-    scope: String,
-    usecase: String,
-}
-
 #[derive(Debug, Serialize)]
 struct PutBlobResponse {
     key: String,
 }
 
-async fn put_object_nokey(
-    State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    headers: HeaderMap,
-    body: Body,
-) -> ApiResult<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key: uuid::Uuid::new_v4().to_string(),
-    };
-    populate_sentry_scope(&path);
-
-    let mut metadata =
-        Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
-    metadata.creation_time = Some(SystemTime::now());
-
-    let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
-
-    Ok(Json(PutBlobResponse {
-        key: key.key.to_string(),
-    }))
-}
-
 async fn put_object(
     State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
+    Path(path): Path<ObjectPath>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
     populate_sentry_scope(&path);
 
     let mut metadata =
@@ -97,16 +60,9 @@ async fn put_object(
 
 async fn get_object(
     State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
+    Path(path): Path<ObjectPath>,
 ) -> ApiResult<Response> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
     populate_sentry_scope(&path);
-
     let Some((metadata, stream)) = state.service.get_object(&path).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
@@ -119,14 +75,8 @@ async fn get_object(
 
 async fn delete_object(
     State(state): State<ServiceState>,
-    Query(params): Query<ContextParams>,
-    Path(key): Path<String>,
+    Path(path): Path<ObjectPath>,
 ) -> ApiResult<impl IntoResponse> {
-    let path = ObjectPath {
-        usecase: params.usecase,
-        scope: params.scope,
-        key,
-    };
     populate_sentry_scope(&path);
 
     state.service.delete_object(&path).await?;
