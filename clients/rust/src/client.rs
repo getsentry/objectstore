@@ -418,7 +418,7 @@ impl Session {
     pub fn object_url(&self, object_key: &str) -> Url {
         let mut url = self.client.service_url.clone();
         let path = format!(
-            "v1/{}/{}/data/{object_key}",
+            "v1/{}/{}/objects/{object_key}",
             self.scope.usecase.name, self.scope.scope
         );
         url.set_path(&path);
@@ -461,7 +461,7 @@ mod tests {
 
         assert_eq!(
             session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/data/foo/bar"
+            "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
         )
     }
 }

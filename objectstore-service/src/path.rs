@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 use serde::de;
 
 /// Magic URL segment that separates objectstore context from an object's user-provided key.
-const PATH_CONTEXT_SEPARATOR: &str = "data";
+const PATH_CONTEXT_SEPARATOR: &str = "objects";
 
 /// The fully scoped path of an object.
 ///

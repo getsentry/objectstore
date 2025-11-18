@@ -206,7 +206,7 @@ class Session:
         return {}
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
-        base_path = f"/v1/{self._usecase.name}/{self._scope}/data/{key or ''}"
+        base_path = f"/v1/{self._usecase.name}/{self._scope}/objects/{key or ''}"
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{base_path}"
         else:

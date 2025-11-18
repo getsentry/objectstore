@@ -14,5 +14,5 @@ def test_object_url() -> None:
 
     assert (
         session.object_url("foo/bar")
-        == "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/data/foo/bar"
+        == "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
     )
