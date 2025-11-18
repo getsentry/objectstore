@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.11
+
+### Various fixes & improvements
+
+- breaking: change url format: {usecase}/{scope1}/.../data/{key} (#203) by @matt-codecov
+
 ## 0.0.10
 
 ### Various fixes & improvements
