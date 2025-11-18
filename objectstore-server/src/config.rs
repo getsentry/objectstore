@@ -450,6 +450,31 @@ pub struct Sentry {
     ///
     /// `OS__SENTRY__DEBUG`
     pub debug: bool,
+
+    /// Additional tags to attach to all Sentry events.
+    ///
+    /// Key-value pairs that are sent as tags with every event reported to Sentry. Useful for adding
+    /// context such as deployment identifiers or environment details.
+    ///
+    /// # Default
+    ///
+    /// Empty (no tags)
+    ///
+    /// # Environment Variables
+    ///
+    /// Each tag is set individually:
+    /// - `OS__SENTRY__TAGS__FOO=foo`
+    /// - `OS__SENTRY__TAGS__BAR=bar`
+    ///
+    /// # YAML Example
+    ///
+    /// ```yaml
+    /// sentry:
+    ///   tags:
+    ///     foo: foo
+    ///     bar: bar
+    /// ```
+    pub tags: BTreeMap<String, String>,
 }
 
 impl Sentry {
@@ -471,6 +496,7 @@ impl Default for Sentry {
             traces_sample_rate: 0.01,
             inherit_sampling_decision: true,
             debug: false,
+            tags: BTreeMap::new(),
         }
     }
 }
