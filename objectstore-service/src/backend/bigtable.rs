@@ -263,6 +263,7 @@ impl Backend for BigTableBackend {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         metadata.size = Some(value.len());
+        metadata.expiration_time = expire_at;
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
@@ -387,6 +388,7 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
+        assert!(meta.expiration_time.is_none());
 
         Ok(())
     }

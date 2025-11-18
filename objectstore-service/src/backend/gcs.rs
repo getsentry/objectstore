@@ -96,6 +96,13 @@ impl GcsObject {
             );
         }
 
+        if let Some(expiration_time) = metadata.expiration_time {
+            gcs_object.metadata.insert(
+                GcsMetaKey::ExpirationTime,
+                humantime::format_rfc3339_micros(expiration_time).to_string(),
+            );
+        }
+
         for (key, value) in &metadata.custom {
             gcs_object
                 .metadata
@@ -123,6 +130,13 @@ impl GcsObject {
             .map(|s| humantime::parse_rfc3339(&s))
             .transpose()?;
 
+        let expiration_time = self
+            .metadata
+            .remove(&GcsMetaKey::ExpirationTime)
+            .map(|s| humantime::parse_rfc3339(&s))
+            .transpose()?
+            .or(self.custom_time);
+
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
@@ -144,6 +158,7 @@ impl GcsObject {
             content_type,
             expiration_policy,
             creation_time,
+            expiration_time,
             compression,
             custom,
             size,
@@ -158,6 +173,8 @@ enum GcsMetaKey {
     Expiration,
     /// Built-in metadata key for [`Metadata::creation_time`].
     CreationTime,
+    /// Built-in metadata key for [`Metadata::expiration_time`].
+    ExpirationTime,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -175,6 +192,7 @@ impl std::str::FromStr for GcsMetaKey {
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
             Some("creation-time") => GcsMetaKey::CreationTime,
+            Some("expiration-time") => GcsMetaKey::ExpirationTime,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -189,6 +207,7 @@ impl fmt::Display for GcsMetaKey {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
             Self::CreationTime => write!(f, "{BUILTIN_META_PREFIX}creation-time"),
+            Self::ExpirationTime => write!(f, "{BUILTIN_META_PREFIX}expiration-time"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -374,15 +393,13 @@ impl Backend for GcsBackend {
             .await
             .context("failed to parse object metadata")?;
 
-        // TODO: Store custom_time directly in metadata.
-        let expire_at = gcs_metadata.custom_time;
         let metadata = gcs_metadata.into_metadata()?;
 
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+        if metadata.expiration_policy.is_timeout() && metadata.expiration_time.is_some_and(|ts| ts < access_time) {
             tracing::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -391,7 +408,7 @@ impl Backend for GcsBackend {
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // Only bump if the difference in deadlines meets a minimum threshold
             let new_expire_at = SystemTime::now() + tti;
-            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
+            if metadata.expiration_time.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
                 self.update_custom_time(object_url.clone(), new_expire_at)
                     .await?;
             }
@@ -483,6 +500,7 @@ mod tests {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             creation_time: Some(SystemTime::now()),
+            expiration_time: None,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             size: None,
@@ -499,6 +517,8 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
+        // Manual policy should have no expiration time
+        assert!(meta.expiration_time.is_none());
 
         Ok(())
     }

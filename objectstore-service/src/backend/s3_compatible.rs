@@ -167,26 +167,26 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         let headers = response.headers();
         // TODO: Populate size in metadata
-        let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+
+        // Extract expiration time from custom-time header if present
+        let expire_at = headers
+            .get(GCS_CUSTOM_TIME)
+            .and_then(|s| s.to_str().ok())
+            .and_then(|s| humantime::parse_rfc3339(s).ok());
+        metadata.expiration_time = expire_at;
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // TODO: Inject the access time from the request.
             let access_time = SystemTime::now();
+            let expire_at_value = expire_at.unwrap_or(access_time);
 
-            let expire_at = headers
-                .get(GCS_CUSTOM_TIME)
-                .and_then(|s| s.to_str().ok())
-                .and_then(|s| humantime::parse_rfc3339(s).ok())
-                .unwrap_or(access_time);
-
-            if expire_at < access_time + tti - TTI_DEBOUNCE {
+            if expire_at_value < access_time + tti - TTI_DEBOUNCE {
                 // This serializes a new custom-time internally.
                 self.update_metadata(path, &metadata).await?;
             }
         }
-
-        // TODO: the object *GET* should probably also contain the expiration time?
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))

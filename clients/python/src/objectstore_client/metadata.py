@@ -11,6 +11,7 @@ Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_CREATION_TIME = "x-sn-creation-time"
+HEADER_EXPIRATION_TIME = "x-sn-expiration-time"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -33,6 +34,7 @@ class Metadata:
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
     creation_time: datetime | None
+    expiration_time: datetime | None
     custom: dict[str, str]
 
     @classmethod
@@ -41,6 +43,7 @@ class Metadata:
         compression = None
         expiration_policy = None
         creation_time = None
+        expiration_time = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -52,6 +55,8 @@ class Metadata:
                 expiration_policy = parse_expiration(v)
             elif k == HEADER_CREATION_TIME:
                 creation_time = datetime.fromisoformat(v)
+            elif k == HEADER_EXPIRATION_TIME:
+                expiration_time = datetime.fromisoformat(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -60,6 +65,7 @@ class Metadata:
             compression=compression,
             expiration_policy=expiration_policy,
             creation_time=creation_time,
+            expiration_time=expiration_time,
             custom=custom_metadata,
         )
 

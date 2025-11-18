@@ -81,7 +81,14 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata = serde_json::from_str(metadata_line.trim_end())?;
+        let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())?;
+
+        // Compute expiration time based on policy and creation time
+        if let Some(creation_time) = metadata.creation_time
+            && let Some(expires_in) = metadata.expiration_policy.expires_in()
+        {
+            metadata.expiration_time = creation_time.checked_add(expires_in);
+        }
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
@@ -130,6 +137,7 @@ mod tests {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             creation_time: Some(SystemTime::now()),
+            expiration_time: None,
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,
@@ -142,7 +150,18 @@ mod tests {
         let (read_metadata, stream) = backend.get_object(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(read_metadata, metadata);
+        // Verify that expiration_time was computed correctly
+        let expected_expiration_time = metadata
+            .creation_time
+            .and_then(|ct| ct.checked_add(Duration::from_secs(3600)));
+        assert_eq!(read_metadata.expiration_time, expected_expiration_time);
+
+        // Verify other fields match
+        assert_eq!(read_metadata.content_type, metadata.content_type);
+        assert_eq!(read_metadata.expiration_policy, metadata.expiration_policy);
+        assert_eq!(read_metadata.creation_time, metadata.creation_time);
+        assert_eq!(read_metadata.compression, metadata.compression);
+        assert_eq!(read_metadata.custom, metadata.custom);
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 }
