@@ -7,7 +7,7 @@ use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
 use url::Url;
 
-pub use objectstore_types::{Compression, PARAM_SCOPE, PARAM_USECASE};
+pub use objectstore_types::Compression;
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -258,7 +258,7 @@ impl Scope {
     }
 
     /// Extends this Scope by creating a new sub-scope nested within it.
-    pub fn push<V>(self, key: &str, value: &V) -> Self
+    pub fn push<V>(self, key: &str, value: V) -> Self
     where
         V: std::fmt::Display,
     {
@@ -410,22 +410,29 @@ pub struct Session {
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {
+    /// Generates a GET url to the object with the given `key`.
+    ///
+    /// This can then be used by downstream services to fetch the given object.
+    /// NOTE however that the service does not strictly follow HTTP semantics,
+    /// in particular in relation to `Accept-Encoding`.
+    pub fn object_url(&self, object_key: &str) -> Url {
+        let mut url = self.client.service_url.clone();
+        let path = format!(
+            "v1/{}/{}/objects/{object_key}",
+            self.scope.usecase.name, self.scope.scope
+        );
+        url.set_path(&path);
+        url
+    }
+
     pub(crate) fn request(
         &self,
         method: reqwest::Method,
-        resource_id: &str,
-    ) -> crate::Result<reqwest::RequestBuilder> {
-        let mut url = self.client.service_url.clone();
-        url.path_segments_mut()
-            .map_err(|_| crate::Error::InvalidUrl {
-                message: format!("The URL {} cannot be a base", self.client.service_url),
-            })?
-            .extend(&["v1", resource_id]);
+        object_key: &str,
+    ) -> reqwest::RequestBuilder {
+        let url = self.object_url(object_key);
 
-        let mut builder = self.client.reqwest.request(method, url).query(&[
-            (PARAM_SCOPE, self.scope.scope.as_str()),
-            (PARAM_USECASE, self.scope.usecase.name.as_ref()),
-        ]);
+        let mut builder = self.client.reqwest.request(method, url);
 
         if self.client.propagate_traces {
             let trace_headers =
@@ -435,6 +442,26 @@ impl Session {
             }
         }
 
-        Ok(builder)
+        builder
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_object_url() {
+        let client = Client::new("http://127.0.0.1:8888/").unwrap();
+        let usecase = Usecase::new("testing");
+        let scope = usecase
+            .for_project(12345, 1337)
+            .push("app_slug", "email_app");
+        let session = client.session(scope).unwrap();
+
+        assert_eq!(
+            session.object_url("foo/bar").to_string(),
+            "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
+        )
     }
 }
