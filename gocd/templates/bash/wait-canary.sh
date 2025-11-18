@@ -1,4 +1,4 @@
 #!/bin/bash
 
-# Wait for 5 minutes
-sleep 300
+# Wait for 1 minute
+sleep 60
