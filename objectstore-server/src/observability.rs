@@ -25,7 +25,7 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
     let dsn = config.dsn.as_ref()?;
 
-    Some(sentry::init(sentry::ClientOptions {
+    let guard = sentry::init(sentry::ClientOptions {
         dsn: dsn.expose_secret().parse().ok(),
         release: Some(RELEASE.into()),
         environment: config.environment.clone(),
@@ -47,7 +47,15 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
         enable_logs: true,
         debug: config.debug,
         ..Default::default()
-    }))
+    });
+
+    sentry::configure_scope(|scope| {
+        for (k, v) in &config.tags {
+            scope.set_tag(k, v);
+        }
+    });
+
+    Some(guard)
 }
 
 pub fn init_tracing(config: &Config) {

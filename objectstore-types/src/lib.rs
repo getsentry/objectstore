@@ -23,11 +23,6 @@ pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
-/// HTTP request query parameter that contains the request scope.
-pub const PARAM_SCOPE: &str = "scope";
-/// HTTP request query parameter that contains the request usecase.
-pub const PARAM_USECASE: &str = "usecase";
-
 /// The default content type for objects without a known content type.
 pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -43,6 +38,9 @@ pub enum Error {
     /// The compression algorithm is invalid.
     #[error("invalid compression value")]
     InvalidCompression,
+    /// The content type is invalid.
+    #[error("invalid content type")]
+    InvalidContentType(#[from] mediatype::MediaTypeError),
 }
 impl From<http::header::InvalidHeaderValue> for Error {
     fn from(err: http::header::InvalidHeaderValue) -> Self {
@@ -216,23 +214,42 @@ impl Metadata {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
-            if name == header::CONTENT_TYPE {
-                let content_type = value.to_str()?;
-                metadata.content_type = content_type.to_owned().into();
-            } else if name == header::CONTENT_ENCODING {
-                let compression = value.to_str()?;
-                metadata.compression = Some(Compression::from_str(compression)?);
-            } else if let Some(name) = name.as_str().strip_prefix(prefix) {
-                if name == HEADER_EXPIRATION {
-                    let expiration_policy = value.to_str()?;
-                    metadata.expiration_policy = ExpirationPolicy::from_str(expiration_policy)?;
-                } else if name == HEADER_REDIRECT_TOMBSTONE {
-                    if value.to_str()? == "true" {
-                        metadata.is_redirect_tombstone = Some(true);
+            match *name {
+                // standard HTTP headers
+                header::CONTENT_TYPE => {
+                    let content_type = value.to_str()?;
+                    validate_content_type(content_type)?;
+                    metadata.content_type = content_type.to_owned().into();
+                }
+                header::CONTENT_ENCODING => {
+                    let compression = value.to_str()?;
+                    metadata.compression = Some(Compression::from_str(compression)?);
+                }
+                _ => {
+                    let Some(name) = name.as_str().strip_prefix(prefix) else {
+                        continue;
+                    };
+
+                    match name {
+                        // Objectstore first-class metadata
+                        HEADER_EXPIRATION => {
+                            let expiration_policy = value.to_str()?;
+                            metadata.expiration_policy =
+                                ExpirationPolicy::from_str(expiration_policy)?;
+                        }
+                        HEADER_REDIRECT_TOMBSTONE => {
+                            if value.to_str()? == "true" {
+                                metadata.is_redirect_tombstone = Some(true);
+                            }
+                        }
+                        _ => {
+                            // customer-provided metadata
+                            if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
+                                let value = value.to_str()?;
+                                metadata.custom.insert(name.into(), value.into());
+                            }
+                        }
                     }
-                } else if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
-                    let value = value.to_str()?;
-                    metadata.custom.insert(name.into(), value.into());
                 }
             }
         }
@@ -256,17 +273,18 @@ impl Metadata {
         } = self;
 
         let mut headers = HeaderMap::new();
+
+        // standard headers
         headers.append(header::CONTENT_TYPE, content_type.parse()?);
-
-        if matches!(is_redirect_tombstone, Some(true)) {
-            let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
-            headers.append(name, "true".parse()?);
-        }
-
         if let Some(compression) = compression {
             headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
         }
 
+        // Objectstore first-class metadata
+        if matches!(is_redirect_tombstone, Some(true)) {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
+            headers.append(name, "true".parse()?);
+        }
         if *expiration_policy != ExpirationPolicy::Manual {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
             headers.append(name, expiration_policy.to_string().parse()?);
@@ -277,6 +295,7 @@ impl Metadata {
             }
         }
 
+        // customer-provided metadata
         for (key, value) in custom {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_META_PREFIX}{key}"))?;
             headers.append(name, value.parse()?);
@@ -284,6 +303,13 @@ impl Metadata {
 
         Ok(headers)
     }
+}
+
+/// Validates that `content_type` is a valid [IANA Media
+/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
+fn validate_content_type(content_type: &str) -> Result<(), Error> {
+    mediatype::MediaType::parse(content_type)?;
+    Ok(())
 }
 
 impl Default for Metadata {
