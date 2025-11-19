@@ -103,14 +103,17 @@ def test_full_cycle(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    data = b"test data"
-
-    object_key = session.put(data)
+    object_key = session.put(b"test data")
     assert object_key is not None
 
     retrieved = session.get(object_key)
-    assert retrieved.payload.read() == data
+    assert retrieved.payload.read() == b"test data"
     assert retrieved.metadata.time_created is not None
+
+    new_key = session.put(b"new data", key=object_key)
+    assert new_key == object_key
+    retrieved = session.get(object_key)
+    assert retrieved.payload.read() == b"new data"
 
     session.delete(object_key)
 
