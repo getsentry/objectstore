@@ -13,7 +13,7 @@ impl Session {
     }
 }
 
-/// A DELETE request builder.
+/// A [`delete`](Session::delete) request builder.
 #[derive(Debug)]
 pub struct DeleteBuilder {
     session: Session,
@@ -21,7 +21,7 @@ pub struct DeleteBuilder {
 }
 
 impl DeleteBuilder {
-    /// Sends the `DELETE` request.
+    /// Sends the delete request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
         self.session
             .request(reqwest::Method::DELETE, &self.key)
