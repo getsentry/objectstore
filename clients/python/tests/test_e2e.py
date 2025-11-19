@@ -171,4 +171,4 @@ def test_connect_timeout() -> None:
     )
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
-        session.put(b"foo")
+        session.get("foo")
