@@ -212,7 +212,7 @@ class Session:
         else:
             return f"{base_path}"
 
-    def insert(
+    def put(
         self,
         contents: bytes | IO[bytes],
         key: str | None = None,

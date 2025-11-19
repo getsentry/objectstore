@@ -32,7 +32,7 @@ impl HttpRemote {
         let stream = ReaderStream::new(payload).boxed();
 
         session
-            .insert_stream(stream)
+            .put_stream(stream)
             .compression(None)
             .send()
             .await

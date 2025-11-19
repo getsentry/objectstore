@@ -53,11 +53,11 @@ session = client.session(
 # The following operations will raise an exception on failure
 
 # Write an object and metadata
-object_key = session.insert(
+object_key = session.put(
     b"Hello, world!",
     # You can pass in your own identifier for the object to decide where to store the file.
     # Otherwise, Objectstore will pick an identifier and return it.
-    # An insert request to an existing identifier overwrites the contents and metadata.
+    # A put request to an existing identifier overwrites the contents and metadata.
     # id="hello",
     metadata={"key": "value"},
     # Overrides the default defined at the Usecase level

@@ -17,10 +17,10 @@ async fn example_basic() -> Result<()> {
         .for_project(42, 1337)
         .session(&client)?;
 
-    let response = session.insert("Hello, world!")
+    let response = session.put("Hello, world!")
         .send()
         .await
-        .expect("insert to succeed");
+        .expect("put to succeed");
 
     let object = session
         .get(&response.key)
@@ -68,7 +68,7 @@ async fn example() -> Result<()> {
     let session = OBJECTSTORE_CLIENT
         .session(ATTACHMENTS.for_project(42, 1337))?;
 
-    let response = session.insert("Hello, world!").send().await?;
+    let response = session.put("Hello, world!").send().await?;
 
     let object = session
         .get(&response.key)

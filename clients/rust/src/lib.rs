@@ -6,7 +6,7 @@ mod client;
 mod delete;
 mod error;
 mod get;
-mod insert;
+mod put;
 pub mod utils;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
@@ -15,7 +15,7 @@ pub use client::*;
 pub use delete::*;
 pub use error::*;
 pub use get::*;
-pub use insert::*;
+pub use put::*;
 
 #[cfg(test)]
 mod tests;
