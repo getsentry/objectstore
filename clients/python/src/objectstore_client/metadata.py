@@ -33,6 +33,11 @@ class Metadata:
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
     time_created: datetime | None
+    """
+    Timestamp indicating when the object was created or the last time it was replaced.
+    This means that a PUT request to an existing object causes this value to be bumped.
+    """
+
     custom: dict[str, str]
 
     @classmethod
