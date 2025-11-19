@@ -84,7 +84,7 @@ impl PutBuilder {
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
     /// server will automatically assign a random key, which is then returned from this request.
     pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.key = Some(key.into());
+        self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
     }
 
