@@ -6,16 +6,7 @@ statusProvider:
   name: github
   config:
     contexts:
-      - 'Publish'
+      - 'Publish to GHCR'
 preReleaseCommand: ""
 targets:
-  - id: release
-    name: docker
-    source: ghcr.io/getsentry/objectstore
-    target: getsentry/objectstore
-  - id: latest
-    name: docker
-    source: ghcr.io/getsentry/objectstore
-    target: getsentry/objectstore
-    targetFormat: '{{{target}}}:latest'
   - name: github
