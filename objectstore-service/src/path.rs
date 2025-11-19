@@ -46,8 +46,8 @@ impl Display for OptionalObjectPath {
             write!(f, "{}/", scope)?;
         }
         write!(f, "{PATH_CONTEXT_SEPARATOR}/")?;
-        if let Some(key) = &self.key {
-            key.fmt(f)?;
+        if let Some(ref key) = self.key {
+            f.write_str(key)?;
         }
         Ok(())
     }
