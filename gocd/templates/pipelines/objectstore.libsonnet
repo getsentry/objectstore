@@ -15,6 +15,8 @@ local soak_job(region, time_mins) =
       SENTRY_ENVIRONMENT: region,
       SOAK_TIME: time_mins,  // 1 minute
       ERROR_LIMIT: 1 * (time_mins * 60),  // 1 per second
+      DRY_RUN: 'false',
+      SKIP_CANARY_CHECKS: 'false',
       PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
     },
     tasks: [
