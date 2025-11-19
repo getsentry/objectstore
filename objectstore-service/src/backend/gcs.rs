@@ -55,6 +55,14 @@ struct GcsObject {
     /// without having to stream it.
     pub size: Option<String>,
 
+    /// Timestamp of when this object was created.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "humantime_serde"
+    )]
+    pub time_created: Option<SystemTime>,
+
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
@@ -68,6 +76,7 @@ impl GcsObject {
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
+            time_created: metadata.time_created,
             metadata: BTreeMap::new(),
         };
 
@@ -86,13 +95,6 @@ impl GcsObject {
             gcs_object.metadata.insert(
                 GcsMetaKey::Expiration,
                 metadata.expiration_policy.to_string(),
-            );
-        }
-
-        if let Some(time_created) = metadata.time_created {
-            gcs_object.metadata.insert(
-                GcsMetaKey::TimeCreated,
-                humantime::format_rfc3339_micros(time_created).to_string(),
             );
         }
 
@@ -117,15 +119,10 @@ impl GcsObject {
             .transpose()?
             .unwrap_or_default();
 
-        let time_created = self
-            .metadata
-            .remove(&GcsMetaKey::TimeCreated)
-            .map(|s| humantime::parse_rfc3339(&s))
-            .transpose()?;
-
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
+        let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
@@ -143,10 +140,10 @@ impl GcsObject {
             is_redirect_tombstone: None,
             content_type,
             expiration_policy,
-            time_created,
             compression,
-            custom,
             size,
+            custom,
+            time_created,
         })
     }
 }
@@ -156,8 +153,6 @@ impl GcsObject {
 enum GcsMetaKey {
     /// Built-in metadata key for [`Metadata::expiration_policy`].
     Expiration,
-    /// Built-in metadata key for [`Metadata::time_created`].
-    TimeCreated,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -174,7 +169,6 @@ impl std::str::FromStr for GcsMetaKey {
 
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
-            Some("time-created") => GcsMetaKey::TimeCreated,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -188,7 +182,6 @@ impl fmt::Display for GcsMetaKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
-            Self::TimeCreated => write!(f, "{BUILTIN_META_PREFIX}time-created"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -482,9 +475,9 @@ mod tests {
             is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
-            time_created: Some(SystemTime::now()),
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            time_created: Some(SystemTime::now()),
             size: None,
         };
 
@@ -499,6 +492,7 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
+        assert!(metadata.time_created.is_some());
 
         Ok(())
     }
