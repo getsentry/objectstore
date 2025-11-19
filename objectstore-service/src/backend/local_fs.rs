@@ -103,7 +103,7 @@ impl Backend for LocalFsBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
@@ -129,6 +129,7 @@ mod tests {
             is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_created: Some(SystemTime::now()),
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,

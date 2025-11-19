@@ -55,6 +55,14 @@ struct GcsObject {
     /// without having to stream it.
     pub size: Option<String>,
 
+    /// Timestamp of when this object was created.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "humantime_serde"
+    )]
+    pub time_created: Option<SystemTime>,
+
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
@@ -68,6 +76,7 @@ impl GcsObject {
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
+            time_created: metadata.time_created,
             metadata: BTreeMap::new(),
         };
 
@@ -113,6 +122,7 @@ impl GcsObject {
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self.size.map(|size| size.parse()).transpose()?;
+        let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
@@ -131,8 +141,9 @@ impl GcsObject {
             content_type,
             expiration_policy,
             compression,
-            custom,
             size,
+            custom,
+            time_created,
         })
     }
 }
@@ -466,6 +477,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            time_created: Some(SystemTime::now()),
             size: None,
         };
 
@@ -480,6 +492,7 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.custom, metadata.custom);
+        assert!(metadata.time_created.is_some());
 
         Ok(())
     }

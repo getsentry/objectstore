@@ -4,12 +4,13 @@ import itertools
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal, TypeVar, cast
 
 Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
+HEADER_TIME_CREATED = "x-sn-time-created"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -31,6 +32,13 @@ class Metadata:
     content_type: str | None
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
+    time_created: datetime | None
+    """
+    Timestamp indicating when the object was created or the last time it was replaced.
+    This means that a PUT request to an existing object causes this value to be bumped.
+    This field is computed by the server, it cannot be set by clients.
+    """
+
     custom: dict[str, str]
 
     @classmethod
@@ -38,6 +46,7 @@ class Metadata:
         content_type = "application/octet-stream"
         compression = None
         expiration_policy = None
+        time_created = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -47,6 +56,8 @@ class Metadata:
                 compression = cast(Compression | None, v)
             elif k == HEADER_EXPIRATION:
                 expiration_policy = parse_expiration(v)
+            elif k == HEADER_TIME_CREATED:
+                time_created = datetime.fromisoformat(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -54,6 +65,7 @@ class Metadata:
             content_type=content_type,
             compression=compression,
             expiration_policy=expiration_policy,
+            time_created=time_created,
             custom=custom_metadata,
         )
 

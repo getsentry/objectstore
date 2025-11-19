@@ -1,6 +1,7 @@
 //! Contains all HTTP endpoint handlers.
 
 use std::io;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use axum::body::Body;
@@ -44,8 +45,10 @@ async fn put_object(
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
     populate_sentry_scope(&path);
-    let metadata =
+
+    let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
+    metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;
