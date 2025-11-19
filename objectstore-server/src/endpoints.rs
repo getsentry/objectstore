@@ -78,7 +78,7 @@ async fn delete_object(
 
     state.service.delete_object(&path).await?;
 
-    Ok(())
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn populate_sentry_scope(path: &ObjectPath) {
