@@ -107,6 +107,30 @@ async fn stores_under_given_key() {
     assert_eq!(stored_id, "test-key123!!");
 }
 
+#[tokio::test]
+async fn overwrites_existing_key() {
+    let server = TestServer::new().await;
+
+    let client = ClientBuilder::new(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session.put("initial body").send().await.unwrap().key;
+    let overwritten_id = session
+        .put("new body")
+        .key(&stored_id)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    assert_eq!(stored_id, overwritten_id);
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "new body");
+}
+
 #[derive(Debug)]
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,

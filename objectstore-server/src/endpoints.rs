@@ -6,12 +6,12 @@ use std::time::SystemTime;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::ObjectPath;
+use objectstore_service::{ObjectPath, OptionalObjectPath};
 use objectstore_types::Metadata;
 use serde::Serialize;
 
@@ -21,11 +21,14 @@ use crate::state::ServiceState;
 pub fn routes() -> Router<ServiceState> {
     let service_routes = Router::new().route(
         "/{*path}",
-        put(put_object).get(get_object).delete(delete_object),
+        routing::post(insert_object)
+            .put(insert_object)
+            .get(get_object)
+            .delete(delete_object),
     );
 
     Router::new()
-        .route("/health", get(health))
+        .route("/health", routing::get(health))
         .nest("/v1/", service_routes)
 }
 
@@ -38,12 +41,24 @@ struct PutBlobResponse {
     key: String,
 }
 
-async fn put_object(
+async fn insert_object(
     State(state): State<ServiceState>,
-    Path(path): Path<ObjectPath>,
+    Path(path): Path<OptionalObjectPath>,
+    method: Method,
     headers: HeaderMap,
     body: Body,
-) -> ApiResult<impl IntoResponse> {
+) -> ApiResult<Response> {
+    let (expected_method, response_status) = match path.key {
+        Some(_) => (Method::PUT, StatusCode::OK),
+        None => (Method::POST, StatusCode::CREATED),
+    };
+
+    // TODO: For now allow PUT everywhere. Remove the second condition when all clients are updated.
+    if method != expected_method && method == Method::POST {
+        return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+
+    let path = path.create_key();
     populate_sentry_scope(&path);
 
     let mut metadata =
@@ -51,11 +66,12 @@ async fn put_object(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let key = state.service.put_object(path, &metadata, stream).await?;
+    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let response = Json(PutBlobResponse {
+        key: response_path.key.to_string(),
+    });
 
-    Ok(Json(PutBlobResponse {
-        key: key.key.to_string(),
-    }))
+    Ok((response_status, response).into_response())
 }
 
 async fn get_object(

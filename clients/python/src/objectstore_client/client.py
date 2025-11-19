@@ -257,11 +257,14 @@ class Session:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
+        if key == "":
+            key = None
+
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
             response = self._pool.request(
-                "PUT",
+                "POST" if not key else "PUT",
                 self._make_url(key),
                 body=body,
                 headers=headers,

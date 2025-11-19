@@ -84,7 +84,7 @@ impl PutBuilder {
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
     /// server will automatically assign a random key, which is then returned from this request.
     pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.key = Some(key.into());
+        self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
     }
 
@@ -138,10 +138,14 @@ impl PutBuilder {
 impl PutBuilder {
     /// Sends the built PUT request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let mut builder = self.session.request(
-            reqwest::Method::PUT,
-            self.key.as_deref().unwrap_or_default(),
-        );
+        let method = match self.key {
+            Some(_) => reqwest::Method::PUT,
+            None => reqwest::Method::POST,
+        };
+
+        let mut builder = self
+            .session
+            .request(method, self.key.as_deref().unwrap_or_default());
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
