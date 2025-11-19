@@ -49,17 +49,17 @@ impl Session {
         }
     }
 
-    /// Creates a PUT request for a [`Bytes`]-like type.
+    /// Creates or replaces an object using a [`Bytes`]-like payload.
     pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder {
         self.put_body(PutBody::Buffer(body.into()))
     }
 
-    /// Creates a PUT request with a stream.
+    /// Creates or replaces an object using a streaming payload.
     pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
-    /// Creates a PUT request with an [`AsyncRead`] type.
+    /// Creates or replaces an object using an [`AsyncRead`] payload.
     pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -69,7 +69,7 @@ impl Session {
     }
 }
 
-/// A PUT request builder.
+/// A [`put`](Session::put) request builder.
 #[derive(Debug)]
 pub struct PutBuilder {
     session: Session,
@@ -136,7 +136,7 @@ impl PutBuilder {
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
-    /// Sends the built PUT request to the upstream service.
+    /// Sends the built put request to the upstream service.
     pub async fn send(self) -> crate::Result<PutResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,

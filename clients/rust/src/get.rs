@@ -45,7 +45,7 @@ impl fmt::Debug for GetResponse {
 }
 
 impl Session {
-    /// Requests the object with the given `key`.
+    /// Retrieves the object with the given `key`.
     pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
             session: self.clone(),
@@ -55,7 +55,7 @@ impl Session {
     }
 }
 
-/// A GET request builder.
+/// A [`get`](Session::get) request builder.
 #[derive(Debug)]
 pub struct GetBuilder {
     session: Session,
@@ -73,7 +73,7 @@ impl GetBuilder {
         self
     }
 
-    /// Sends the `GET` request.
+    /// Sends the get request.
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
         let response = self
             .session

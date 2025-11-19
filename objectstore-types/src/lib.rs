@@ -199,8 +199,8 @@ pub struct Metadata {
 
     /// The creation/last replacement time of the object, if known.
     ///
-    /// This is populated by the server when performing a POST or PUT request, i.e. when an object is
-    /// first created or when an existing object is overwritten.
+    /// This is set by the server every time an object is put, i.e. when objects are first created
+    /// and when existing objects are overwritten.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_created: Option<SystemTime>,
 
