@@ -5,13 +5,14 @@ local gocdtasks = import 'github.com/getsentry/gocd-jsonnet/libs/gocd-tasks.libs
 local region_has_canary(region) =
   region == 'de' || region == 'us';
 
-local soak_job(time_mins) =
+local soak_job(region, time_mins) =
   {
     timeout: 60 * time_mins + 30,  // soak time + buffer
     elastic_profile_id: 'objectstore',
     environment_variables: {
       GOCD_ACCESS_TOKEN: '{{SECRET:[devinfra][gocd_access_token]}}',
       SENTRY_AUTH_TOKEN: '{{SECRET:[devinfra-sentryio][token]}}',
+      SENTRY_ENVIRONMENT: region,
       SOAK_TIME: time_mins,  // 1 minute
       ERROR_LIMIT: 1 * (time_mins * 60),  // 1 per second
       PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
@@ -55,7 +56,7 @@ local deploy_canary(region) =
                 gocdtasks.script(importstr '../bash/deploy.sh'),
               ],
             },
-            soak: soak_job(1),
+            soak: soak_job(region, 1),
           },
         },
       },
@@ -69,7 +70,7 @@ local soak_time(region) =
       {
         'soak-time': {
           jobs: {
-            soak: soak_job(10),
+            soak: soak_job(region, 1),
           },
         },
       },
