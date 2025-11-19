@@ -356,7 +356,7 @@ pub(crate) struct ClientInner {
 ///
 /// let session = client.session(usecase.for_project(12345, 1337))?;
 ///
-/// let response = session.put("hello world").send().await?;
+/// let response = session.insert("hello world").send().await?;
 ///
 /// # Ok(())
 /// # }
@@ -406,7 +406,7 @@ pub struct Session {
     pub(crate) client: Arc<ClientInner>,
 }
 
-/// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
+/// The type of [`Stream`](futures_util::Stream) to be used for an insert request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {

@@ -145,7 +145,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await?
             .error_for_status()
-            .context("failed to put object")?;
+            .context("failed to insert object")?;
 
         Ok(())
     }

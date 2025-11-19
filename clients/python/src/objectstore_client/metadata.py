@@ -35,7 +35,7 @@ class Metadata:
     time_created: datetime | None
     """
     Timestamp indicating when the object was created or the last time it was replaced.
-    This means that a PUT request to an existing object causes this value to be bumped.
+    This means that an insert request to an existing object causes this value to be bumped.
     This field is computed by the server, it cannot be set by clients.
     """
 

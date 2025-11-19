@@ -15,33 +15,33 @@ pub use objectstore_types::{Compression, ExpirationPolicy};
 
 use crate::{ClientStream, Session};
 
-/// The response returned from the service after uploading an object.
+/// The response returned from the service after inserting an object.
 #[derive(Debug, Deserialize)]
-pub struct PutResponse {
+pub struct InsertResponse {
     /// The key of the object, as stored.
     pub key: String,
 }
 
-pub(crate) enum PutBody {
+pub(crate) enum InsertBody {
     Buffer(Bytes),
     Stream(ClientStream),
 }
 
-impl fmt::Debug for PutBody {
+impl fmt::Debug for InsertBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PutBody").finish_non_exhaustive()
+        f.debug_tuple("InsertBody").finish_non_exhaustive()
     }
 }
 
 impl Session {
-    fn put_body(&self, body: PutBody) -> PutBuilder {
+    fn insert_body(&self, body: InsertBody) -> InsertBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
             compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
 
-        PutBuilder {
+        InsertBuilder {
             session: self.clone(),
             metadata,
             key: None,
@@ -49,36 +49,36 @@ impl Session {
         }
     }
 
-    /// Creates a PUT request for a [`Bytes`]-like type.
-    pub fn put(&self, body: impl Into<Bytes>) -> PutBuilder {
-        self.put_body(PutBody::Buffer(body.into()))
+    /// Creates or replaces an object using a [`Bytes`]-like payload.
+    pub fn insert(&self, body: impl Into<Bytes>) -> InsertBuilder {
+        self.insert_body(InsertBody::Buffer(body.into()))
     }
 
-    /// Creates a PUT request with a stream.
-    pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
-        self.put_body(PutBody::Stream(body))
+    /// Creates or replaces an object using a streaming payload.
+    pub fn insert_stream(&self, body: ClientStream) -> InsertBuilder {
+        self.insert_body(InsertBody::Stream(body))
     }
 
-    /// Creates a PUT request with an [`AsyncRead`] type.
-    pub fn put_read<R>(&self, body: R) -> PutBuilder
+    /// Creates or replaces an object using an [`AsyncRead`] payload.
+    pub fn insert_read<R>(&self, body: R) -> InsertBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
         let stream = ReaderStream::new(body).boxed();
-        self.put_body(PutBody::Stream(stream))
+        self.insert_body(InsertBody::Stream(stream))
     }
 }
 
-/// A PUT request builder.
+/// An insert request builder.
 #[derive(Debug)]
-pub struct PutBuilder {
+pub struct InsertBuilder {
     session: Session,
     metadata: Metadata,
     key: Option<String>,
-    body: PutBody,
+    body: InsertBody,
 }
 
-impl PutBuilder {
+impl InsertBuilder {
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -135,9 +135,9 @@ impl PutBuilder {
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
-impl PutBuilder {
-    /// Sends the built PUT request to the upstream service.
-    pub async fn send(self) -> crate::Result<PutResponse> {
+impl InsertBuilder {
+    /// Sends the built insert request to the upstream service.
+    pub async fn send(self) -> crate::Result<InsertResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,
@@ -148,20 +148,20 @@ impl PutBuilder {
             .request(method, self.key.as_deref().unwrap_or_default());
 
         let body = match (self.metadata.compression, self.body) {
-            (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
+            (Some(Compression::Zstd), InsertBody::Buffer(bytes)) => {
                 let cursor = Cursor::new(bytes);
                 let encoder = ZstdEncoder::new(cursor);
                 let stream = ReaderStream::new(encoder);
                 Body::wrap_stream(stream)
             }
-            (Some(Compression::Zstd), PutBody::Stream(stream)) => {
+            (Some(Compression::Zstd), InsertBody::Stream(stream)) => {
                 let stream = StreamReader::new(stream);
                 let encoder = ZstdEncoder::new(stream);
                 let stream = ReaderStream::new(encoder);
                 Body::wrap_stream(stream)
             }
-            (None, PutBody::Buffer(bytes)) => bytes.into(),
-            (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
+            (None, InsertBody::Buffer(bytes)) => bytes.into(),
+            (None, InsertBody::Stream(stream)) => Body::wrap_stream(stream),
             // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
         };
 

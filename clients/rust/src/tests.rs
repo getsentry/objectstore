@@ -22,7 +22,7 @@ async fn stores_uncompressed() {
     let body = "oh hai!";
 
     let stored_id = session
-        .put(body)
+        .insert(body)
         .compression(None)
         .send()
         .await
@@ -46,7 +46,7 @@ async fn uses_zstd_by_default() {
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = session.put(body).send().await.unwrap().key;
+    let stored_id = session.insert(body).send().await.unwrap().key;
 
     // when the user indicates that it can deal with zstd, it gets zstd
     let GetResponse { metadata, stream } = session
@@ -79,7 +79,7 @@ async fn deletes_stores_stuff() {
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = session.put(body).send().await.unwrap().key;
+    let stored_id = session.insert(body).send().await.unwrap().key;
 
     session.delete(&stored_id).send().await.unwrap();
 
@@ -97,7 +97,7 @@ async fn stores_under_given_key() {
 
     let body = "oh hai!";
     let stored_id = session
-        .put(body)
+        .insert(body)
         .key("test-key123!!")
         .send()
         .await
@@ -115,9 +115,9 @@ async fn overwrites_existing_key() {
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
-    let stored_id = session.put("initial body").send().await.unwrap().key;
+    let stored_id = session.insert("initial body").send().await.unwrap().key;
     let overwritten_id = session
-        .put("new body")
+        .insert("new body")
         .key(&stored_id)
         .send()
         .await

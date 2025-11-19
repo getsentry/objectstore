@@ -37,7 +37,7 @@ async fn health() -> impl IntoResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct PutBlobResponse {
+struct InsertResponse {
     key: String,
 }
 
@@ -67,7 +67,7 @@ async fn insert_object(
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let response_path = state.service.put_object(path, &metadata, stream).await?;
-    let response = Json(PutBlobResponse {
+    let response = Json(InsertResponse {
         key: response_path.key.to_string(),
     });
 

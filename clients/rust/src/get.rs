@@ -45,7 +45,7 @@ impl fmt::Debug for GetResponse {
 }
 
 impl Session {
-    /// Requests the object with the given `key`.
+    /// Retrieves the object with the given `key`.
     pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
             session: self.clone(),
