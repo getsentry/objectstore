@@ -45,8 +45,8 @@ class Metadata:
     """
     Timestamp indicating when the object will expire.
 
-    When using the `TimeToIdle` expiration policy, the reported expiration time will be
-    the one that was set before the request that was made to access this object.
+    When using a Time To Idle expiration policy, this value will reflect the expiration
+    timestamp present prior to the current access to the object.
 
     This field is computed by the server, it cannot be set by clients.
     Use `expiration_policy` to set an expiration policy instead.

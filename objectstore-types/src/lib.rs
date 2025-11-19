@@ -206,9 +206,10 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_created: Option<SystemTime>,
 
-    /// The expiration time of the object, if any.
+    /// The expiration time of the object, if any, in accordance with its expiration policy.
     ///
-    /// This is derived according to the `expiration_policy`.
+    /// When using a Time To Idle expiration policy, this value will reflect the expiration
+    /// timestamp present prior to the current access to the object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_expires: Option<SystemTime>,
 
