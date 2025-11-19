@@ -5,6 +5,26 @@ local gocdtasks = import 'github.com/getsentry/gocd-jsonnet/libs/gocd-tasks.libs
 local region_has_canary(region) =
   region == 'de' || region == 'us';
 
+local soak_job(time_mins) =
+  {
+    timeout: 60 * time_mins + 30,  // soak time + buffer
+    elastic_profile_id: 'objectstore',
+    environment_variables: {
+      GOCD_ACCESS_TOKEN: '{{SECRET:[devinfra][gocd_access_token]}}',
+      SENTRY_AUTH_TOKEN: '{{SECRET:[devinfra-sentryio][token]}}',
+      SOAK_TIME: time_mins,  // 1 minute
+      ERROR_LIMIT: 1 * (time_mins * 60),  // 1 per second
+      PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
+    },
+    tasks: [
+      gocdtasks.script(importstr '../bash/wait.sh'),
+      gocdtasks.script(importstr '../bash/check-sentry-errors.sh'),
+      gocdtasks.script(importstr '../bash/check-sentry-new-errors.sh'),
+      // TODO: Add datadog monitors
+      utils.pause_on_failure(),
+    ],
+  };
+
 local deploy_canary(region) =
   if region_has_canary(region) then
     [
@@ -30,16 +50,26 @@ local deploy_canary(region) =
               elastic_profile_id: 'objectstore',
               environment_variables: {
                 K8S_ENVIRONMENT: 'canary',
-                PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
               },
               tasks: [
                 gocdtasks.script(importstr '../bash/deploy.sh'),
-                gocdtasks.script(importstr '../bash/wait-canary.sh'),
-                // TODO: Add sentry error checks
-                // TODO: Add datadog monitors
-                utils.pause_on_failure(),
               ],
             },
+            soak: soak_job(1),
+          },
+        },
+      },
+    ]
+  else
+    [];
+
+local soak_time(region) =
+  if region == 's4s' then
+    [
+      {
+        'soak-time': {
+          jobs: {
+            soak: soak_job(10),
           },
         },
       },
@@ -91,5 +121,5 @@ function(region) {
       destination: 'objectstore',
     },
   },
-  stages: utils.github_checks() + deploy_canary(region) + deploy_primary(region),
+  stages: utils.github_checks() + deploy_canary(region) + deploy_primary(region) + soak_time(region),
 }
