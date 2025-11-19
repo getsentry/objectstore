@@ -10,7 +10,7 @@ from typing import Literal, TypeVar, cast
 Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
-HEADER_CREATION_TIME = "x-sn-creation-time"
+HEADER_TIME_CREATED = "x-sn-time-created"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -32,7 +32,7 @@ class Metadata:
     content_type: str | None
     compression: Compression | None
     expiration_policy: ExpirationPolicy | None
-    creation_time: datetime | None
+    time_created: datetime | None
     custom: dict[str, str]
 
     @classmethod
@@ -40,7 +40,7 @@ class Metadata:
         content_type = "application/octet-stream"
         compression = None
         expiration_policy = None
-        creation_time = None
+        time_created = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -50,8 +50,8 @@ class Metadata:
                 compression = cast(Compression | None, v)
             elif k == HEADER_EXPIRATION:
                 expiration_policy = parse_expiration(v)
-            elif k == HEADER_CREATION_TIME:
-                creation_time = datetime.fromisoformat(v)
+            elif k == HEADER_TIME_CREATED:
+                time_created = datetime.fromisoformat(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -59,7 +59,7 @@ class Metadata:
             content_type=content_type,
             compression=compression,
             expiration_policy=expiration_policy,
-            creation_time=creation_time,
+            time_created=time_created,
             custom=custom_metadata,
         )
 

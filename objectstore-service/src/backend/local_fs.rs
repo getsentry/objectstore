@@ -129,7 +129,7 @@ mod tests {
             is_redirect_tombstone: None,
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
-            creation_time: Some(SystemTime::now()),
+            time_created: Some(SystemTime::now()),
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,

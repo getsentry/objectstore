@@ -110,7 +110,7 @@ def test_full_cycle(server_url: str) -> None:
 
     retrieved = session.get(object_key)
     assert retrieved.payload.read() == data
-    assert retrieved.metadata.creation_time is not None
+    assert retrieved.metadata.time_created is not None
 
     session.delete(object_key)
 

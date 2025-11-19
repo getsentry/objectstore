@@ -23,7 +23,7 @@ pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
 /// The custom HTTP header that contains the serialized redirect tombstone.
 pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The custom HTTP header that contains the object creation time.
-pub const HEADER_CREATION_TIME: &str = "x-sn-creation-time";
+pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -199,7 +199,7 @@ pub struct Metadata {
 
     /// The creation time of the object, if known. This is populated by the server at object creation time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub creation_time: Option<SystemTime>,
+    pub time_created: Option<SystemTime>,
 
     /// The content type of the object, if known.
     pub content_type: Cow<'static, str>,
@@ -253,10 +253,10 @@ impl Metadata {
                                 metadata.is_redirect_tombstone = Some(true);
                             }
                         }
-                        HEADER_CREATION_TIME => {
+                        HEADER_TIME_CREATED => {
                             let timestamp = value.to_str()?;
                             let time = parse_rfc3339(timestamp)?;
-                            metadata.creation_time = Some(time);
+                            metadata.time_created = Some(time);
                         }
                         _ => {
                             // customer-provided metadata
@@ -284,7 +284,7 @@ impl Metadata {
             content_type,
             compression,
             expiration_policy,
-            creation_time,
+            time_created,
             size: _,
             custom,
         } = self;
@@ -311,8 +311,8 @@ impl Metadata {
                 headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
             }
         }
-        if let Some(time) = creation_time {
-            let name = HeaderName::try_from(format!("{prefix}{HEADER_CREATION_TIME}"))?;
+        if let Some(time) = time_created {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_CREATED}"))?;
             let timestamp = format_rfc3339_micros(*time);
             headers.append(name, timestamp.to_string().parse()?);
         }
@@ -339,7 +339,7 @@ impl Default for Metadata {
         Self {
             is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::Manual,
-            creation_time: None,
+            time_created: None,
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
             size: None,

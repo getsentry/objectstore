@@ -48,7 +48,7 @@ async fn put_object(
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
-    metadata.creation_time = Some(SystemTime::now());
+    metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
     let key = state.service.put_object(path, &metadata, stream).await?;
