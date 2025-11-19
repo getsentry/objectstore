@@ -24,6 +24,8 @@ pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
 pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The custom HTTP header that contains the object creation time.
 pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
+/// The custom HTTP header that contains the object expiration time.
+pub const HEADER_TIME_EXPIRES: &str = "x-sn-time-expires";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -204,6 +206,12 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_created: Option<SystemTime>,
 
+    /// The expiration time of the object, if any.
+    ///
+    /// This is derived according to the `expiration_policy`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_expires: Option<SystemTime>,
+
     /// The content type of the object, if known.
     pub content_type: Cow<'static, str>,
 
@@ -261,6 +269,11 @@ impl Metadata {
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_created = Some(time);
                         }
+                        HEADER_TIME_EXPIRES => {
+                            let timestamp = value.to_str()?;
+                            let time = parse_rfc3339(timestamp)?;
+                            metadata.time_expires = Some(time);
+                        }
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
@@ -288,6 +301,7 @@ impl Metadata {
             compression,
             expiration_policy,
             time_created,
+            time_expires,
             size: _,
             custom,
         } = self;
@@ -319,6 +333,11 @@ impl Metadata {
             let timestamp = format_rfc3339_micros(*time);
             headers.append(name, timestamp.to_string().parse()?);
         }
+        if let Some(time) = time_expires {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_EXPIRES}"))?;
+            let timestamp = format_rfc3339_micros(*time);
+            headers.append(name, timestamp.to_string().parse()?);
+        }
 
         // customer-provided metadata
         for (key, value) in custom {
@@ -343,6 +362,7 @@ impl Default for Metadata {
             is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::Manual,
             time_created: None,
+            time_expires: None,
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
             size: None,

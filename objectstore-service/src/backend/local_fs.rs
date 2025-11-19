@@ -130,6 +130,7 @@ mod tests {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             time_created: Some(SystemTime::now()),
+            time_expires: None,
             compression: Some(Compression::Zstd),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,
