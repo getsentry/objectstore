@@ -23,7 +23,7 @@ local soak_job(region, time_mins) =
       gocdtasks.script(importstr '../bash/wait.sh'),
       gocdtasks.script(importstr '../bash/check-sentry-errors.sh'),
       gocdtasks.script(importstr '../bash/check-sentry-new-errors.sh'),
-      // TODO: Add datadog monitors
+      gocdtasks.script(importstr '../bash/check-datadog-monitors.sh'),
       utils.pause_on_failure(),
     ],
   };
