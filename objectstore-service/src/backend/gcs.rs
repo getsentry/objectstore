@@ -144,6 +144,7 @@ impl GcsObject {
             size,
             custom,
             time_created,
+            time_expires: self.custom_time,
         })
     }
 }
@@ -478,6 +479,7 @@ mod tests {
             compression: None,
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             time_created: Some(SystemTime::now()),
+            time_expires: None,
             size: None,
         };
 
