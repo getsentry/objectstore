@@ -11,6 +11,8 @@ local soak_job(region, time_mins) =
     elastic_profile_id: 'objectstore',
     environment_variables: {
       GOCD_ACCESS_TOKEN: '{{SECRET:[devinfra][gocd_access_token]}}',
+      DATADOG_API_KEY: '{{SECRET:[devinfra][sentry_datadog_api_key]}}',
+      DATADOG_APP_KEY: '{{SECRET:[devinfra][sentry_datadog_app_key]}}',
       SENTRY_AUTH_TOKEN: '{{SECRET:[devinfra-sentryio][token]}}',
       SENTRY_ENVIRONMENT: region,
       SOAK_TIME: time_mins,  // 1 minute
