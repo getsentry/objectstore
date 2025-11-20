@@ -16,6 +16,3 @@ pub use delete::*;
 pub use error::*;
 pub use get::*;
 pub use put::*;
-
-#[cfg(test)]
-mod tests;

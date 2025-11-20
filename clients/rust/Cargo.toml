@@ -26,10 +26,8 @@ tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
 
 [dev-dependencies]
-objectstore-server = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "full"] }
-uuid = { version = "1.18.0", features = ["v7"] }
+objectstore-test = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 
 [features]
