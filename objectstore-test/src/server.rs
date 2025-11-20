@@ -26,7 +26,8 @@ use tempfile::TempDir;
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
-    _tempdir: TempDir,
+    _long_term_tempdir: TempDir,
+    _high_volume_tempdir: TempDir,
 }
 
 impl TestServer {
@@ -36,13 +37,14 @@ impl TestServer {
         listener.set_nonblocking(true).unwrap();
         let socket = listener.local_addr().unwrap();
 
-        let tempdir = tempfile::tempdir().unwrap();
+        let long_term_tempdir = tempfile::tempdir().unwrap();
+        let high_volume_tempdir = tempfile::tempdir().unwrap();
         let config = Config {
             long_term_storage: Storage::FileSystem {
-                path: tempdir.path().into(),
+                path: long_term_tempdir.path().into(),
             },
             high_volume_storage: Storage::FileSystem {
-                path: tempdir.path().into(),
+                path: high_volume_tempdir.path().into(),
             },
             ..Default::default()
         };
@@ -58,7 +60,8 @@ impl TestServer {
         Self {
             handle,
             socket,
-            _tempdir: tempdir,
+            _long_term_tempdir: long_term_tempdir,
+            _high_volume_tempdir: high_volume_tempdir,
         }
     }
 
