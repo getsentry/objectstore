@@ -1,0 +1,15 @@
+[package]
+name = "objectstore-test"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Test utilities for Objectstore and its clients"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+objectstore-server = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

@@ -1949,17 +1949,15 @@ dependencies = [
  "bytes",
  "futures-util",
  "infer",
- "objectstore-server",
+ "objectstore-test",
  "objectstore-types",
  "reqwest",
  "sentry-core",
  "serde",
- "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "url",
- "uuid",
  "zstd",
 ]
 
@@ -2025,6 +2023,15 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "objectstore-test"
+version = "0.1.0"
+dependencies = [
+ "objectstore-server",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
