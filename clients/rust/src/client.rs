@@ -15,6 +15,7 @@ const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"
 struct ClientBuilderInner {
     service_url: Url,
     propagate_traces: bool,
+    auth_token: Option<String>,
     reqwest_builder: reqwest::ClientBuilder,
 }
 
@@ -67,8 +68,17 @@ impl ClientBuilder {
         Self(Ok(ClientBuilderInner {
             service_url,
             propagate_traces: false,
+            auth_token: None,
             reqwest_builder,
         }))
+    }
+
+    /// Sets the authorization token that will be used on each request to Objectstore.
+    pub fn auth_token(mut self, auth_token: String) -> Self {
+        if let Ok(ref mut inner) = self.0 {
+            inner.auth_token = Some(auth_token);
+        }
+        self
     }
 
     /// Changes whether the `sentry-trace` header will be sent to Objectstore
@@ -123,6 +133,7 @@ impl ClientBuilder {
                 reqwest: inner.reqwest_builder.build()?,
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
+                auth_token: inner.auth_token,
             }),
         })
     }
@@ -340,6 +351,7 @@ pub(crate) struct ClientInner {
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,
+    auth_token: Option<String>,
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -447,6 +459,10 @@ impl Session {
         let url = self.object_url(object_key);
 
         let mut builder = self.client.reqwest.request(method, url);
+
+        if let Some(auth_token) = &self.client.auth_token {
+            builder = builder.bearer_auth(auth_token);
+        }
 
         if self.client.propagate_traces {
             let trace_headers =
