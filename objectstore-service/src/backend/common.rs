@@ -14,6 +14,8 @@ use crate::ObjectPath;
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
 pub type BoxedBackend = Box<dyn Backend>;
+
+/// Type alias for data streams used in [`StorageService`](crate::StorageService) and `Backend` APIs.
 pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
