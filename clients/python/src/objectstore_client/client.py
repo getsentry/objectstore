@@ -206,7 +206,7 @@ class Session:
         self._scope = scope
 
     def _make_headers(self) -> dict[str, str]:
-        headers = dict(self._pool.headers) or {}
+        headers = dict(self._pool.headers)
         if self._propagate_traces:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
