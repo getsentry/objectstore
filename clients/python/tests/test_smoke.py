@@ -16,3 +16,13 @@ def test_object_url() -> None:
         session.object_url("foo/bar")
         == "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
     )
+
+
+def test_object_url_with_base_path() -> None:
+    client = Client("http://127.0.0.1:8888/api/prefix")
+    session = client.session(Usecase("testing"), org=12345, project=1337)
+
+    assert (
+        session.object_url("foo/bar")
+        == "http://127.0.0.1:8888/api/prefix/v1/testing/org.12345/project.1337/objects/foo/bar"
+    )

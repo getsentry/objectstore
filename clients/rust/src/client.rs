@@ -417,11 +417,13 @@ impl Session {
     /// in particular in relation to `Accept-Encoding`.
     pub fn object_url(&self, object_key: &str) -> Url {
         let mut url = self.client.service_url.clone();
-        let path = format!(
-            "v1/{}/{}/objects/{object_key}",
+        let base_path = self.client.service_url.path().trim_end_matches('/');
+        let relative_path = format!(
+            "/v1/{}/{}/objects/{object_key}",
             self.scope.usecase.name, self.scope.scope
         );
-        url.set_path(&path);
+        let full_path = format!("{base_path}{relative_path}");
+        url.set_path(&full_path);
         url
     }
 
@@ -462,6 +464,19 @@ mod tests {
         assert_eq!(
             session.object_url("foo/bar").to_string(),
             "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
+        )
+    }
+
+    #[test]
+    fn test_object_url_with_base_path() {
+        let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
+        let usecase = Usecase::new("testing");
+        let scope = usecase.for_project(12345, 1337);
+        let session = client.session(scope).unwrap();
+
+        assert_eq!(
+            session.object_url("foo/bar").to_string(),
+            "http://127.0.0.1:8888/api/prefix/v1/testing/org.12345/project.1337/objects/foo/bar"
         )
     }
 }
