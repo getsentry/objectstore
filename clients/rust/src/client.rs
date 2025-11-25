@@ -418,11 +418,10 @@ impl Session {
     pub fn object_url(&self, object_key: &str) -> Url {
         let mut url = self.client.service_url.clone();
         let base_path = self.client.service_url.path().trim_end_matches('/');
-        let relative_path = format!(
-            "/v1/{}/{}/objects/{object_key}",
+        let full_path = format!(
+            "{base_path}/v1/{}/{}/objects/{object_key}",
             self.scope.usecase.name, self.scope.scope
         );
-        let full_path = format!("{base_path}{relative_path}");
         url.set_path(&full_path);
         url
     }
