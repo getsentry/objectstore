@@ -6,18 +6,26 @@ use crate::config::{Config, Storage};
 
 pub type ServiceState = Arc<State>;
 
+/// State that is made available in request handlers.
 pub struct State {
+    /// Service configuration.
     pub config: Config,
-    pub service: StorageService,
+    /// Raw handle to the underlying storage service that does not enforce authorization checks.
+    ///
+    /// Consider using [`crate::auth::AuthAwareService`].
+    pub authless_service: StorageService,
 }
 
 impl State {
     pub async fn new(config: Config) -> anyhow::Result<ServiceState> {
         let high_volume = map_storage_config(&config.high_volume_storage);
         let long_term = map_storage_config(&config.long_term_storage);
-        let service = StorageService::new(high_volume, long_term).await?;
+        let authless_service = StorageService::new(high_volume, long_term).await?;
 
-        Ok(Arc::new(Self { config, service }))
+        Ok(Arc::new(Self {
+            config,
+            authless_service,
+        }))
     }
 }
 
