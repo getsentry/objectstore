@@ -48,6 +48,11 @@ impl ClientBuilder {
             Ok(url) => url,
             Err(err) => return Self(Err(err.into())),
         };
+        if service_url.cannot_be_a_base() {
+            return ClientBuilder(Err(crate::Error::InvalidUrl {
+                message: "service_url cannot be a base".to_owned(),
+            }));
+        }
 
         let reqwest_builder = reqwest::Client::builder()
             // The read timeout "applies to each read operation", so should work fine for larger
@@ -107,11 +112,12 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// This method fails if:
-    /// - the given `service_url` is invalid
+    /// - the given `service_url` is invalid or cannot be used as a base URL
     /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
     ///   more information on when this can happen.
     pub fn build(self) -> crate::Result<Client> {
         let inner = self.0?.apply_defaults();
+
         Ok(Client {
             inner: Arc::new(ClientInner {
                 reqwest: inner.reqwest_builder.build()?,
@@ -417,12 +423,17 @@ impl Session {
     /// in particular in relation to `Accept-Encoding`.
     pub fn object_url(&self, object_key: &str) -> Url {
         let mut url = self.client.service_url.clone();
-        let base_path = self.client.service_url.path().trim_end_matches('/');
-        let full_path = format!(
-            "{base_path}/v1/{}/{}/objects/{object_key}",
-            self.scope.usecase.name, self.scope.scope
-        );
-        url.set_path(&full_path);
+
+        // `path_segments_mut` can only error if the url is cannot-be-a-base,
+        // and we check that in `ClientBuilder::new`, therefore this will never panic.
+        let mut segments = url.path_segments_mut().unwrap();
+        segments.push("v1").push(&self.scope.usecase.name);
+        if !self.scope.scope.is_empty() {
+            segments.push(&self.scope.scope);
+        }
+        segments.push("objects").push(object_key);
+        drop(segments);
+
         url
     }
 
