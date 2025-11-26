@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
+from urllib.parse import urlparse
 
 import sentry_sdk
 import urllib3
@@ -121,6 +122,7 @@ class Client:
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs_to_use
         )
+        self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
 
@@ -172,6 +174,7 @@ class Client:
 
         return Session(
             self._pool,
+            self._base_path,
             self._metrics_backend,
             self._propagate_traces,
             usecase,
@@ -189,28 +192,33 @@ class Session:
     def __init__(
         self,
         pool: HTTPConnectionPool,
+        base_path: str,
         metrics_backend: MetricsBackend,
         propagate_traces: bool,
         usecase: Usecase,
         scope: str,
     ):
         self._pool = pool
+        self._base_path = base_path
         self._metrics_backend = metrics_backend
         self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
 
     def _make_headers(self) -> dict[str, str]:
+        headers = dict(self._pool.headers)
         if self._propagate_traces:
-            return dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
-        return {}
+            headers.update(
+                dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
+            )
+        return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
-        base_path = f"/v1/{self._usecase.name}/{self._scope}/objects/{key or ''}"
+        relative_path = f"/v1/{self._usecase.name}/{self._scope}/objects/{key or ''}"
+        path = self._base_path.rstrip("/") + relative_path
         if full:
-            return f"http://{self._pool.host}:{self._pool.port}{base_path}"
-        else:
-            return f"{base_path}"
+            return f"http://{self._pool.host}:{self._pool.port}{path}"
+        return path
 
     def put(
         self,

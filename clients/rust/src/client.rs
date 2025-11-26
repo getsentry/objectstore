@@ -48,6 +48,11 @@ impl ClientBuilder {
             Ok(url) => url,
             Err(err) => return Self(Err(err.into())),
         };
+        if service_url.cannot_be_a_base() {
+            return ClientBuilder(Err(crate::Error::InvalidUrl {
+                message: "service_url cannot be a base".to_owned(),
+            }));
+        }
 
         let reqwest_builder = reqwest::Client::builder()
             // The read timeout "applies to each read operation", so should work fine for larger
@@ -107,11 +112,12 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// This method fails if:
-    /// - the given `service_url` is invalid
+    /// - the given `service_url` is invalid or cannot be used as a base URL
     /// - the [`reqwest::Client`] fails to build. Refer to [`reqwest::ClientBuilder::build`] for
     ///   more information on when this can happen.
     pub fn build(self) -> crate::Result<Client> {
         let inner = self.0?.apply_defaults();
+
         Ok(Client {
             inner: Arc::new(ClientInner {
                 reqwest: inner.reqwest_builder.build()?,
@@ -417,11 +423,19 @@ impl Session {
     /// in particular in relation to `Accept-Encoding`.
     pub fn object_url(&self, object_key: &str) -> Url {
         let mut url = self.client.service_url.clone();
-        let path = format!(
-            "v1/{}/{}/objects/{object_key}",
-            self.scope.usecase.name, self.scope.scope
-        );
-        url.set_path(&path);
+
+        // `path_segments_mut` can only error if the url is cannot-be-a-base,
+        // and we check that in `ClientBuilder::new`, therefore this will never panic.
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .extend(self.scope.usecase.name.split("/"));
+        if !self.scope.scope.is_empty() {
+            segments.extend(self.scope.scope.split("/"));
+        }
+        segments.push("objects").extend(object_key.split("/"));
+        drop(segments);
+
         url
     }
 
@@ -462,6 +476,19 @@ mod tests {
         assert_eq!(
             session.object_url("foo/bar").to_string(),
             "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
+        )
+    }
+
+    #[test]
+    fn test_object_url_with_base_path() {
+        let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
+        let usecase = Usecase::new("testing");
+        let scope = usecase.for_project(12345, 1337);
+        let session = client.session(scope).unwrap();
+
+        assert_eq!(
+            session.object_url("foo/bar").to_string(),
+            "http://127.0.0.1:8888/api/prefix/v1/testing/org.12345/project.1337/objects/foo/bar"
         )
     }
 }
