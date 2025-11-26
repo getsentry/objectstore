@@ -427,11 +427,13 @@ impl Session {
         // `path_segments_mut` can only error if the url is cannot-be-a-base,
         // and we check that in `ClientBuilder::new`, therefore this will never panic.
         let mut segments = url.path_segments_mut().unwrap();
-        segments.push("v1").push(&self.scope.usecase.name);
+        segments
+            .push("v1")
+            .extend(self.scope.usecase.name.split("/"));
         if !self.scope.scope.is_empty() {
-            segments.push(&self.scope.scope);
+            segments.extend(self.scope.scope.split("/"));
         }
-        segments.push("objects").push(object_key);
+        segments.push("objects").extend(object_key.split("/"));
         drop(segments);
 
         url
