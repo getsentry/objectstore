@@ -100,6 +100,7 @@ class Client:
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
+        external_base_url: str | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -122,9 +123,11 @@ class Client:
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs_to_use
         )
+        self._base_url = base_url.rstrip("/")
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
+        self._external_base_url = external_base_url
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -173,12 +176,14 @@ class Client:
         scope_str = "/".join(parts)
 
         return Session(
+            self._base_url,
             self._pool,
             self._base_path,
             self._metrics_backend,
             self._propagate_traces,
             usecase,
             scope_str,
+            self._external_base_url,
         )
 
 
@@ -191,12 +196,14 @@ class Session:
 
     def __init__(
         self,
+        base_url: str,
         pool: HTTPConnectionPool,
         base_path: str,
         metrics_backend: MetricsBackend,
         propagate_traces: bool,
         usecase: Usecase,
         scope: str,
+        external_base_url: str | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -204,6 +211,8 @@ class Session:
         self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
+        self._external_base_url = external_base_url
+        self._base_url = base_url
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
@@ -217,7 +226,12 @@ class Session:
         relative_path = f"/v1/{self._usecase.name}/{self._scope}/objects/{key or ''}"
         path = self._base_path.rstrip("/") + relative_path
         if full:
-            return f"http://{self._pool.host}:{self._pool.port}{path}"
+            full_url = f"http://{self._pool.host}:{self._pool.port}{path}"
+            if self._external_base_url:
+                return full_url.replace(
+                    self._base_url, self._external_base_url.rstrip("/"), 1
+                )
+            return full_url
         return path
 
     def put(
