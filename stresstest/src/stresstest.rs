@@ -18,6 +18,8 @@ use crate::http::HttpRemote;
 use crate::workload::{Action, Workload, WorkloadMode};
 
 /// Stresstest runner that can execute multiple workloads concurrently against a remote.
+///
+/// To execute the stresstest, use [`run`](Self::run).
 #[derive(Debug)]
 pub struct Stresstest {
     remote: HttpRemote,
