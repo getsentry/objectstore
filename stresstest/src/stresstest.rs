@@ -9,7 +9,8 @@ use anyhow::Result;
 use bytesize::ByteSize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use objectstore_client::Usecase;
+use objectstore_client::{ExpirationPolicy, Usecase};
+use rand_distr::Exp;
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -104,7 +105,9 @@ pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duratio
                 let start = Instant::now();
                 remote
                     .delete(
-                        &Usecase::new(usecase.as_str()),
+                        &Usecase::new(usecase.as_str()).with_expiration_policy(
+                            ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                        ),
                         *organization_id,
                         object_key,
                     )
