@@ -25,12 +25,16 @@ pub struct Stresstest {
     remote: HttpRemote,
     workloads: Vec<Workload>,
     duration: Duration,
+    ttl: Option<Duration>,
     cleanup: bool,
 }
 
 impl Stresstest {
     /// Default runtime for the stresstest.
     pub const DEFAULT_DURATION: Duration = Duration::from_secs(60);
+
+    /// Default TTL for all objects created during the stresstest.
+    pub const DEFAULT_TTL: Duration = Duration::from_hours(1);
 
     /// Creates a new `Stresstest` instance with the given remote.
     ///
@@ -41,6 +45,7 @@ impl Stresstest {
             remote,
             workloads: Vec::new(),
             duration: Self::DEFAULT_DURATION,
+            ttl: Some(Self::DEFAULT_TTL),
             cleanup: false,
         }
     }
@@ -50,6 +55,14 @@ impl Stresstest {
     /// Defaults to 60 seconds.
     pub fn duration(mut self, duration: Duration) -> Self {
         self.duration = duration;
+        self
+    }
+
+    /// Sets the TTL for all objects created during the stresstest.
+    ///
+    /// Defaults to 1 hour. Use `None` to disable TTL.
+    pub fn ttl(mut self, ttl: Option<Duration>) -> Self {
+        self.ttl = ttl;
         self
     }
 
@@ -79,6 +92,7 @@ impl Stresstest {
             remote,
             workloads,
             duration,
+            ttl,
             cleanup,
         } = self;
 
@@ -104,7 +118,7 @@ impl Stresstest {
             .into_iter()
             .map(|workload| {
                 let remote = Arc::clone(&remote);
-                tokio::spawn(run_workload(remote, workload, duration))
+                tokio::spawn(run_workload(remote, workload, duration, ttl))
             })
             .collect();
 
@@ -176,13 +190,7 @@ impl Stresstest {
                 let bar = &bar;
                 async move {
                     let start = Instant::now();
-                    remote
-                        .delete(
-                            &Usecase::new(usecase.as_str()),
-                            *organization_id,
-                            object_key,
-                        )
-                        .await;
+                    remote.delete(usecase, *organization_id, object_key).await;
                     cleanup_timing
                         .lock()
                         .unwrap()
@@ -218,6 +226,7 @@ async fn run_workload(
     remote: Arc<HttpRemote>,
     workload: Workload,
     duration: Duration,
+    ttl: Option<Duration>,
 ) -> (Workload, WorkloadMetrics) {
     // In throughput mode, allow for a high concurrency value.
     let concurrency = match workload.mode {
@@ -259,9 +268,14 @@ async fn run_workload(
                     match action {
                         Action::Write(internal_id, payload) => {
                             let file_size = payload.len;
-                            let usecase = workload.lock().unwrap().name.clone();
                             let organization_id = workload.lock().unwrap().next_organization_id();
-                            match remote.write(&Usecase::new(usecase.as_str()), organization_id, payload).await {
+
+                            let mut usecase = Usecase::new(&workload.lock().unwrap().name);
+                            if let Some(ttl) = ttl {
+                                usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
+                            }
+
+                            match remote.write(&usecase, organization_id, payload).await {
                                 Ok(object_key) => {
                                     let external_id = (usecase, organization_id, object_key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
@@ -280,11 +294,7 @@ async fn run_workload(
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            let usecase = Usecase::new(usecase.as_str()).with_expiration_policy(
-                                ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-                            );
-
-                            match remote.read(&usecase, *organization_id, object_key, payload).await {
+                            match remote.read(usecase, *organization_id, object_key, payload).await {
                                 Ok(_) => {
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
@@ -300,7 +310,7 @@ async fn run_workload(
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.delete(&Usecase::new(usecase.as_str()), *organization_id, object_key).await;
+                            remote.delete(usecase, *organization_id, object_key).await;
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }

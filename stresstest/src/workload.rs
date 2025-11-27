@@ -5,6 +5,7 @@ use std::thread::available_parallelism;
 use std::time::Instant;
 use std::{fmt, io, task};
 
+use objectstore_client::Usecase;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
@@ -279,7 +280,7 @@ impl fmt::Display for InternalId {
 ///
 /// The identifier consists of the usecase, organization ID and the object key. These key maps to
 /// [`InternalId`].
-pub type ExternalId = (String, u64, String);
+pub type ExternalId = (Usecase, u64, String);
 
 /// An action that can be performed by the workload.
 #[derive(Debug)]
