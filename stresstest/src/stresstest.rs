@@ -178,9 +178,7 @@ impl Stresstest {
                     let start = Instant::now();
                     remote
                         .delete(
-                            &Usecase::new(usecase.as_str()).with_expiration_policy(
-                                ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-                            ),
+                            &Usecase::new(usecase.as_str()),
                             *organization_id,
                             object_key,
                         )
@@ -282,7 +280,11 @@ async fn run_workload(
                         Action::Read(internal_id, external_id, payload) => {
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
-                            match remote.read(&Usecase::new(usecase.as_str()), *organization_id, object_key, payload).await {
+                            let usecase = Usecase::new(usecase.as_str()).with_expiration_policy(
+                                ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                            );
+
+                            match remote.read(&usecase, *organization_id, object_key, payload).await {
                                 Ok(_) => {
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
