@@ -19,5 +19,5 @@ pub mod http;
 pub mod stresstest;
 pub mod workload;
 
-pub use crate::stresstest::run;
+pub use crate::stresstest::Stresstest;
 pub use crate::workload::Workload;

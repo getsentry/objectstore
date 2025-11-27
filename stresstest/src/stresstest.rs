@@ -10,7 +10,6 @@ use bytesize::ByteSize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
-use rand_distr::Exp;
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -18,128 +17,201 @@ use yansi::Paint;
 use crate::http::HttpRemote;
 use crate::workload::{Action, Workload, WorkloadMode};
 
-/// Runs the given workloads concurrently against the remote.
-///
-/// The function runs all workloads concurrently, then prints metrics and finally deletes all
-/// objects from the remote.
-pub async fn run(remote: HttpRemote, workloads: Vec<Workload>, duration: Duration) -> Result<()> {
-    let remote = Arc::new(remote);
+/// Stresstest runner that can execute multiple workloads concurrently against a remote.
+#[derive(Debug)]
+pub struct Stresstest {
+    remote: HttpRemote,
+    workloads: Vec<Workload>,
+    duration: Duration,
+    cleanup: bool,
+}
 
-    let bar = ProgressBar::new_spinner()
-        .with_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}")?)
-        .with_message("Running stresstest:");
-    bar.enable_steady_tick(Duration::from_millis(100));
+impl Stresstest {
+    /// Default runtime for the stresstest.
+    pub const DEFAULT_DURATION: Duration = Duration::from_secs(60);
 
-    // run the workloads concurrently
-    let tasks: Vec<_> = workloads
-        .into_iter()
-        .map(|workload| {
-            let remote = Arc::clone(&remote);
-            tokio::spawn(run_workload(remote, workload, duration))
-        })
-        .collect();
-
-    let finished_tasks = futures::future::join_all(tasks).await;
-    bar.finish_and_clear();
-
-    let mut total_metrics = WorkloadMetrics::default();
-    let workloads = finished_tasks.into_iter().map(|task| {
-        let (workload, metrics) = task.unwrap();
-
-        println!();
-        println!(
-            "{} {} (mode: {:?}, concurrency: {})",
-            "## Workload".bold(),
-            workload.name.bold().blue(),
-            workload.mode,
-            workload.concurrency.bold()
-        );
-        print_metrics(&metrics, duration);
-
-        total_metrics.file_sizes.merge(&metrics.file_sizes).unwrap();
-        total_metrics.bytes_written += metrics.bytes_written;
-        total_metrics.bytes_read += metrics.bytes_read;
-        total_metrics
-            .write_timing
-            .merge(&metrics.write_timing)
-            .unwrap();
-        total_metrics
-            .read_timing
-            .merge(&metrics.read_timing)
-            .unwrap();
-        total_metrics
-            .delete_timing
-            .merge(&metrics.delete_timing)
-            .unwrap();
-        total_metrics.write_failures += metrics.write_failures;
-        total_metrics.read_failures += metrics.read_failures;
-
-        workload
-    });
-
-    let workloads: Vec<_> = workloads.collect();
-    let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
-    let files_to_cleanup = workloads.iter().flat_map(|w| w.external_files());
-    let cleanup_count = workloads.iter().flat_map(|w| w.external_files()).count();
-
-    println!();
-    println!("{}", "## TOTALS".bold());
-    print_metrics(&total_metrics, duration);
-    println!();
-
-    let bar = ProgressBar::new(cleanup_count as u64)
-        .with_message("Deleting remaining files...")
-        .with_style(ProgressStyle::with_template(
-            "{msg}\n{wide_bar} {pos}/{len}",
-        )?);
-    bar.enable_steady_tick(Duration::from_millis(100));
-
-    let start = Instant::now();
-    let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
-    futures::stream::iter(files_to_cleanup)
-        .for_each_concurrent(max_concurrency, |(usecase, organization_id, object_key)| {
-            let remote = remote.clone();
-            let cleanup_timing = cleanup_timing.clone();
-            let bar = &bar;
-            async move {
-                let start = Instant::now();
-                remote
-                    .delete(
-                        &Usecase::new(usecase.as_str()).with_expiration_policy(
-                            ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-                        ),
-                        *organization_id,
-                        object_key,
-                    )
-                    .await;
-                cleanup_timing
-                    .lock()
-                    .unwrap()
-                    .add(start.elapsed().as_secs_f64());
-
-                bar.inc(1);
-            }
-        })
-        .await;
-
-    bar.finish_and_clear();
-
-    let cleanup_duration = start.elapsed();
-    let cleanup_timing = cleanup_timing.lock().unwrap();
-
-    println!(
-        "{} ({} files, concurrency: {})",
-        "## CLEANUP".bold(),
-        cleanup_timing.count().blue(),
-        max_concurrency.bold()
-    );
-    if cleanup_timing.count() > 0 {
-        print_ops(&cleanup_timing, cleanup_duration);
-        println!();
-        print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+    /// Creates a new `Stresstest` instance with the given remote.
+    ///
+    /// It is required to add at least one workload using [`Self::workload`] and configure the
+    /// duration before running the stresstest.
+    pub fn new(remote: HttpRemote) -> Self {
+        Self {
+            remote,
+            workloads: Vec::new(),
+            duration: Self::DEFAULT_DURATION,
+            cleanup: false,
+        }
     }
 
-    Ok(())
+    /// Sets the duration of the stresstest.
+    ///
+    /// Defaults to 60 seconds.
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Adds a workload to the stresstest.
+    ///
+    /// Without any workloads, the stresstest will do nothing.
+    pub fn workload(mut self, workload: Workload) -> Self {
+        self.workloads.push(workload);
+        self
+    }
+
+    /// Sets whether to cleanup all objects after the test.
+    ///
+    /// By default, objects will remain in the backend and be deleted after their TTL expires.
+    /// The TTL is hard-coded to 1 hour.
+    pub fn cleanup(mut self, cleanup: bool) -> Self {
+        self.cleanup = cleanup;
+        self
+    }
+
+    /// Runs the given workloads concurrently against the remote.
+    ///
+    /// The function runs all workloads concurrently, then prints metrics and finally deletes all
+    /// objects from the remote.
+    pub async fn run(self) -> Result<()> {
+        let Self {
+            remote,
+            workloads,
+            duration,
+            cleanup,
+        } = self;
+
+        if workloads.is_empty() {
+            println!("no workloads specified, nothing to do");
+            return Ok(());
+        }
+
+        if duration.is_zero() {
+            println!("duration is zero, nothing to do");
+            return Ok(());
+        }
+
+        let remote = Arc::new(remote);
+
+        let bar = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}")?)
+            .with_message("Running stresstest:");
+        bar.enable_steady_tick(Duration::from_millis(100));
+
+        // run the workloads concurrently
+        let tasks: Vec<_> = workloads
+            .into_iter()
+            .map(|workload| {
+                let remote = Arc::clone(&remote);
+                tokio::spawn(run_workload(remote, workload, duration))
+            })
+            .collect();
+
+        let finished_tasks = futures::future::join_all(tasks).await;
+        bar.finish_and_clear();
+
+        let mut total_metrics = WorkloadMetrics::default();
+        let workloads = finished_tasks.into_iter().map(|task| {
+            let (workload, metrics) = task.unwrap();
+
+            println!();
+            println!(
+                "{} {} (mode: {:?}, concurrency: {})",
+                "## Workload".bold(),
+                workload.name.bold().blue(),
+                workload.mode,
+                workload.concurrency.bold()
+            );
+            print_metrics(&metrics, duration);
+
+            total_metrics.file_sizes.merge(&metrics.file_sizes).unwrap();
+            total_metrics.bytes_written += metrics.bytes_written;
+            total_metrics.bytes_read += metrics.bytes_read;
+            total_metrics
+                .write_timing
+                .merge(&metrics.write_timing)
+                .unwrap();
+            total_metrics
+                .read_timing
+                .merge(&metrics.read_timing)
+                .unwrap();
+            total_metrics
+                .delete_timing
+                .merge(&metrics.delete_timing)
+                .unwrap();
+            total_metrics.write_failures += metrics.write_failures;
+            total_metrics.read_failures += metrics.read_failures;
+
+            workload
+        });
+
+        let workloads: Vec<_> = workloads.collect();
+        println!();
+        println!("{}", "## TOTALS".bold());
+        print_metrics(&total_metrics, duration);
+        println!();
+
+        if !cleanup {
+            return Ok(());
+        }
+
+        let max_concurrency = workloads.iter().map(|w| w.concurrency).max().unwrap();
+        let files_to_cleanup = workloads.iter().flat_map(|w| w.external_files());
+        let cleanup_count = workloads.iter().flat_map(|w| w.external_files()).count();
+
+        let bar = ProgressBar::new(cleanup_count as u64)
+            .with_message("Deleting remaining files...")
+            .with_style(ProgressStyle::with_template(
+                "{msg}\n{wide_bar} {pos}/{len}",
+            )?);
+        bar.enable_steady_tick(Duration::from_millis(100));
+
+        let start = Instant::now();
+        let cleanup_timing = Arc::new(Mutex::new(DDSketch::default()));
+        futures::stream::iter(files_to_cleanup)
+            .for_each_concurrent(max_concurrency, |(usecase, organization_id, object_key)| {
+                let remote = remote.clone();
+                let cleanup_timing = cleanup_timing.clone();
+                let bar = &bar;
+                async move {
+                    let start = Instant::now();
+                    remote
+                        .delete(
+                            &Usecase::new(usecase.as_str()).with_expiration_policy(
+                                ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                            ),
+                            *organization_id,
+                            object_key,
+                        )
+                        .await;
+                    cleanup_timing
+                        .lock()
+                        .unwrap()
+                        .add(start.elapsed().as_secs_f64());
+
+                    bar.inc(1);
+                }
+            })
+            .await;
+
+        bar.finish_and_clear();
+
+        let cleanup_duration = start.elapsed();
+        let cleanup_timing = cleanup_timing.lock().unwrap();
+
+        println!(
+            "{} ({} files, concurrency: {})",
+            "## CLEANUP".bold(),
+            cleanup_timing.count().blue(),
+            max_concurrency.bold()
+        );
+        if cleanup_timing.count() > 0 {
+            print_ops(&cleanup_timing, cleanup_duration);
+            println!();
+            print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+        }
+
+        Ok(())
+    }
 }
 
 async fn run_workload(

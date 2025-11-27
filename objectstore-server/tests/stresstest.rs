@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use stresstest::Workload;
 use stresstest::http::HttpRemote;
+use stresstest::{Stresstest, Workload};
 
 const OBJECTSTORE_EXE: &str = env!("CARGO_BIN_EXE_objectstore");
 
@@ -60,7 +60,11 @@ async fn test_basic() {
         .action_weights(8, 1, 1)
         .build();
 
-    stresstest::run(remote, vec![workload], Duration::from_secs(2))
+    Stresstest::new(remote)
+        .duration(Duration::from_secs(2))
+        .workload(workload)
+        .cleanup(true)
+        .run()
         .await
         .expect("Failed to run stress test");
 
