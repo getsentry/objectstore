@@ -21,6 +21,7 @@ use anyhow::Context;
 use argh::FromArgs;
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
+use stresstest::stresstest::Stresstest;
 
 use crate::config::Config;
 
@@ -46,22 +47,23 @@ async fn main() -> anyhow::Result<()> {
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
     let remote = HttpRemote::new(&config.remote);
+    let mut stresstest = Stresstest::new(remote)
+        .duration(config.duration)
+        .cleanup(config.cleanup);
 
-    let workloads = config
-        .workloads
-        .into_iter()
-        .map(|w| {
-            Workload::builder(w.name)
-                .concurrency(w.concurrency)
-                .organizations(w.organizations)
-                .mode(w.mode)
-                .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
-                .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
-                .build()
-        })
-        .collect();
+    for w in config.workloads {
+        let workload = Workload::builder(w.name)
+            .concurrency(w.concurrency)
+            .organizations(w.organizations)
+            .mode(w.mode)
+            .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
+            .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
+            .build();
 
-    stresstest::run(remote, workloads, config.duration).await?;
+        stresstest = stresstest.workload(workload);
+    }
+
+    stresstest.run().await?;
 
     Ok(())
 }

@@ -12,6 +12,10 @@
 //!
 //! *Read* or *delete* actions are using a *zipfian* distribution, meaning that
 //! more recently written blobs are the ones that will be read/deleted.
+//!
+//! To run a stresstest, instantiate the [`Stresstest`] struct with a remote backend
+//! implementation, such as the [`HttpRemote`](http::HttpRemote) and configure it with
+//! the desired duration and workload.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
@@ -19,5 +23,5 @@ pub mod http;
 pub mod stresstest;
 pub mod workload;
 
-pub use crate::stresstest::run;
+pub use crate::stresstest::Stresstest;
 pub use crate::workload::Workload;

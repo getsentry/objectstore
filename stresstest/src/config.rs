@@ -12,6 +12,9 @@ pub struct Config {
     pub duration: Duration,
 
     pub workloads: Vec<Workload>,
+
+    #[serde(default)]
+    pub cleanup: bool,
 }
 
 #[derive(Debug, Deserialize)]
