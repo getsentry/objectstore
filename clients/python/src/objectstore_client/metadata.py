@@ -11,6 +11,7 @@ Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_TIME_CREATED = "x-sn-time-created"
+HEADER_TIME_EXPIRES = "x-sn-time-expires"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -35,8 +36,20 @@ class Metadata:
     time_created: datetime | None
     """
     Timestamp indicating when the object was created or the last time it was replaced.
+
     This means that a PUT request to an existing object causes this value to be bumped.
     This field is computed by the server, it cannot be set by clients.
+    """
+
+    time_expires: datetime | None
+    """
+    Timestamp indicating when the object will expire.
+
+    When using a Time To Idle expiration policy, this value will reflect the expiration
+    timestamp present prior to the current access to the object.
+
+    This field is computed by the server, it cannot be set by clients.
+    Use `expiration_policy` to set an expiration policy instead.
     """
 
     custom: dict[str, str]
@@ -47,6 +60,7 @@ class Metadata:
         compression = None
         expiration_policy = None
         time_created = None
+        time_expires = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -58,6 +72,8 @@ class Metadata:
                 expiration_policy = parse_expiration(v)
             elif k == HEADER_TIME_CREATED:
                 time_created = datetime.fromisoformat(v)
+            elif k == HEADER_TIME_EXPIRES:
+                time_expires = datetime.fromisoformat(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -66,6 +82,7 @@ class Metadata:
             compression=compression,
             expiration_policy=expiration_policy,
             time_created=time_created,
+            time_expires=time_expires,
             custom=custom_metadata,
         )
 
