@@ -355,7 +355,7 @@ class Session:
 
 def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
     if response.status >= 400:
-        res = (response.data or response.read()).decode("utf-8", "replace")
+        res = (response.data or response.read() or b"").decode("utf-8", "replace")
         raise RequestError(
             f"Objectstore request failed with status {response.status}",
             response.status,
