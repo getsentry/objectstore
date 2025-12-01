@@ -25,7 +25,7 @@ objectstore-client = { path = "clients/rust" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
-objectstore-types = { path = "objectstore-types", version = "0.0.11" }
+objectstore-types = { path = "objectstore-types", version = "0.0.12" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.69"
