@@ -55,10 +55,10 @@ session = client.session(
 # Write an object and metadata
 object_key = session.put(
     b"Hello, world!",
-    # You can pass in your own identifier for the object to decide where to store the file.
-    # Otherwise, Objectstore will pick an identifier and return it.
-    # A put request to an existing identifier overwrites the contents and metadata.
-    # id="hello",
+    # You can pass in your own key for the object to decide where to store the file.
+    # Otherwise, Objectstore will pick a key and return it.
+    # A put request to an existing key overwrites the contents and metadata.
+    # key="hello",
     metadata={"key": "value"},
     # Overrides the default defined at the Usecase level
     expiration_policy=TimeToIdle(datetime.timedelta(days=30)),

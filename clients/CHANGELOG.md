@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.12
+
+### Features
+
+- feat: Add time_creation as first-class metadata (#210) by @lcian
+- feat(clients): Append to the given base URL path (#222) by @lcian
+- feat: Add time_expires as first-class metadata (#217) by @lcian
+
 ## 0.0.11
 
 ### Various fixes & improvements
