@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.13
+
+### Fixes
+
+- fix(py-client): Don't call str on bytes (#225) by @lcian
+
 ## 0.0.12
 
 ### Features
