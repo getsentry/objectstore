@@ -15,7 +15,7 @@ use std::net::{SocketAddr, TcpListener};
 
 use objectstore_server::config::{Config, Storage};
 use objectstore_server::http::App;
-use objectstore_server::state::State;
+use objectstore_server::state::Services;
 use tempfile::TempDir;
 
 /// An in-process test server for use in integration tests.
@@ -49,7 +49,7 @@ impl TestServer {
             ..Default::default()
         };
 
-        let state = State::new(config).await.unwrap();
+        let state = Services::spawn(config).await.unwrap();
         let app = App::new(state);
 
         let handle = tokio::spawn(async move {

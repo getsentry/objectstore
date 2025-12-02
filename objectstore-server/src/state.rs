@@ -1,12 +1,14 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Result;
 use objectstore_service::{StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
 use crate::config::{Config, Storage};
 
 /// Shared reference to the objectstore [service state](State).
-pub type ServiceState = Arc<State>;
+pub type ServiceState = Arc<Services>;
 
 /// Reference to the objectstore business logic.
 ///
@@ -16,16 +18,19 @@ pub type ServiceState = Arc<State>;
 /// In request handlers, use `axum::extract::State<ServiceState>` to retrieve a shared reference to
 /// this structure.
 #[derive(Debug)]
-pub struct State {
+pub struct Services {
     /// The server configuration.
     pub config: Config,
     /// The storage service instance.
     pub service: StorageService,
 }
 
-impl State {
+impl Services {
     /// Spawns all services and background tasks for objectstore.
-    pub async fn new(config: Config) -> anyhow::Result<ServiceState> {
+    ///
+    /// This returns a [`ServiceState`], which is a shared reference to the services suitable for
+    /// use in the web server.
+    pub async fn spawn(config: Config) -> Result<ServiceState> {
         tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
 
         let high_volume = map_storage_config(&config.high_volume_storage);
