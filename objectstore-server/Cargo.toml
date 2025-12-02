@@ -19,6 +19,8 @@ console = "0.16.1"
 elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
 num_cpus = "1.17.0"
