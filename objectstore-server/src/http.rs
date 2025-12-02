@@ -22,7 +22,7 @@ use tracing::Level;
 
 use crate::config::Config;
 use crate::endpoints;
-use crate::state::{ServiceState, State};
+use crate::state::{ServiceState, Services};
 
 /// The maximum backlog for TCP listen sockets before refusing connections.
 const TCP_LISTEN_BACKLOG: u32 = 1024;
@@ -42,7 +42,7 @@ pub async fn server(config: Config) -> Result<()> {
     merni::counter!("server.start": 1);
 
     let listener = listen(&config).context("failed to start TCP listener")?;
-    let state = State::new(config).await?;
+    let state = Services::spawn(config).await?;
 
     let server_handle = tokio::spawn(async move {
         App::new(state)

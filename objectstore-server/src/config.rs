@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
@@ -326,12 +327,19 @@ pub struct Runtime {
     /// - For CPU-intensive workloads, consider matching or exceeding the number of cores
     /// - Setting this too high can lead to increased memory usage and context switching
     pub worker_threads: usize,
+
+    /// Interval in seconds for reporting internal runtime metrics.
+    ///
+    /// Defaults to `10` seconds.
+    #[serde(with = "humantime_serde")]
+    pub metrics_interval: Duration,
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self {
             worker_threads: num_cpus::get(),
+            metrics_interval: Duration::from_secs(10),
         }
     }
 }
