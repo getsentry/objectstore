@@ -7,7 +7,7 @@ use tokio::runtime::Handle;
 
 use crate::config::{Config, Storage};
 
-/// Shared reference to the objectstore [service state](State).
+/// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
 
 /// Reference to the objectstore business logic.
