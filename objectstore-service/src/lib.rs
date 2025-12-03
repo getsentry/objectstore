@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::backend::common::{BackendStream, BoxedBackend};
+use crate::id::ObjectId;
 
 pub use path::*;
 
@@ -31,6 +32,7 @@ enum BackendChoice {
     LongTerm,
 }
 
+// TODO(ja): Move into a submodule
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
@@ -103,10 +105,10 @@ impl StorageService {
     /// Stores or overwrites an object at the given key.
     pub async fn put_object(
         &self,
-        path: ObjectPath,
+        id: ObjectId,
         metadata: &Metadata,
         mut stream: BackendStream,
-    ) -> anyhow::Result<ObjectPath> {
+    ) -> anyhow::Result<ObjectId> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
@@ -121,7 +123,7 @@ impl StorageService {
         }
 
         // There might currently be a tombstone at the given path from a previously stored object.
-        let previously_stored_object = self.0.high_volume_backend.get_object(&path).await?;
+        let previously_stored_object = self.0.high_volume_backend.get_object(&id).await?;
         if is_tombstoned(&previously_stored_object) {
             // Write the object to the other backend and keep the tombstone in place
             backend = BackendChoice::LongTerm;
@@ -134,7 +136,7 @@ impl StorageService {
 
                 self.0
                     .high_volume_backend
-                    .put_object(&path, metadata, stream)
+                    .put_object(&id, metadata, stream)
                     .await?;
                 (
                     "high-volume",
@@ -159,7 +161,7 @@ impl StorageService {
                 // first write the object
                 self.0
                     .long_term_backend
-                    .put_object(&path, metadata, stream)
+                    .put_object(&id, metadata, stream)
                     .await?;
 
                 let redirect_metadata = Metadata {
@@ -168,17 +170,16 @@ impl StorageService {
                     ..Default::default()
                 };
                 let redirect_stream = futures_util::stream::empty().boxed();
-                let redirect_request = self.0.high_volume_backend.put_object(
-                    &path,
-                    &redirect_metadata,
-                    redirect_stream,
-                );
+                let redirect_request =
+                    self.0
+                        .high_volume_backend
+                        .put_object(&id, &redirect_metadata, redirect_stream);
 
                 // then we write the tombstone
                 let redirect_result = redirect_request.await;
                 if redirect_result.is_err() {
                     // and clean up on any kind of error
-                    self.0.long_term_backend.delete_object(&path).await?;
+                    self.0.long_term_backend.delete_object(&id).await?;
                 }
                 redirect_result?;
 
@@ -192,40 +193,41 @@ impl StorageService {
 
         merni::distribution!(
             "put.latency"@s: start.elapsed(),
-            "usecase" => path.usecase,
+            "usecase" => id.usecase,
             "backend_choice" => backend_choice,
             "backend_type" => backend_ty
         );
         merni::distribution!(
             "put.size"@b: stored_size,
-            "usecase" => path.usecase,
+            "usecase" => id.usecase,
             "backend_choice" => backend_choice,
             "backend_type" => backend_ty
         );
 
-        Ok(path)
+        // TODO(ja): Return a struct here
+        Ok(id)
     }
 
     /// Streams the contents of an object stored at the given key.
     pub async fn get_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
         let mut backend_type = self.0.high_volume_backend.name();
-        let mut result = self.0.high_volume_backend.get_object(path).await?;
+        let mut result = self.0.high_volume_backend.get_object(id).await?;
 
         if is_tombstoned(&result) {
-            result = self.0.long_term_backend.get_object(path).await?;
+            result = self.0.long_term_backend.get_object(id).await?;
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
         }
 
         merni::distribution!(
             "get.latency.pre-response"@s: start.elapsed(),
-            "usecase" => path.usecase,
+            "usecase" => id.usecase,
             "backend_choice" => backend_choice,
             "backend_type" => backend_type
         );
@@ -234,7 +236,7 @@ impl StorageService {
             if let Some(size) = metadata.size {
                 merni::distribution!(
                     "get.size"@b: size,
-                    "usecase" => path.usecase,
+                    "usecase" => id.usecase,
                     "backend_choice" => backend_choice,
                     "backend_type" => backend_type
                 );
@@ -247,19 +249,19 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
         let start = Instant::now();
 
-        if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(path).await? {
+        if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
             if metadata.is_redirect_tombstone == Some(true) {
-                self.0.long_term_backend.delete_object(path).await?;
+                self.0.long_term_backend.delete_object(id).await?;
             }
-            self.0.high_volume_backend.delete_object(path).await?;
+            self.0.high_volume_backend.delete_object(id).await?;
         }
 
         merni::distribution!(
             "delete.latency"@s: start.elapsed(),
-            "usecase" => path.usecase
+            "usecase" => id.usecase
         );
 
         Ok(())
@@ -314,16 +316,18 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::{StreamExt, TryStreamExt};
 
+    use crate::id::{Scope, Scopes};
+
     use super::*;
 
     fn make_stream(contents: &[u8]) -> BackendStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    fn make_path() -> ObjectPath {
-        ObjectPath {
+    fn make_path() -> ObjectId {
+        ObjectId {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
             key: "testing".into(),
         }
     }
