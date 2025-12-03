@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, MatchedPath, Request};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{RequestExt, ServiceExt};
@@ -206,23 +206,60 @@ fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
-    let request_start = Instant::now();
-
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
-    let method = request.method().clone();
-    merni::counter!("server.requests": 1, "route" => route, "method" => method.as_str());
+    let guard = EmitMetricsGuard::new(route, request.method());
 
     let response = next.run(request).await;
 
-    merni::distribution!(
-        "server.requests.duration"@s: request_start.elapsed(),
-        "route" => route,
-        "method" => method.as_str(),
-        "status" => response.status().as_str()
-    );
-
+    guard.finish(response.status());
     response
+}
+
+/// Helper for [`emit_request_metrics`].
+///
+/// This tracks relevant generic request parameters and emits metrics. If the guard is dropped
+/// without calling [`Self::finish`], it will emit a `499`` status code (derived from nginx'
+/// non-standard "client closed request").
+struct EmitMetricsGuard<'a> {
+    route: &'a str,
+    method: Method,
+    start: Instant,
+    status: Option<StatusCode>,
+}
+
+impl<'a> EmitMetricsGuard<'a> {
+    fn new(route: &'a str, method: &Method) -> Self {
+        merni::counter!(
+            "server.requests": 1,
+            "route" => route,
+            "method" => method.as_str()
+        );
+
+        Self {
+            route,
+            method: method.clone(),
+            start: Instant::now(),
+            status: None,
+        }
+    }
+
+    fn finish(mut self, status: StatusCode) {
+        self.status = Some(status);
+    }
+}
+
+impl Drop for EmitMetricsGuard<'_> {
+    fn drop(&mut self) {
+        merni::distribution!(
+            "server.requests.duration"@s: self.start.elapsed(),
+            "route" => self.route,
+            "method" => self.method,
+            "status" => self.status
+                .map(|s| s.as_u16())
+                .unwrap_or(499)
+        );
+    }
 }
 
 fn listen(config: &Config) -> Result<TcpListener> {
