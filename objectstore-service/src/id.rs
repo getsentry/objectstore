@@ -138,6 +138,15 @@ pub struct ObjectId {
 
 impl ObjectId {
     /// TODO(ja): Doc
+    pub fn create(usecase: String, scopes: Scopes) -> Self {
+        Self {
+            usecase,
+            scopes,
+            key: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// TODO(ja): Doc
     pub fn as_storage_path(&self) -> AsStoragePath<'_, Self> {
         AsStoragePath { inner: self }
     }

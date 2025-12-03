@@ -7,7 +7,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::backend::common::{self, Backend, BackendStream};
-use crate::path::ObjectPath;
+use crate::id::ObjectId;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -67,8 +67,8 @@ impl<T> S3CompatibleBackend<T> {
     }
 
     /// Formats the S3 object URL for the given key.
-    fn object_url(&self, path: &ObjectPath) -> String {
-        format!("{}/{}/{path}", self.endpoint, self.bucket)
+    fn object_url(&self, id: &ObjectId) -> String {
+        format!("{}/{}/{}", self.endpoint, self.bucket, id.as_storage_path())
     }
 }
 
@@ -86,12 +86,15 @@ where
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, path: &ObjectPath, metadata: &Metadata) -> Result<()> {
+    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> Result<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
-        self.request(Method::PUT, self.object_url(path))
+        self.request(Method::PUT, self.object_url(id))
             .await?
-            .header("x-goog-copy-source", format!("/{}/{path}", self.bucket))
+            .header(
+                "x-goog-copy-source",
+                format!("/{}/{}", self.bucket, id.as_storage_path()),
+            )
             .header("x-goog-metadata-directive", "REPLACE")
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .send()
@@ -130,15 +133,15 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         "s3-compatible"
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
         tracing::debug!("Writing to s3_compatible backend");
-        self.request(Method::PUT, self.object_url(path))
+        self.request(Method::PUT, self.object_url(id))
             .await?
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .body(Body::wrap_stream(stream))
@@ -150,10 +153,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
-        let object_url = self.object_url(path);
+        let object_url = self.object_url(id);
 
         let response = self.request(Method::GET, &object_url).await?.send().await?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -182,7 +185,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
             if expire_at < access_time + tti - TTI_DEBOUNCE {
                 // This serializes a new custom-time internally.
-                self.update_metadata(path, &metadata).await?;
+                self.update_metadata(id, &metadata).await?;
             }
         }
 
@@ -192,11 +195,11 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(Some((metadata, stream.boxed())))
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
         tracing::debug!("Deleting from s3_compatible backend");
         let response = self
-            .request(Method::DELETE, self.object_url(path))
+            .request(Method::DELETE, self.object_url(id))
             .await?
             .send()
             .await?;

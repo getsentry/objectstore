@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::id::{Scope, Scopes};
+use objectstore_service::id::{ObjectId, Scope, Scopes};
 use objectstore_service::{ObjectPath, OptionalObjectPath};
 use objectstore_types::Metadata;
 use serde::{Deserialize, Serialize, de};
@@ -96,14 +96,8 @@ struct ObjectsParams {
 
 impl ObjectsParams {
     /// TODO(ja): Doc
-    pub fn into_object_path(self) -> ObjectPath {
-        OptionalObjectPath {
-            usecase: self.usecase,
-            // TODO(ja): Push `Scopes` into service, do not use strings anymore
-            scope: self.scopes.into_scopes().into_storage_strings(),
-            key: None,
-        }
-        .create_key()
+    pub fn into_object_id(self) -> ObjectId {
+        ObjectId::create(self.usecase, self.scopes.into_scopes())
     }
 }
 
@@ -117,20 +111,20 @@ struct ObjectParams {
 
 impl ObjectParams {
     /// TODO(ja): Doc
-    pub fn into_object_path(self) -> ObjectPath {
-        ObjectPath {
+    pub fn into_object_id(self) -> ObjectId {
+        ObjectId {
             usecase: self.usecase,
-            scope: self.scopes.into_scopes().into_storage_strings(),
+            scopes: self.scopes.into_scopes(),
             key: self.key,
         }
     }
 }
 
 // TODO(ja): Create axum extractors for these so we can auto-populate the scope on extraction.
-fn populate_sentry_scope(path: &ObjectPath) {
+fn populate_sentry_scope(path: &ObjectId) {
     sentry::configure_scope(|s| {
-        s.set_tag("usecase", path.usecase.clone());
-        s.set_extra("scope", path.scope.clone().into());
+        s.set_tag("usecase", &path.usecase);
+        s.set_extra("scope", path.scopes.as_storage_path().to_string().into());
         s.set_extra("key", path.key.clone().into());
     });
 }
@@ -150,15 +144,15 @@ async fn objects_post(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let path = params.into_object_path();
-    populate_sentry_scope(&path);
+    let id = params.into_object_id();
+    populate_sentry_scope(&id);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let response_path = state.service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -170,10 +164,10 @@ async fn object_get(
     State(state): State<ServiceState>,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
-    let path = params.into_object_path();
-    populate_sentry_scope(&path);
+    let id = params.into_object_id();
+    populate_sentry_scope(&id);
 
-    let Some((metadata, stream)) = state.service.get_object(&path).await? else {
+    let Some((metadata, stream)) = state.service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -187,10 +181,10 @@ async fn object_head(
     State(state): State<ServiceState>,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
-    let path = params.into_object_path();
-    populate_sentry_scope(&path);
+    let id = params.into_object_id();
+    populate_sentry_scope(&id);
 
-    let Some((metadata, _stream)) = state.service.get_object(&path).await? else {
+    let Some((metadata, _stream)) = state.service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -207,15 +201,15 @@ async fn object_put(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let path = params.into_object_path();
-    populate_sentry_scope(&path);
+    let id = params.into_object_id();
+    populate_sentry_scope(&id);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let response_path = state.service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -227,10 +221,10 @@ async fn object_delete(
     State(state): State<ServiceState>,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<impl IntoResponse> {
-    let path = params.into_object_path();
-    populate_sentry_scope(&path);
+    let id = params.into_object_id();
+    populate_sentry_scope(&id);
 
-    state.service.delete_object(&path).await?;
+    state.service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

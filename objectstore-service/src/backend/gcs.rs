@@ -10,8 +10,8 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::ObjectPath;
 use crate::backend::common::{self, Backend, BackendStream};
+use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -232,10 +232,10 @@ impl GcsBackend {
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
-    fn object_url(&self, path: &ObjectPath) -> Result<Url> {
+    fn object_url(&self, id: &ObjectId) -> Result<Url> {
         let mut url = self.endpoint.clone();
 
-        let path = path.to_string();
+        let path = id.as_storage_path().to_string();
         url.path_segments_mut()
             .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
@@ -244,7 +244,7 @@ impl GcsBackend {
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, path: &ObjectPath, upload_type: &str) -> Result<Url> {
+    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url> {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
@@ -253,7 +253,7 @@ impl GcsBackend {
 
         url.query_pairs_mut()
             .append_pair("uploadType", upload_type)
-            .append_pair("name", &path.to_string());
+            .append_pair("name", &id.as_storage_path().to_string());
 
         Ok(url)
     }
@@ -303,10 +303,10 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
         metadata: &Metadata,
         stream: BackendStream,
     ) -> Result<()> {
@@ -332,7 +332,7 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        self.request(Method::POST, self.upload_url(path, "multipart")?)
+        self.request(Method::POST, self.upload_url(id, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
@@ -344,10 +344,10 @@ impl Backend for GcsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from GCS backend");
-        let object_url = self.object_url(path)?;
+        let object_url = self.object_url(id)?;
         let metadata_response = self
             .request(Method::GET, object_url.clone())
             .await?
@@ -409,11 +409,11 @@ impl Backend for GcsBackend {
         Ok(Some((metadata, stream)))
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
         tracing::debug!("Deleting from GCS backend");
         let response = self
-            .request(Method::DELETE, self.object_url(path)?)
+            .request(Method::DELETE, self.object_url(id)?)
             .await?
             .send()
             .await?;
@@ -435,6 +435,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use uuid::Uuid;
+
+    use crate::id::{Scope, Scopes};
 
     use super::*;
 
@@ -459,10 +461,10 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_key() -> ObjectPath {
-        ObjectPath {
+    fn make_key() -> ObjectId {
+        ObjectId {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
             key: Uuid::new_v4().to_string(),
         }
     }
