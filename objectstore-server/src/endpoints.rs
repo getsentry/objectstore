@@ -66,7 +66,12 @@ async fn insert_object(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let result = state.service.put_object(path, &metadata, stream).await;
+    if let Err(ref e) = result {
+        merni::counter!("tmp.insert.errors": 1);
+    }
+
+    let response_path = result?;
     let response = Json(PutBlobResponse {
         key: response_path.key.to_string(),
     });

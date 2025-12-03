@@ -60,8 +60,8 @@ impl ClientBuilder {
             // We define both as 500ms which is still very conservative, given that we are in the same network,
             // and expect our backends to respond in <100ms.
             // This can be overridden by the caller.
-            .connect_timeout(Duration::from_millis(500))
-            .read_timeout(Duration::from_millis(500))
+            // .connect_timeout(Duration::from_millis(500))
+            // .read_timeout(Duration::from_millis(500))
             .user_agent(USER_AGENT);
 
         Self(Ok(ClientBuilderInner {

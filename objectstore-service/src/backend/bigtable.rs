@@ -1,5 +1,5 @@
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use bigtable_rs::bigtable::BigTableConnection;
@@ -12,12 +12,12 @@ use crate::ObjectPath;
 use crate::backend::common::{Backend, BackendStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_millis(400);
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
 /// How often to retry failed `mutate` operations
-const REQUEST_RETRY_COUNT: usize = 2;
+const REQUEST_RETRY_COUNT: usize = 0;
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
@@ -58,26 +58,29 @@ impl BigTableBackend {
         connections: Option<usize>,
     ) -> Result<Self> {
         let bigtable = if let Some(endpoint) = endpoint {
+            tracing::info!("Connecting to BigTable emulator at {}", endpoint);
             BigTableConnection::new_with_emulator(
                 endpoint,
                 project_id,
                 instance_name,
                 false, // is_read_only
-                Some(CONNECT_TIMEOUT),
+                Some(TIMEOUT),
             )?
         } else {
             let token_provider = gcp_auth::provider().await?;
+
             // TODO on connections: Idle connections are automatically closed in “a few minutes”.
             // We need to make sure that on longer idle periods the channels are re-opened.
             let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
+            tracing::info!("Creating {} connections to BigTable", connections);
 
             BigTableConnection::new_with_token_provider(
                 project_id,
                 instance_name,
                 false, // is_read_only
                 connections,
-                Some(CONNECT_TIMEOUT),
-                token_provider.clone(),
+                Some(TIMEOUT),
+                token_provider,
             )?
         };
 
@@ -191,18 +194,24 @@ impl Backend for BigTableBackend {
         tracing::debug!("Writing to Bigtable backend");
         let path = path.to_string().into_bytes();
 
+        merni::counter!("bigtable.put.started": 1);
+
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
             payload.extend_from_slice(&chunk);
         }
 
+        merni::counter!("bigtable.put.stream_complete": 1);
         self.put_row(path, metadata, payload, "put").await?;
+        merni::counter!("bigtable.put.success": 1);
+
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", fields(?path), skip_all)]
     async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
         tracing::debug!("Reading from Bigtable backend");
+        merni::counter!("bigtable.get.started": 1);
         let path = path.to_string().into_bytes();
         let rows = v2::RowSet {
             row_keys: vec![path.clone()],
@@ -220,10 +229,13 @@ impl Backend for BigTableBackend {
 
         let mut retry_count = 0;
         let response = loop {
+            merni::counter!("bigtable.read.attempt": 1, "retry_count" => retry_count);
+            let started = Instant::now();
             let response = client.read_rows(request.clone()).await;
+            merni::distribution!("bigtable.read.initial.duration"@s: started.elapsed());
             if response.is_ok() || retry_count >= REQUEST_RETRY_COUNT {
                 if response.is_err() {
-                    merni::counter!("bigtable.read_failures": 1);
+                    merni::counter!("bigtable.read_failures": 1, "retry_count" => retry_count);
                 }
                 break response?;
             }
@@ -235,9 +247,11 @@ impl Backend for BigTableBackend {
 
         let Some((read_path, cells)) = response.into_iter().next() else {
             tracing::debug!("Object not found");
+            merni::counter!("bigtable.get.miss": 1);
             return Ok(None);
         };
 
+        merni::counter!("bigtable.get.hit": 1);
         debug_assert!(read_path == path, "Row key mismatch");
         let mut value = Vec::new();
         let mut metadata = Metadata::default();

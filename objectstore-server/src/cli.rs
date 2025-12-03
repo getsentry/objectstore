@@ -61,7 +61,7 @@ pub fn execute() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
 
     // Sentry should be initialized before creating the async runtime.
-    let _sentry_guard = observability::init_sentry(&config);
+    // let _sentry_guard = observability::init_sentry(&config);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("main-rt")
@@ -70,7 +70,9 @@ pub fn execute() -> Result<()> {
         .build()?;
     let _runtime_guard = runtime.enter();
 
-    observability::init_tracing(&config);
+    // console_subscriber::init();
+
+    // observability::init_tracing(&config);
     tracing::debug!(?config);
 
     let metrics_guard = observability::init_metrics(&config)?;

@@ -13,7 +13,7 @@ pub struct OptionalObjectPath {
     pub usecase: String,
     /// The scope of the object, used for compartmentalization.
     pub scope: Vec<String>,
-    /// The optional, user-provided key.
+    /// The optional, user-providded key.
     pub key: Option<String>,
 }
 

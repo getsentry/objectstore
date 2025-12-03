@@ -106,7 +106,8 @@ pub fn init_tracing(config: &Config) {
         .with(format.with_filter(config.logging.level))
         .with(sentry_layer)
         .with(env_filter)
-        .init();
+        .try_init()
+        .ok();
 }
 
 /// Logs an error to the configured logger or `stderr` if not yet configured.

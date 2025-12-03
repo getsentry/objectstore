@@ -107,6 +107,8 @@ impl StorageService {
     ) -> anyhow::Result<ObjectPath> {
         let start = Instant::now();
 
+        merni::counter!("put.started": 1);
+
         let mut first_chunk = BytesMut::new();
         let mut backend = BackendChoice::HighVolume;
         while let Some(chunk) = stream.try_next().await? {
@@ -118,6 +120,8 @@ impl StorageService {
             }
         }
 
+        merni::counter!("put.streamed": 1);
+
         // There might currently be a tombstone at the given path from a previously stored object.
         let previously_stored_object = self.0.high_volume_backend.get_object(&path).await?;
         if is_tombstoned(&previously_stored_object) {
@@ -125,15 +129,30 @@ impl StorageService {
             backend = BackendChoice::LongTerm;
         }
 
+        merni::counter!("put.tombstone_checked": 1);
+
         let (backend_choice, backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
                 let stored_size = first_chunk.len() as u64;
                 let stream = futures_util::stream::once(async { Ok(first_chunk.into()) }).boxed();
 
-                self.0
+                let result = self
+                    .0
                     .high_volume_backend
                     .put_object(&path, metadata, stream)
-                    .await?;
+                    .await;
+
+                match &result {
+                    Ok(_) => {
+                        merni::counter!("put.success": 1, "backend_choice" => "high-volume", "backend_type" => self.0.high_volume_backend.name())
+                    }
+                    Err(_) => {
+                        merni::counter!("put.failed": 1, "backend_choice" => "high-volume", "backend_type" => self.0.high_volume_backend.name())
+                    }
+                }
+
+                result?;
+
                 (
                     "high-volume",
                     self.0.high_volume_backend.name(),
