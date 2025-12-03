@@ -103,7 +103,7 @@ async fn delete_object(
 fn populate_sentry_scope(path: &ObjectPath) {
     sentry::configure_scope(|s| {
         s.set_tag("usecase", path.usecase.clone());
-        s.set_extra("scope", path.scope.clone().into());
+        s.set_extra("scope", path.scope.to_string().into());
         s.set_extra("key", path.key.clone().into());
     });
 }

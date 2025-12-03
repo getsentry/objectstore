@@ -7,6 +7,7 @@
 
 mod backend;
 mod path;
+mod scope;
 
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
@@ -20,6 +21,7 @@ use std::time::Instant;
 use crate::backend::common::{BackendStream, BoxedBackend};
 
 pub use path::*;
+pub use scope::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -321,7 +323,10 @@ mod tests {
     fn make_path() -> ObjectPath {
         ObjectPath {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scope: SentryScope {
+                org: "123".into(),
+                project: None,
+            },
             key: "testing".into(),
         }
     }

@@ -111,6 +111,8 @@ mod tests {
 
     use super::*;
 
+    use crate::SentryScope;
+
     fn make_stream(contents: &[u8]) -> BackendStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
@@ -122,7 +124,10 @@ mod tests {
 
         let key = ObjectPath {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scope: SentryScope {
+                org: "123".into(),
+                project: None,
+            },
             key: "testing".into(),
         };
         let metadata = Metadata {

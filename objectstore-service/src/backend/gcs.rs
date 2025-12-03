@@ -438,6 +438,8 @@ mod tests {
 
     use super::*;
 
+    use crate::SentryScope;
+
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
     // automatically in CI.
     //
@@ -462,7 +464,10 @@ mod tests {
     fn make_key() -> ObjectPath {
         ObjectPath {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scope: SentryScope {
+                org: "123".into(),
+                project: None,
+            },
             key: Uuid::new_v4().to_string(),
         }
     }

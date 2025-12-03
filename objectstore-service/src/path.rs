@@ -2,8 +2,12 @@ use std::fmt::{self, Display};
 
 use serde::de;
 
+use crate::{SentryScope, StringOrWildcard};
+
 /// Magic URL segment that separates objectstore context from an object's user-provided key.
 const PATH_CONTEXT_SEPARATOR: &str = "objects";
+const PATH_ORG_KEY: &str = "org";
+const PATH_PROJECT_KEY: &str = "project";
 
 /// An [`ObjectPath`] that may or may not have a user-provided key.
 // DO NOT derive Eq, see the implementation of PartialEq below.
@@ -12,7 +16,7 @@ pub struct OptionalObjectPath {
     /// The usecase, or "product" this object belongs to.
     pub usecase: String,
     /// The scope of the object, used for compartmentalization.
-    pub scope: Vec<String>,
+    pub scope: SentryScope,
     /// The optional, user-provided key.
     pub key: Option<String>,
 }
@@ -41,11 +45,11 @@ impl OptionalObjectPath {
 
 impl Display for OptionalObjectPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/", self.usecase)?;
-        for scope in &self.scope {
-            write!(f, "{}/", scope)?;
-        }
-        write!(f, "{PATH_CONTEXT_SEPARATOR}/")?;
+        write!(
+            f,
+            "{}/{}/{PATH_CONTEXT_SEPARATOR}/",
+            self.usecase, self.scope
+        )?;
         if let Some(ref key) = self.key {
             f.write_str(key)?;
         }
@@ -85,32 +89,42 @@ impl<'de> serde::de::Visitor<'de> for OptionalObjectPathVisitor {
             return Err(E::custom("path is empty or contains leading '/'"));
         }
 
-        // Next is the "scope". This _should_ be one or more key-value pairs where the key and
-        // value are separated with a '.' and each pair is separated from the next with a '/'.
+        // Next is the "scope", which for the foreseeable future is a Sentry organization and
+        // optionally a Sentry project. The organization is serialized as `org.{value}` and the
+        // project, if it exists, is serialized as `proj.{value}`. The two are separated with a
+        // slash.
         //
-        // Examples:
+        // Example:
         //   org.123/proj.456
-        //   state.wa/city.seattle
         //
-        // We know the scope is over when we encounter:
-        // - the end of the path
-        // - the separator string "data/"
-        let mut scope = vec![];
-        while iter.by_ref().peek().is_some() {
-            let segment: String = iter.by_ref().take_while(|c| *c != '/').collect();
+        // The scope is followed by a separator string `"data/"` in case we ever introduce more
+        // scope schemes and need to make this parsing more dynamic.
 
-            if segment == PATH_CONTEXT_SEPARATOR {
-                break;
-            } else if segment.is_empty() {
-                return Err(E::custom("scope must not be empty"));
-            } else {
-                scope.push(segment);
-            }
+        // Parse the organization. Burn the `org.` and then read the value.
+        if PATH_ORG_KEY != iter.by_ref().take_while(|c| *c != '.').collect::<String>() {
+            return Err(E::custom("scope must begin with `org.` key"));
+        }
+        let org = iter.by_ref().take_while(|c| *c != '/').collect();
+
+        // Using a clone of `iter`, check whether the `project.` key is present. If it is,
+        // advance `iter` to skip it and then parse the associated value.
+        let mut project = None;
+        if PATH_PROJECT_KEY == iter.clone().take_while(|c| *c != '.').collect::<String>() {
+            project = Some(StringOrWildcard::String(
+                iter.by_ref()
+                    .skip_while(|c| *c != '.')
+                    .take_while(|c| *c != '/')
+                    .collect(),
+            ));
         }
 
-        if scope.is_empty() {
-            return Err(E::custom("scope must not be empty"));
+        if PATH_CONTEXT_SEPARATOR != iter.by_ref().take_while(|c| *c != '/').collect::<String>() {
+            return Err(E::custom(
+                "scope must be followed by path context separator",
+            ));
         }
+
+        let scope = SentryScope { org, project };
 
         // The rest of the path is a user-provided key.
         let key = if iter.peek().is_some() {
@@ -150,7 +164,7 @@ pub struct ObjectPath {
     /// The scope of the object, used for compartmentalization.
     ///
     /// This is treated as a prefix, and includes such things as the organization and project.
-    pub scope: Vec<String>,
+    pub scope: SentryScope,
 
     /// This key uniquely identifies the object within its usecase/scope.
     pub key: String,
@@ -158,11 +172,11 @@ pub struct ObjectPath {
 
 impl Display for ObjectPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/", self.usecase)?;
-        for scope in &self.scope {
-            write!(f, "{}/", scope)?;
-        }
-        write!(f, "{PATH_CONTEXT_SEPARATOR}/{}", self.key)
+        write!(
+            f,
+            "{}/{}/{PATH_CONTEXT_SEPARATOR}/{}",
+            self.usecase, self.scope, self.key
+        )
     }
 }
 
