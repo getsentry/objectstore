@@ -82,10 +82,8 @@ impl Scopes {
     }
 
     /// TODO(ja): Doc
-    pub fn as_storage_path(&self) -> AsStoragePath<'_> {
-        AsStoragePath {
-            scopes: &self.scopes,
-        }
+    pub fn as_storage_path(&self) -> AsStoragePath<'_, Self> {
+        AsStoragePath { inner: self }
     }
 
     /// TODO(ja): Doc
@@ -104,24 +102,6 @@ impl<'a> IntoIterator for &'a Scopes {
 
     fn into_iter(self) -> Self::IntoIter {
         self.scopes.iter()
-    }
-}
-
-/// TODO(ja): Doc
-#[derive(Debug)]
-pub struct AsStoragePath<'a> {
-    scopes: &'a [Scope],
-}
-
-impl fmt::Display for AsStoragePath<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, scope) in self.scopes.iter().enumerate() {
-            if i > 0 {
-                write!(f, "/")?;
-            }
-            write!(f, "{}.{}", scope.key, scope.value)?;
-        }
-        Ok(())
     }
 }
 
@@ -154,4 +134,41 @@ pub struct ObjectId {
 
     /// This key uniquely identifies the object within its usecase/scope.
     pub key: String,
+}
+
+impl ObjectId {
+    /// TODO(ja): Doc
+    pub fn as_storage_path(&self) -> AsStoragePath<'_, Self> {
+        AsStoragePath { inner: self }
+    }
+}
+
+/// TODO(ja): Doc
+#[derive(Debug)]
+pub struct AsStoragePath<'a, T> {
+    inner: &'a T,
+}
+
+impl fmt::Display for AsStoragePath<'_, Scopes> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, scope) in self.inner.iter().enumerate() {
+            if i > 0 {
+                write!(f, "/")?;
+            }
+            write!(f, "{}.{}", scope.key, scope.value)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for AsStoragePath<'_, ObjectId> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}",
+            self.inner.usecase,
+            self.inner.scopes.as_storage_path(),
+            self.inner.key
+        )
+    }
 }
