@@ -255,14 +255,15 @@ async fn deprecated_insert(
     }
 
     let path = path.create_key();
-    populate_sentry_scope(&path);
+    let id = deprecated_path_into_id(path);
+    populate_sentry_scope(&id);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let response_path = state.service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -274,8 +275,9 @@ async fn deprecated_get(
     State(state): State<ServiceState>,
     Path(path): Path<ObjectPath>,
 ) -> ApiResult<Response> {
-    populate_sentry_scope(&path);
-    let Some((metadata, stream)) = state.service.get_object(&path).await? else {
+    let id = deprecated_path_into_id(path);
+    populate_sentry_scope(&id);
+    let Some((metadata, stream)) = state.service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -289,9 +291,25 @@ async fn deprecated_delete(
     State(state): State<ServiceState>,
     Path(path): Path<ObjectPath>,
 ) -> ApiResult<impl IntoResponse> {
-    populate_sentry_scope(&path);
+    let id = deprecated_path_into_id(path);
+    populate_sentry_scope(&id);
 
-    state.service.delete_object(&path).await?;
+    state.service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn deprecated_path_into_id(path: ObjectPath) -> ObjectId {
+    ObjectId {
+        usecase: path.usecase,
+        scopes: path
+            .scope
+            .iter()
+            .map(|s| {
+                let (key, value) = s.split_once(".").unwrap();
+                Scope::create(key, value).unwrap()
+            })
+            .collect(),
+        key: path.key,
+    }
 }
