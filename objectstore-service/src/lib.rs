@@ -5,7 +5,9 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+// TODO(ja): Re-organize modules
 mod backend;
+pub mod id;
 mod path;
 
 use bytes::BytesMut;
