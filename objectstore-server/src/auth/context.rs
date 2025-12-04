@@ -358,6 +358,45 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_from_encoded_jwt_expired() -> Result<(), AuthError> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
+
+        let claims = sample_claims("123", "456", "attachments", max_permission());
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(TEST_SIGNING_KID.into());
+        header.typ = Some("JWT".into());
+
+        let claims = TestJwtClaims {
+            exp: get_current_timestamp() - 100, // NB: expired
+            claims: claims.clone(),
+        };
+
+        let encoded_token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(TEST_SIGNING_SECRET.as_bytes()),
+        )
+        .unwrap();
+
+        // Create test config with max permissions
+        let test_config = test_config(max_permission());
+        let auth_context =
+            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
+
+        // Ensure the token failed verification
+        let Err(AuthError::ValidationFailure(error)) = auth_context else {
+            panic!("auth must fail");
+        };
+        assert_eq!(
+            error.kind(),
+            &jsonwebtoken::errors::ErrorKind::ExpiredSignature
+        );
+
+        Ok(())
+    }
+
     fn sample_object_path(org: u32, proj: u32) -> ObjectPath {
         ObjectPath {
             usecase: "attachments".into(),
