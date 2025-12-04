@@ -6,7 +6,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::util::StringOrWildcard;
+use crate::auth::util::StringOrWildcard;
 use crate::config::AuthZ;
 
 /// Permissions that control whether different operations are authorized.
@@ -26,6 +26,7 @@ pub enum Permission {
 }
 
 /// `AuthContext` encapsulates the verified content of things like authorization tokens.
+///
 /// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
 /// perform certain operations on a given resource.
 #[derive(Debug, PartialEq)]
@@ -35,7 +36,7 @@ pub struct AuthContext {
     pub usecase: String,
 
     /// The scope elements that this request may act on. See also: [`ObjectPath::scope`].
-    pub scope: BTreeMap<String, StringOrWildcard>,
+    pub scopes: BTreeMap<String, StringOrWildcard>,
 
     /// The permissions that this request has been granted.
     pub permissions: HashSet<Permission>,
@@ -51,7 +52,7 @@ pub enum AuthError {
     /// Indicates that something about the request prevented authorization verification from
     /// happening properly.
     #[error("bad request: {0}")]
-    BadRequest(String),
+    BadRequest(&'static str),
 
     /// Indicates that something about Objectstore prevented authorization verification from
     /// happening properly.
@@ -111,14 +112,14 @@ impl AuthContext {
         encoded_token: Option<&str>,
         config: &AuthZ,
     ) -> Result<AuthContext, AuthError> {
-        let encoded_token = encoded_token
-            .ok_or_else(|| AuthError::BadRequest("No authorization token provided".into()))?;
+        let encoded_token =
+            encoded_token.ok_or(AuthError::BadRequest("No authorization token provided"))?;
 
         let jwt_header = decode_header(encoded_token)?;
         let key_id = jwt_header
             .kid
             .as_ref()
-            .ok_or_else(|| AuthError::BadRequest("JWT header is missing `kid` field".into()))?;
+            .ok_or(AuthError::BadRequest("JWT header is missing `kid` field"))?;
 
         let key_config = config
             .keys
@@ -161,7 +162,7 @@ impl AuthContext {
 
         Ok(AuthContext {
             usecase,
-            scope,
+            scopes: scope,
             permissions,
             enforce: config.enforce,
         })
@@ -192,7 +193,7 @@ impl AuthContext {
                 .ok_or(AuthError::InternalError(format!(
                     "Invalid scope element: {element}"
                 )))?;
-            let authorized = match self.scope.get(key) {
+            let authorized = match self.scopes.get(key) {
                 Some(StringOrWildcard::String(s)) => s == value,
                 Some(StringOrWildcard::Wildcard) => true,
                 _ => false,
@@ -285,7 +286,7 @@ mod tests {
             usecase: "attachments".into(),
             permissions,
             enforce: true,
-            scope: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
+            scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
         }
     }
 

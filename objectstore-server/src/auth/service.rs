@@ -4,19 +4,20 @@ use objectstore_service::BackendStream;
 use objectstore_service::{ObjectPath, StorageService};
 use objectstore_types::Metadata;
 
-use super::{AuthContext, AuthError, Permission};
+use crate::auth::{AuthContext, AuthError, Permission};
 use crate::state::ServiceState;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
-/// Wrapper around [`objectstore_service::StorageService`] that ensures each storage operation is
-/// authorized according to the request's authorization details. See also: [`AuthContext`].
+/// Wrapper around [`StorageService`] that ensures each operation is authorized.
 ///
-/// When [`crate::config::AuthZ::enforce`] is false, authorization failures are logged but any
-/// unauthorized operations are still allowed to proceed.
+/// Authorization is performed according to the request's authorization details, see also
+/// [`AuthContext`]. When [`crate::config::AuthZ::enforce`] is false, authorization failures are
+/// logged but any unauthorized operations are still allowed to proceed.
 ///
 /// Objectstore API endpoints can use `AuthAwareService` simply by adding it to their handler
 /// function's argument list like so:
+///
 /// ```no_run
 /// # use axum::extract::Path;
 /// # use axum::response::IntoResponse;
@@ -32,24 +33,23 @@ const BEARER_PREFIX: &str = "Bearer ";
 ///     Ok(StatusCode::NO_CONTENT)
 /// }
 /// ```
+#[derive(Debug)]
 pub struct AuthAwareService {
     service: StorageService,
-
+    context: Option<AuthContext>,
     enforce: bool,
-
-    auth_context: Option<AuthContext>,
 }
 
 impl AuthAwareService {
     fn assert_authorized(&self, perm: Permission, path: &ObjectPath) -> anyhow::Result<()> {
-        let auth_result = self
-            .auth_context
-            .as_ref()
-            .ok_or(AuthError::VerificationFailure)
-            .and_then(|ac| ac.assert_authorized(perm, path));
         if self.enforce {
-            return Ok(auth_result?);
+            let context = self
+                .context
+                .as_ref()
+                .ok_or(AuthError::VerificationFailure)?;
+            context.assert_authorized(perm, path)?;
         }
+
         Ok(())
     }
 
@@ -61,7 +61,6 @@ impl AuthAwareService {
         stream: BackendStream,
     ) -> anyhow::Result<ObjectPath> {
         self.assert_authorized(Permission::ObjectWrite, &path)?;
-
         self.service.put_object(path, metadata, stream).await
     }
 
@@ -71,14 +70,12 @@ impl AuthAwareService {
         path: &ObjectPath,
     ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
         self.assert_authorized(Permission::ObjectRead, path)?;
-
         self.service.get_object(path).await
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
     pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
         self.assert_authorized(Permission::ObjectDelete, path)?;
-
         self.service.delete_object(path).await
     }
 }
@@ -97,16 +94,16 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             // TODO: Handle case-insensitive bearer prefix
             .and_then(|v| v.strip_prefix(BEARER_PREFIX));
 
-        let auth_context = AuthContext::from_encoded_jwt(encoded_token, &state.config.auth);
-        if auth_context.is_err() && state.config.auth.enforce {
+        let context = AuthContext::from_encoded_jwt(encoded_token, &state.config.auth);
+        if context.is_err() && state.config.auth.enforce {
             tracing::debug!("Authorization failed when enforcement is enabled");
             return Err(StatusCode::UNAUTHORIZED);
         }
 
         Ok(AuthAwareService {
-            service: state.authless_service.clone(),
+            service: state.service.clone(),
             enforce: state.config.auth.enforce,
-            auth_context: auth_context.ok(),
+            context: context.ok(),
         })
     }
 }

@@ -24,7 +24,7 @@ pub struct Services {
     /// Raw handle to the underlying storage service that does not enforce authorization checks.
     ///
     /// Consider using [`crate::auth::AuthAwareService`].
-    pub authless_service: StorageService,
+    pub service: StorageService,
 }
 
 impl Services {
@@ -37,12 +37,9 @@ impl Services {
 
         let high_volume = map_storage_config(&config.high_volume_storage);
         let long_term = map_storage_config(&config.long_term_storage);
-        let authless_service = StorageService::new(high_volume, long_term).await?;
+        let service = StorageService::new(high_volume, long_term).await?;
 
-        Ok(Arc::new(Self {
-            config,
-            authless_service,
-        }))
+        Ok(Arc::new(Self { config, service }))
     }
 }
 

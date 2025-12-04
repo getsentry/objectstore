@@ -4,10 +4,10 @@ use std::fmt::{self, Display};
 /// Simple enum for deserializing strings where `'*'` represents a special wildcard value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StringOrWildcard {
-    /// Regular, non-wildcard string value.
-    String(String),
     /// Wildcard value.
     Wildcard,
+    /// Regular, non-wildcard string value.
+    String(String),
 }
 
 impl<'de> Deserialize<'de> for StringOrWildcard {
