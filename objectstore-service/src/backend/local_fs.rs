@@ -8,8 +8,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::ObjectPath;
-use crate::backend::common::{Backend, BackendStream};
+use crate::backend::common::Backend;
+use crate::{ObjectPath, PayloadStream};
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -33,7 +33,7 @@ impl Backend for LocalFsBackend {
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> anyhow::Result<()> {
         tracing::debug!("Writing to local_fs backend");
         let path = self.path.join(path.to_string());
@@ -66,7 +66,7 @@ impl Backend for LocalFsBackend {
     async fn get_object(
         &self,
         path: &ObjectPath,
-    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(path.to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -111,7 +111,7 @@ mod tests {
 
     use super::*;
 
-    fn make_stream(contents: &[u8]) -> BackendStream {
+    fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
