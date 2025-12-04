@@ -1,6 +1,6 @@
 use axum::extract::FromRequestParts;
 use axum::http::{StatusCode, header, request::Parts};
-use objectstore_service::BackendStream;
+use objectstore_service::PayloadStream;
 use objectstore_service::{ObjectPath, StorageService};
 use objectstore_types::Metadata;
 
@@ -58,7 +58,7 @@ impl AuthAwareService {
         &self,
         path: ObjectPath,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> anyhow::Result<ObjectPath> {
         self.assert_authorized(Permission::ObjectWrite, &path)?;
         self.service.put_object(path, metadata, stream).await
@@ -68,7 +68,7 @@ impl AuthAwareService {
     pub async fn get_object(
         &self,
         path: &ObjectPath,
-    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
         self.assert_authorized(Permission::ObjectRead, path)?;
         self.service.get_object(path).await
     }

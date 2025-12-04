@@ -1,12 +1,9 @@
 use std::fmt::Debug;
-use std::io;
 
 use anyhow::Result;
-use bytes::Bytes;
-use futures_util::stream::BoxStream;
 use objectstore_types::Metadata;
 
-use crate::ObjectPath;
+use crate::{ObjectPath, PayloadStream};
 
 /// User agent string used for outgoing requests.
 ///
@@ -15,9 +12,6 @@ pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERS
 
 /// A type-erased [`Backend`] instance.
 pub type BoxedBackend = Box<dyn Backend>;
-
-/// Type alias for data streams used in [`Backend`] APIs.
-pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {
@@ -29,11 +23,11 @@ pub trait Backend: Debug + Send + Sync + 'static {
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> Result<()>;
 
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>>;
+    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, PayloadStream)>>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, path: &ObjectPath) -> Result<()>;

@@ -8,8 +8,8 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
-use crate::ObjectPath;
-use crate::backend::common::{Backend, BackendStream};
+use crate::backend::common::Backend;
+use crate::{ObjectPath, PayloadStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -186,7 +186,7 @@ impl Backend for BigTableBackend {
         &self,
         path: &ObjectPath,
         metadata: &Metadata,
-        mut stream: BackendStream,
+        mut stream: PayloadStream,
     ) -> Result<()> {
         tracing::debug!("Writing to Bigtable backend");
         let path = path.to_string().into_bytes();
@@ -201,7 +201,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = path.to_string().into_bytes();
         let rows = v2::RowSet {
@@ -345,11 +345,11 @@ mod tests {
         .await
     }
 
-    fn make_stream(contents: &[u8]) -> BackendStream {
+    fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    async fn read_to_vec(mut stream: BackendStream) -> Result<Vec<u8>> {
+    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
             payload.extend(&chunk);

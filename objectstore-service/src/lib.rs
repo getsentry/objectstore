@@ -8,19 +8,18 @@
 mod backend;
 mod path;
 
-use bytes::BytesMut;
-use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::Metadata;
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use bytes::{Bytes, BytesMut};
+use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
+use objectstore_types::Metadata;
+
 use crate::backend::common::BoxedBackend;
 
-pub use crate::backend::common::BackendStream;
-pub use path::*;
+pub use crate::path::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -39,6 +38,9 @@ struct StorageServiceInner {
     high_volume_backend: BoxedBackend,
     long_term_backend: BoxedBackend,
 }
+
+/// Type alias for data streams used in service APIs.
+pub type PayloadStream = BoxStream<'static, std::io::Result<Bytes>>;
 
 /// Configuration to initialize a [`StorageService`].
 #[derive(Debug, Clone)]
@@ -104,7 +106,7 @@ impl StorageService {
         &self,
         path: ObjectPath,
         metadata: &Metadata,
-        mut stream: BackendStream,
+        mut stream: PayloadStream,
     ) -> anyhow::Result<ObjectPath> {
         let start = Instant::now();
 
@@ -209,7 +211,7 @@ impl StorageService {
     pub async fn get_object(
         &self,
         path: &ObjectPath,
-    ) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -265,7 +267,7 @@ impl StorageService {
     }
 }
 
-fn is_tombstoned(result: &Option<(Metadata, BackendStream)>) -> bool {
+fn is_tombstoned(result: &Option<(Metadata, PayloadStream)>) -> bool {
     matches!(
         result,
         Some((
@@ -315,7 +317,7 @@ mod tests {
 
     use super::*;
 
-    fn make_stream(contents: &[u8]) -> BackendStream {
+    fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
