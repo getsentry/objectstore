@@ -65,9 +65,9 @@ async fn objects_post(
 
 async fn object_get(
     State(state): State<ServiceState>,
-    Path(params): Path<CollectionParams>,
+    Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
-    let id = params.create_object_id();
+    let id = params.into_object_id();
     helpers::populate_sentry_scope(&id);
 
     let Some((metadata, stream)) = state.service.get_object(&id).await? else {
