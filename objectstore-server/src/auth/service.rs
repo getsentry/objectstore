@@ -18,17 +18,15 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// Objectstore API endpoints can use `AuthAwareService` simply by adding it to their handler
 /// function's argument list like so:
 ///
-/// ```no_run
-/// # use axum::extract::Path;
-/// # use axum::response::IntoResponse;
-/// # use axum::http::StatusCode;
-/// # use objectstore_server::{auth::AuthAwareService, error::ApiResult};
-/// # use objectstore_service::ObjectPath;
-/// async fn delete_object(
-///     service: AuthAwareService,      // <- Constructed automatically from request parts
-///     Path(path): Path<ObjectPath>,
-/// ) -> ApiResult<impl IntoResponse> {
-///     service.delete_object(&path).await?;
+/// ```
+/// use axum::http::StatusCode;
+/// use objectstore_server::auth::AuthAwareService;
+/// use objectstore_server::error::ApiResult;
+///
+/// async fn my_endpoint(service: AuthAwareService) -> Result<StatusCode, StatusCode> {
+///     service.delete_object(todo!("pass some ID"))
+///         .await
+///         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 ///
 ///     Ok(StatusCode::NO_CONTENT)
 /// }
