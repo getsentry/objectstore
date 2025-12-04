@@ -84,6 +84,11 @@ impl Scopes {
         Self { scopes: vec![] }
     }
 
+    /// Returns `true` if there are no scopes.
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
+    }
+
     /// Returns the scope with the given key, if it exists.
     pub fn get(&self, key: &str) -> Option<&Scope> {
         self.scopes.iter().find(|s| s.name() == key)
@@ -236,12 +241,42 @@ impl fmt::Display for AsStoragePath<'_, Scopes> {
 
 impl fmt::Display for AsStoragePath<'_, ObjectId> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}",
-            self.inner.usecase,
-            self.inner.scopes.as_storage_path(),
-            self.inner.key
-        )
+        write!(f, "{}/", self.inner.usecase)?;
+        if !self.inner.scopes.is_empty() {
+            write!(f, "{}/", self.inner.scopes.as_storage_path())?;
+        }
+        write!(f, "objects/{}", self.inner.key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_path() {
+        let object_id = ObjectId {
+            usecase: "testing".to_string(),
+            scopes: Scopes::from_iter([
+                Scope::create("org", "12345").unwrap(),
+                Scope::create("project", "1337").unwrap(),
+            ]),
+            key: "foo/bar".to_string(),
+        };
+
+        let path = object_id.as_storage_path().to_string();
+        assert_eq!(path, "testing/org.12345/project.1337/objects/foo/bar");
+    }
+
+    #[test]
+    fn test_storage_path_empty_scopes() {
+        let object_id = ObjectId {
+            usecase: "testing".to_string(),
+            scopes: Scopes::empty(),
+            key: "foo/bar".to_string(),
+        };
+
+        let path = object_id.as_storage_path().to_string();
+        assert_eq!(path, "testing/objects/foo/bar");
     }
 }
