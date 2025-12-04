@@ -47,7 +47,7 @@ async fn objects_post(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let id = params.into_object_id();
+    let id = params.create_object_id();
     helpers::populate_sentry_scope(&id);
 
     let mut metadata =
@@ -67,7 +67,7 @@ async fn object_get(
     State(state): State<ServiceState>,
     Path(params): Path<CollectionParams>,
 ) -> ApiResult<Response> {
-    let id = params.into_object_id();
+    let id = params.create_object_id();
     helpers::populate_sentry_scope(&id);
 
     let Some((metadata, stream)) = state.service.get_object(&id).await? else {
@@ -133,6 +133,8 @@ async fn object_delete(
 }
 
 /// Path parameters used for collection-level endpoints.
+///
+/// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct CollectionParams {
     usecase: String,
@@ -141,13 +143,15 @@ struct CollectionParams {
 }
 
 impl CollectionParams {
-    /// TODO(ja): Doc
-    pub fn into_object_id(self) -> ObjectId {
+    /// Converts the params into a new [`ObjectId`] with a random unique `key`.
+    pub fn create_object_id(self) -> ObjectId {
         ObjectId::random(self.usecase, self.scopes)
     }
 }
 
 /// Path parameters used for object-level endpoints.
+///
+/// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct ObjectParams {
     usecase: String,
@@ -157,7 +161,7 @@ struct ObjectParams {
 }
 
 impl ObjectParams {
-    /// TODO(ja): Doc
+    /// Converts the params into an [`ObjectId`].
     pub fn into_object_id(self) -> ObjectId {
         ObjectId {
             usecase: self.usecase,
