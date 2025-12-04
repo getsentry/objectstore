@@ -6,7 +6,8 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::backend::common::{self, Backend, BackendStream};
+use crate::PayloadStream;
+use crate::backend::common::{self, Backend};
 use crate::id::ObjectId;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -138,7 +139,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> Result<()> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
@@ -154,7 +155,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(id);
 

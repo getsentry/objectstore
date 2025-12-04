@@ -10,7 +10,8 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::common::{self, Backend, BackendStream};
+use crate::PayloadStream;
+use crate::backend::common::{self, Backend};
 use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
@@ -308,7 +309,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> Result<()> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
@@ -345,7 +346,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
@@ -449,11 +450,11 @@ mod tests {
         GcsBackend::new(Some("http://localhost:8087"), "test-bucket").await
     }
 
-    fn make_stream(contents: &[u8]) -> BackendStream {
+    fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    async fn read_to_vec(mut stream: BackendStream) -> Result<Vec<u8>> {
+    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
             payload.extend(&chunk);

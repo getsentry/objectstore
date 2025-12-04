@@ -21,7 +21,9 @@ pub type ServiceState = Arc<Services>;
 pub struct Services {
     /// The server configuration.
     pub config: Config,
-    /// The storage service instance.
+    /// Raw handle to the underlying storage service that does not enforce authorization checks.
+    ///
+    /// Consider using [`crate::auth::AuthAwareService`].
     pub service: StorageService,
 }
 

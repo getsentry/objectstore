@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -14,6 +14,7 @@ use objectstore_service::id::{ObjectId, Scope, Scopes};
 use objectstore_types::Metadata;
 use serde::{Deserialize, Serialize, de};
 
+use crate::auth::AuthAwareService;
 use crate::endpoints::helpers;
 use crate::error::ApiResult;
 use crate::state::ServiceState;
@@ -42,7 +43,7 @@ pub struct InsertObjectResponse {
 }
 
 async fn objects_post(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(params): Path<CollectionParams>,
     headers: HeaderMap,
     body: Body,
@@ -55,7 +56,7 @@ async fn objects_post(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(id, &metadata, stream).await?;
+    let response_path = service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -64,13 +65,13 @@ async fn objects_post(
 }
 
 async fn object_get(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
     helpers::populate_sentry_scope(&id);
 
-    let Some((metadata, stream)) = state.service.get_object(&id).await? else {
+    let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -81,13 +82,13 @@ async fn object_get(
 }
 
 async fn object_head(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
     helpers::populate_sentry_scope(&id);
 
-    let Some((metadata, _stream)) = state.service.get_object(&id).await? else {
+    let Some((metadata, _stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -99,7 +100,7 @@ async fn object_head(
 }
 
 async fn object_put(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(params): Path<ObjectParams>,
     headers: HeaderMap,
     body: Body,
@@ -112,7 +113,7 @@ async fn object_put(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(id, &metadata, stream).await?;
+    let response_path = service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -121,13 +122,13 @@ async fn object_put(
 }
 
 async fn object_delete(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<impl IntoResponse> {
     let id = params.into_object_id();
     helpers::populate_sentry_scope(&id);
 
-    state.service.delete_object(&id).await?;
+    service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

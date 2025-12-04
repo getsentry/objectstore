@@ -61,6 +61,12 @@ impl ConfigSecret {
     }
 }
 
+impl From<&str> for ConfigSecret {
+    fn from(str: &str) -> Self {
+        ConfigSecret(str.to_string())
+    }
+}
+
 impl std::ops::Deref for ConfigSecret {
     type Target = str;
     fn deref(&self) -> &Self::Target {

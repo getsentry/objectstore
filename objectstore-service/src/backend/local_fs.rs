@@ -2,13 +2,15 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
+use anyhow::Result;
 use futures_util::StreamExt;
 use objectstore_types::Metadata;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::common::{Backend, BackendStream};
+use crate::PayloadStream;
+use crate::backend::common::Backend;
 use crate::id::ObjectId;
 
 #[derive(Debug)]
@@ -33,7 +35,7 @@ impl Backend for LocalFsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: BackendStream,
+        stream: PayloadStream,
     ) -> anyhow::Result<()> {
         tracing::debug!("Writing to local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
@@ -63,7 +65,7 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> anyhow::Result<Option<(Metadata, BackendStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -110,7 +112,7 @@ mod tests {
 
     use super::*;
 
-    fn make_stream(contents: &[u8]) -> BackendStream {
+    fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 

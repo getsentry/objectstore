@@ -3,7 +3,7 @@ use std::{fmt, io};
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -12,6 +12,7 @@ use objectstore_service::id::{ObjectId, Scope, Scopes};
 use objectstore_types::Metadata;
 use serde::de;
 
+use crate::auth::AuthAwareService;
 use crate::endpoints::helpers;
 use crate::endpoints::objects::InsertObjectResponse;
 use crate::error::ApiResult;
@@ -30,7 +31,7 @@ pub fn router() -> Router<ServiceState> {
 }
 
 async fn deprecated_insert(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(optional_id): Path<OptionalObjectId>,
     method: Method,
     headers: HeaderMap,
@@ -54,7 +55,7 @@ async fn deprecated_insert(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(id, &metadata, stream).await?;
+    let response_path = service.put_object(id, &metadata, stream).await?;
     let response = Json(InsertObjectResponse {
         key: response_path.key.to_string(),
     });
@@ -63,12 +64,12 @@ async fn deprecated_insert(
 }
 
 async fn deprecated_get(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(optional_id): Path<OptionalObjectId>,
 ) -> ApiResult<Response> {
     let id = optional_id.require_key()?;
     helpers::populate_sentry_scope(&id);
-    let Some((metadata, stream)) = state.service.get_object(&id).await? else {
+    let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -79,13 +80,13 @@ async fn deprecated_get(
 }
 
 async fn deprecated_delete(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(optional_id): Path<OptionalObjectId>,
 ) -> ApiResult<impl IntoResponse> {
     let id = optional_id.require_key()?;
     helpers::populate_sentry_scope(&id);
 
-    state.service.delete_object(&id).await?;
+    service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
