@@ -8,7 +8,6 @@
 // TODO(ja): Re-organize modules
 mod backend;
 pub mod id;
-mod path;
 
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
@@ -21,8 +20,6 @@ use std::time::Instant;
 
 use crate::backend::common::{BackendStream, BoxedBackend};
 use crate::id::ObjectId;
-
-pub use path::*;
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
