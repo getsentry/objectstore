@@ -226,6 +226,14 @@ impl ScopeInner {
     pub(crate) fn usecase(&self) -> &Usecase {
         &self.usecase
     }
+
+    fn as_path_segment(&self) -> &str {
+        if self.scope.is_empty() {
+            "_"
+        } else {
+            &self.scope
+        }
+    }
 }
 
 impl std::fmt::Display for ScopeInner {
@@ -254,12 +262,12 @@ impl Scope {
     }
 
     fn for_organization(usecase: Usecase, organization: u64) -> Self {
-        let scope = format!("org.{}", organization);
+        let scope = format!("org={}", organization);
         Self(Ok(ScopeInner { usecase, scope }))
     }
 
     fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
-        let scope = format!("org.{}/project.{}", organization, project);
+        let scope = format!("org={};project={}", organization, project);
         Self(Ok(ScopeInner { usecase, scope }))
     }
 
@@ -275,10 +283,10 @@ impl Scope {
             Self::validate_value(&value)?;
 
             if !inner.scope.is_empty() {
-                inner.scope.push('/');
+                inner.scope.push(';');
             }
             inner.scope.push_str(key);
-            inner.scope.push('.');
+            inner.scope.push('=');
             inner.scope.push_str(&value);
 
             Ok(inner)
@@ -429,11 +437,10 @@ impl Session {
         let mut segments = url.path_segments_mut().unwrap();
         segments
             .push("v1")
-            .extend(self.scope.usecase.name.split("/"));
-        if !self.scope.scope.is_empty() {
-            segments.extend(self.scope.scope.split("/"));
-        }
-        segments.push("objects").extend(object_key.split("/"));
+            .push("objects")
+            .push(&self.scope.usecase.name)
+            .push(self.scope.as_path_segment())
+            .extend(object_key.split("/"));
         drop(segments);
 
         url
@@ -475,7 +482,7 @@ mod tests {
 
         assert_eq!(
             session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
+            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo/bar"
         )
     }
 
@@ -488,7 +495,7 @@ mod tests {
 
         assert_eq!(
             session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/api/prefix/v1/testing/org.12345/project.1337/objects/foo/bar"
+            "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/foo/bar"
         )
     }
 }

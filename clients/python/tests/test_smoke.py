@@ -14,7 +14,7 @@ def test_object_url() -> None:
 
     assert (
         session.object_url("foo/bar")
-        == "http://127.0.0.1:8888/v1/testing/org.12345/project.1337/app_slug.email_app/objects/foo/bar"
+        == "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo/bar"
     )
 
 
@@ -24,5 +24,5 @@ def test_object_url_with_base_path() -> None:
 
     assert (
         session.object_url("foo/bar")
-        == "http://127.0.0.1:8888/api/prefix/v1/testing/org.12345/project.1337/objects/foo/bar"
+        == "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/foo/bar"
     )
