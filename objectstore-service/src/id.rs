@@ -138,11 +138,16 @@ pub struct ObjectId {
 
 impl ObjectId {
     /// TODO(ja): Doc
-    pub fn create(usecase: String, scopes: Scopes) -> Self {
+    pub fn random(usecase: String, scopes: Scopes) -> Self {
+        Self::optional(usecase, scopes, None)
+    }
+
+    /// TODO(ja): Doc
+    pub fn optional(usecase: String, scopes: Scopes, key: Option<String>) -> Self {
         Self {
             usecase,
             scopes,
-            key: uuid::Uuid::new_v4().to_string(),
+            key: key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         }
     }
 

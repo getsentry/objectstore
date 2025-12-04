@@ -1,10 +1,10 @@
 //! Contains all HTTP endpoint handlers.
 
 use std::borrow::Cow;
-use std::io;
 use std::time::SystemTime;
+use std::{fmt, io};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -13,7 +13,6 @@ use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::id::{ObjectId, Scope, Scopes};
-use objectstore_service::{ObjectPath, OptionalObjectPath};
 use objectstore_types::Metadata;
 use serde::{Deserialize, Serialize, de};
 
@@ -97,7 +96,7 @@ struct ObjectsParams {
 impl ObjectsParams {
     /// TODO(ja): Doc
     pub fn into_object_id(self) -> ObjectId {
-        ObjectId::create(self.usecase, self.scopes.into_scopes())
+        ObjectId::random(self.usecase, self.scopes.into_scopes())
     }
 }
 
@@ -162,7 +161,7 @@ async fn objects_post(
 
 async fn object_get(
     State(state): State<ServiceState>,
-    Path(params): Path<ObjectParams>,
+    Path(params): Path<ObjectsParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
     populate_sentry_scope(&id);
@@ -237,14 +236,102 @@ async fn health() -> impl IntoResponse {
 // OLD ROUTES. TODO(ja): Move into subfile, remove eventually
 // ----------------------------------------------------
 
+/// Magic URL segment that separates objectstore context from an object's user-provided key.
+const PATH_CONTEXT_SEPARATOR: &str = "objects";
+
+struct OptionalObjectId {
+    usecase: String,
+    scopes: Scopes,
+    key: Option<String>,
+}
+
+impl OptionalObjectId {
+    /// Converts to an [`ObjectId`], generating a unique `key` if none was provided.
+    pub fn create_key(self) -> ObjectId {
+        ObjectId::optional(self.usecase, self.scopes, self.key)
+    }
+
+    /// Converts to an [`ObjectId`], returning an error if no `key` was provided.
+    pub fn require_key(self) -> Result<ObjectId> {
+        Ok(ObjectId {
+            usecase: self.usecase,
+            scopes: self.scopes,
+            key: self
+                .key
+                .context("object key is required but was not provided")?,
+        })
+    }
+}
+
+struct OptionalObjectIdVisitor;
+
+impl<'de> serde::de::Visitor<'de> for OptionalObjectIdVisitor {
+    type Value = OptionalObjectId;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            formatter,
+            "a string of the following format: `{{usecase}}/{{scope1}}/.../{PATH_CONTEXT_SEPARATOR}/{{key}}`"
+        )
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        let Some((usecase, mut remainder)) = s.split_once('/') else {
+            return Err(E::custom("path is empty or contains no '/'"));
+        };
+
+        let mut scopes = vec![];
+
+        loop {
+            let Some((scope_str, tail)) = remainder.split_once('/') else {
+                return Err(E::custom("missing object key"));
+            };
+
+            remainder = tail;
+            if scope_str == PATH_CONTEXT_SEPARATOR {
+                break;
+            } else if scope_str.is_empty() {
+                return Err(E::custom("scope must not be empty"));
+            }
+
+            let Some((key, value)) = scope_str.split_once('.') else {
+                return Err(E::custom("scope must be 'key.value'"));
+            };
+
+            let scope = Scope::create(key, value).map_err(E::custom)?;
+            scopes.push(scope);
+        }
+
+        let key = Some(remainder).filter(|s| !s.is_empty());
+
+        Ok(OptionalObjectId {
+            usecase: usecase.to_owned(),
+            scopes: scopes.into_iter().collect(),
+            key: key.map(|k| k.to_owned()),
+        })
+    }
+}
+
+impl<'de> de::Deserialize<'de> for OptionalObjectId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(OptionalObjectIdVisitor)
+    }
+}
+
 async fn deprecated_insert(
     State(state): State<ServiceState>,
-    Path(path): Path<OptionalObjectPath>,
+    Path(optional_id): Path<OptionalObjectId>,
     method: Method,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let (expected_method, response_status) = match path.key {
+    let (expected_method, response_status) = match optional_id.key {
         Some(_) => (Method::PUT, StatusCode::OK),
         None => (Method::POST, StatusCode::CREATED),
     };
@@ -254,8 +341,7 @@ async fn deprecated_insert(
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
 
-    let path = path.create_key();
-    let id = deprecated_path_into_id(path);
+    let id = optional_id.create_key();
     populate_sentry_scope(&id);
 
     let mut metadata =
@@ -273,9 +359,9 @@ async fn deprecated_insert(
 
 async fn deprecated_get(
     State(state): State<ServiceState>,
-    Path(path): Path<ObjectPath>,
+    Path(optional_id): Path<OptionalObjectId>,
 ) -> ApiResult<Response> {
-    let id = deprecated_path_into_id(path);
+    let id = optional_id.require_key()?;
     populate_sentry_scope(&id);
     let Some((metadata, stream)) = state.service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -289,27 +375,12 @@ async fn deprecated_get(
 
 async fn deprecated_delete(
     State(state): State<ServiceState>,
-    Path(path): Path<ObjectPath>,
+    Path(optional_id): Path<OptionalObjectId>,
 ) -> ApiResult<impl IntoResponse> {
-    let id = deprecated_path_into_id(path);
+    let id = optional_id.require_key()?;
     populate_sentry_scope(&id);
 
     state.service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn deprecated_path_into_id(path: ObjectPath) -> ObjectId {
-    ObjectId {
-        usecase: path.usecase,
-        scopes: path
-            .scope
-            .iter()
-            .map(|s| {
-                let (key, value) = s.split_once(".").unwrap();
-                Scope::create(key, value).unwrap()
-            })
-            .collect(),
-        key: path.key,
-    }
 }
