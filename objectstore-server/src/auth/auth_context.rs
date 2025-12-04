@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use jsonwebtoken::{decode, decode_header, DecodingKey, Header, TokenData, Validation};
+use jsonwebtoken::{DecodingKey, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::ObjectPath;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -244,7 +244,7 @@ mod tests {
     }
 
     fn sign_token(claims: &JwtClaims, signing_secret: &str) -> String {
-        use jsonwebtoken::{encode, get_current_timestamp, Algorithm, EncodingKey, Header};
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some(TEST_SIGNING_KID.into());
