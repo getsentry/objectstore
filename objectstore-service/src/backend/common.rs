@@ -13,9 +13,10 @@ use crate::ObjectPath;
 /// This intentionally has a "sentry" prefix so that it can easily be traced back to us.
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
+/// A type-erased [`Backend`] instance.
 pub type BoxedBackend = Box<dyn Backend>;
 
-/// Type alias for data streams used in [`StorageService`](crate::StorageService) and `Backend` APIs.
+/// Type alias for data streams used in [`Backend`] APIs.
 pub type BackendStream = BoxStream<'static, io::Result<Bytes>>;
 
 #[async_trait::async_trait]
