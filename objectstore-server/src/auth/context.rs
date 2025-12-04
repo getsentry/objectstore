@@ -176,7 +176,6 @@ impl AuthContext {
         Ok(())
     }
 
-    // TODO add example scope comparisons
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
     /// `Err(AuthError::NotPermitted)` is returned.
     ///
@@ -196,7 +195,7 @@ impl AuthContext {
             let authorized = match self.scopes.get(key) {
                 Some(StringOrWildcard::String(s)) => s == value,
                 Some(StringOrWildcard::Wildcard) => true,
-                _ => false,
+                None => false,
             };
             if !authorized {
                 self.fail_if_enforced(&perm, path)?;
