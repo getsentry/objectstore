@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -15,6 +15,7 @@ use objectstore_service::{ObjectPath, OptionalObjectPath};
 use objectstore_types::Metadata;
 use serde::Serialize;
 
+use crate::auth::AuthAwareService;
 use crate::error::ApiResult;
 use crate::state::ServiceState;
 
@@ -42,8 +43,8 @@ struct PutBlobResponse {
 }
 
 async fn insert_object(
-    State(state): State<ServiceState>,
     Path(path): Path<OptionalObjectPath>,
+    service: AuthAwareService,
     method: Method,
     headers: HeaderMap,
     body: Body,
@@ -66,7 +67,7 @@ async fn insert_object(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = state.service.put_object(path, &metadata, stream).await?;
+    let response_path = service.put_object(path, &metadata, stream).await?;
     let response = Json(PutBlobResponse {
         key: response_path.key.to_string(),
     });
@@ -75,11 +76,11 @@ async fn insert_object(
 }
 
 async fn get_object(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(path): Path<ObjectPath>,
 ) -> ApiResult<Response> {
     populate_sentry_scope(&path);
-    let Some((metadata, stream)) = state.service.get_object(&path).await? else {
+    let Some((metadata, stream)) = service.get_object(&path).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -90,12 +91,12 @@ async fn get_object(
 }
 
 async fn delete_object(
-    State(state): State<ServiceState>,
+    service: AuthAwareService,
     Path(path): Path<ObjectPath>,
 ) -> ApiResult<impl IntoResponse> {
     populate_sentry_scope(&path);
 
-    state.service.delete_object(&path).await?;
+    service.delete_object(&path).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

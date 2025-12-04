@@ -17,8 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::backend::common::{BackendStream, BoxedBackend};
+use crate::backend::common::BoxedBackend;
 
+pub use crate::backend::common::BackendStream;
 pub use path::*;
 
 /// The threshold up until which we will go to the "high volume" backend.

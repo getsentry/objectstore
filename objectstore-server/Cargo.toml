@@ -21,6 +21,7 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
+jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 merni = { workspace = true }
 mimalloc = { workspace = true }
 num_cpus = "1.17.0"
@@ -38,6 +39,7 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = "3.14.1"
+thiserror = "2.0.17"
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
 tower = { version = "0.5.2" }
