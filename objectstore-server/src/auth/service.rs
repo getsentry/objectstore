@@ -96,7 +96,10 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 
         let context = AuthContext::from_encoded_jwt(encoded_token, &state.config.auth);
         if context.is_err() && state.config.auth.enforce {
-            tracing::debug!("Authorization failed when enforcement is enabled");
+            tracing::debug!(
+                "Authorization failed and enforcement is enabled: `{:?}`",
+                context
+            );
             return Err(StatusCode::UNAUTHORIZED);
         }
 

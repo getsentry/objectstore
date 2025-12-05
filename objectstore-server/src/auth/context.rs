@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use jsonwebtoken::{DecodingKey, Header, TokenData, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::ObjectPath;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -126,11 +126,23 @@ impl AuthContext {
             .get(key_id)
             .ok_or_else(|| AuthError::InternalError(format!("Key `{key_id}` not configured")))?;
 
+        if jwt_header.alg != Algorithm::EdDSA {
+            tracing::warn!(
+                "JWT signed with unexpected algorithm `{:?}`",
+                jwt_header.alg
+            );
+        }
+
         let mut verified_claims: Option<TokenData<JwtClaims>> = None;
         for key in &key_config.key_versions {
+            let decoding_key = match jwt_header.alg {
+                Algorithm::EdDSA => DecodingKey::from_ed_pem(key.expose_secret().as_bytes())?,
+                _ => DecodingKey::from_secret(key.expose_secret().as_bytes()),
+            };
+
             let decode_result = decode::<JwtClaims>(
                 encoded_token,
-                &DecodingKey::from_secret(key.expose_secret().as_bytes()),
+                &decoding_key,
                 &jwt_validation_params(&jwt_header),
             );
 
