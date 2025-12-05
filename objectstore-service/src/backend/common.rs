@@ -3,7 +3,8 @@ use std::fmt::Debug;
 use anyhow::Result;
 use objectstore_types::Metadata;
 
-use crate::{ObjectPath, PayloadStream};
+use crate::PayloadStream;
+use crate::id::ObjectId;
 
 /// User agent string used for outgoing requests.
 ///
@@ -21,16 +22,16 @@ pub trait Backend: Debug + Send + Sync + 'static {
     /// Stores an object at the given path with the given metadata.
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
     ) -> Result<()>;
 
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, PayloadStream)>>;
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>>;
 
     /// Deletes the object at the given path.
-    async fn delete_object(&self, path: &ObjectPath) -> Result<()>;
+    async fn delete_object(&self, id: &ObjectId) -> Result<()>;
 }
 
 /// Creates a reqwest client with required defaults.

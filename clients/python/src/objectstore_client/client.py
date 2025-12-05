@@ -168,9 +168,9 @@ class Client:
                     f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
                 )
 
-            formatted = f"{key}.{value}"
+            formatted = f"{key}={value}"
             parts.append(formatted)
-        scope_str = "/".join(parts)
+        scope_str = ";".join(parts)
 
         return Session(
             self._pool,
@@ -214,7 +214,7 @@ class Session:
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
-        relative_path = f"/v1/{self._usecase.name}/{self._scope}/objects/{key or ''}"
+        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
         path = self._base_path.rstrip("/") + relative_path
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
