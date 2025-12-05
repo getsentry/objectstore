@@ -6,15 +6,57 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Generator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import jwt
 import pytest
 import urllib3
 import zstandard
 from objectstore_client import Client, Usecase
 from objectstore_client.client import RequestError
 from objectstore_client.metadata import TimeToLive
+
+TEST_EDDSA_KID: str = "test_kid"
+TEST_EDDSA_PRIVKEY_PATH: str = (
+    os.path.dirname(os.path.realpath(__file__)) + "/ed25519.private.pem"
+)
+TEST_EDDSA_PUBKEY_PATH: str = (
+    os.path.dirname(os.path.realpath(__file__)) + "/ed25519.public.pem"
+)
+
+
+class TokenGenerator:
+    def _parse_perms(self, perms: str) -> set[str]:
+        result: set[str] = set()
+        if "r" in perms:
+            result.add("object.read")
+        if "w" in perms:
+            result.add("object.write")
+        if "d" in perms:
+            result.add("object.delete")
+        return result
+
+    def __init__(self, usecase: str, perms: str = "rwd", **scopes: str | int):
+        self.usecase = usecase
+        self.perms = self._parse_perms(perms)
+        self.scopes = scopes
+
+    def sign(self) -> str:
+        headers = {"kid": TEST_EDDSA_KID}
+        claims = {
+            "exp": datetime.now(tz=UTC),
+            "res": {
+                "os:usecase": self.usecase,
+                **self.scopes,
+            },
+            "permissions": list(self.perms),
+        }
+
+        with open(TEST_EDDSA_PRIVKEY_PATH, "rb") as f:
+            encoding_key = f.read()
+
+        return jwt.encode(claims, encoding_key, algorithm="EdDSA", headers=headers)
 
 
 class Server:
@@ -61,6 +103,12 @@ class Server:
         self._url = f"http://{addr}"
         self._tempdir = tempfile.mkdtemp()
 
+        with open(TEST_EDDSA_PUBKEY_PATH) as f:
+            verification_key = f.read().replace("\n", "\\n")
+
+        # this messy format is how Figment supports map structures in env variables
+        env_key_map = f'{{{TEST_EDDSA_KID}={{key_versions=["{verification_key}"],max_permissions=["object.read","object.write","object.delete"]}}}}'  # noqa: E501
+
         env = {
             **os.environ,
             "OS__HTTP_ADDR": addr,
@@ -68,6 +116,8 @@ class Server:
             "OS__HIGH_VOLUME_STORAGE__PATH": f"{self._tempdir}/high-volume",
             "OS__LONG_TERM_STORAGE__TYPE": "filesystem",
             "OS__LONG_TERM_STORAGE__PATH": f"{self._tempdir}/long-term",
+            "OS__AUTH__ENFORCE": "true",
+            "OS__AUTH__KEYS": env_key_map,
         }
 
         self._process = subprocess.Popen([str(server_bin), "run"], env=env)
@@ -95,7 +145,10 @@ def server_url() -> Generator[str]:
 
 
 def test_full_cycle(server_url: str) -> None:
-    client = Client(server_url)
+    token = TokenGenerator(
+        usecase="test-usecase", perms="rwd", org="42", project="1337"
+    ).sign()
+    client = Client(server_url, auth_token=token)
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -122,7 +175,10 @@ def test_full_cycle(server_url: str) -> None:
 
 
 def test_full_cycle_uncompressed(server_url: str) -> None:
-    client = Client(server_url)
+    token = TokenGenerator(
+        usecase="test-usecase", perms="rwd", my_scope="42", my_nested_scope="something!"
+    ).sign()
+    client = Client(server_url, auth_token=token)
     test_usecase = Usecase(
         "test-usecase",
         compression="none",
@@ -149,6 +205,42 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
     assert decompressed_data == data
 
 
+def test_fails_with_wrong_auth_scope(server_url: str) -> None:
+    token = TokenGenerator(
+        usecase="test-usecase", perms="rwd", org="42", project="9999"
+    ).sign()
+    client = Client(server_url, auth_token=token)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    # TODO: When server errors cause appropriate status codes to be returned,
+    # ensure this is 403
+    with pytest.raises(RequestError, check=lambda e: e.status == 500):
+        _object_key = session.put(b"test data")
+
+
+def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
+    token = TokenGenerator(
+        usecase="test-usecase", perms="rd", org="42", project="1337"
+    ).sign()
+    client = Client(server_url, auth_token=token)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    # TODO: When server errors cause appropriate status codes to be returned,
+    # ensure this is 403
+    with pytest.raises(RequestError, check=lambda e: e.status == 500):
+        _object_key = session.put(b"test data")
+
+
 def test_connect_timeout() -> None:
     # this server accepts the connection
     # (even though the backlog is 0 and we never call `accept`),
@@ -159,7 +251,14 @@ def test_connect_timeout() -> None:
 
     timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
 
-    client = Client(url, connection_kwargs={"timeout": timeout})
+    token = TokenGenerator(
+        usecase="test-usecase",
+        perms="rwd",
+        org="12345",
+        project="1337",
+        app_slug="email_app",
+    ).sign()
+    client = Client(url, connection_kwargs={"timeout": timeout}, auth_token=token)
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",

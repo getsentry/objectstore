@@ -11,12 +11,15 @@
 //! }
 //! ```
 
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 
-use objectstore_server::config::{Config, Storage};
+use objectstore_server::config::Config;
 use objectstore_server::http::App;
 use objectstore_server::state::Services;
 use tempfile::TempDir;
+
+use crate::token::*;
 
 /// An in-process test server for use in integration tests.
 ///
@@ -39,15 +42,40 @@ impl TestServer {
 
         let long_term_tempdir = tempfile::tempdir().unwrap();
         let high_volume_tempdir = tempfile::tempdir().unwrap();
-        let config = Config {
-            long_term_storage: Storage::FileSystem {
-                path: long_term_tempdir.path().into(),
-            },
-            high_volume_storage: Storage::FileSystem {
-                path: high_volume_tempdir.path().into(),
-            },
-            ..Default::default()
-        };
+
+        let mut config_file = tempfile::NamedTempFile::new().unwrap();
+        let long_term_dir_str = long_term_tempdir.path().display();
+        let high_volume_dir_str = high_volume_tempdir.path().display();
+        config_file
+            .write_all(
+                format!(
+                    r#"long_term_storage:
+    type: filesystem
+    path: {}
+
+high_volume_storage:
+    type: filesystem
+    path: {}
+
+auth:
+    enforce: true
+    keys:
+        {}:
+            key_versions:
+                - '{}'
+            max_permissions:
+                - "object.read"
+                - "object.write"
+                - "object.delete""#,
+                    long_term_dir_str,
+                    high_volume_dir_str,
+                    TEST_EDDSA_KID,
+                    TEST_EDDSA_PUBKEY.as_str(),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let config = Config::load(Some(config_file.path())).unwrap();
 
         let state = Services::spawn(config).await.unwrap();
         let app = App::new(state);

@@ -20,3 +20,6 @@ dependencies = [
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["PyJWT[crypto]>=2.10.1"]
