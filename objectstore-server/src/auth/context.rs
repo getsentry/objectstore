@@ -128,16 +128,24 @@ impl AuthContext {
 
         if jwt_header.alg != Algorithm::EdDSA {
             tracing::warn!(
-                "JWT signed with unexpected algorithm `{:?}`",
-                jwt_header.alg
+                algorithm = ?jwt_header.alg,
+                "JWT signed with unexpected algorithm",
             );
+            let kind = jsonwebtoken::errors::ErrorKind::InvalidAlgorithm;
+            return Err(AuthError::ValidationFailure(kind.into()));
         }
 
         let mut verified_claims: Option<TokenData<JwtClaims>> = None;
         for key in &key_config.key_versions {
-            let decoding_key = match jwt_header.alg {
-                Algorithm::EdDSA => DecodingKey::from_ed_pem(key.expose_secret().as_bytes())?,
-                _ => DecodingKey::from_secret(key.expose_secret().as_bytes()),
+            let decoding_key = match DecodingKey::from_ed_pem(key.expose_secret().as_bytes()) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::error!(
+                        error = &error as &dyn std::error::Error,
+                        "Failed to construct decoding key from PEM",
+                    );
+                    continue;
+                }
             };
 
             let decode_result = decode::<JwtClaims>(
