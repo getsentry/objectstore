@@ -97,6 +97,7 @@ class Client:
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
         propagate_traces: bool = False,
+        auth_token: str | None = None,
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
@@ -125,6 +126,7 @@ class Client:
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
+        self._auth_token = auth_token
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -177,6 +179,7 @@ class Client:
             self._base_path,
             self._metrics_backend,
             self._propagate_traces,
+            self._auth_token,
             usecase,
             scope_str,
         )
@@ -195,6 +198,7 @@ class Session:
         base_path: str,
         metrics_backend: MetricsBackend,
         propagate_traces: bool,
+        auth_token: str | None,
         usecase: Usecase,
         scope: str,
     ):
@@ -202,6 +206,7 @@ class Session:
         self._base_path = base_path
         self._metrics_backend = metrics_backend
         self._propagate_traces = propagate_traces
+        self._auth_token = auth_token
         self._usecase = usecase
         self._scope = scope
 
@@ -211,6 +216,8 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
+        if self._auth_token:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
