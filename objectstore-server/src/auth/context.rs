@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Header, TokenData, Validation, decode, decode_header};
-use objectstore_service::ObjectPath;
+use objectstore_service::id::ObjectId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -35,7 +35,7 @@ pub struct AuthContext {
     /// The objectstore usecase that this request may act on.
     pub usecase: String,
 
-    /// The scope elements that this request may act on. See also: [`ObjectPath::scope`].
+    /// The scope elements that this request may act on. See also: [`ObjectId::scopes`].
     pub scopes: BTreeMap<String, StringOrWildcard>,
 
     /// The permissions that this request has been granted.
@@ -128,16 +128,24 @@ impl AuthContext {
 
         if jwt_header.alg != Algorithm::EdDSA {
             tracing::warn!(
-                "JWT signed with unexpected algorithm `{:?}`",
-                jwt_header.alg
+                algorithm = ?jwt_header.alg,
+                "JWT signed with unexpected algorithm",
             );
+            let kind = jsonwebtoken::errors::ErrorKind::InvalidAlgorithm;
+            return Err(AuthError::ValidationFailure(kind.into()));
         }
 
         let mut verified_claims: Option<TokenData<JwtClaims>> = None;
         for key in &key_config.key_versions {
-            let decoding_key = match jwt_header.alg {
-                Algorithm::EdDSA => DecodingKey::from_ed_pem(key.expose_secret().as_bytes())?,
-                _ => DecodingKey::from_secret(key.expose_secret().as_bytes()),
+            let decoding_key = match DecodingKey::from_ed_pem(key.expose_secret().as_bytes()) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::error!(
+                        error = &error as &dyn std::error::Error,
+                        "Failed to construct decoding key from PEM",
+                    );
+                    continue;
+                }
             };
 
             let decode_result = decode::<JwtClaims>(
@@ -180,8 +188,8 @@ impl AuthContext {
         })
     }
 
-    fn fail_if_enforced(&self, perm: &Permission, path: &ObjectPath) -> Result<(), AuthError> {
-        tracing::debug!(?self, ?perm, ?path, "Authorization failed");
+    fn fail_if_enforced(&self, perm: &Permission, id: &ObjectId) -> Result<(), AuthError> {
+        tracing::debug!(?self, ?perm, ?id, "Authorization failed");
         if self.enforce {
             return Err(AuthError::NotPermitted);
         }
@@ -193,24 +201,19 @@ impl AuthContext {
     ///
     /// The passed-in `perm` is checked against this `AuthContext`'s `permissions`. If it is not
     /// present, then the operation is not authorized.
-    pub fn assert_authorized(&self, perm: Permission, path: &ObjectPath) -> Result<(), AuthError> {
-        if !self.permissions.contains(&perm) || self.usecase != path.usecase {
-            self.fail_if_enforced(&perm, path)?;
+    pub fn assert_authorized(&self, perm: Permission, id: &ObjectId) -> Result<(), AuthError> {
+        if !self.permissions.contains(&perm) || self.usecase != id.usecase {
+            self.fail_if_enforced(&perm, id)?;
         }
 
-        for element in &path.scope {
-            let (key, value) = element
-                .split_once('.')
-                .ok_or(AuthError::InternalError(format!(
-                    "Invalid scope element: {element}"
-                )))?;
-            let authorized = match self.scopes.get(key) {
-                Some(StringOrWildcard::String(s)) => s == value,
+        for scope in &id.scopes {
+            let authorized = match self.scopes.get(scope.name()) {
+                Some(StringOrWildcard::String(s)) => s == scope.value(),
                 Some(StringOrWildcard::Wildcard) => true,
                 None => false,
             };
             if !authorized {
-                self.fail_if_enforced(&perm, path)?;
+                self.fail_if_enforced(&perm, id)?;
             }
         }
 
@@ -222,11 +225,21 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::config::{AuthZVerificationKey, ConfigSecret};
+    use objectstore_service::id::{Scope, Scopes};
     use secrecy::SecretBox;
     use serde_json::json;
 
     const TEST_SIGNING_KID: &str = "test-key";
-    const TEST_SIGNING_SECRET: &str = "fa24f0a3ab08f9ff0d4b2183595a045c";
+    // Private key generated with `openssl genpkey -algorithm Ed25519`
+    const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIAZtPzCHjltjZSi3+THxP6Rh8vUM0LRNA/QDR8zJx0tB
+-----END PRIVATE KEY-----
+"#;
+    // Public key extracted with `openssl pkey -in private_key.pem -pubout`
+    const TEST_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
+-----END PUBLIC KEY-----
+"#;
 
     #[derive(Serialize, Deserialize)]
     struct TestJwtClaims {
@@ -244,7 +257,7 @@ mod tests {
     }
 
     fn test_config(max_permissions: HashSet<Permission>) -> AuthZ {
-        let wrapped_key = SecretBox::new(Box::new(ConfigSecret::from(TEST_SIGNING_SECRET)));
+        let wrapped_key = SecretBox::new(Box::new(ConfigSecret::from(TEST_PUBLIC_KEY)));
         let key_config = AuthZVerificationKey {
             key_versions: vec![wrapped_key],
             max_permissions,
@@ -255,24 +268,20 @@ mod tests {
         }
     }
 
-    fn sign_token(claims: &JwtClaims, signing_secret: &str) -> String {
+    fn sign_token(claims: &JwtClaims, signing_secret: &str, exp: Option<u64>) -> String {
         use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 
-        let mut header = Header::new(Algorithm::HS256);
+        let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(TEST_SIGNING_KID.into());
         header.typ = Some("JWT".into());
 
         let claims = TestJwtClaims {
-            exp: get_current_timestamp() + 300,
+            exp: exp.unwrap_or_else(|| get_current_timestamp() + 300),
             claims: claims.clone(),
         };
 
-        encode(
-            &header,
-            &claims,
-            &EncodingKey::from_secret(signing_secret.as_bytes()),
-        )
-        .unwrap()
+        let key = EncodingKey::from_ed_pem(signing_secret.as_bytes()).unwrap();
+        encode(&header, &claims, &key).unwrap()
     }
 
     fn sample_claims(
@@ -305,7 +314,7 @@ mod tests {
     fn test_from_encoded_jwt_basic() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, TEST_SIGNING_SECRET);
+        let encoded_token = sign_token(&claims, TEST_PRIVATE_KEY, None);
 
         // Create test config with max permissions
         let test_config = test_config(max_permission());
@@ -323,7 +332,7 @@ mod tests {
     fn test_from_encoded_jwt_max_permissions_limit() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, TEST_SIGNING_SECRET);
+        let encoded_token = sign_token(&claims, TEST_PRIVATE_KEY, None);
 
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
@@ -355,9 +364,12 @@ mod tests {
 
     #[test]
     fn test_from_encoded_jwt_unknown_key_fails() -> Result<(), AuthError> {
-        // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, "unknown signing key");
+        let unknown_key = r#"-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
+-----END PRIVATE KEY-----
+"#;
+        let encoded_token = sign_token(&claims, unknown_key, None);
 
         // Create test config with max permissions
         let test_config = test_config(max_permission());
@@ -372,25 +384,12 @@ mod tests {
 
     #[test]
     fn test_from_encoded_jwt_expired() -> Result<(), AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-
         let claims = sample_claims("123", "456", "attachments", max_permission());
-
-        let mut header = Header::new(Algorithm::HS256);
-        header.kid = Some(TEST_SIGNING_KID.into());
-        header.typ = Some("JWT".into());
-
-        let claims = TestJwtClaims {
-            exp: get_current_timestamp() - 100, // NB: expired
-            claims: claims.clone(),
-        };
-
-        let encoded_token = encode(
-            &header,
+        let encoded_token = sign_token(
             &claims,
-            &EncodingKey::from_secret(TEST_SIGNING_SECRET.as_bytes()),
-        )
-        .unwrap();
+            TEST_PRIVATE_KEY,
+            Some(jsonwebtoken::get_current_timestamp() - 100),
+        );
 
         // Create test config with max permissions
         let test_config = test_config(max_permission());
@@ -409,10 +408,13 @@ mod tests {
         Ok(())
     }
 
-    fn sample_object_path(org: u32, proj: u32) -> ObjectPath {
-        ObjectPath {
+    fn sample_object_path(org: &str, project: &str) -> ObjectId {
+        ObjectId {
             usecase: "attachments".into(),
-            scope: vec![format!("org.{org}"), format!("project.{proj}")],
+            scopes: Scopes::from_iter([
+                Scope::create("org", org).unwrap(),
+                Scope::create("project", project).unwrap(),
+            ]),
             key: "abcde".into(),
         }
     }
@@ -423,7 +425,7 @@ mod tests {
     #[test]
     fn test_assert_authorized_exact_scope_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -436,7 +438,7 @@ mod tests {
     #[test]
     fn test_assert_authorized_wildcard_project_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "*", max_permission());
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -449,8 +451,11 @@ mod tests {
     #[test]
     fn test_assert_authorized_org_only_path_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let mut object = sample_object_path(123, 999);
-        object.scope.pop();
+        let object = ObjectId {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
+            key: "abcde".into(),
+        };
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -466,13 +471,13 @@ mod tests {
     #[test]
     fn test_assert_authorized_scope_mismatch_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(123, 999);
+        let object = sample_object_path("123", "999");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(999, 456);
+        let object = sample_object_path("999", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -484,7 +489,7 @@ mod tests {
     fn test_assert_authorized_wrong_usecase_fails() -> Result<(), AuthError> {
         let mut auth_context = sample_auth_context("123", "456", max_permission());
         auth_context.usecase = "debug-files".into();
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -496,7 +501,7 @@ mod tests {
     fn test_assert_authorized_auth_context_missing_permission_fails() -> Result<(), AuthError> {
         let auth_context =
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -510,7 +515,7 @@ mod tests {
         let mut auth_context =
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
         // Object's scope is not covered by the auth context
-        let object = sample_object_path(999, 999);
+        let object = sample_object_path("999", "999");
 
         // Auth fails for two reasons, but because enforcement is off, it should not return an error
         auth_context.enforce = false;

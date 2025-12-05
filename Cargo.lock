@@ -2174,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "async-compression",
  "bytes",
@@ -2253,6 +2253,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2271,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-types"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "http 1.3.1",
  "humantime",

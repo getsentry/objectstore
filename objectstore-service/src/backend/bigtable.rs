@@ -8,8 +8,9 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
+use crate::PayloadStream;
 use crate::backend::common::Backend;
-use crate::{ObjectPath, PayloadStream};
+use crate::id::ObjectId;
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -181,15 +182,15 @@ impl Backend for BigTableBackend {
         "bigtable"
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> Result<()> {
         tracing::debug!("Writing to Bigtable backend");
-        let path = path.to_string().into_bytes();
+        let path = id.as_storage_path().to_string().into_bytes();
 
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
@@ -200,10 +201,10 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn get_object(&self, path: &ObjectPath) -> Result<Option<(Metadata, PayloadStream)>> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from Bigtable backend");
-        let path = path.to_string().into_bytes();
+        let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
             row_keys: vec![path.clone()],
             row_ranges: vec![],
@@ -286,11 +287,11 @@ impl Backend for BigTableBackend {
         Ok(Some((metadata, stream)))
     }
 
-    #[tracing::instrument(level = "trace", fields(?path), skip_all)]
-    async fn delete_object(&self, path: &ObjectPath) -> Result<()> {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
         tracing::debug!("Deleting from Bigtable backend");
 
-        let path = path.to_string().into_bytes();
+        let path = id.as_storage_path().to_string().into_bytes();
         let mutations = [mutation::Mutation::DeleteFromRow(
             mutation::DeleteFromRow {},
         )];
@@ -327,6 +328,8 @@ mod tests {
 
     use uuid::Uuid;
 
+    use crate::id::{Scope, Scopes};
+
     use super::*;
 
     // NB: Not run any of these tests, you need to have a BigTable emulator running. This is done
@@ -357,10 +360,10 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_key() -> ObjectPath {
-        ObjectPath {
+    fn make_key() -> ObjectId {
+        ObjectId {
             usecase: "testing".into(),
-            scope: vec!["testing".into()],
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
             key: Uuid::new_v4().to_string(),
         }
     }
