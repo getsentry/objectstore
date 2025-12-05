@@ -21,7 +21,7 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
-jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
+jsonwebtoken = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
 num_cpus = "1.17.0"

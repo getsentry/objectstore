@@ -1,12 +1,22 @@
-use objectstore_client::{Client, Usecase};
+use objectstore_client::{Client, Error, Usecase};
 use objectstore_test::server::TestServer;
+use objectstore_test::token::TestTokenGenerator;
 use objectstore_types::Compression;
 
 #[tokio::test]
 async fn stores_uncompressed() {
     let server = TestServer::new().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -32,7 +42,16 @@ async fn stores_uncompressed() {
 async fn uses_zstd_by_default() {
     let server = TestServer::new().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -60,7 +79,17 @@ async fn uses_zstd_by_default() {
 async fn deletes_stores_stuff() {
     let server = TestServer::new().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .proj("1337")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -77,7 +106,17 @@ async fn deletes_stores_stuff() {
 async fn stores_under_given_key() {
     let server = TestServer::new().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .proj("1337")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -92,7 +131,17 @@ async fn stores_under_given_key() {
 async fn overwrites_existing_key() {
     let server = TestServer::new().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .proj("1337")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -105,4 +154,50 @@ async fn overwrites_existing_key() {
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
     let payload = response.payload().await.unwrap();
     assert_eq!(payload, "new body");
+}
+
+#[tokio::test]
+async fn fails_with_wrong_auth_token_scope() {
+    let server = TestServer::new().await;
+
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .proj("9999")
+        .usecase("usecase")
+        .perms("rwd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let put_result = session.put("initial body").send().await;
+    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
+    assert!(matches!(put_result, Err(Error::Reqwest(_))));
+}
+
+#[tokio::test]
+async fn fails_with_insufficient_auth_token_perms() {
+    let server = TestServer::new().await;
+
+    let token = TestTokenGenerator::new()
+        .org("12345")
+        .proj("1337")
+        .usecase("usecase")
+        .perms("rd")
+        .sign();
+
+    let client = Client::builder(server.url("/"))
+        .auth_token(token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let put_result = session.put("initial body").send().await;
+    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
+    assert!(matches!(put_result, Err(Error::Reqwest(_))));
 }
