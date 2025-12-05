@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{DecodingKey, Header, TokenData, Validation, decode, decode_header};
-use objectstore_service::ObjectPath;
+use objectstore_service::id::ObjectId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -35,7 +35,7 @@ pub struct AuthContext {
     /// The objectstore usecase that this request may act on.
     pub usecase: String,
 
-    /// The scope elements that this request may act on. See also: [`ObjectPath::scope`].
+    /// The scope elements that this request may act on. See also: [`ObjectId::scopes`].
     pub scopes: BTreeMap<String, StringOrWildcard>,
 
     /// The permissions that this request has been granted.
@@ -168,8 +168,8 @@ impl AuthContext {
         })
     }
 
-    fn fail_if_enforced(&self, perm: &Permission, path: &ObjectPath) -> Result<(), AuthError> {
-        tracing::debug!(?self, ?perm, ?path, "Authorization failed");
+    fn fail_if_enforced(&self, perm: &Permission, id: &ObjectId) -> Result<(), AuthError> {
+        tracing::debug!(?self, ?perm, ?id, "Authorization failed");
         if self.enforce {
             return Err(AuthError::NotPermitted);
         }
@@ -181,24 +181,19 @@ impl AuthContext {
     ///
     /// The passed-in `perm` is checked against this `AuthContext`'s `permissions`. If it is not
     /// present, then the operation is not authorized.
-    pub fn assert_authorized(&self, perm: Permission, path: &ObjectPath) -> Result<(), AuthError> {
-        if !self.permissions.contains(&perm) || self.usecase != path.usecase {
-            self.fail_if_enforced(&perm, path)?;
+    pub fn assert_authorized(&self, perm: Permission, id: &ObjectId) -> Result<(), AuthError> {
+        if !self.permissions.contains(&perm) || self.usecase != id.usecase {
+            self.fail_if_enforced(&perm, id)?;
         }
 
-        for element in &path.scope {
-            let (key, value) = element
-                .split_once('.')
-                .ok_or(AuthError::InternalError(format!(
-                    "Invalid scope element: {element}"
-                )))?;
-            let authorized = match self.scopes.get(key) {
-                Some(StringOrWildcard::String(s)) => s == value,
+        for scope in &id.scopes {
+            let authorized = match self.scopes.get(scope.name()) {
+                Some(StringOrWildcard::String(s)) => s == scope.value(),
                 Some(StringOrWildcard::Wildcard) => true,
                 None => false,
             };
             if !authorized {
-                self.fail_if_enforced(&perm, path)?;
+                self.fail_if_enforced(&perm, id)?;
             }
         }
 
@@ -210,6 +205,7 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::config::{AuthZVerificationKey, ConfigSecret};
+    use objectstore_service::id::{Scope, Scopes};
     use secrecy::SecretBox;
     use serde_json::json;
 
@@ -397,10 +393,13 @@ mod tests {
         Ok(())
     }
 
-    fn sample_object_path(org: u32, proj: u32) -> ObjectPath {
-        ObjectPath {
+    fn sample_object_path(org: &str, project: &str) -> ObjectId {
+        ObjectId {
             usecase: "attachments".into(),
-            scope: vec![format!("org.{org}"), format!("project.{proj}")],
+            scopes: Scopes::from_iter([
+                Scope::create("org", org).unwrap(),
+                Scope::create("project", project).unwrap(),
+            ]),
             key: "abcde".into(),
         }
     }
@@ -411,7 +410,7 @@ mod tests {
     #[test]
     fn test_assert_authorized_exact_scope_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -424,7 +423,7 @@ mod tests {
     #[test]
     fn test_assert_authorized_wildcard_project_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "*", max_permission());
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -437,8 +436,11 @@ mod tests {
     #[test]
     fn test_assert_authorized_org_only_path_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let mut object = sample_object_path(123, 999);
-        object.scope.pop();
+        let object = ObjectId {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
+            key: "abcde".into(),
+        };
 
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
@@ -454,13 +456,13 @@ mod tests {
     #[test]
     fn test_assert_authorized_scope_mismatch_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(123, 999);
+        let object = sample_object_path("123", "999");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         let auth_context = sample_auth_context("123", "456", max_permission());
-        let object = sample_object_path(999, 456);
+        let object = sample_object_path("999", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -472,7 +474,7 @@ mod tests {
     fn test_assert_authorized_wrong_usecase_fails() -> Result<(), AuthError> {
         let mut auth_context = sample_auth_context("123", "456", max_permission());
         auth_context.usecase = "debug-files".into();
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -484,7 +486,7 @@ mod tests {
     fn test_assert_authorized_auth_context_missing_permission_fails() -> Result<(), AuthError> {
         let auth_context =
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
-        let object = sample_object_path(123, 456);
+        let object = sample_object_path("123", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
@@ -498,7 +500,7 @@ mod tests {
         let mut auth_context =
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
         // Object's scope is not covered by the auth context
-        let object = sample_object_path(999, 999);
+        let object = sample_object_path("999", "999");
 
         // Auth fails for two reasons, but because enforcement is off, it should not return an error
         auth_context.enforce = false;

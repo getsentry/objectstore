@@ -1,7 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::{StatusCode, header, request::Parts};
-use objectstore_service::PayloadStream;
-use objectstore_service::{ObjectPath, StorageService};
+use objectstore_service::id::ObjectId;
+use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::Metadata;
 
 use crate::auth::{AuthContext, AuthError, Permission};
@@ -18,17 +18,15 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// Objectstore API endpoints can use `AuthAwareService` simply by adding it to their handler
 /// function's argument list like so:
 ///
-/// ```no_run
-/// # use axum::extract::Path;
-/// # use axum::response::IntoResponse;
-/// # use axum::http::StatusCode;
-/// # use objectstore_server::{auth::AuthAwareService, error::ApiResult};
-/// # use objectstore_service::ObjectPath;
-/// async fn delete_object(
-///     service: AuthAwareService,      // <- Constructed automatically from request parts
-///     Path(path): Path<ObjectPath>,
-/// ) -> ApiResult<impl IntoResponse> {
-///     service.delete_object(&path).await?;
+/// ```
+/// use axum::http::StatusCode;
+/// use objectstore_server::auth::AuthAwareService;
+/// use objectstore_server::error::ApiResult;
+///
+/// async fn my_endpoint(service: AuthAwareService) -> Result<StatusCode, StatusCode> {
+///     service.delete_object(todo!("pass some ID"))
+///         .await
+///         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 ///
 ///     Ok(StatusCode::NO_CONTENT)
 /// }
@@ -41,13 +39,13 @@ pub struct AuthAwareService {
 }
 
 impl AuthAwareService {
-    fn assert_authorized(&self, perm: Permission, path: &ObjectPath) -> anyhow::Result<()> {
+    fn assert_authorized(&self, perm: Permission, id: &ObjectId) -> anyhow::Result<()> {
         if self.enforce {
             let context = self
                 .context
                 .as_ref()
                 .ok_or(AuthError::VerificationFailure)?;
-            context.assert_authorized(perm, path)?;
+            context.assert_authorized(perm, id)?;
         }
 
         Ok(())
@@ -56,27 +54,27 @@ impl AuthAwareService {
     /// Auth-aware wrapper around [`StorageService::put_object`].
     pub async fn put_object(
         &self,
-        path: ObjectPath,
+        id: ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> anyhow::Result<ObjectPath> {
-        self.assert_authorized(Permission::ObjectWrite, &path)?;
-        self.service.put_object(path, metadata, stream).await
+    ) -> anyhow::Result<ObjectId> {
+        self.assert_authorized(Permission::ObjectWrite, &id)?;
+        self.service.put_object(id, metadata, stream).await
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
     pub async fn get_object(
         &self,
-        path: &ObjectPath,
+        id: &ObjectId,
     ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
-        self.assert_authorized(Permission::ObjectRead, path)?;
-        self.service.get_object(path).await
+        self.assert_authorized(Permission::ObjectRead, id)?;
+        self.service.get_object(id).await
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
-    pub async fn delete_object(&self, path: &ObjectPath) -> anyhow::Result<()> {
-        self.assert_authorized(Permission::ObjectDelete, path)?;
-        self.service.delete_object(path).await
+    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+        self.assert_authorized(Permission::ObjectDelete, id)?;
+        self.service.delete_object(id).await
     }
 }
 
