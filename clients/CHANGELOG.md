@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.14
+
+### New Features ✨
+
+- feat(server): Implement the new Web API by @jan-auer in [#230](https://github.com/getsentry/objectstore/pull/230)
+
 ## 0.0.13
 
 ### Fixes
