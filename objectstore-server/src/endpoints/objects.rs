@@ -48,10 +48,8 @@ async fn objects_post(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    // let id = params.create_object_id();
     let context = params.into_context();
-    // TODO(ja): Bring this back
-    // helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_context(&context);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
@@ -73,7 +71,7 @@ async fn object_get(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -90,7 +88,7 @@ async fn object_head(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let Some((metadata, _stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -110,7 +108,7 @@ async fn object_put(
     body: Body,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
@@ -134,7 +132,7 @@ async fn object_delete(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<impl IntoResponse> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     service.delete_object(&id).await?;
 
