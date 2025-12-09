@@ -67,12 +67,18 @@ impl HttpRemote {
         Ok(())
     }
 
-    pub(crate) async fn delete(&self, usecase: &Usecase, organization_id: u64, key: &str) {
+    pub(crate) async fn delete(
+        &self,
+        usecase: &Usecase,
+        organization_id: u64,
+        key: &str,
+    ) -> anyhow::Result<()> {
         self.session(usecase, organization_id)
             .delete(key)
             .send()
-            .await
-            .unwrap();
+            .await?;
+
+        Ok(())
     }
 
     fn session(&self, usecase: &Usecase, organization_id: u64) -> Session {

@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 
 use bytesize::ByteSize;
 use futures::StreamExt;
@@ -190,7 +190,10 @@ impl Stresstest {
                 let bar = &bar;
                 async move {
                     let start = Instant::now();
-                    remote.delete(usecase, *organization_id, object_key).await;
+                    remote
+                        .delete(usecase, *organization_id, object_key)
+                        .await
+                        .unwrap();
                     cleanup_timing
                         .lock()
                         .unwrap()
@@ -285,7 +288,7 @@ async fn run_workload(
                                     metrics.bytes_written += file_size;
                                 }
                                 Err(err) => {
-                                    eprintln!("error writing object: {err}");
+                                    print_error("writing object", &err);
                                     let mut metrics = metrics.lock().unwrap();
                                     metrics.write_failures += 1;
                                 }
@@ -302,7 +305,7 @@ async fn run_workload(
                                     metrics.bytes_read += file_size;
                                 }
                                 Err(err) => {
-                                    eprintln!("error reading object: {err}");
+                                    print_error("reading object", &err);
                                     let mut metrics = metrics.lock().unwrap();
                                     metrics.read_failures += 1;
                                 }
@@ -310,7 +313,9 @@ async fn run_workload(
                         }
                         Action::Delete(external_id) => {
                             let (usecase, organization_id, object_key) = &external_id;
-                            remote.delete(usecase, *organization_id, object_key).await;
+                            if let Err(err) = remote.delete(usecase, *organization_id, object_key).await {
+                                print_error("deleting object", &err);
+                            }
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }
@@ -340,6 +345,13 @@ async fn run_workload(
         .unwrap();
 
     (workload, metrics)
+}
+
+fn print_error(message: &str, error: &Error) {
+    eprintln!("{} {}", "ERROR:".bold().red(), message.bold());
+    for source in error.chain() {
+        eprintln!("  {}: {source}", "caused by".italic());
+    }
 }
 
 fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
