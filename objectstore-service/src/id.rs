@@ -134,11 +134,11 @@ impl FromIterator<Scope> for Scopes {
     }
 }
 
-/// The fully qualified identifier of an object.
+/// Defines where an object belongs within the object store.
 ///
-/// This consists of a usecase, the scopes, and the key.
+/// This is part of the full object identifier, see [`ObjectId`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ObjectId {
+pub struct ObjectContext {
     /// The usecase, or "product" this object belongs to.
     ///
     /// This can be defined on-the-fly by the client, but special server logic
@@ -167,46 +167,99 @@ pub struct ObjectId {
     /// you must use [`Scope::create`] to create them:
     ///
     /// ```
-    /// use objectstore_service::id::{ObjectId, Scope, Scopes};
+    /// use objectstore_service::id::{ObjectContext, Scope, Scopes};
     ///
-    /// let object_id = ObjectId {
+    /// let object_id = ObjectContext {
     ///     usecase: "my_usecase".to_string(),
     ///     scopes: Scopes::from_iter([
     ///         Scope::create("organization", "17").unwrap(),
     ///         Scope::create("project", "42").unwrap(),
     ///     ]),
-    ///     key: "my_object_key".to_string(),
     /// };
     /// ```
     pub scopes: Scopes,
+}
+
+/// The fully qualified identifier of an object.
+///
+/// This consists of a usecase and the scopes, which make up the object's context and define where
+/// the object belongs within objectstore, as well as the unique key within the context.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectId {
+    /// The usecase and scopes this object belongs to.
+    pub context: ObjectContext,
 
     /// This key uniquely identifies the object within its usecase and scopes.
     ///
-    /// Note that keys can be reused across different scopes. Only in combination with the usecase
-    /// and scopes a key makes a unique identifier.
+    /// Note that keys can be reused across different contexts. Only in combination with the context
+    /// a key makes a unique identifier.
     ///
     /// Keys can be assigned by the service. For this, use [`ObjectId::random`].
     pub key: String,
 }
 
 impl ObjectId {
+    /// Creates a new `ObjectId` with the given `context` and `key`.
+    pub fn new(context: ObjectContext, key: String) -> Self {
+        Self::optional(context, Some(key))
+    }
+
+    /// Creates a new `ObjectId` from all of its parts.
+    pub fn from_parts(usecase: String, scopes: Scopes, key: String) -> Self {
+        Self::new(ObjectContext { usecase, scopes }, key)
+    }
+
     /// Creates a unique `ObjectId` with a random key.
     ///
     /// This can be used when creating an object with a server-generated key.
-    pub fn random(usecase: String, scopes: Scopes) -> Self {
-        Self::optional(usecase, scopes, None)
+    pub fn random(context: ObjectContext) -> Self {
+        Self::optional(context, None)
     }
 
     /// Creates a new `ObjectId`, generating a key if none is provided.
     ///
     /// This creates a unique key like [`ObjectId::random`] if no `key` is provided, or otherwise
     /// uses the provided `key`.
-    pub fn optional(usecase: String, scopes: Scopes, key: Option<String>) -> Self {
+    pub fn optional(context: ObjectContext, key: Option<String>) -> Self {
         Self {
-            usecase,
-            scopes,
+            context,
             key: key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         }
+    }
+
+    /// Returns the key of the object.
+    ///
+    /// See [`key`](field@ObjectId::key) for more information.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Returns the context of the object.
+    ///
+    /// See [`context`](field@ObjectId::context) for more information.
+    pub fn context(&self) -> &ObjectContext {
+        &self.context
+    }
+
+    /// Returns the usecase of the object.
+    ///
+    /// See [`ObjectContext::usecase`] for more information.
+    pub fn usecase(&self) -> &str {
+        &self.context.usecase
+    }
+
+    /// Returns the scopes of the object.
+    ///
+    /// See [`ObjectContext::scopes`] for more information.
+    pub fn scopes(&self) -> &Scopes {
+        &self.context.scopes
+    }
+
+    /// Returns an iterator over all scopes of the object.
+    ///
+    /// See [`ObjectContext::scopes`] for more information.
+    pub fn iter_scopes(&self) -> impl Iterator<Item = &Scope> {
+        self.context.scopes.iter()
     }
 
     /// Returns a view that formats this ID as a storage path.
@@ -241,9 +294,9 @@ impl fmt::Display for AsStoragePath<'_, Scopes> {
 
 impl fmt::Display for AsStoragePath<'_, ObjectId> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/", self.inner.usecase)?;
-        if !self.inner.scopes.is_empty() {
-            write!(f, "{}/", self.inner.scopes.as_storage_path())?;
+        write!(f, "{}/", self.inner.context.usecase)?;
+        if !self.inner.context.scopes.is_empty() {
+            write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
         write!(f, "objects/{}", self.inner.key)
     }
@@ -256,11 +309,13 @@ mod tests {
     #[test]
     fn test_storage_path() {
         let object_id = ObjectId {
-            usecase: "testing".to_string(),
-            scopes: Scopes::from_iter([
-                Scope::create("org", "12345").unwrap(),
-                Scope::create("project", "1337").unwrap(),
-            ]),
+            context: ObjectContext {
+                usecase: "testing".to_string(),
+                scopes: Scopes::from_iter([
+                    Scope::create("org", "12345").unwrap(),
+                    Scope::create("project", "1337").unwrap(),
+                ]),
+            },
             key: "foo/bar".to_string(),
         };
 
@@ -271,8 +326,10 @@ mod tests {
     #[test]
     fn test_storage_path_empty_scopes() {
         let object_id = ObjectId {
-            usecase: "testing".to_string(),
-            scopes: Scopes::empty(),
+            context: ObjectContext {
+                usecase: "testing".to_string(),
+                scopes: Scopes::empty(),
+            },
             key: "foo/bar".to_string(),
         };
 

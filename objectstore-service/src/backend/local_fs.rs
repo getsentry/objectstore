@@ -108,7 +108,7 @@ mod tests {
     use futures_util::TryStreamExt;
     use objectstore_types::{Compression, ExpirationPolicy};
 
-    use crate::id::{Scope, Scopes};
+    use crate::id::{ObjectContext, Scope, Scopes};
 
     use super::*;
 
@@ -121,11 +121,11 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(tempdir.path());
 
-        let key = ObjectId {
+        let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
-            key: "testing".into(),
-        };
+        });
+
         let metadata = Metadata {
             is_redirect_tombstone: None,
             content_type: "text/plain".into(),
@@ -137,11 +137,11 @@ mod tests {
             size: None,
         };
         backend
-            .put_object(&key, &metadata, make_stream(b"oh hai!"))
+            .put_object(&id, &metadata, make_stream(b"oh hai!"))
             .await
             .unwrap();
 
-        let (read_metadata, stream) = backend.get_object(&key).await.unwrap().unwrap();
+        let (read_metadata, stream) = backend.get_object(&id).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(read_metadata, metadata);

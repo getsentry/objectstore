@@ -19,7 +19,7 @@ use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
 use crate::backend::common::BoxedBackend;
-use crate::id::ObjectId;
+use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -102,10 +102,14 @@ impl StorageService {
         Ok(Self(Arc::new(inner)))
     }
 
-    /// Stores or overwrites an object at the given key.
-    pub async fn put_object(
+    /// Creates or overwrites an object.
+    ///
+    /// The object is identified by the components of an [`ObjectId`]. The `context` is required,
+    /// while the `key` can be assigned automatically if set to `None`.
+    pub async fn insert_object(
         &self,
-        id: ObjectId,
+        context: ObjectContext,
+        key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> anyhow::Result<ObjectId> {
@@ -122,12 +126,17 @@ impl StorageService {
             }
         }
 
+        let has_key = key.is_some();
+        let id = ObjectId::optional(context, key);
+
         // There might currently be a tombstone at the given path from a previously stored object.
-        let previously_stored_object = self.0.high_volume_backend.get_object(&id).await?;
-        if is_tombstoned(&previously_stored_object) {
-            // Write the object to the other backend and keep the tombstone in place
-            backend = BackendChoice::LongTerm;
-        }
+        if has_key {
+            let previously_stored_object = self.0.high_volume_backend.get_object(&id).await?;
+            if is_tombstoned(&previously_stored_object) {
+                // Write the object to the other backend and keep the tombstone in place
+                backend = BackendChoice::LongTerm;
+            }
+        };
 
         let (backend_choice, backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
@@ -193,18 +202,17 @@ impl StorageService {
 
         merni::distribution!(
             "put.latency"@s: start.elapsed(),
-            "usecase" => id.usecase,
+            "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
             "backend_type" => backend_ty
         );
         merni::distribution!(
             "put.size"@b: stored_size,
-            "usecase" => id.usecase,
+            "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
             "backend_type" => backend_ty
         );
 
-        // TODO(ja): Return a struct here
         Ok(id)
     }
 
@@ -227,7 +235,7 @@ impl StorageService {
 
         merni::distribution!(
             "get.latency.pre-response"@s: start.elapsed(),
-            "usecase" => id.usecase,
+            "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
             "backend_type" => backend_type
         );
@@ -236,7 +244,7 @@ impl StorageService {
             if let Some(size) = metadata.size {
                 merni::distribution!(
                     "get.size"@b: size,
-                    "usecase" => id.usecase,
+                    "usecase" => id.usecase(),
                     "backend_choice" => backend_choice,
                     "backend_type" => backend_type
                 );
@@ -261,7 +269,7 @@ impl StorageService {
 
         merni::distribution!(
             "delete.latency"@s: start.elapsed(),
-            "usecase" => id.usecase
+            "usecase" => id.usecase()
         );
 
         Ok(())
@@ -324,11 +332,10 @@ mod tests {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    fn make_path() -> ObjectId {
-        ObjectId {
+    fn make_context() -> ObjectContext {
+        ObjectContext {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
-            key: "testing".into(),
         }
     }
 
@@ -341,7 +348,12 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
+            .insert_object(
+                make_context(),
+                Some("testing".into()),
+                &Default::default(),
+                make_stream(b"oh hai!"),
+            )
             .await
             .unwrap();
 
@@ -360,7 +372,12 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .put_object(make_path(), &Default::default(), make_stream(b"oh hai!"))
+            .insert_object(
+                make_context(),
+                Some("testing".into()),
+                &Default::default(),
+                make_stream(b"oh hai!"),
+            )
             .await
             .unwrap();
 

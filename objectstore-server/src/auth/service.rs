@@ -1,6 +1,6 @@
 use axum::extract::FromRequestParts;
 use axum::http::{StatusCode, header, request::Parts};
-use objectstore_service::id::ObjectId;
+use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::Metadata;
 
@@ -39,27 +39,30 @@ pub struct AuthAwareService {
 }
 
 impl AuthAwareService {
-    fn assert_authorized(&self, perm: Permission, id: &ObjectId) -> anyhow::Result<()> {
+    fn assert_authorized(&self, perm: Permission, context: &ObjectContext) -> anyhow::Result<()> {
         if self.enforce {
-            let context = self
+            let auth = self
                 .context
                 .as_ref()
                 .ok_or(AuthError::VerificationFailure)?;
-            context.assert_authorized(perm, id)?;
+            auth.assert_authorized(perm, context)?;
         }
 
         Ok(())
     }
 
-    /// Auth-aware wrapper around [`StorageService::put_object`].
-    pub async fn put_object(
+    /// Auth-aware wrapper around [`StorageService::insert_object`].
+    pub async fn insert_object(
         &self,
-        id: ObjectId,
+        context: ObjectContext,
+        key: Option<String>,
         metadata: &Metadata,
         stream: PayloadStream,
     ) -> anyhow::Result<ObjectId> {
-        self.assert_authorized(Permission::ObjectWrite, &id)?;
-        self.service.put_object(id, metadata, stream).await
+        self.assert_authorized(Permission::ObjectWrite, &context)?;
+        self.service
+            .insert_object(context, key, metadata, stream)
+            .await
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
@@ -67,13 +70,13 @@ impl AuthAwareService {
         &self,
         id: &ObjectId,
     ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
-        self.assert_authorized(Permission::ObjectRead, id)?;
+        self.assert_authorized(Permission::ObjectRead, id.context())?;
         self.service.get_object(id).await
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
     pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
-        self.assert_authorized(Permission::ObjectDelete, id)?;
+        self.assert_authorized(Permission::ObjectDelete, id.context())?;
         self.service.delete_object(id).await
     }
 }

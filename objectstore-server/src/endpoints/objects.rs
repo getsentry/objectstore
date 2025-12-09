@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::id::{ObjectId, Scope, Scopes};
+use objectstore_service::id::{ObjectContext, ObjectId, Scope, Scopes};
 use objectstore_types::Metadata;
 use serde::{Deserialize, Serialize, de};
 
@@ -48,17 +48,19 @@ async fn objects_post(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let id = params.create_object_id();
-    helpers::populate_sentry_scope(&id);
+    let context = params.into_context();
+    helpers::populate_sentry_context(&context);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = service.put_object(id, &metadata, stream).await?;
+    let response_id = service
+        .insert_object(context, None, &metadata, stream)
+        .await?;
     let response = Json(InsertObjectResponse {
-        key: response_path.key.to_string(),
+        key: response_id.key().to_string(),
     });
 
     Ok((StatusCode::CREATED, response).into_response())
@@ -69,7 +71,7 @@ async fn object_get(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -86,7 +88,7 @@ async fn object_head(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let Some((metadata, _stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
@@ -106,16 +108,20 @@ async fn object_put(
     body: Body,
 ) -> ApiResult<Response> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     let mut metadata =
         Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
     metadata.time_created = Some(SystemTime::now());
 
+    let ObjectId { context, key } = id;
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = service.put_object(id, &metadata, stream).await?;
+    let response_id = service
+        .insert_object(context, Some(key), &metadata, stream)
+        .await?;
+
     let response = Json(InsertObjectResponse {
-        key: response_path.key.to_string(),
+        key: response_id.key.to_string(),
     });
 
     Ok((StatusCode::OK, response).into_response())
@@ -126,14 +132,14 @@ async fn object_delete(
     Path(params): Path<ObjectParams>,
 ) -> ApiResult<impl IntoResponse> {
     let id = params.into_object_id();
-    helpers::populate_sentry_scope(&id);
+    helpers::populate_sentry_object_id(&id);
 
     service.delete_object(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Path parameters used for collection-level endpoints.
+/// Path parameters used for collection-level endpoints without a key.
 ///
 /// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
@@ -144,9 +150,12 @@ struct CollectionParams {
 }
 
 impl CollectionParams {
-    /// Converts the params into a new [`ObjectId`] with a random unique `key`.
-    pub fn create_object_id(self) -> ObjectId {
-        ObjectId::random(self.usecase, self.scopes)
+    /// Converts the params into an [`ObjectContext`].
+    pub fn into_context(self) -> ObjectContext {
+        ObjectContext {
+            usecase: self.usecase,
+            scopes: self.scopes,
+        }
     }
 }
 
@@ -164,11 +173,7 @@ struct ObjectParams {
 impl ObjectParams {
     /// Converts the params into an [`ObjectId`].
     pub fn into_object_id(self) -> ObjectId {
-        ObjectId {
-            usecase: self.usecase,
-            scopes: self.scopes,
-            key: self.key,
-        }
+        ObjectId::from_parts(self.usecase, self.scopes, self.key)
     }
 }
 
