@@ -51,7 +51,7 @@ impl AuthAwareService {
         Ok(())
     }
 
-    /// Auth-aware wrapper around [`StorageService::put_object`].
+    /// Auth-aware wrapper around [`StorageService::insert_object`].
     pub async fn insert_object(
         &self,
         context: ObjectContext,
