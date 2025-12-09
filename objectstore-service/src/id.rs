@@ -167,15 +167,14 @@ pub struct ObjectContext {
     /// you must use [`Scope::create`] to create them:
     ///
     /// ```
-    /// use objectstore_service::id::{ObjectId, Scope, Scopes};
+    /// use objectstore_service::id::{ObjectContext, Scope, Scopes};
     ///
-    /// let object_id = ObjectId {
+    /// let object_id = ObjectContext {
     ///     usecase: "my_usecase".to_string(),
     ///     scopes: Scopes::from_iter([
     ///         Scope::create("organization", "17").unwrap(),
     ///         Scope::create("project", "42").unwrap(),
     ///     ]),
-    ///     key: "my_object_key".to_string(),
     /// };
     /// ```
     pub scopes: Scopes,
