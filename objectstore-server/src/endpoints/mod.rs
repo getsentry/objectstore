@@ -6,15 +6,12 @@ use axum::Router;
 
 use crate::state::ServiceState;
 
-mod deprecated;
 mod health;
 mod helpers;
 mod objects;
 
 pub fn routes() -> Router<ServiceState> {
-    let routes_v1 = Router::new()
-        .merge(objects::router())
-        .merge(deprecated::router());
+    let routes_v1 = Router::new().merge(objects::router());
 
     Router::new()
         .merge(health::router())
