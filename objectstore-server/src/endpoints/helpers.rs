@@ -3,10 +3,9 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 pub fn populate_sentry_context(context: &ObjectContext) {
     sentry::configure_scope(|s| {
         s.set_tag("usecase", &context.usecase);
-        s.set_extra(
-            "scopes",
-            context.scopes.as_storage_path().to_string().into(),
-        );
+        for scope in &context.scopes {
+            s.set_tag(&format!("scope.{}", scope.name()), scope.value());
+        }
     });
 }
 
