@@ -56,11 +56,11 @@ async fn objects_post(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let response_path = service
+    let response_id = service
         .insert_object(context, None, &metadata, stream)
         .await?;
     let response = Json(InsertObjectResponse {
-        key: response_path.key().to_string(),
+        key: response_id.key().to_string(),
     });
 
     Ok((StatusCode::CREATED, response).into_response())
