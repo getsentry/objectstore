@@ -326,9 +326,7 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use uuid::Uuid;
-
-    use crate::id::{Scope, Scopes};
+    use crate::id::{ObjectContext, Scope, Scopes};
 
     use super::*;
 
@@ -360,19 +358,18 @@ mod tests {
         Ok(payload)
     }
 
-    fn make_key() -> ObjectId {
-        ObjectId {
+    fn make_id() -> ObjectId {
+        ObjectId::random(ObjectContext {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
-            key: Uuid::new_v4().to_string(),
-        }
+        })
     }
 
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_key();
+        let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
             time_created: Some(SystemTime::now()),
@@ -381,10 +378,10 @@ mod tests {
         };
 
         backend
-            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
         let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -399,8 +396,8 @@ mod tests {
     async fn test_get_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_key();
-        let result = backend.get_object(&path).await?;
+        let id = make_id();
+        let result = backend.get_object(&id).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -410,8 +407,8 @@ mod tests {
     async fn test_delete_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_key();
-        backend.delete_object(&path).await?;
+        let id = make_id();
+        backend.delete_object(&id).await?;
 
         Ok(())
     }
@@ -420,14 +417,14 @@ mod tests {
     async fn test_overwrite() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_key();
+        let id = make_id();
         let metadata = Metadata {
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
             ..Default::default()
         };
 
         backend
-            .put_object(&path, &metadata, make_stream(b"hello"))
+            .put_object(&id, &metadata, make_stream(b"hello"))
             .await?;
 
         let metadata = Metadata {
@@ -436,10 +433,10 @@ mod tests {
         };
 
         backend
-            .put_object(&path, &metadata, make_stream(b"world"))
+            .put_object(&id, &metadata, make_stream(b"world"))
             .await?;
 
-        let (meta, stream) = backend.get_object(&path).await?.unwrap();
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
         let payload = read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -453,16 +450,16 @@ mod tests {
     async fn test_read_after_delete() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let path = make_key();
+        let id = make_id();
         let metadata = Metadata::default();
 
         backend
-            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        backend.delete_object(&path).await?;
+        backend.delete_object(&id).await?;
 
-        let result = backend.get_object(&path).await?;
+        let result = backend.get_object(&id).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -475,17 +472,17 @@ mod tests {
 
         let backend = create_test_backend().await?;
 
-        let path = make_key();
+        let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             ..Default::default()
         };
 
         backend
-            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let result = backend.get_object(&path).await?;
+        let result = backend.get_object(&id).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -498,17 +495,17 @@ mod tests {
 
         let backend = create_test_backend().await?;
 
-        let path = make_key();
+        let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             ..Default::default()
         };
 
         backend
-            .put_object(&path, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let result = backend.get_object(&path).await?;
+        let result = backend.get_object(&id).await?;
         assert!(result.is_none());
 
         Ok(())
