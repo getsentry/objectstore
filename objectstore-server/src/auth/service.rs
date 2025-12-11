@@ -2,9 +2,9 @@ use axum::extract::FromRequestParts;
 use axum::http::{StatusCode, header, request::Parts};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{PayloadStream, StorageService};
-use objectstore_types::Metadata;
+use objectstore_types::{Metadata, Permission};
 
-use crate::auth::{AuthContext, AuthError, Permission};
+use crate::auth::{AuthContext, AuthError};
 use crate::state::ServiceState;
 
 const BEARER_PREFIX: &str = "Bearer ";
