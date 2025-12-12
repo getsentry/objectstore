@@ -14,7 +14,7 @@ pub enum Error {
     #[error(transparent)]
     Metadata(#[from] objectstore_types::Error),
     /// Error when scope validation fails.
-    #[error(transparent)]
+    #[error("invalid scope: {0}")]
     InvalidScope(#[from] objectstore_types::scope::InvalidScopeError),
     /// Error when URL manipulation fails.
     #[error("{message}")]
