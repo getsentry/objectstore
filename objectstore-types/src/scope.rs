@@ -5,7 +5,7 @@
 //!  - [`Scope`] is a single key-value pair representing one level of hierarchy
 //!  - [`Scopes`] is an ordered collection of [`Scope`]s
 
-use std::fmt;
+use std::fmt::{self, Write};
 
 /// A single scope value of an object.
 ///
@@ -116,11 +116,19 @@ impl Scopes {
 
     /// Returns a view that formats the scopes as path for storage.
     ///
-    /// This will serialize the scopes as `{scope1.key}.{scope1.value}/...`, which is intended to be
-    /// used by backends to reference the object in a storage system. This becomes part of the
-    /// storage path of an [`ObjectId`].
+    /// This will serialize the scopes as `{name}.{value}/...`, which is intended to be used by
+    /// backends to reference the object in a storage system. This becomes part of the storage path
+    /// of an [`ObjectId`].
     pub fn as_storage_path(&self) -> AsStoragePath<'_> {
         AsStoragePath { inner: self }
+    }
+
+    /// Returns a view that formats the scopes as path for web API usage.
+    ///
+    /// This will serialize the scopes as `{name}={value};...`, which is intended to be used by
+    /// clients to format URL paths.
+    pub fn as_api_path(&self) -> AsApiPath<'_> {
+        AsApiPath { inner: self }
     }
 }
 
@@ -159,5 +167,25 @@ impl fmt::Display for AsStoragePath<'_> {
             write!(f, "{}.{}", scope.name, scope.value)?;
         }
         Ok(())
+    }
+}
+
+/// A view returned by [`Scopes::as_api_path`].
+#[derive(Debug)]
+pub struct AsApiPath<'a> {
+    inner: &'a Scopes,
+}
+
+impl fmt::Display for AsApiPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some((first, rest)) = self.inner.scopes.split_first() {
+            write!(f, "{}={}", first.name, first.value)?;
+            for scope in rest {
+                write!(f, ";{}={}", scope.name, scope.value)?;
+            }
+            Ok(())
+        } else {
+            f.write_char('_')
+        }
     }
 }

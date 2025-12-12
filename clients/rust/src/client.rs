@@ -224,23 +224,6 @@ impl ScopeInner {
     pub(crate) fn usecase(&self) -> &Usecase {
         &self.usecase
     }
-
-    fn as_path_segment(&self) -> String {
-        if self.scopes.is_empty() {
-            return "_".to_string();
-        }
-        self.scopes
-            .iter()
-            .map(|scope| format!("{}={}", scope.name(), scope.value()))
-            .collect::<Vec<String>>()
-            .join(";")
-    }
-}
-
-impl std::fmt::Display for ScopeInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.as_path_segment())
-    }
 }
 
 /// A [`Scope`] is a sequence of key-value pairs that defines a (possibly nested) namespace within a
@@ -389,7 +372,7 @@ impl Session {
             .push("v1")
             .push("objects")
             .push(&self.scope.usecase.name)
-            .push(&self.scope.as_path_segment())
+            .push(&self.scope.scopes.as_storage_path().to_string())
             .extend(object_key.split("/"));
         drop(segments);
 
