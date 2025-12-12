@@ -45,6 +45,8 @@ use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 
+use crate::killswitches::Killswitches;
+
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
 
@@ -92,7 +94,7 @@ impl Zeroize for ConfigSecret {
 /// The `type` field in YAML or `__TYPE` in environment variables determines which variant is used.
 ///
 /// Used in: [`Config::high_volume_storage`], [`Config::long_term_storage`]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Storage {
     /// Local filesystem storage backend (type `"filesystem"`).
@@ -306,7 +308,7 @@ pub enum Storage {
 /// Controls the threading behavior of the server's async runtime.
 ///
 /// Used in: [`Config::runtime`]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Runtime {
     /// Number of worker threads for the server runtime.
@@ -355,7 +357,7 @@ impl Default for Runtime {
 /// tracing. Sentry is disabled by default and only enabled when a DSN is provided.
 ///
 /// Used in: [`Config::sentry`]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Sentry {
     /// Sentry DSN (Data Source Name).
     ///
@@ -607,7 +609,7 @@ mod display_fromstr {
 /// Controls the verbosity and format of log output. Logs are always written to stderr.
 ///
 /// Used in: [`Config::logging`]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Logging {
     /// Minimum log level to output.
     ///
@@ -664,7 +666,7 @@ impl Default for Logging {
 /// Metrics configuration.
 ///
 /// Configures submission of internal metrics to Datadog.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Metrics {
     /// Datadog [API key] for metrics.
     ///
@@ -710,7 +712,7 @@ pub struct Metrics {
 
 /// A key that may be used to verify a request's `Authorization` header and its
 /// associated permissions. May contain multiple key versions to facilitate rotation.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZVerificationKey {
     /// Versions of this key's key material which may be used to verify signatures.
     ///
@@ -729,7 +731,7 @@ pub struct AuthZVerificationKey {
 }
 
 /// Configuration for content-based authorization.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct AuthZ {
     /// Whether to enforce content-based authorization or not.
     ///
@@ -758,7 +760,7 @@ pub struct AuthZ {
 ///
 /// See individual field documentation for details on each configuration option, including
 /// defaults and environment variables.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     /// HTTP server bind address.
     ///
@@ -864,6 +866,9 @@ pub struct Config {
     /// Controls the verification and enforcement of content-based access control based on the
     /// JWT in a request's `Authorization` header.
     pub auth: AuthZ,
+
+    /// A list of matchers for requests to discard without processing.
+    pub killswitches: Killswitches,
 }
 
 impl Default for Config {
@@ -883,6 +888,7 @@ impl Default for Config {
             sentry: Sentry::default(),
             metrics: Metrics::default(),
             auth: AuthZ::default(),
+            killswitches: Killswitches::default(),
         }
     }
 }

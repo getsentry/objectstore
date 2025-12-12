@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
+use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
@@ -10,8 +11,33 @@ use serde::{Deserialize, de};
 use crate::extractors::Xt;
 use crate::state::ServiceState;
 
+#[derive(Debug)]
+pub enum ObjectRejection {
+    Path(PathRejection),
+    Killswitched,
+}
+
+impl IntoResponse for ObjectRejection {
+    fn into_response(self) -> Response {
+        match self {
+            ObjectRejection::Path(rejection) => rejection.into_response(),
+            ObjectRejection::Killswitched => (
+                axum::http::StatusCode::FORBIDDEN,
+                "Object access is disabled for this scope through killswitches",
+            )
+                .into_response(),
+        }
+    }
+}
+
+impl From<PathRejection> for ObjectRejection {
+    fn from(rejection: PathRejection) -> Self {
+        ObjectRejection::Path(rejection)
+    }
+}
+
 impl FromRequestParts<ServiceState> for Xt<ObjectId> {
-    type Rejection = PathRejection;
+    type Rejection = ObjectRejection;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -22,6 +48,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 
         populate_sentry_context(id.context());
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
+
+        if state.config.killswitches.matches(id.context()) {
+            return Err(ObjectRejection::Killswitched);
+        }
 
         Ok(Xt(id))
     }
@@ -66,7 +96,7 @@ where
 }
 
 impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
-    type Rejection = PathRejection;
+    type Rejection = ObjectRejection;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -79,6 +109,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
         };
 
         populate_sentry_context(&context);
+
+        if state.config.killswitches.matches(&context) {
+            return Err(ObjectRejection::Killswitched);
+        }
 
         Ok(Xt(context))
     }
