@@ -4,14 +4,11 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::scope::{Scope, Scopes};
+use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
 use crate::state::ServiceState;
-
-/// Used in place of scopes in the URL to represent an empty set of scopes.
-const EMPTY_SCOPES: &str = "_";
 
 impl FromRequestParts<ServiceState> for Xt<ObjectId> {
     type Rejection = PathRejection;
