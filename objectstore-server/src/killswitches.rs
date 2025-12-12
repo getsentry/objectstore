@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 /// A list of killswitches that may disable access to certain object contexts.
 #[derive(Debug, Default, Deserialize, Serialize)]
-pub struct Killswitches(Vec<Killswitch>);
+pub struct Killswitches(pub Vec<Killswitch>);
 
 impl Killswitches {
+    /// Returns `true` if any of the contained killswitches matches the given context.
     pub fn matches(&self, context: &ObjectContext) -> bool {
         self.0.iter().any(|s| s.matches(context))
     }
@@ -17,7 +18,7 @@ impl Killswitches {
 ///
 /// Note that at least one of the fields should be set, or else the killswitch will match all
 /// contexts and discard all requests.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Killswitch {
     /// Optional usecase to match.
     ///
@@ -34,6 +35,7 @@ pub struct Killswitch {
 }
 
 impl Killswitch {
+    /// Returns `true` if this killswitch matches the given context.
     pub fn matches(&self, context: &ObjectContext) -> bool {
         if let Some(ref switch_usecase) = self.usecase
             && switch_usecase != &context.usecase

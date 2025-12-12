@@ -926,6 +926,8 @@ mod tests {
 
     use secrecy::ExposeSecret;
 
+    use crate::killswitches::Killswitch;
+
     use super::*;
 
     #[test]
@@ -1077,29 +1079,30 @@ mod tests {
             Ok(())
         });
     }
+
     #[test]
     fn configure_auth_with_yaml() {
         let mut tempfile = tempfile::NamedTempFile::new().unwrap();
         tempfile
             .write_all(
                 br#"
-            auth:
-                enforce: true
-                keys:
-                    kid1:
-                        key_versions:
-                            - "abcde"
-                            - "fghij"
-                            - |
-                              this is a test
-                                multiline string
-                              end of string
-                        max_permissions:
-                            - "object.read"
-                            - "object.write"
-                    kid2:
-                        key_versions:
-                            - "12345"
+                auth:
+                    enforce: true
+                    keys:
+                        kid1:
+                            key_versions:
+                                - "abcde"
+                                - "fghij"
+                                - |
+                                this is a test
+                                    multiline string
+                                end of string
+                            max_permissions:
+                                - "object.read"
+                                - "object.write"
+                        kid2:
+                            key_versions:
+                                - "12345"
             "#,
             )
             .unwrap();
@@ -1124,6 +1127,56 @@ mod tests {
             let kid2 = config.auth.keys.get("kid2").unwrap();
             assert_eq!(kid2.key_versions[0].expose_secret().as_str(), "12345");
             assert_eq!(kid2.max_permissions, HashSet::new());
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_killswitches_with_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                killswitches:
+                  - usecase: broken_usecase
+                  - scopes:
+                      org: "42"
+                  - scopes:
+                      org: "42"
+                      project: "4711"
+                  - usecase: attachments
+                    scopes:
+                      org: "42"
+                "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let expected = [
+                Killswitch {
+                    usecase: Some("broken_usecase".into()),
+                    scopes: BTreeMap::new(),
+                },
+                Killswitch {
+                    usecase: None,
+                    scopes: BTreeMap::from([("org".into(), "42".into())]),
+                },
+                Killswitch {
+                    usecase: None,
+                    scopes: BTreeMap::from([
+                        ("org".into(), "42".into()),
+                        ("project".into(), "4711".into()),
+                    ]),
+                },
+                Killswitch {
+                    usecase: Some("attachments".into()),
+                    scopes: BTreeMap::from([("org".into(), "42".into())]),
+                },
+            ];
+
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert_eq!(&config.killswitches.0, &expected,);
 
             Ok(())
         });
