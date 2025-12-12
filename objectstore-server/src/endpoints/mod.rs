@@ -7,7 +7,6 @@ use axum::Router;
 use crate::state::ServiceState;
 
 mod health;
-mod helpers;
 mod objects;
 
 pub fn routes() -> Router<ServiceState> {
