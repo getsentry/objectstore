@@ -14,7 +14,7 @@ use objectstore_client::{Client, Usecase, Result};
 async fn example_basic() -> Result<()> {
     let client = Client::new("http://localhost:8888/")?;
     let session = Usecase::new("attachments")
-        .for_project(42, 1337)?
+        .for_project(42, 1337)
         .session(&client)?;
 
     let response = session.put("Hello, world!")
@@ -66,7 +66,7 @@ static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
 
 async fn example() -> Result<()> {
     let session = OBJECTSTORE_CLIENT
-        .session(ATTACHMENTS.for_project(42, 1337)?)?;
+        .session(ATTACHMENTS.for_project(42, 1337))?;
 
     let response = session.put("Hello, world!").send().await?;
 

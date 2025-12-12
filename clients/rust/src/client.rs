@@ -299,9 +299,10 @@ pub(crate) struct ClientInner {
 ///     .timeout(Duration::from_secs(1))
 ///     .propagate_traces(true)
 ///     .build()?;
-/// let usecase = Usecase::new("my_app");
 ///
-/// let session = client.session(usecase.for_project(12345, 1337)?)?;
+/// let session = Usecase::new("my_app")
+///     .for_project(12345, 1337)
+///     .session(&client)?;
 ///
 /// let response = session.put("hello world").send().await?;
 ///
@@ -372,7 +373,7 @@ impl Session {
             .push("v1")
             .push("objects")
             .push(&self.scope.usecase.name)
-            .push(&self.scope.scopes.as_storage_path().to_string())
+            .push(&self.scope.scopes.as_api_path().to_string())
             .extend(object_key.split("/"));
         drop(segments);
 
