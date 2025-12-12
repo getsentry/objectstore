@@ -40,11 +40,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
+use objectstore_types::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
-
-use crate::auth::Permission;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";

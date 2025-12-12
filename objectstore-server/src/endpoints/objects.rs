@@ -10,8 +10,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_service::id::{ObjectContext, ObjectId, Scope, Scopes};
+use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::Metadata;
+use objectstore_types::scope::{Scope, Scopes};
 use serde::{Deserialize, Serialize, de};
 
 use crate::auth::AuthAwareService;

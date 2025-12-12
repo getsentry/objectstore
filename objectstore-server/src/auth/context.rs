@@ -2,28 +2,13 @@ use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
+use objectstore_types::Permission;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::auth::util::StringOrWildcard;
 use crate::config::AuthZ;
-
-/// Permissions that control whether different operations are authorized.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
-pub enum Permission {
-    /// The permission required to read objects from objectstore.
-    #[serde(rename = "object.read")]
-    ObjectRead,
-
-    /// The permission required to write/overwrite objects in objectstore.
-    #[serde(rename = "object.write")]
-    ObjectWrite,
-
-    /// The permission required to delete objects from objectstore.
-    #[serde(rename = "object.delete")]
-    ObjectDelete,
-}
 
 /// `AuthContext` encapsulates the verified content of things like authorization tokens.
 ///
@@ -237,7 +222,7 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::config::{AuthZVerificationKey, ConfigSecret};
-    use objectstore_service::id::{Scope, Scopes};
+    use objectstore_types::scope::{Scope, Scopes};
     use secrecy::SecretBox;
     use serde_json::json;
 
