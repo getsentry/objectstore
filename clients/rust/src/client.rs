@@ -7,7 +7,7 @@ use futures_util::stream::BoxStream;
 use objectstore_types::ExpirationPolicy;
 use url::Url;
 
-pub use objectstore_types::Compression;
+pub use objectstore_types::{Compression, scope as scope_types};
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -205,12 +205,12 @@ impl Usecase {
     }
 
     /// Creates a new [`Scope`] tied to the given organization.
-    pub fn for_organization(&self, organization: u64) -> Scope {
+    pub fn for_organization(&self, organization: u64) -> crate::Result<Scope> {
         Scope::for_organization(self.clone(), organization)
     }
 
     /// Creates a new [`Scope`] tied to the given organization and project.
-    pub fn for_project(&self, organization: u64, project: u64) -> Scope {
+    pub fn for_project(&self, organization: u64, project: u64) -> crate::Result<Scope> {
         Scope::for_project(self.clone(), organization, project)
     }
 }
@@ -218,7 +218,7 @@ impl Usecase {
 #[derive(Debug)]
 pub(crate) struct ScopeInner {
     usecase: Usecase,
-    scope: String,
+    scopes: scope_types::Scopes,
 }
 
 impl ScopeInner {
@@ -227,18 +227,21 @@ impl ScopeInner {
         &self.usecase
     }
 
-    fn as_path_segment(&self) -> &str {
-        if self.scope.is_empty() {
-            "_"
-        } else {
-            &self.scope
+    fn as_path_segment(&self) -> String {
+        if self.scopes.is_empty() {
+            return "_".to_string();
         }
+        self.scopes
+            .iter()
+            .map(|scope| format!("{}={}", scope.name(), scope.value()))
+            .collect::<Vec<String>>()
+            .join(";")
     }
 }
 
 impl std::fmt::Display for ScopeInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.scope)
+        f.write_str(&self.as_path_segment())
     }
 }
 
@@ -257,80 +260,34 @@ impl Scope {
     pub fn new(usecase: Usecase) -> Self {
         Self(Ok(ScopeInner {
             usecase,
-            scope: String::new(),
+            scopes: scope_types::Scopes::empty(),
         }))
     }
 
-    fn for_organization(usecase: Usecase, organization: u64) -> Self {
-        let scope = format!("org={}", organization);
-        Self(Ok(ScopeInner { usecase, scope }))
+    fn for_organization(usecase: Usecase, organization: u64) -> crate::Result<Self> {
+        let scopes = scope_types::Scopes::from_iter([scope_types::Scope::create(
+            "org",
+            &organization.to_string(),
+        )?]);
+        Ok(Self(Ok(ScopeInner { usecase, scopes })))
     }
 
-    fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
-        let scope = format!("org={};project={}", organization, project);
-        Self(Ok(ScopeInner { usecase, scope }))
+    fn for_project(usecase: Usecase, organization: u64, project: u64) -> crate::Result<Self> {
+        let scopes = scope_types::Scopes::from_iter([
+            scope_types::Scope::create("org", &organization.to_string())?,
+            scope_types::Scope::create("project", &project.to_string())?,
+        ]);
+        Ok(Self(Ok(ScopeInner { usecase, scopes })))
     }
 
     /// Extends this Scope by creating a new sub-scope nested within it.
-    pub fn push<V>(self, key: &str, value: V) -> Self
-    where
-        V: std::fmt::Display,
-    {
+    pub fn push(self, key: &str, value: &str) -> Self {
         let result = self.0.and_then(|mut inner| {
-            Self::validate_key(key)?;
-
-            let value = value.to_string();
-            Self::validate_value(&value)?;
-
-            if !inner.scope.is_empty() {
-                inner.scope.push(';');
-            }
-            inner.scope.push_str(key);
-            inner.scope.push('=');
-            inner.scope.push_str(&value);
-
+            inner.scopes.push(key, value)?;
             Ok(inner)
         });
 
         Self(result)
-    }
-
-    /// Characters allowed in a Scope's key and value.
-    /// These are the URL safe characters, except for `.` which we use as separator between
-    /// key and value of Scope components.
-    const ALLOWED_CHARS: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
-
-    /// Validates that a scope key contains only allowed characters and is not empty.
-    fn validate_key(key: &str) -> crate::Result<()> {
-        if key.is_empty() {
-            return Err(crate::Error::InvalidScope {
-                message: "Scope key cannot be empty".to_string(),
-            });
-        }
-        if key.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
-            Ok(())
-        } else {
-            Err(crate::Error::InvalidScope {
-                message: format!("Invalid scope key '{key}'."),
-            })
-        }
-    }
-
-    /// Validates that a scope value contains only allowed characters and is not empty.
-    fn validate_value(value: &str) -> crate::Result<()> {
-        if value.is_empty() {
-            return Err(crate::Error::InvalidScope {
-                message: "Scope value cannot be empty".to_string(),
-            });
-        }
-        if value.bytes().all(|b| Self::ALLOWED_CHARS.contains(&b)) {
-            Ok(())
-        } else {
-            Err(crate::Error::InvalidScope {
-                message: format!("Invalid scope value '{value}'."),
-            })
-        }
     }
 
     /// Creates a session for this scope using the given client.
@@ -368,7 +325,7 @@ pub(crate) struct ClientInner {
 ///     .build()?;
 /// let usecase = Usecase::new("my_app");
 ///
-/// let session = client.session(usecase.for_project(12345, 1337))?;
+/// let session = client.session(usecase.for_project(12345, 1337)?)?;
 ///
 /// let response = session.put("hello world").send().await?;
 ///
@@ -439,7 +396,7 @@ impl Session {
             .push("v1")
             .push("objects")
             .push(&self.scope.usecase.name)
-            .push(self.scope.as_path_segment())
+            .push(&self.scope.as_path_segment())
             .extend(object_key.split("/"));
         drop(segments);
 
@@ -477,6 +434,7 @@ mod tests {
         let usecase = Usecase::new("testing");
         let scope = usecase
             .for_project(12345, 1337)
+            .unwrap()
             .push("app_slug", "email_app");
         let session = client.session(scope).unwrap();
 
@@ -490,7 +448,7 @@ mod tests {
     fn test_object_url_with_base_path() {
         let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
         let usecase = Usecase::new("testing");
-        let scope = usecase.for_project(12345, 1337);
+        let scope = usecase.for_project(12345, 1337).unwrap();
         let session = client.session(scope).unwrap();
 
         assert_eq!(

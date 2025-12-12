@@ -98,6 +98,12 @@ impl Scopes {
     pub fn iter(&self) -> impl Iterator<Item = &Scope> {
         self.into_iter()
     }
+
+    /// Pushes a new scope to the collection.
+    pub fn push(&mut self, key: &str, value: &str) -> Result<(), InvalidScopeError> {
+        self.scopes.push(Scope::create(key, value)?);
+        Ok(())
+    }
 }
 
 impl<'a> IntoIterator for &'a Scopes {
