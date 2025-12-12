@@ -11,8 +11,8 @@ use std::fmt::{self, Write};
 ///
 /// These are the URL safe characters, except for `.` which we use as separator between
 /// key and value of Scope components in backends.
-const ALLOWED_CHARS: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
+const ALLOWED_CHARS: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
 
 /// A single scope value of an object.
 ///
@@ -56,9 +56,9 @@ impl Scope {
             return Err(InvalidScopeError::Empty);
         }
 
-        for &b in name.as_bytes().iter().chain(value.as_bytes()) {
-            if !ALLOWED_CHARS.contains(&b) {
-                return Err(InvalidScopeError::InvalidChar(b.into()));
+        for c in name.chars().chain(value.chars()) {
+            if !ALLOWED_CHARS.contains(c) {
+                return Err(InvalidScopeError::InvalidChar(c));
             }
         }
 
@@ -218,11 +218,59 @@ mod tests {
     #[test]
     fn test_allowed_characters() {
         // Storage paths
-        assert!(!ALLOWED_CHARS.contains(&b'.'));
-        assert!(!ALLOWED_CHARS.contains(&b'/'));
+        assert!(!ALLOWED_CHARS.contains('.'));
+        assert!(!ALLOWED_CHARS.contains('/'));
 
         // API paths
-        assert!(!ALLOWED_CHARS.contains(&b'='));
-        assert!(!ALLOWED_CHARS.contains(&b';'));
+        assert!(!ALLOWED_CHARS.contains('='));
+        assert!(!ALLOWED_CHARS.contains(';'));
+    }
+
+    #[test]
+    fn test_create_scope_empty() {
+        let err = Scope::create("", "value").unwrap_err();
+        assert!(matches!(err, InvalidScopeError::Empty));
+
+        let err = Scope::create("key", "").unwrap_err();
+        assert!(matches!(err, InvalidScopeError::Empty));
+    }
+
+    #[test]
+    fn test_create_scope_invalid_char() {
+        let err = Scope::create("key/", "value").unwrap_err();
+        assert!(matches!(err, InvalidScopeError::InvalidChar('/')));
+
+        let err = dbg!(Scope::create("key", "⚠️").unwrap_err());
+        assert!(matches!(err, InvalidScopeError::InvalidChar('⚠')));
+    }
+
+    #[test]
+    fn test_as_storage_path() {
+        let scopes = Scopes::from_iter([
+            Scope::create("org", "12345").unwrap(),
+            Scope::create("project", "1337").unwrap(),
+        ]);
+
+        let storage_path = scopes.as_storage_path().to_string();
+        assert_eq!(storage_path, "org.12345/project.1337");
+
+        let empty_scopes = Scopes::empty();
+        let storage_path = empty_scopes.as_storage_path().to_string();
+        assert_eq!(storage_path, "");
+    }
+
+    #[test]
+    fn test_as_api_path() {
+        let scopes = Scopes::from_iter([
+            Scope::create("org", "12345").unwrap(),
+            Scope::create("project", "1337").unwrap(),
+        ]);
+
+        let api_path = scopes.as_api_path().to_string();
+        assert_eq!(api_path, "org=12345;project=1337");
+
+        let empty_scopes = Scopes::empty();
+        let api_path = empty_scopes.as_api_path().to_string();
+        assert_eq!(api_path, "_");
     }
 }
