@@ -1094,9 +1094,9 @@ mod tests {
                                 - "abcde"
                                 - "fghij"
                                 - |
-                                this is a test
+                                  this is a test
                                     multiline string
-                                end of string
+                                  end of string
                             max_permissions:
                                 - "object.read"
                                 - "object.write"
