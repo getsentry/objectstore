@@ -84,9 +84,9 @@ impl HttpRemote {
     fn session(&self, usecase: &Usecase, organization_id: u64) -> Session {
         // NB: Reuse the organization ID as project ID to create unique projects. Right now, we do
         // not benefit from simulating multiple projects per org.
-        let scope = usecase
+        usecase
             .for_project(organization_id, organization_id)
-            .unwrap();
-        self.client.session(scope).unwrap()
+            .session(&self.client)
+            .unwrap()
     }
 }

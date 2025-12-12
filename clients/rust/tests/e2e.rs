@@ -8,8 +8,7 @@ async fn stores_uncompressed() {
 
     let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let scope = usecase.for_organization(12345).unwrap();
-    let session = client.session(scope).unwrap();
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
 
@@ -35,8 +34,7 @@ async fn uses_zstd_by_default() {
 
     let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let scope = usecase.for_organization(12345).unwrap();
-    let session = client.session(scope).unwrap();
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
     let stored_id = session.put(body).send().await.unwrap().key;
@@ -64,8 +62,7 @@ async fn deletes_stores_stuff() {
 
     let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let scope = usecase.for_project(12345, 1337).unwrap();
-    let session = client.session(scope).unwrap();
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
     let stored_id = session.put(body).send().await.unwrap().key;
@@ -82,8 +79,7 @@ async fn stores_under_given_key() {
 
     let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let scope = usecase.for_project(12345, 1337).unwrap();
-    let session = client.session(scope).unwrap();
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
     let request = session.put(body).key("test-key123!!");
@@ -98,8 +94,7 @@ async fn overwrites_existing_key() {
 
     let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let scope = usecase.for_project(12345, 1337).unwrap();
-    let session = client.session(scope).unwrap();
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let stored_id = session.put("initial body").send().await.unwrap().key;
     let request = session.put("new body").key(&stored_id);

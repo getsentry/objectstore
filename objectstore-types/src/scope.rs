@@ -38,14 +38,18 @@ impl Scope {
     /// let invalid_scope = Scope::create("", "value");
     /// assert!(invalid_scope.is_err());
     /// ```
-    pub fn create(name: &str, value: &str) -> Result<Self, InvalidScopeError> {
+    pub fn create<V>(name: &str, value: V) -> Result<Self, InvalidScopeError>
+    where
+        V: std::fmt::Display,
+    {
+        let value = value.to_string();
         if name.is_empty() || value.is_empty() {
             return Err(InvalidScopeError);
         }
 
         Ok(Self {
             name: name.to_owned(),
-            value: value.to_owned(),
+            value,
         })
     }
 
@@ -100,7 +104,10 @@ impl Scopes {
     }
 
     /// Pushes a new scope to the collection.
-    pub fn push(&mut self, key: &str, value: &str) -> Result<(), InvalidScopeError> {
+    pub fn push<V>(&mut self, key: &str, value: V) -> Result<(), InvalidScopeError>
+    where
+        V: std::fmt::Display,
+    {
         self.scopes.push(Scope::create(key, value)?);
         Ok(())
     }

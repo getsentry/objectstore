@@ -4,10 +4,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use objectstore_types::ExpirationPolicy;
+use objectstore_types::{Compression, ExpirationPolicy, scope};
 use url::Url;
-
-pub use objectstore_types::{Compression, scope as scope_types};
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -205,12 +203,12 @@ impl Usecase {
     }
 
     /// Creates a new [`Scope`] tied to the given organization.
-    pub fn for_organization(&self, organization: u64) -> crate::Result<Scope> {
+    pub fn for_organization(&self, organization: u64) -> Scope {
         Scope::for_organization(self.clone(), organization)
     }
 
     /// Creates a new [`Scope`] tied to the given organization and project.
-    pub fn for_project(&self, organization: u64, project: u64) -> crate::Result<Scope> {
+    pub fn for_project(&self, organization: u64, project: u64) -> Scope {
         Scope::for_project(self.clone(), organization, project)
     }
 }
@@ -218,7 +216,7 @@ impl Usecase {
 #[derive(Debug)]
 pub(crate) struct ScopeInner {
     usecase: Usecase,
-    scopes: scope_types::Scopes,
+    scopes: scope::Scopes,
 }
 
 impl ScopeInner {
@@ -260,28 +258,23 @@ impl Scope {
     pub fn new(usecase: Usecase) -> Self {
         Self(Ok(ScopeInner {
             usecase,
-            scopes: scope_types::Scopes::empty(),
+            scopes: scope::Scopes::empty(),
         }))
     }
 
-    fn for_organization(usecase: Usecase, organization: u64) -> crate::Result<Self> {
-        let scopes = scope_types::Scopes::from_iter([scope_types::Scope::create(
-            "org",
-            &organization.to_string(),
-        )?]);
-        Ok(Self(Ok(ScopeInner { usecase, scopes })))
+    fn for_organization(usecase: Usecase, organization: u64) -> Self {
+        Self::new(usecase).push("org", organization)
     }
 
-    fn for_project(usecase: Usecase, organization: u64, project: u64) -> crate::Result<Self> {
-        let scopes = scope_types::Scopes::from_iter([
-            scope_types::Scope::create("org", &organization.to_string())?,
-            scope_types::Scope::create("project", &project.to_string())?,
-        ]);
-        Ok(Self(Ok(ScopeInner { usecase, scopes })))
+    fn for_project(usecase: Usecase, organization: u64, project: u64) -> Self {
+        Self::for_organization(usecase, organization).push("project", project)
     }
 
     /// Extends this Scope by creating a new sub-scope nested within it.
-    pub fn push(self, key: &str, value: &str) -> Self {
+    pub fn push<V>(self, key: &str, value: V) -> Self
+    where
+        V: std::fmt::Display,
+    {
         let result = self.0.and_then(|mut inner| {
             inner.scopes.push(key, value)?;
             Ok(inner)
@@ -434,7 +427,6 @@ mod tests {
         let usecase = Usecase::new("testing");
         let scope = usecase
             .for_project(12345, 1337)
-            .unwrap()
             .push("app_slug", "email_app");
         let session = client.session(scope).unwrap();
 
@@ -448,7 +440,7 @@ mod tests {
     fn test_object_url_with_base_path() {
         let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
         let usecase = Usecase::new("testing");
-        let scope = usecase.for_project(12345, 1337).unwrap();
+        let scope = usecase.for_project(12345, 1337);
         let session = client.session(scope).unwrap();
 
         assert_eq!(
