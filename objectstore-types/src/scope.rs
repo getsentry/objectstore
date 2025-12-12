@@ -7,6 +7,13 @@
 
 use std::fmt::{self, Write};
 
+/// Characters allowed in a Scope's key and value.
+///
+/// These are the URL safe characters, except for `.` which we use as separator between
+/// key and value of Scope components in backends.
+const ALLOWED_CHARS: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
+
 /// A single scope value of an object.
 ///
 /// Scopes are used in a hierarchy in object IDs.
@@ -46,7 +53,13 @@ impl Scope {
     {
         let value = value.to_string();
         if name.is_empty() || value.is_empty() {
-            return Err(InvalidScopeError);
+            return Err(InvalidScopeError::Empty);
+        }
+
+        for &b in name.as_bytes().iter().chain(value.as_bytes()) {
+            if !ALLOWED_CHARS.contains(&b) {
+                return Err(InvalidScopeError::InvalidChar(b.into()));
+            }
         }
 
         Ok(Self {
@@ -68,8 +81,14 @@ impl Scope {
 
 /// An error indicating that a scope is invalid, returned by [`Scope::create`].
 #[derive(Debug, thiserror::Error)]
-#[error("invalid scope: key and value must be non-empty")]
-pub struct InvalidScopeError;
+pub enum InvalidScopeError {
+    /// Indicates that either the key or value is empty.
+    #[error("key and value must be non-empty")]
+    Empty,
+    /// Indicates that the key or value contains an invalid character.
+    #[error("invalid character '{0}'")]
+    InvalidChar(char),
+}
 
 /// An ordered set of resource scopes.
 ///
@@ -187,5 +206,23 @@ impl fmt::Display for AsApiPath<'_> {
         } else {
             f.write_char('_')
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test to ensure we're not unintentionally adding characters to the allowed set
+    /// that are required in storage or API paths.
+    #[test]
+    fn test_allowed_characters() {
+        // Storage paths
+        assert!(!ALLOWED_CHARS.contains(&b'.'));
+        assert!(!ALLOWED_CHARS.contains(&b'/'));
+
+        // API paths
+        assert!(!ALLOWED_CHARS.contains(&b'='));
+        assert!(!ALLOWED_CHARS.contains(&b';'));
     }
 }
