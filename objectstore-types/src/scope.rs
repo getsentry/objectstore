@@ -5,6 +5,8 @@
 //!  - [`Scope`] is a single key-value pair representing one level of hierarchy
 //!  - [`Scopes`] is an ordered collection of [`Scope`]s
 
+use std::fmt;
+
 /// A single scope value of an object.
 ///
 /// Scopes are used in a hierarchy in object IDs.
@@ -40,7 +42,7 @@ impl Scope {
     /// ```
     pub fn create<V>(name: &str, value: V) -> Result<Self, InvalidScopeError>
     where
-        V: std::fmt::Display,
+        V: fmt::Display,
     {
         let value = value.to_string();
         if name.is_empty() || value.is_empty() {
@@ -106,10 +108,19 @@ impl Scopes {
     /// Pushes a new scope to the collection.
     pub fn push<V>(&mut self, key: &str, value: V) -> Result<(), InvalidScopeError>
     where
-        V: std::fmt::Display,
+        V: fmt::Display,
     {
         self.scopes.push(Scope::create(key, value)?);
         Ok(())
+    }
+
+    /// Returns a view that formats the scopes as path for storage.
+    ///
+    /// This will serialize the scopes as `{scope1.key}.{scope1.value}/...`, which is intended to be
+    /// used by backends to reference the object in a storage system. This becomes part of the
+    /// storage path of an [`ObjectId`].
+    pub fn as_storage_path(&self) -> AsStoragePath<'_> {
+        AsStoragePath { inner: self }
     }
 }
 
@@ -130,5 +141,23 @@ impl FromIterator<Scope> for Scopes {
         Self {
             scopes: iter.into_iter().collect(),
         }
+    }
+}
+
+/// A view returned by [`Scopes::as_storage_path`].
+#[derive(Debug)]
+pub struct AsStoragePath<'a> {
+    inner: &'a Scopes,
+}
+
+impl fmt::Display for AsStoragePath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, scope) in self.inner.iter().enumerate() {
+            if i > 0 {
+                write!(f, "/")?;
+            }
+            write!(f, "{}.{}", scope.name, scope.value)?;
+        }
+        Ok(())
     }
 }

@@ -7,8 +7,9 @@
 //!  - [`Scope`] and [`Scopes`] define hierarchical scopes for objects, which are part of the
 //!    `ObjectId`.
 
-use objectstore_types::scope::{Scope, Scopes};
 use std::fmt;
+
+use objectstore_types::scope::{Scope, Scopes};
 
 /// Defines where an object belongs within the object store.
 ///
@@ -144,43 +145,22 @@ impl ObjectId {
     /// This will format a hierarchical path in the format
     /// `{usecase}/{scope1.key}.{scope1.value}/.../{key}` that is intended to be used by backends to
     /// reference the object in a storage system.
-    pub fn as_storage_path(&self) -> AsStoragePath<'_, Self> {
+    pub fn as_storage_path(&self) -> AsStoragePath<'_> {
         AsStoragePath { inner: self }
     }
 }
 
-/// A view that formats a supported type as a storage path.
-///
-/// This will format a hierarchical path in the format
-/// `{usecase}/{scope1.key}.{scope1.value}/.../{key}` that is intended to be used by backends to
-/// reference the object in a storage system.
+/// A view returned by [`ObjectId::as_storage_path`].
 #[derive(Debug)]
-pub struct AsStoragePath<'a, T> {
-    inner: &'a T,
+pub struct AsStoragePath<'a> {
+    inner: &'a ObjectId,
 }
 
-impl fmt::Display for AsStoragePath<'_, Scopes> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, scope) in self.inner.iter().enumerate() {
-            if i > 0 {
-                write!(f, "/")?;
-            }
-            write!(f, "{}.{}", scope.name, scope.value)?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for AsStoragePath<'_, ObjectId> {
+impl fmt::Display for AsStoragePath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/", self.inner.context.usecase)?;
         if !self.inner.context.scopes.is_empty() {
-            // TODO: Improve how we convert an `objectstore_types` type to `AsStoragePath`
-            // Maybe create from any key/value iterator
-            let asp = AsStoragePath {
-                inner: &self.inner.context.scopes,
-            };
-            write!(f, "{}/", asp)?;
+            write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
         write!(f, "objects/{}", self.inner.key)
     }
