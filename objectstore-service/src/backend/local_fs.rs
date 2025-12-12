@@ -108,7 +108,8 @@ mod tests {
     use futures_util::TryStreamExt;
     use objectstore_types::{Compression, ExpirationPolicy};
 
-    use crate::id::{ObjectContext, Scope, Scopes};
+    use crate::id::ObjectContext;
+    use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
 

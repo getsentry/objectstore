@@ -6,6 +6,8 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+pub mod scope;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;

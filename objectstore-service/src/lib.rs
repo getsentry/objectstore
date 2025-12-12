@@ -324,7 +324,7 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::{StreamExt, TryStreamExt};
 
-    use crate::id::{Scope, Scopes};
+    use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
 

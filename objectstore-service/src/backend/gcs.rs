@@ -435,7 +435,8 @@ impl Backend for GcsBackend {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::id::{ObjectContext, Scope, Scopes};
+    use crate::id::ObjectContext;
+    use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
 

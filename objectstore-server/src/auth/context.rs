@@ -222,7 +222,7 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::config::{AuthZVerificationKey, ConfigSecret};
-    use objectstore_service::id::{Scope, Scopes};
+    use objectstore_types::scope::{Scope, Scopes};
     use secrecy::SecretBox;
     use serde_json::json;
 
