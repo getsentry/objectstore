@@ -5,7 +5,7 @@
 //!  - [`Scope`] is a single key-value pair representing one level of hierarchy
 //!  - [`Scopes`] is an ordered collection of [`Scope`]s
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 /// Characters allowed in a Scope's key and value.
 ///
@@ -13,6 +13,9 @@ use std::fmt::{self, Write};
 /// key and value of Scope components in backends.
 const ALLOWED_CHARS: &str =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-()$!+'";
+
+/// Used in place of scopes in the URL to represent an empty set of scopes.
+pub const EMPTY_SCOPES: &str = "_";
 
 /// A single scope value of an object.
 ///
@@ -204,7 +207,7 @@ impl fmt::Display for AsApiPath<'_> {
             }
             Ok(())
         } else {
-            f.write_char('_')
+            f.write_str(EMPTY_SCOPES)
         }
     }
 }
@@ -271,6 +274,6 @@ mod tests {
 
         let empty_scopes = Scopes::empty();
         let api_path = empty_scopes.as_api_path().to_string();
-        assert_eq!(api_path, "_");
+        assert_eq!(api_path, EMPTY_SCOPES);
     }
 }
