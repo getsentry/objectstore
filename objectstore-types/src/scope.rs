@@ -137,7 +137,7 @@ impl Scopes {
     ///
     /// This will serialize the scopes as `{name}.{value}/...`, which is intended to be used by
     /// backends to reference the object in a storage system. This becomes part of the storage path
-    /// of an [`ObjectId`].
+    /// of an `ObjectId`.
     pub fn as_storage_path(&self) -> AsStoragePath<'_> {
         AsStoragePath { inner: self }
     }
