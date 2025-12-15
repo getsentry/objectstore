@@ -6,11 +6,14 @@ use axum::Router;
 
 use crate::state::ServiceState;
 
+mod batch;
 mod health;
 mod objects;
 
 pub fn routes() -> Router<ServiceState> {
-    let routes_v1 = Router::new().merge(objects::router());
+    let routes_v1 = Router::new()
+        .merge(objects::router())
+        .merge(batch::router());
 
     Router::new()
         .merge(health::router())

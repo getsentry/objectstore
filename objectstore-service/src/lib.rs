@@ -86,6 +86,10 @@ pub enum StorageConfig<'a> {
     },
 }
 
+pub type GetResult = anyhow::Result<Option<(Metadata, PayloadStream)>>;
+pub type InsertResult = anyhow::Result<ObjectId>;
+pub type DeleteResult = anyhow::Result<()>;
+
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
     pub async fn new(

@@ -11,9 +11,9 @@ use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
 
-/// Defines where an object belongs within the object store.
+/// Defines where an object, or batch of objects, belongs within the object store.
 ///
-/// This is part of the full object identifier, see [`ObjectId`].
+/// This is part of the full object identifier for single objects, see [`ObjectId`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectContext {
     /// The usecase, or "product" this object belongs to.
