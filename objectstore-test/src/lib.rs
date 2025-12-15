@@ -4,3 +4,4 @@
 //! modules for all available utilities.
 
 pub mod server;
+pub mod tracing;

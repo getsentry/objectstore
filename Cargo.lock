@@ -2212,6 +2212,7 @@ dependencies = [
  "nix",
  "num_cpus",
  "objectstore-service",
+ "objectstore-test",
  "objectstore-types",
  "rand 0.9.2",
  "reqwest",
@@ -2268,6 +2269,7 @@ dependencies = [
  "objectstore-server",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

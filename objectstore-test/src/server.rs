@@ -31,23 +31,27 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    pub async fn new() -> Self {
+    /// Spawns a new test server with the given configuration.
+    ///
+    /// Unless overridden to a different kind of backend, the long-term and high-volume storage
+    /// backends will use temporary directories.
+    pub async fn with_config(mut config: Config) -> Self {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr).unwrap();
         listener.set_nonblocking(true).unwrap();
         let socket = listener.local_addr().unwrap();
 
+        config.logging.level = "trace".parse().unwrap();
+        crate::tracing::init();
+
         let long_term_tempdir = tempfile::tempdir().unwrap();
+        if let Storage::FileSystem { ref mut path } = config.long_term_storage {
+            *path = long_term_tempdir.path().into();
+        }
         let high_volume_tempdir = tempfile::tempdir().unwrap();
-        let config = Config {
-            long_term_storage: Storage::FileSystem {
-                path: long_term_tempdir.path().into(),
-            },
-            high_volume_storage: Storage::FileSystem {
-                path: high_volume_tempdir.path().into(),
-            },
-            ..Default::default()
-        };
+        if let Storage::FileSystem { ref mut path } = config.high_volume_storage {
+            *path = high_volume_tempdir.path().into();
+        }
 
         let state = Services::spawn(config).await.unwrap();
         let app = App::new(state);
@@ -63,6 +67,11 @@ impl TestServer {
             _long_term_tempdir: long_term_tempdir,
             _high_volume_tempdir: high_volume_tempdir,
         }
+    }
+
+    /// Spawns a new test server with default configuration.
+    pub async fn new() -> Self {
+        Self::with_config(Config::default()).await
     }
 
     /// Returns a full URL pointing to the given path.
