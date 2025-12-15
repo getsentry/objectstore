@@ -157,9 +157,7 @@ def test_connect_timeout() -> None:
     addr = s.getsockname()
     url = f"http://127.0.0.1:{addr[1]}"
 
-    timeout = urllib3.Timeout(connect=0.05, read=0.05)  # 50ms
-
-    client = Client(url, connection_kwargs={"timeout": timeout})
+    client = Client(url, timeout_ms=50)
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",
