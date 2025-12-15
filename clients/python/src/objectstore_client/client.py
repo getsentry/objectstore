@@ -113,7 +113,7 @@ class Client:
 
         if timeout_ms:
             connection_kwargs_to_use["timeout"] = urllib3.Timeout(
-                connect=timeout_ms * 100, read=timeout_ms * 100
+                connect=timeout_ms / 1000, read=timeout_ms / 1000
             )
 
         if connection_kwargs:
