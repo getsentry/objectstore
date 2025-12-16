@@ -24,7 +24,7 @@ impl DeleteBuilder {
     /// Sends the delete request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
         self.session
-            .request(reqwest::Method::DELETE, &self.key)
+            .request(reqwest::Method::DELETE, &self.key)?
             .send()
             .await?;
         Ok(())

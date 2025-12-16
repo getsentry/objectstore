@@ -145,7 +145,7 @@ impl PutBuilder {
 
         let mut builder = self
             .session
-            .request(method, self.key.as_deref().unwrap_or_default());
+            .request(method, self.key.as_deref().unwrap_or_default())?;
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
