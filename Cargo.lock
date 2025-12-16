@@ -2180,6 +2180,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "infer",
+ "jsonwebtoken",
  "objectstore-test",
  "objectstore-types",
  "reqwest",

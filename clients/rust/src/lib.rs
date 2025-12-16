@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+mod auth;
 mod client;
 mod delete;
 mod error;
@@ -11,6 +12,7 @@ pub mod utils;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
+pub use auth::*;
 pub use client::*;
 pub use delete::*;
 pub use error::*;
