@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
+use futures_util::Stream;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
@@ -88,6 +89,7 @@ pub enum StorageConfig<'a> {
 
 pub type GetResult = anyhow::Result<Option<(Metadata, PayloadStream)>>;
 pub type InsertResult = anyhow::Result<ObjectId>;
+pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
 pub type DeleteResult = anyhow::Result<()>;
 
 impl StorageService {
@@ -277,6 +279,35 @@ impl StorageService {
         );
 
         Ok(())
+    }
+
+    /// TODO
+    pub async fn insert_objects(
+        &self,
+        context: ObjectContext,
+        inserts: impl Stream<Item = Result<(Metadata, Bytes), anyhow::Error>>,
+    ) -> BatchInsertResult {
+        let mut inserts = Box::pin(inserts);
+
+        let mut results = Vec::new();
+        while let Some(item) = inserts.next().await {
+            let result = match item {
+                Ok((metadata, bytes)) => {
+                    let id = ObjectId::optional(context.clone(), None);
+                    let stream = futures_util::stream::once(async { Ok(bytes) }).boxed();
+
+                    self.0
+                        .high_volume_backend
+                        .put_object(&id, &metadata, stream)
+                        .await?;
+
+                    Ok(id)
+                }
+                Err(e) => Err(e),
+            };
+            results.push(result);
+        }
+        Ok(results)
     }
 }
 

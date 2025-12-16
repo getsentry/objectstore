@@ -2,14 +2,15 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use axum::extract::{DefaultBodyLimit, Multipart};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, IntoResponseParts};
+use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing;
 use axum::{Json, Router};
-use axum_extra::response::multiple::MultipartForm;
+use axum_extra::response::multiple::{MultipartForm, Part};
 use futures::TryStreamExt;
-use futures_util::StreamExt;
+use futures::stream::{self, StreamExt, unfold};
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{DeleteResult, GetResult};
+use objectstore_service::{DeleteResult, GetResult, InsertResult};
 use objectstore_types::Metadata;
 use serde::{Deserialize, Serialize};
 
@@ -37,28 +38,6 @@ struct RequestManifest {
     operations: Vec<Operation>,
 }
 
-#[derive(Serialize, Debug)]
-struct Response {}
-
-pub trait IntoPart {
-    fn into_part(self) -> axum_extra::response::multiple::Part;
-}
-
-impl IntoPart for GetResult {
-    fn into_part(self) -> axum_extra::response::multiple::Part {
-        todo!()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-struct ResultManifest {}
-
-impl IntoPart for ResultManifest {
-    fn into_part(self) -> axum_extra::response::multiple::Part {
-        todo!()
-    }
-}
-
 async fn batch(
     service: AuthAwareService,
     Xt(context): Xt<ObjectContext>,
@@ -75,38 +54,37 @@ async fn batch(
     let manifest: RequestManifest = serde_json::from_str(manifest)
         .map_err(|err| anyhow::Error::new(err).context("failed to deserialize manifest"))?;
 
-    let result_manifest = ResultManifest {};
-    let mut parts = vec![];
-    for operation in manifest.operations {
-        let result = match operation {
+    let inserts = unfold(multipart, |mut m| async move {
+        match m.next_field().await {
+            Ok(Some(field)) => {
+                let metadata = Metadata::from_headers(field.headers(), "").unwrap();
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| anyhow::Error::new(e))
+                    .unwrap();
+                Some((Ok((metadata, bytes)), m))
+            }
+            Ok(None) => None,
+            Err(_) => todo!(),
+        }
+    });
+    let insert_results = service.insert_objects(context.clone(), inserts).await;
+
+    for operation in manifest.operations.into_iter() {
+        match operation {
             Operation::Get(key) => {
                 let result = service
                     .get_object(&ObjectId::new(context.clone(), key))
                     .await;
-                parts.push(result.into_part());
-            }
-            Operation::Insert(key) => {
-                service.insert_object(
-                    context.clone(),
-                    key,
-                    &Metadata::default(),
-                    multipart
-                        .next_field()
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .map_err(|err| std::io::Error::other(err))
-                        .boxed(),
-                );
             }
             Operation::Delete(key) => {
-                service
+                let result = service
                     .delete_object(&ObjectId::new(context.clone(), key))
                     .await;
             }
+            _ => (),
         };
     }
-    parts.insert(0, result_manifest.into_part());
-
-    Ok(MultipartForm::with_parts(parts).into_response())
+    Ok(StatusCode::OK.into_response())
 }
