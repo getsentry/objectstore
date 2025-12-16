@@ -1,5 +1,9 @@
+use bytes::Bytes;
+use futures::Stream;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{DeleteResult, GetResult, InsertResult, PayloadStream, StorageService};
+use objectstore_service::{
+    BatchInsertResult, DeleteResult, GetResult, InsertResult, PayloadStream, StorageService,
+};
 use objectstore_types::{Metadata, Permission};
 
 use crate::auth::AuthContext;
@@ -72,5 +76,15 @@ impl AuthAwareService {
     pub async fn delete_object(&self, id: &ObjectId) -> DeleteResult {
         self.assert_authorized(Permission::ObjectDelete, id.context())?;
         self.service.delete_object(id).await
+    }
+
+    /// Auth-aware wrapper around [`StorageService::insert_objects`].
+    pub async fn insert_objects(
+        &self,
+        context: ObjectContext,
+        inserts: impl Stream<Item = anyhow::Result<(Metadata, Bytes)>>,
+    ) -> BatchInsertResult {
+        self.assert_authorized(Permission::ObjectWrite, &context)?;
+        self.service.insert_objects(context, inserts).await
     }
 }
