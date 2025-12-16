@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
 
-use jsonwebtoken::{Algorithm, DecodingKey, Header, TokenData, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::Permission;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+use crate::auth::error::AuthError;
+use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
-use crate::config::AuthZ;
 
 /// `AuthContext` encapsulates the verified content of things like authorization tokens.
 ///
@@ -33,32 +32,6 @@ pub struct AuthContext {
     /// If true, authorization checks are performed and logged but failures are suppressed.
     /// If false, authorization failures result in errors.
     pub enforce: bool,
-}
-
-/// Error type for different authorization failure scenarios.
-#[derive(Error, Debug, PartialEq)]
-pub enum AuthError {
-    /// Indicates that something about the request prevented authorization verification from
-    /// happening properly.
-    #[error("bad request: {0}")]
-    BadRequest(&'static str),
-
-    /// Indicates that something about Objectstore prevented authorization verification from
-    /// happening properly.
-    #[error("internal error: {0}")]
-    InternalError(String),
-
-    /// Indicates that the provided authorization token is invalid (e.g. expired or malformed).
-    #[error("failed to decode token: {0}")]
-    ValidationFailure(#[from] jsonwebtoken::errors::Error),
-
-    /// Indicates that an otherwise-valid token was unable to be verified with configured keys.
-    #[error("failed to verify token")]
-    VerificationFailure,
-
-    /// Indicates that the requested operation is not authorized and auth enforcement is enabled.
-    #[error("operation not allowed")]
-    NotPermitted,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -99,7 +72,7 @@ impl AuthContext {
     /// `exp` claim field has not passed.
     pub fn from_encoded_jwt(
         encoded_token: Option<&str>,
-        config: &AuthZ,
+        key_directory: &PublicKeyDirectory,
     ) -> Result<AuthContext, AuthError> {
         let encoded_token =
             encoded_token.ok_or(AuthError::BadRequest("No authorization token provided"))?;
@@ -110,7 +83,7 @@ impl AuthContext {
             .as_ref()
             .ok_or(AuthError::BadRequest("JWT header is missing `kid` field"))?;
 
-        let key_config = config
+        let key_config = key_directory
             .keys
             .get(key_id)
             .ok_or_else(|| AuthError::InternalError(format!("Key `{key_id}` not configured")))?;
@@ -125,21 +98,10 @@ impl AuthContext {
         }
 
         let mut verified_claims: Option<TokenData<JwtClaims>> = None;
-        for key in &key_config.key_versions {
-            let decoding_key = match DecodingKey::from_ed_pem(key.expose_secret().as_bytes()) {
-                Ok(key) => key,
-                Err(error) => {
-                    tracing::error!(
-                        error = &error as &dyn std::error::Error,
-                        "Failed to construct decoding key from PEM",
-                    );
-                    continue;
-                }
-            };
-
+        for decoding_key in &key_config.key_versions {
             let decode_result = decode::<JwtClaims>(
                 encoded_token,
-                &decoding_key,
+                decoding_key,
                 &jwt_validation_params(&jwt_header),
             );
 
@@ -173,7 +135,7 @@ impl AuthContext {
             usecase,
             scopes: scope,
             permissions,
-            enforce: config.enforce,
+            enforce: key_directory.enforce,
         })
     }
 
@@ -221,9 +183,9 @@ impl AuthContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AuthZVerificationKey, ConfigSecret};
+    use crate::auth::PublicKeyConfig;
+    use jsonwebtoken::DecodingKey;
     use objectstore_types::scope::{Scope, Scopes};
-    use secrecy::SecretBox;
     use serde_json::json;
 
     const TEST_SIGNING_KID: &str = "test-key";
@@ -253,15 +215,14 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
         ])
     }
 
-    fn test_config(max_permissions: HashSet<Permission>) -> AuthZ {
-        let wrapped_key = SecretBox::new(Box::new(ConfigSecret::from(TEST_PUBLIC_KEY)));
-        let key_config = AuthZVerificationKey {
-            key_versions: vec![wrapped_key],
+    fn test_key_config(max_permissions: HashSet<Permission>) -> PublicKeyDirectory {
+        let public_key = PublicKeyConfig {
+            key_versions: vec![DecodingKey::from_ed_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap()],
             max_permissions,
         };
-        AuthZ {
+        PublicKeyDirectory {
             enforce: true,
-            keys: BTreeMap::from([(TEST_SIGNING_KID.into(), key_config)]),
+            keys: BTreeMap::from([(TEST_SIGNING_KID.into(), public_key)]),
         }
     }
 
@@ -314,7 +275,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
         let encoded_token = sign_token(&claims, TEST_PRIVATE_KEY, None);
 
         // Create test config with max permissions
-        let test_config = test_config(max_permission());
+        let test_config = test_key_config(max_permission());
         let auth_context =
             AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
 
@@ -333,7 +294,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
 
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
-        let test_config = test_config(ro_permission.clone());
+        let test_config = test_key_config(ro_permission.clone());
         let auth_context =
             AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
 
@@ -350,7 +311,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
         let encoded_token = "abcdef";
 
         // Create test config with max permissions
-        let test_config = test_config(max_permission());
+        let test_config = test_key_config(max_permission());
         let auth_context = AuthContext::from_encoded_jwt(Some(encoded_token), &test_config);
 
         // Ensure the token failed verification
@@ -369,7 +330,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let encoded_token = sign_token(&claims, unknown_key, None);
 
         // Create test config with max permissions
-        let test_config = test_config(max_permission());
+        let test_config = test_key_config(max_permission());
         let auth_context =
             AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
 
@@ -389,7 +350,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         );
 
         // Create test config with max permissions
-        let test_config = test_config(max_permission());
+        let test_config = test_key_config(max_permission());
         let auth_context =
             AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
 

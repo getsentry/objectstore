@@ -5,6 +5,7 @@ use anyhow::Result;
 use objectstore_service::{StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
+use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 
 /// Shared reference to the objectstore [`Services`].
@@ -25,6 +26,11 @@ pub struct Services {
     ///
     /// Consider using [`crate::auth::AuthAwareService`].
     pub service: StorageService,
+    /// Directory for EdDSA public keys.
+    ///
+    /// The `kid` header field from incoming authorization tokens should correspond to a public key
+    /// in this directory that can be used to verify the token.
+    pub key_directory: PublicKeyDirectory,
 }
 
 impl Services {
@@ -39,7 +45,13 @@ impl Services {
         let long_term = map_storage_config(&config.long_term_storage);
         let service = StorageService::new(high_volume, long_term).await?;
 
-        Ok(Arc::new(Self { config, service }))
+        let key_directory: PublicKeyDirectory = (&config.auth).try_into()?;
+
+        Ok(Arc::new(Self {
+            config,
+            service,
+            key_directory,
+        }))
     }
 }
 
