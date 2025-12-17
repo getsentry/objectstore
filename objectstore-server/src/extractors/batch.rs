@@ -9,8 +9,8 @@ use axum::{
 use bytes::Buf;
 use futures::stream;
 use http::header::CONTENT_TYPE;
-use multer::{Constraints, Multipart, SizeLimit};
-use objectstore_service::{BACKEND_SIZE_THRESHOLD, InsertStream, id::ObjectKey};
+use multer::Multipart;
+use objectstore_service::{InsertStream, id::ObjectKey};
 use objectstore_types::Metadata;
 use serde::Deserialize;
 
@@ -33,8 +33,6 @@ pub struct BatchRequest {
     pub manifest: Manifest,
     pub inserts: InsertStream,
 }
-
-const MANIFEST_FIELD_NAME: &str = "manifest";
 
 impl Debug for BatchRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
