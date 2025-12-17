@@ -97,25 +97,25 @@ where
         let manifest = serde_json::from_reader::<_, Manifest>(manifest.reader())
             .context("failed to parse manifest")?;
 
-        let inserts = Box::pin(stream::unfold(parts, |mut m| async move {
-            match m.next_field().await {
+        let inserts = Box::pin(stream::unfold(parts, |mut parts| async move {
+            match parts.next_field().await {
                 Ok(Some(field)) => {
                     let metadata = match Metadata::from_headers(field.headers(), "") {
                         Ok(metadata) => metadata,
                         Err(err) => {
-                            return Some((Err(err.into()), m));
+                            return Some((Err(err.into()), parts));
                         }
                     };
                     let bytes = match field.bytes().await {
                         Ok(bytes) => bytes,
                         Err(err) => {
-                            return Some((Err(err.into()), m));
+                            return Some((Err(err.into()), parts));
                         }
                     };
-                    Some((Ok((metadata, bytes)), m))
+                    Some((Ok((metadata, bytes)), parts))
                 }
                 Ok(None) => None,
-                Err(err) => Some((Err(err).context("failed to parse multipart part"), m)),
+                Err(err) => Some((Err(err).context("failed to parse multipart part"), parts)),
             }
         }));
 
