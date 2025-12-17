@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 argh = "0.1.13"
-axum = { version = "0.8.4", features = ["multipart", "macros"] }
+axum = { version = "0.8.4", features = ["multipart"] }
 axum-extra = { version = "0.12.2", features = ["multipart"] }
 bytes = { workspace = true }
 console = "0.16.1"
