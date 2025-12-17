@@ -294,7 +294,7 @@ impl StorageService {
     pub async fn insert_objects(
         &self,
         _context: ObjectContext,
-        _inserts: Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>,
+        _inserts: InsertStream,
     ) -> BatchInsertResult {
         todo!();
     }

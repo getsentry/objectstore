@@ -4,7 +4,8 @@ use bytes::Bytes;
 use futures::Stream;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{
-    BatchInsertResult, DeleteResult, GetResult, InsertResult, PayloadStream, StorageService,
+    BatchInsertResult, DeleteResult, GetResult, InsertResult, InsertStream, PayloadStream,
+    StorageService,
 };
 use objectstore_types::{Metadata, Permission};
 
@@ -84,7 +85,7 @@ impl AuthAwareService {
     pub async fn insert_objects(
         &self,
         context: ObjectContext,
-        inserts: Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>,
+        inserts: InsertStream,
     ) -> BatchInsertResult {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
         self.service.insert_objects(context, inserts).await
