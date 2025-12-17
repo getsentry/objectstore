@@ -16,15 +16,15 @@ use serde::Deserialize;
 
 use crate::error::AnyhowResponse;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(tag = "op")]
 pub enum Operation {
-    Get(ObjectKey),
-    Insert(Option<ObjectKey>),
-    Delete(ObjectKey),
+    Get { key: ObjectKey },
+    Insert { key: Option<ObjectKey> },
+    Delete { key: ObjectKey },
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, PartialEq)]
 pub struct Manifest {
     pub operations: Vec<Operation>,
 }
@@ -120,5 +120,77 @@ where
         }));
 
         Ok(Self { manifest, inserts })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, header::CONTENT_TYPE};
+    use futures::StreamExt;
+    use objectstore_types::{ExpirationPolicy, HEADER_EXPIRATION};
+
+    #[tokio::test]
+    async fn test_valid_request_works() {
+        let manifest = r#"{"operations":[{"op":"Insert"},{"op":"Get","key":"abc123"},{"op":"Insert","key":"xyz789"},{"op":"Delete","key":"def456"}]}"#;
+        let insert1_data = b"first blob data";
+        let insert2_data = b"second blob data";
+        let expiration = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        let body = format!(
+            "--boundary\r\n\
+             Content-Type: application/json\r\n\
+             \r\n\
+             {manifest}\r\n\
+             --boundary\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n\
+             {insert1}\r\n\
+             --boundary\r\n\
+             Content-Type: text/plain\r\n\
+             {HEADER_EXPIRATION}: {expiration}\r\n\
+             \r\n\
+             {insert2}\r\n\
+             --boundary--\r\n",
+            insert1 = String::from_utf8_lossy(insert1_data),
+            insert2 = String::from_utf8_lossy(insert2_data),
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/mixed; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
+
+        let expected_manifest = Manifest {
+            operations: vec![
+                Operation::Insert { key: None },
+                Operation::Get {
+                    key: "abc123".to_string(),
+                },
+                Operation::Insert {
+                    key: Some("xyz789".to_string()),
+                },
+                Operation::Delete {
+                    key: "def456".to_string(),
+                },
+            ],
+        };
+        assert_eq!(batch_request.manifest, expected_manifest);
+
+        let inserts: Vec<_> = batch_request.inserts.collect().await;
+        assert_eq!(inserts.len(), 2);
+
+        let (metadata1, bytes1) = inserts[0].as_ref().unwrap();
+        assert_eq!(metadata1.content_type, "application/octet-stream");
+        assert_eq!(bytes1.as_ref(), insert1_data);
+
+        let (metadata2, bytes2) = inserts[1].as_ref().unwrap();
+        assert_eq!(metadata2.content_type, "text/plain");
+        assert_eq!(metadata2.expiration_policy, expiration);
+        assert_eq!(bytes2.as_ref(), insert2_data);
     }
 }
