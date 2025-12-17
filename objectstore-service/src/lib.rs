@@ -24,7 +24,7 @@ use crate::backend::common::BoxedBackend;
 use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
-pub const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
 enum BackendChoice {
     HighVolume,
