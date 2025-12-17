@@ -1,7 +1,6 @@
 //!
 //! This is mostly adapted from <https://github.com/tokio-rs/axum/blob/main/examples/anyhow-error-response/src/main.rs>
 
-use axum::extract::multipart::MultipartError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
@@ -39,11 +38,5 @@ impl From<Response> for AnyhowResponse {
 impl From<anyhow::Error> for AnyhowResponse {
     fn from(err: anyhow::Error) -> Self {
         Self::Error(err)
-    }
-}
-
-impl From<MultipartError> for AnyhowResponse {
-    fn from(value: MultipartError) -> Self {
-        Self::Error(value.into())
     }
 }
