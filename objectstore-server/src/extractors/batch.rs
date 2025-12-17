@@ -34,7 +34,7 @@ pub struct BatchRequest {
     pub inserts: InsertStream,
 }
 
-const MANIFEST_FIELD_NAME: &'static str = "manifest";
+const MANIFEST_FIELD_NAME: &str = "manifest";
 
 impl Debug for BatchRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
