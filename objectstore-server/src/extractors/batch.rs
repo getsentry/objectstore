@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use anyhow::Context;
+use async_stream::try_stream;
 use axum::{
     extract::{FromRequest, Request},
     http::StatusCode,
@@ -97,27 +98,13 @@ where
         let manifest = serde_json::from_reader::<_, Manifest>(manifest.reader())
             .context("failed to parse manifest")?;
 
-        let inserts = Box::pin(stream::unfold(parts, |mut parts| async move {
-            match parts.next_field().await {
-                Ok(Some(field)) => {
-                    let metadata = match Metadata::from_headers(field.headers(), "") {
-                        Ok(metadata) => metadata,
-                        Err(err) => {
-                            return Some((Err(err.into()), parts));
-                        }
-                    };
-                    let bytes = match field.bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            return Some((Err(err.into()), parts));
-                        }
-                    };
-                    Some((Ok((metadata, bytes)), parts))
-                }
-                Ok(None) => None,
-                Err(err) => Some((Err(err).context("failed to parse multipart part"), parts)),
+        let inserts = Box::pin(async_stream::try_stream! {
+            while let Some(field) = parts.next_field().await? {
+                let metadata = Metadata::from_headers(field.headers(), "")?;
+                let bytes = field.bytes().await?;
+                yield (metadata, bytes);
             }
-        }));
+        });
 
         Ok(Self { manifest, inserts })
     }
