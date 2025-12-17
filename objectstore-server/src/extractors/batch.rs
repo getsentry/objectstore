@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::error::AnyhowResponse;
 
 #[derive(Deserialize, Debug, PartialEq)]
-#[serde(tag = "op")]
+#[serde(tag = "op", rename_all = "lowercase")]
 pub enum Operation {
     Get { key: ObjectKey },
     Insert { key: Option<ObjectKey> },
@@ -122,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_request_works() {
-        let manifest = r#"{"operations":[{"op":"Insert"},{"op":"Get","key":"abc123"},{"op":"Insert","key":"xyz789"},{"op":"Delete","key":"def456"}]}"#;
+        let manifest = r#"{"operations":[{"op":"insert"},{"op":"get","key":"abc123"},{"op":"insert","key":"xyz789"},{"op":"delete","key":"def456"}]}"#;
         let insert1_data = b"first blob data";
         let insert2_data = b"second blob data";
         let expiration = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
