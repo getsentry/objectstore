@@ -9,31 +9,6 @@ use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
-/// `AuthContext` encapsulates the verified content of things like authorization tokens.
-///
-/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
-/// perform certain operations on a given resource.
-#[derive(Debug, PartialEq)]
-#[non_exhaustive]
-pub struct AuthContext {
-    /// The objectstore usecase that this request may act on.
-    ///
-    /// See also: [`ObjectContext::usecase`].
-    pub usecase: String,
-
-    /// The scope elements that this request may act on.
-    ///
-    /// See also: [`ObjectContext::scopes`].
-    pub scopes: BTreeMap<String, StringOrWildcard>,
-
-    /// The permissions that this request has been granted.
-    pub permissions: HashSet<Permission>,
-
-    /// If true, authorization checks are performed and logged but failures are suppressed.
-    /// If false, authorization failures result in errors.
-    pub enforce: bool,
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
@@ -55,6 +30,27 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
     validation.set_issuer(&["sentry", "relay"]);
     validation.set_required_spec_claims(&["exp"]);
     validation
+}
+
+/// `AuthContext` encapsulates the verified content of things like authorization tokens.
+///
+/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
+/// perform certain operations on a given resource.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub struct AuthContext {
+    /// The objectstore usecase that this request may act on.
+    ///
+    /// See also: [`ObjectContext::usecase`].
+    pub usecase: String,
+
+    /// The scope elements that this request may act on.
+    ///
+    /// See also: [`ObjectContext::scopes`].
+    pub scopes: BTreeMap<String, StringOrWildcard>,
+
+    /// The permissions that this request has been granted.
+    pub permissions: HashSet<Permission>,
 }
 
 impl AuthContext {
@@ -135,20 +131,7 @@ impl AuthContext {
             usecase,
             scopes: scope,
             permissions,
-            enforce: key_directory.enforce,
         })
-    }
-
-    fn fail_if_enforced(
-        &self,
-        perm: &Permission,
-        context: &ObjectContext,
-    ) -> Result<(), AuthError> {
-        tracing::debug!(?self, ?perm, ?context, "Authorization failed");
-        if self.enforce {
-            return Err(AuthError::NotPermitted);
-        }
-        Ok(())
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
@@ -162,7 +145,8 @@ impl AuthContext {
         context: &ObjectContext,
     ) -> Result<(), AuthError> {
         if !self.permissions.contains(&perm) || self.usecase != context.usecase {
-            self.fail_if_enforced(&perm, context)?;
+            tracing::debug!(?self, ?perm, ?context, "Authorization failed");
+            return Err(AuthError::NotPermitted);
         }
 
         for scope in &context.scopes {
@@ -172,7 +156,8 @@ impl AuthContext {
                 None => false,
             };
             if !authorized {
-                self.fail_if_enforced(&perm, context)?;
+                tracing::debug!(?self, ?perm, ?context, "Authorization failed");
+                return Err(AuthError::NotPermitted);
             }
         }
 
@@ -221,7 +206,6 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
             max_permissions,
         };
         PublicKeyDirectory {
-            enforce: true,
             keys: BTreeMap::from([(TEST_SIGNING_KID.into(), public_key)]),
         }
     }
@@ -263,7 +247,6 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
         AuthContext {
             usecase: "attachments".into(),
             permissions,
-            enforce: true,
             scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
         }
     }
@@ -461,21 +444,6 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_assert_authorized_passes_if_enforcement_disabled() -> Result<(), AuthError> {
-        // Auth context is read-only but we will try using write permissions
-        let mut auth_context =
-            sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
-        // Object's scope is not covered by the auth context
-        let object = sample_object_context("999", "999");
-
-        // Auth fails for two reasons, but because enforcement is off, it should not return an error
-        auth_context.enforce = false;
-        auth_context.assert_authorized(Permission::ObjectWrite, &object)?;
 
         Ok(())
     }

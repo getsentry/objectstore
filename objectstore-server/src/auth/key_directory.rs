@@ -58,9 +58,6 @@ impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
 pub struct PublicKeyDirectory {
     /// Mapping from key ID to key configuration.
     pub keys: BTreeMap<String, PublicKeyConfig>,
-
-    /// Whether authorization checks should be enforced.
-    pub enforce: bool,
 }
 
 impl TryFrom<&AuthZ> for PublicKeyDirectory {
@@ -68,7 +65,6 @@ impl TryFrom<&AuthZ> for PublicKeyDirectory {
 
     fn try_from(auth_config: &AuthZ) -> Result<Self, Self::Error> {
         Ok(Self {
-            enforce: auth_config.enforce,
             keys: auth_config
                 .keys
                 .iter()
