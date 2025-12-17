@@ -149,6 +149,22 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
     assert decompressed_data == data
 
 
+def test_full_cycle_structured_key(server_url: str) -> None:
+    client = Client(server_url)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(b"test data", key="1/shard-0.json")
+    assert object_key == "1/shard-0.json"
+
+    retrieved = session.get(object_key)
+    assert retrieved.payload.read() == b"test data"
+
+
 def test_connect_timeout() -> None:
     # this server accepts the connection
     # (even though the backlog is 0 and we never call `accept`),

@@ -89,6 +89,24 @@ async fn stores_under_given_key() {
 }
 
 #[tokio::test]
+async fn stores_structured_keys() {
+    let server = TestServer::new().await;
+
+    let client = Client::builder(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let body = "oh hai!";
+    let request = session.put(body).key("1/shard-0.json");
+    let stored_id = request.send().await.unwrap().key;
+    assert_eq!(stored_id, "1/shard-0.json");
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    let received = response.payload().await.unwrap();
+    assert_eq!(received, body);
+}
+
+#[tokio::test]
 async fn overwrites_existing_key() {
     let server = TestServer::new().await;
 
