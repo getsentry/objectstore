@@ -1,3 +1,5 @@
+use std::pin::Pin;
+
 use bytes::Bytes;
 use futures::Stream;
 use objectstore_service::id::{ObjectContext, ObjectId};
@@ -83,7 +85,7 @@ impl AuthAwareService {
     pub async fn insert_objects(
         &self,
         context: ObjectContext,
-        inserts: impl Stream<Item = anyhow::Result<(Metadata, Bytes)>>,
+        inserts: Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>,
     ) -> BatchInsertResult {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
         self.service.insert_objects(context, inserts).await

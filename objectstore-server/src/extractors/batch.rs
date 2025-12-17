@@ -1,16 +1,11 @@
-use std::{fmt::Debug, path::Path, pin::Pin};
+use std::{fmt::Debug, pin::Pin};
 
 use anyhow::Context;
 use axum::{
-    RequestExt, Router,
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{FromRequest, Request},
-    http::{
-        StatusCode,
-        header::{HeaderValue, USER_AGENT},
-    },
-    response::{IntoResponse, Response},
-    routing::get,
+    http::StatusCode,
+    response::IntoResponse,
 };
 use bytes::Buf;
 use futures::{Stream, stream};

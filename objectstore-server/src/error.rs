@@ -4,7 +4,6 @@
 use axum::extract::multipart::MultipartError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::DeleteResult;
 
 pub enum AnyhowResponse {
     Error(anyhow::Error),

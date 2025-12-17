@@ -10,6 +10,7 @@ mod backend;
 pub mod id;
 
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -87,10 +88,15 @@ pub enum StorageConfig<'a> {
     },
 }
 
+/// Result type for get operations.
 pub type GetResult = anyhow::Result<Option<(Metadata, PayloadStream)>>;
+/// Result type for insert operations.
 pub type InsertResult = anyhow::Result<ObjectId>;
-pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
+/// Result type for delete operations.
 pub type DeleteResult = anyhow::Result<()>;
+
+/// Result type for batch insert operations.
+pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
 
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
@@ -284,30 +290,10 @@ impl StorageService {
     /// TODO
     pub async fn insert_objects(
         &self,
-        context: ObjectContext,
-        inserts: impl Stream<Item = Result<(Metadata, Bytes), anyhow::Error>>,
+        _context: ObjectContext,
+        _inserts: Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>,
     ) -> BatchInsertResult {
-        let mut inserts = Box::pin(inserts);
-
-        let mut results = Vec::new();
-        while let Some(item) = inserts.next().await {
-            let result = match item {
-                Ok((metadata, bytes)) => {
-                    let id = ObjectId::optional(context.clone(), None);
-                    let stream = futures_util::stream::once(async { Ok(bytes) }).boxed();
-
-                    self.0
-                        .high_volume_backend
-                        .put_object(&id, &metadata, stream)
-                        .await?;
-
-                    Ok(id)
-                }
-                Err(e) => Err(e),
-            };
-            results.push(result);
-        }
-        Ok(results)
+        todo!();
     }
 }
 
