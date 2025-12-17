@@ -79,21 +79,7 @@ where
         let content_type = content_type.replace("multipart/mixed", "multipart/form-data");
         let boundary =
             multer::parse_boundary(content_type).context("failed to parse multipart boundary")?;
-
-        let mut parts = Multipart::with_constraints(
-            request.into_body().into_data_stream(),
-            boundary,
-            Constraints::new().size_limit(
-                SizeLimit::new()
-                    // 200 MiB: BigTable's maximum size for a single mutation
-                    .whole_stream(200 * 1024 * 1024)
-                    // A single operation serializes to (minimum) roughly 14 bytes, so this roughly
-                    // means we accept a maximum of 10_000 operations per batch request
-                    .for_field(MANIFEST_FIELD_NAME, 14 * 10_000)
-                    // Each payload needs to be within the maximum size supported by BigTable
-                    .per_field(BACKEND_SIZE_THRESHOLD as u64),
-            ),
-        );
+        let mut parts = Multipart::new(request.into_body().into_data_stream(), boundary);
 
         let manifest = parts
             .next_field()
