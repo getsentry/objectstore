@@ -2,6 +2,7 @@
 //!
 //! This builds on top of the [`objectstore_service`], and exposes the underlying storage layer as
 //! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
+#![warn(missing_debug_implementations)]
 
 pub mod auth;
 pub mod cli;
