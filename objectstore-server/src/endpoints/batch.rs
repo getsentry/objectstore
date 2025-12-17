@@ -1,5 +1,4 @@
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -11,9 +10,7 @@ use crate::extractors::{BatchRequest, Xt};
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
-    Router::new()
-        .route("/objects:batch/{usecase}/{scopes}/", routing::post(batch))
-        .layer(DefaultBodyLimit::max(500 * 1_000_000))
+    Router::new().route("/objects:batch/{usecase}/{scopes}/", routing::post(batch))
 }
 
 async fn batch(
