@@ -37,8 +37,8 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         stream: PayloadStream,
     ) -> anyhow::Result<()> {
-        tracing::debug!("Writing to local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
+        tracing::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let file = OpenOptions::new()
             .create(true)
