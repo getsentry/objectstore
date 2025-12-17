@@ -1,17 +1,16 @@
-use std::{fmt::Debug, pin::Pin};
+use std::fmt::Debug;
 
 use anyhow::Context;
 use axum::{
-    body::Bytes,
     extract::{FromRequest, Request},
     http::StatusCode,
     response::IntoResponse,
 };
 use bytes::Buf;
-use futures::{Stream, stream};
+use futures::stream;
 use http::header::CONTENT_TYPE;
 use multer::{Constraints, Multipart, SizeLimit};
-use objectstore_service::{BACKEND_SIZE_THRESHOLD, id::ObjectKey};
+use objectstore_service::{BACKEND_SIZE_THRESHOLD, InsertStream, id::ObjectKey};
 use objectstore_types::Metadata;
 use serde::Deserialize;
 
@@ -32,7 +31,7 @@ pub struct Manifest {
 
 pub struct BatchRequest {
     pub manifest: Manifest,
-    pub parts: Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>,
+    pub inserts: InsertStream,
 }
 
 const MANIFEST_FIELD_NAME: &'static str = "manifest";
@@ -114,7 +113,7 @@ where
         let manifest = serde_json::from_reader::<_, Manifest>(manifest.reader())
             .context("failed to parse manifest")?;
 
-        let parts = Box::pin(stream::unfold(parts, |mut m| async move {
+        let inserts = Box::pin(stream::unfold(parts, |mut m| async move {
             match m.next_field().await {
                 Ok(Some(field)) => {
                     let metadata = match Metadata::from_headers(field.headers(), "") {
@@ -136,6 +135,6 @@ where
             }
         }));
 
-        Ok(Self { manifest, parts })
+        Ok(Self { manifest, inserts })
     }
 }

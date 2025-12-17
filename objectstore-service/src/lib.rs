@@ -95,6 +95,9 @@ pub type InsertResult = anyhow::Result<ObjectId>;
 /// Result type for delete operations.
 pub type DeleteResult = anyhow::Result<()>;
 
+/// Type alias to represent a stream of insert operations.
+pub type InsertStream =
+    Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>;
 /// Result type for batch insert operations.
 pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
 
