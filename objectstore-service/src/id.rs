@@ -10,11 +10,12 @@
 use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
+use serde::Deserialize;
 
 /// Defines where an object, or batch of objects, belongs within the object store.
 ///
 /// This is part of the full object identifier for single objects, see [`ObjectId`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 pub struct ObjectContext {
     /// The usecase, or "product" this object belongs to.
     ///
@@ -62,7 +63,7 @@ pub struct ObjectContext {
 ///
 /// This consists of a usecase and the scopes, which make up the object's context and define where
 /// the object belongs within objectstore, as well as the unique key within the context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 pub struct ObjectId {
     /// The usecase and scopes this object belongs to.
     pub context: ObjectContext,
@@ -73,8 +74,11 @@ pub struct ObjectId {
     /// a key makes a unique identifier.
     ///
     /// Keys can be assigned by the service. For this, use [`ObjectId::random`].
-    pub key: String,
+    pub key: ObjectKey,
 }
+
+/// A key that uniquely identifies an object within its usecase and scopes.
+pub type ObjectKey = String;
 
 impl ObjectId {
     /// Creates a new `ObjectId` with the given `context` and `key`.
