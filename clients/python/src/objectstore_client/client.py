@@ -90,7 +90,38 @@ class _ConnectionDefaults:
 
 
 class Client:
-    """A client for Objectstore. Constructing it initializes a connection pool."""
+    """
+    A client for Objectstore. Constructing it initializes a connection pool.
+
+    Args:
+        base_url: The base URL of the Objectstore server (e.g.,
+            "http://objectstore:8888"). metrics_backend: Optional metrics backend for
+            tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
+            provided.
+        propagate_traces: Whether to propagate Sentry trace headers in requests to
+            objectstore. Defaults to ``False``.
+        retries: Number of connection retries for failed requests.
+            Defaults to ``3`` if not specified. **Note:** only connection failures are
+            retried, not read failures (as compression streams cannot be rewound).
+        timeout_ms: Read timeout in milliseconds for API requests. The read timeout
+            is the maximum time to wait between consecutive read operations on the
+            socket (i.e., between receiving chunks of data). Defaults to no read timeout
+            if not specified. The connection timeout is always 100ms. To override the
+            connection timeout, pass a custom ``urllib3.Timeout`` object via
+            ``connection_kwargs``. For example:
+
+            .. code-block:: python
+
+                client = Client(
+                    "http://objectstore:8888", connection_kwargs={
+                        "timeout": urllib3.Timeout(connect=1.0, read=5.0)
+                    }
+                )
+
+        connection_kwargs: Additional keyword arguments to pass to the underlying
+            urllib3 connection pool (e.g., custom headers, SSL settings, advanced
+            timeouts).
+    """
 
     def __init__(
         self,
@@ -102,38 +133,6 @@ class Client:
         connection_kwargs: Mapping[str, Any] | None = None,
         token_generator: TokenGenerator | None = None,
     ):
-        """
-        Initialize an Objectstore client.
-
-        Args:
-            base_url: The base URL of the Objectstore server (e.g.,
-                "http://objectstore:8888"). metrics_backend: Optional metrics backend
-                for tracking storage operations. Defaults to ``NoOpMetricsBackend`` if
-                not provided.
-            propagate_traces: Whether to propagate Sentry trace headers in requests to
-                objectstore. Defaults to ``False``.
-            retries: Number of connection retries for failed requests.
-                Defaults to ``3`` if not specified. Note: only connection failures are
-                retried, not read failures (as compression streams cannot be rewound).
-            timeout_ms: Read timeout in milliseconds for API requests. The read timeout
-                is the maximum time to wait between consecutive read operations on the
-                socket (i.e., between receiving chunks of data). Defaults to no read
-                timeout if not specified. The connection timeout is always 100ms. To
-                override the connection timeout, pass a custom ``urllib3.Timeout``
-                object via ``connection_kwargs``. For example:
-
-                .. code-block:: python
-
-                    client = Client(
-                        "http://objectstore:8888", connection_kwargs={
-                            "timeout": urllib3.Timeout(connect=1.0, read=5.0)
-                        }
-                    )
-
-            connection_kwargs: Additional keyword arguments to pass to the underlying
-                urllib3 connection pool (e.g., custom headers, SSL settings, advanced
-                timeouts).
-        """
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries:
