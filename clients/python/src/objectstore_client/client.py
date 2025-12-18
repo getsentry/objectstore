@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import string
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import BytesIO
@@ -12,6 +11,7 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
+from objectstore_client.auth import TokenGenerator
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -25,8 +25,7 @@ from objectstore_client.metrics import (
     NoOpMetricsBackend,
     measure_storage_operation,
 )
-
-Permission = Literal["read", "write"]
+from objectstore_client.scope import Scope
 
 
 class GetResponse(NamedTuple):
@@ -68,12 +67,6 @@ class Usecase:
         self._expiration_policy = expiration_policy
 
 
-# Characters allowed in a Scope's key and value.
-# These are the URL safe characters, except for `.` which we use as separator between
-# key and value of Scope components.
-SCOPE_VALUE_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "-_()$!+'")
-
-
 @dataclass
 class _ConnectionDefaults:
     retries: urllib3.Retry = urllib3.Retry(connect=3, read=0)
@@ -100,6 +93,7 @@ class Client:
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
+        token_generator: TokenGenerator | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -125,11 +119,12 @@ class Client:
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
+        self._token_generator = token_generator
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
         Create a [Session] with the Objectstore server, tied to a specific [Usecase] and
-        Scope.
+        [Scope].
 
         A Scope is a (possibly nested) namespace within a Usecase, given as a sequence
         of key-value pairs passed as kwargs.
@@ -148,37 +143,14 @@ class Client:
         ```
         """
 
-        parts = []
-        for key, value in scopes.items():
-            if not key:
-                raise ValueError("Scope key cannot be empty")
-            if not value:
-                raise ValueError("Scope value cannot be empty")
-
-            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in key):
-                raise ValueError(
-                    f"Invalid scope key {key}. The valid character set is: "
-                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
-                )
-
-            value = str(value)
-            if any(c not in SCOPE_VALUE_ALLOWED_CHARS for c in value):
-                raise ValueError(
-                    f"Invalid scope value {value}. The valid character set is: "
-                    f"{''.join(SCOPE_VALUE_ALLOWED_CHARS)}"
-                )
-
-            formatted = f"{key}={value}"
-            parts.append(formatted)
-        scope_str = ";".join(parts)
-
         return Session(
             self._pool,
             self._base_path,
             self._metrics_backend,
             self._propagate_traces,
             usecase,
-            scope_str,
+            Scope(**scopes),
+            self._token_generator,
         )
 
 
@@ -196,7 +168,8 @@ class Session:
         metrics_backend: MetricsBackend,
         propagate_traces: bool,
         usecase: Usecase,
-        scope: str,
+        scope: Scope,
+        token_generator: TokenGenerator | None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -204,6 +177,7 @@ class Session:
         self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
+        self._token_generator = token_generator
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
@@ -211,6 +185,11 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
+        if self._token_generator:
+            token = self._token_generator.sign_for_scope(
+                self._usecase.name, self._scope
+            )
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
