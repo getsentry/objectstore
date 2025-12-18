@@ -3,11 +3,7 @@ name = "objectstore-client"
 version = "0.0.14"
 description = "Client SDK for Objectstore, the Sentry object storage platform"
 readme = "README.md"
-authors = [
-    {name = "Sentry", email = "oss@sentry.io"},
-]
-homepage = "https://getsentry.github.io/objectstore/"
-repository = "https://github.com/getsentry/objectstore"
+authors = [{ name = "Sentry", email = "oss@sentry.io" }]
 license = { file = "LICENSE.md" }
 requires-python = ">=3.11"
 dependencies = [
