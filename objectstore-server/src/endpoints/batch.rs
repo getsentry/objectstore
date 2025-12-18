@@ -7,7 +7,7 @@ use axum::routing;
 use futures::StreamExt;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
-use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::Metadata;
 use serde::Serialize;
 
@@ -35,55 +35,11 @@ pub enum OperationResult {
     },
 }
 
-#[derive(Serialize, Debug, PartialEq)]
-#[serde(tag = "results")]
-pub struct ResponseManifest {
-    pub results: Vec<OperationResult>,
-}
-
 async fn batch(
     service: AuthAwareService,
     Xt(context): Xt<ObjectContext>,
     request: BatchRequest,
 ) -> ApiResult<Response> {
-    let (gets, inserts, deletes): (Vec<_>, Vec<_>, Vec<_>) =
-        request.manifest.operations.into_iter().enumerate().fold(
-            (vec![], vec![], vec![]),
-            |mut acc, (i, op)| {
-                match op {
-                    Operation::Get { key } => acc.0.push((i, key)),
-                    Operation::Insert { key } => acc.1.push((i, key)),
-                    Operation::Delete { key } => acc.2.push((i, key)),
-                }
-                acc
-            },
-        );
-
-    let get_keys: Vec<ObjectKey> = gets.iter().map(|(_, key)| key.clone()).collect();
-    let get_results = service.get_objects(&context, &get_keys).await?;
-
-    let insert_keys: Vec<Option<ObjectKey>> = inserts.iter().map(|(_, key)| key.clone()).collect();
-    let insert_results = service
-        .insert_objects(&context, &insert_keys, request.inserts)
-        .await?;
-
-    let delete_keys: Vec<ObjectKey> = deletes.iter().map(|(_, key)| key.clone()).collect();
-    let delete_results = service.delete_objects(&context, &delete_keys).await?;
-
-    let mut results = vec![None; request.manifest.operations.len()];
-    let mut streams = vec![];
-    for ((i, _), res) in gets.into_iter().zip(get_results) {
-        results[i] = None;
-    }
-    for ((i, _), res) in inserts.into_iter().zip(insert_results) {
-        results[i] = None;
-    }
-    for ((i, _), res) in deletes.into_iter().zip(delete_results) {
-        results[i] = None;
-    }
-    let results = results.into_iter().map(|r| r.unwrap()).collect();
-    let manifest = ResponseManifest { results };
-
     let r = rand::random::<u128>();
     let boundary = format!("os-boundary-{r:032x}");
 
@@ -93,13 +49,32 @@ async fn batch(
         HeaderValue::from_str(&format!("multipart/mixed; boundary={boundary}")).unwrap(),
     );
 
-    let body_stream = async_stream::stream! {
-        yield Ok(serde_json::to_vec(&manifest)?);
-        for result in get_results {
-            //yield result.unwrap();
-            todo!();
+    while let Some(operation) = request.operations.next().await {
+        match operation {
+            Ok(operation) => match operation {
+                Operation::Get(get) => {
+                    let res = service
+                        .get_object(&ObjectId::new(context.clone(), get.key))
+                        .await;
+                    res.into_part()
+                }
+                Operation::Insert(insert) => {
+                    let res = service
+                        .insert_object(context.clone(), insert.key, &insert.metadata, insert.stream)
+                        .await;
+                    res.into_part()
+                }
+                Operation::Delete(delete) => {
+                    let res = service
+                        .delete_object(&ObjectId::new(context.clone(), delete.key))
+                        .await;
+                    res.into_part()
+                }
+            },
+            Err(err) => todo!(),
         }
-    };
+    }
+    let body_stream = async_stream::stream! {};
 
     Ok((headers, Body::from_stream(body_stream)).into_response())
 }
