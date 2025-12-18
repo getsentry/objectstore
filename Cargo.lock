@@ -2267,7 +2267,9 @@ dependencies = [
 name = "objectstore-test"
 version = "0.1.0"
 dependencies = [
+ "jsonwebtoken",
  "objectstore-server",
+ "objectstore-types",
  "tempfile",
  "tokio",
  "tracing-subscriber",

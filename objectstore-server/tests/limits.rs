@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use objectstore_server::config::Config;
+use objectstore_server::config::{AuthZ, Config};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_test::server::TestServer;
 
@@ -17,6 +17,10 @@ async fn test_killswitches() -> Result<()> {
             usecase: Some("blocked".to_string()),
             scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
         }]),
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         ..Default::default()
     })
     .await;

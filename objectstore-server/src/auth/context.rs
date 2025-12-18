@@ -173,17 +173,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
 
-    const TEST_SIGNING_KID: &str = "test-key";
-    // Private key generated with `openssl genpkey -algorithm Ed25519`
-    const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIAZtPzCHjltjZSi3+THxP6Rh8vUM0LRNA/QDR8zJx0tB
------END PRIVATE KEY-----
-"#;
-    // Public key extracted with `openssl pkey -in private_key.pem -pubout`
-    const TEST_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
------END PUBLIC KEY-----
-"#;
+    use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY, TEST_EDDSA_PUBKEY};
 
     #[derive(Serialize, Deserialize)]
     struct TestJwtClaims {
@@ -202,11 +192,11 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
 
     fn test_key_config(max_permissions: HashSet<Permission>) -> PublicKeyDirectory {
         let public_key = PublicKeyConfig {
-            key_versions: vec![DecodingKey::from_ed_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap()],
+            key_versions: vec![DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap()],
             max_permissions,
         };
         PublicKeyDirectory {
-            keys: BTreeMap::from([(TEST_SIGNING_KID.into(), public_key)]),
+            keys: BTreeMap::from([(TEST_EDDSA_KID.into(), public_key)]),
         }
     }
 
@@ -214,7 +204,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
         use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 
         let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(TEST_SIGNING_KID.into());
+        header.kid = Some(TEST_EDDSA_KID.into());
         header.typ = Some("JWT".into());
 
         let claims = TestJwtClaims {
@@ -255,7 +245,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
     fn test_from_encoded_jwt_basic() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, TEST_PRIVATE_KEY, None);
+        let encoded_token = sign_token(&claims, &TEST_EDDSA_PRIVKEY, None);
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
@@ -273,7 +263,7 @@ MCowBQYDK2VwAyEA/TOsO19FvHFTsZqcYiO8HGfm02Df5oWBXgzulxYPvSs=
     fn test_from_encoded_jwt_max_permissions_limit() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, TEST_PRIVATE_KEY, None);
+        let encoded_token = sign_token(&claims, &TEST_EDDSA_PRIVKEY, None);
 
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
@@ -328,7 +318,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let claims = sample_claims("123", "456", "attachments", max_permission());
         let encoded_token = sign_token(
             &claims,
-            TEST_PRIVATE_KEY,
+            &TEST_EDDSA_PRIVKEY,
             Some(jsonwebtoken::get_current_timestamp() - 100),
         );
 
