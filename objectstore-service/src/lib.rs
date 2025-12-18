@@ -294,63 +294,6 @@ impl StorageService {
 
         Ok(())
     }
-
-    /// Batch inserts multiple objects.
-    pub async fn insert_objects(
-        &self,
-        context: &ObjectContext,
-        keys: &[Option<ObjectKey>],
-        mut inserts: PayloadMetadataStream,
-    ) -> BatchInsertResult {
-        let mut results = Vec::new();
-        let mut key_idx = 0;
-
-        while let Some(item) = inserts.next().await {
-            let result = match item {
-                Ok((metadata, bytes)) => {
-                    let key = keys.get(key_idx).and_then(|k| k.clone());
-                    let stream = futures_util::stream::once(async { Ok(bytes) }).boxed();
-                    self.insert_object(context.clone(), key, &metadata, stream)
-                        .await
-                }
-                Err(e) => Err(e),
-            };
-            results.push(result);
-            key_idx += 1;
-        }
-
-        Ok(results)
-    }
-
-    /// Batch retrieve multiple objects by their keys.
-    pub async fn get_objects(&self, context: &ObjectContext, keys: &[ObjectKey]) -> BatchGetResult {
-        let mut results = Vec::new();
-
-        for key in keys {
-            let id = ObjectId::new(context.clone(), key.clone());
-            let result = self.get_object(&id).await;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    /// Batch deletes multiple objects by their keys.
-    pub async fn delete_objects(
-        &self,
-        context: &ObjectContext,
-        keys: &[ObjectKey],
-    ) -> BatchDeleteResult {
-        let mut results = Vec::new();
-
-        for key in keys {
-            let id = ObjectId::new(context.clone(), key.clone());
-            let result = self.delete_object(&id).await;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
 }
 
 fn is_tombstoned(result: &Option<(Metadata, PayloadStream)>) -> bool {
