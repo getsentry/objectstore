@@ -56,13 +56,10 @@ impl ClientBuilder {
         }
 
         let reqwest_builder = reqwest::Client::builder()
-            // The read timeout "applies to each read operation", so should work fine for larger
-            // transfers that are split into multiple chunks.
-            // We define both as 500ms which is still very conservative, given that we are in the same network,
-            // and expect our backends to respond in <100ms.
-            // This can be overridden by the caller.
-            .connect_timeout(Duration::from_millis(500))
-            .read_timeout(Duration::from_millis(500))
+            // We define just a connection timeout by default but do not limit reads. A connect
+            // timeout of 100ms is still very conservative, but should provide a sensible upper
+            // bound to expected request latencies.
+            .connect_timeout(Duration::from_millis(100))
             .user_agent(USER_AGENT);
 
         Self(Ok(ClientBuilderInner {
@@ -84,16 +81,16 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets both the connect and the read timeout for the [`reqwest::Client`].
-    /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    /// Defines a read timeout for the [`reqwest::Client`].
     ///
-    /// By default, a connect and read timeout of 500ms is set.
+    /// The read timeout is defined to be "between consecutive read operations", for example between
+    /// chunks of a streaming response. For more fine-grained configuration of this and other
+    /// timeouts, use [`Self::configure_reqwest`].
+    ///
+    /// By default, no read timeout and a connect timeout of 100ms is set.
     pub fn timeout(self, timeout: Duration) -> Self {
         let Ok(mut inner) = self.0 else { return self };
-        inner.reqwest_builder = inner
-            .reqwest_builder
-            .connect_timeout(timeout)
-            .read_timeout(timeout);
+        inner.reqwest_builder = inner.reqwest_builder.read_timeout(timeout);
         Self(Ok(inner))
     }
 

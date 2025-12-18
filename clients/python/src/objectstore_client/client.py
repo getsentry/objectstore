@@ -67,23 +67,61 @@ class Usecase:
         self._expiration_policy = expiration_policy
 
 
+# Connect timeout used unless overridden in connection parameters.
+DEFAULT_CONNECT_TIMEOUT = 0.1
+
+
 @dataclass
 class _ConnectionDefaults:
     retries: urllib3.Retry = urllib3.Retry(connect=3, read=0)
     """We only retry connection problems, as we cannot rewind our compression stream."""
 
-    timeout: urllib3.Timeout = urllib3.Timeout(connect=0.5, read=0.5)
+    timeout: urllib3.Timeout = urllib3.Timeout(
+        connect=DEFAULT_CONNECT_TIMEOUT, read=None
+    )
     """
-    The read timeout is defined to be "between consecutive read operations",
-    which should mean one chunk of the response, with a large response being
-    split into multiple chunks.
-    We define both as 500ms which is still very conservative,
-    given that we are in the same network, and expect our backends to respond in <100ms.
+    The read timeout is defined to be "between consecutive read operations", which
+    should mean one chunk of the response, with a large response being split into
+    multiple chunks.
+
+    By default, the client limits the connection phase to 100ms, and has no read
+    timeout.
     """
 
 
 class Client:
-    """A client for Objectstore. Constructing it initializes a connection pool."""
+    """
+    A client for Objectstore. Constructing it initializes a connection pool.
+
+    Args:
+        base_url: The base URL of the Objectstore server (e.g.,
+            "http://objectstore:8888"). metrics_backend: Optional metrics backend for
+            tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
+            provided.
+        propagate_traces: Whether to propagate Sentry trace headers in requests to
+            objectstore. Defaults to ``False``.
+        retries: Number of connection retries for failed requests.
+            Defaults to ``3`` if not specified. **Note:** only connection failures are
+            retried, not read failures (as compression streams cannot be rewound).
+        timeout_ms: Read timeout in milliseconds for API requests. The read timeout
+            is the maximum time to wait between consecutive read operations on the
+            socket (i.e., between receiving chunks of data). Defaults to no read timeout
+            if not specified. The connection timeout is always 100ms. To override the
+            connection timeout, pass a custom ``urllib3.Timeout`` object via
+            ``connection_kwargs``. For example:
+
+            .. code-block:: python
+
+                client = Client(
+                    "http://objectstore:8888", connection_kwargs={
+                        "timeout": urllib3.Timeout(connect=1.0, read=5.0)
+                    }
+                )
+
+        connection_kwargs: Additional keyword arguments to pass to the underlying
+            urllib3 connection pool (e.g., custom headers, SSL settings, advanced
+            timeouts).
+    """
 
     def __init__(
         self,
@@ -107,7 +145,7 @@ class Client:
 
         if timeout_ms:
             connection_kwargs_to_use["timeout"] = urllib3.Timeout(
-                connect=timeout_ms / 1000, read=timeout_ms / 1000
+                connect=DEFAULT_CONNECT_TIMEOUT, read=timeout_ms / 1000
             )
 
         if connection_kwargs:
