@@ -23,6 +23,7 @@ figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
+itertools = "0.14.0"
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }

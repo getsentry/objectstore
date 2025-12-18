@@ -1,7 +1,7 @@
-use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_service::{
-    BatchInsertResult, DeleteResult, GetResult, InsertResult, InsertStream, PayloadStream,
-    StorageService,
+    BatchDeleteResult, BatchGetResult, BatchInsertResult, DeleteResult, GetResult, InsertResult,
+    InsertStream, PayloadStream, StorageService,
 };
 use objectstore_types::{Metadata, Permission};
 
@@ -81,10 +81,27 @@ impl AuthAwareService {
     /// Auth-aware wrapper around [`StorageService::insert_objects`].
     pub async fn insert_objects(
         &self,
-        context: ObjectContext,
+        context: &ObjectContext,
+        keys: &[Option<ObjectKey>],
         inserts: InsertStream,
     ) -> BatchInsertResult {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
-        self.service.insert_objects(context, inserts).await
+        self.service.insert_objects(context, keys, inserts).await
+    }
+
+    /// Auth-aware wrapper around [`StorageService::get_objects`].
+    pub async fn get_objects(&self, context: &ObjectContext, keys: &[ObjectKey]) -> BatchGetResult {
+        self.assert_authorized(Permission::ObjectRead, context)?;
+        self.service.get_objects(context, keys).await
+    }
+
+    /// Auth-aware wrapper around [`StorageService::delete_objects`].
+    pub async fn delete_objects(
+        &self,
+        context: &ObjectContext,
+        keys: &[ObjectKey],
+    ) -> BatchDeleteResult {
+        self.assert_authorized(Permission::ObjectDelete, context)?;
+        self.service.delete_objects(context, keys).await
     }
 }
