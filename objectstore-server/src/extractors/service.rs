@@ -25,7 +25,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(strip_bearer);
 
         let context =
-            AuthContext::from_encoded_jwt(encoded_token, &state.config.auth).map_err(|err| {
+            AuthContext::from_encoded_jwt(encoded_token, &state.key_directory).map_err(|err| {
                 tracing::debug!("Authorization rejected: `{:?}`", err);
                 StatusCode::UNAUTHORIZED
             })?;

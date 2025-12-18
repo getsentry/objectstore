@@ -714,12 +714,13 @@ pub struct Metrics {
 /// associated permissions. May contain multiple key versions to facilitate rotation.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZVerificationKey {
-    /// Versions of this key's key material which may be used to verify signatures.
+    /// Files that contain versions of this key's key material which may be used to verify
+    /// signatures.
     ///
     /// If a key is being rotated, the old and new versions of that key should both be
     /// configured so objectstore can verify signatures while the updated key is still
     /// rolling out. Otherwise, this should only contain the most recent version of a key.
-    pub key_versions: Vec<SecretBox<ConfigSecret>>,
+    pub key_files: Vec<PathBuf>,
 
     /// The maximum set of permissions that this key's signer is authorized to grant.
     ///
@@ -1053,7 +1054,7 @@ mod tests {
             jail.set_env("OS__AUTH__ENFORCE", "true");
             jail.set_env(
                 "OS__AUTH__KEYS",
-                r#"{kid1={key_versions=["abcde","fghij","this is a test\n  multiline string\nend of string\n"],max_permissions=["object.read", "object.write"],}, kid2={key_versions=["12345"],}}"#,
+                r#"{kid1={key_files=["abcde","fghij","this is a test\n  multiline string\nend of string\n"],max_permissions=["object.read", "object.write"],}, kid2={key_files=["12345"],}}"#,
             );
 
             let config = Config::load(None).unwrap();
@@ -1061,11 +1062,11 @@ mod tests {
             assert!(config.auth.enforce);
 
             let kid1 = config.auth.keys.get("kid1").unwrap();
-            assert_eq!(kid1.key_versions[0].expose_secret().as_str(), "abcde");
-            assert_eq!(kid1.key_versions[1].expose_secret().as_str(), "fghij");
+            assert_eq!(kid1.key_files[0], Path::new("abcde"));
+            assert_eq!(kid1.key_files[1], Path::new("fghij"));
             assert_eq!(
-                kid1.key_versions[2].expose_secret().as_str(),
-                "this is a test\n  multiline string\nend of string\n"
+                kid1.key_files[2],
+                Path::new("this is a test\n  multiline string\nend of string\n"),
             );
             assert_eq!(
                 kid1.max_permissions,
@@ -1073,7 +1074,7 @@ mod tests {
             );
 
             let kid2 = config.auth.keys.get("kid2").unwrap();
-            assert_eq!(kid2.key_versions[0].expose_secret().as_str(), "12345");
+            assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
 
             Ok(())
@@ -1090,7 +1091,7 @@ mod tests {
                     enforce: true
                     keys:
                         kid1:
-                            key_versions:
+                            key_files:
                                 - "abcde"
                                 - "fghij"
                                 - |
@@ -1101,7 +1102,7 @@ mod tests {
                                 - "object.read"
                                 - "object.write"
                         kid2:
-                            key_versions:
+                            key_files:
                                 - "12345"
             "#,
             )
@@ -1113,11 +1114,11 @@ mod tests {
             assert!(config.auth.enforce);
 
             let kid1 = config.auth.keys.get("kid1").unwrap();
-            assert_eq!(kid1.key_versions[0].expose_secret().as_str(), "abcde");
-            assert_eq!(kid1.key_versions[1].expose_secret().as_str(), "fghij");
+            assert_eq!(kid1.key_files[0], Path::new("abcde"));
+            assert_eq!(kid1.key_files[1], Path::new("fghij"));
             assert_eq!(
-                kid1.key_versions[2].expose_secret().as_str(),
-                "this is a test\n  multiline string\nend of string\n"
+                kid1.key_files[2],
+                Path::new("this is a test\n  multiline string\nend of string\n")
             );
             assert_eq!(
                 kid1.max_permissions,
@@ -1125,7 +1126,7 @@ mod tests {
             );
 
             let kid2 = config.auth.keys.get("kid2").unwrap();
-            assert_eq!(kid2.key_versions[0].expose_secret().as_str(), "12345");
+            assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
 
             Ok(())

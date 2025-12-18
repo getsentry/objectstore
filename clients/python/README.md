@@ -14,9 +14,19 @@ import urllib3
 from objectstore_client import (
     Client,
     NoOpMetricsBackend,
+    Permission,
     TimeToIdle,
     TimeToLive,
+    TokenGenerator,
     Usecase,
+)
+
+# Necessary when using Objectstore instances that enforce authorization checks.
+token_generator = TokenGenerator(
+    "my-key-id",
+    "<securely inject EdDSA private key>",
+    expiry_seconds=60,
+    permissions=Permission.max(),
 )
 
 # This should be stored in a global variable and reused, in order to reuse the connection
@@ -31,6 +41,8 @@ client = Client(
     retries=3,      # Number of connection retries
     # For further customization, provide additional kwargs for urllib3.HTTPConnectionPool
     connection_kwargs={"maxsize": 10},
+    # Optionally, provide a token generator for Objectstore instances with authorization enforced
+    token_generator=token_generator,
 )
 
 # This could also be stored in a global/shared variable, as you will deal with a fixed number of usecases with statically defined defaults
