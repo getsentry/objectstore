@@ -1,47 +1,95 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, pin::Pin};
 
 use anyhow::Context;
-use async_stream::try_stream;
 use axum::{
     extract::{FromRequest, Request},
     http::StatusCode,
     response::IntoResponse,
 };
-use bytes::Buf;
-use futures::stream;
+use bytes::Bytes;
+use futures::Stream;
 use http::header::CONTENT_TYPE;
-use multer::Multipart;
-use objectstore_service::{InsertStream, id::ObjectKey};
+use multer::Field;
+use multer::{Constraints, Multipart, SizeLimit};
+use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
-use serde::Deserialize;
 
 use crate::error::AnyhowResponse;
 
-#[derive(Deserialize, Debug, PartialEq)]
-#[serde(tag = "op", rename_all = "lowercase")]
-pub enum Operation {
-    Get { key: ObjectKey },
-    Insert { key: Option<ObjectKey> },
-    Delete { key: ObjectKey },
+#[derive(Debug)]
+pub struct GetOperation {
+    pub key: ObjectKey,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
-pub struct Manifest {
-    pub operations: Vec<Operation>,
+#[derive(Debug)]
+pub struct InsertOperation {
+    pub key: Option<ObjectKey>,
+    pub metadata: Metadata,
+    pub payload: Bytes,
+}
+
+#[derive(Debug)]
+pub struct DeleteOperation {
+    pub key: ObjectKey,
+}
+
+#[derive(Debug)]
+pub enum Operation {
+    Get(GetOperation),
+    Insert(InsertOperation),
+    Delete(DeleteOperation),
+}
+
+impl Operation {
+    async fn try_from_field(field: Field<'_>) -> anyhow::Result<Self> {
+        let kind = field
+            .headers()
+            .get(HEADER_BATCH_OPERATION_KIND)
+            .ok_or(anyhow::anyhow!(
+                "missing {HEADER_BATCH_OPERATION_KIND} header"
+            ))?;
+        let kind = kind
+            .to_str()
+            .context(format!("invalid {HEADER_BATCH_OPERATION_KIND} header"))?
+            .to_lowercase();
+
+        let key = match field.headers().get(HEADER_BATCH_OPERATION_KEY) {
+            Some(key) => Some(key.to_str().context("invalid object key")?.to_owned()),
+            None => None,
+        };
+
+        let operation = match kind.as_str() {
+            "get" => {
+                let key = key.context("missing object key for get operation")?;
+                Operation::Get(GetOperation { key })
+            }
+            "insert" => Operation::Insert(InsertOperation {
+                key,
+                metadata: Metadata::from_headers(field.headers(), "")?,
+                payload: field.bytes().await?,
+            }),
+            "delete" => {
+                let key = key.context("missing object key for delet operation")?;
+                Operation::Delete(DeleteOperation { key })
+            }
+            _ => anyhow::bail!("invalid {HEADER_BATCH_OPERATION_KIND} header"),
+        };
+        Ok(operation)
+    }
 }
 
 pub struct BatchRequest {
-    pub manifest: Manifest,
-    pub inserts: InsertStream,
+    pub operations: Pin<Box<dyn Stream<Item = anyhow::Result<Operation>> + Send>>,
 }
 
 impl Debug for BatchRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchRequest")
-            .field("manifest", &self.manifest)
-            .finish()
+        f.debug_struct("BatchRequest").finish()
     }
 }
+
+pub const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
+pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 
 impl<S> FromRequest<S> for BatchRequest
 where
@@ -78,35 +126,28 @@ where
         let content_type = content_type.replace("multipart/mixed", "multipart/form-data");
         let boundary =
             multer::parse_boundary(content_type).context("failed to parse multipart boundary")?;
-        let mut parts = Multipart::new(request.into_body().into_data_stream(), boundary);
-
-        let manifest = parts
-            .next_field()
-            .await
-            .context("failed to parse multipart part")?
-            .ok_or(
-                (
-                    StatusCode::BAD_REQUEST,
-                    "expected at least one multipart part",
-                )
-                    .into_response(),
-            )?;
-        let manifest = manifest
-            .bytes()
-            .await
-            .context("failed to extract manifest")?;
-        let manifest = serde_json::from_reader::<_, Manifest>(manifest.reader())
-            .context("failed to parse manifest")?;
-
-        let inserts = Box::pin(async_stream::try_stream! {
+        let mut parts = Multipart::with_constraints(
+            request.into_body().into_data_stream(),
+            boundary,
+            Constraints::new().size_limit(
+                // TODO(lcian): tentative limits that should be tested
+                SizeLimit::new()
+                    .per_field(1024 * 1024) // 1 MB
+                    .whole_stream(1024 * 1024 * 1024), // 1 GB
+            ),
+        );
+        let operations = Box::pin(async_stream::try_stream! {
+            let mut count = 0;
             while let Some(field) = parts.next_field().await? {
-                let metadata = Metadata::from_headers(field.headers(), "")?;
-                let bytes = field.bytes().await?;
-                yield (metadata, bytes);
+                if count >= 1000 {
+                    Err(anyhow::anyhow!("exceeded limit of 1000 operations per batch request"))?;
+                }
+                count += 1;
+                yield Operation::try_from_field(field).await?;
             }
         });
 
-        Ok(Self { manifest, inserts })
+        Ok(Self { operations })
     }
 }
 
@@ -122,24 +163,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_request_works() {
-        let manifest = r#"{"operations":[{"op":"insert"},{"op":"get","key":"abc123"},{"op":"insert","key":"xyz789"},{"op":"delete","key":"def456"}]}"#;
         let insert1_data = b"first blob data";
         let insert2_data = b"second blob data";
         let expiration = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
         let body = format!(
             "--boundary\r\n\
-             Content-Type: application/json\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: test0\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: get\r\n\
              \r\n\
-             {manifest}\r\n\
+             \r\n\
              --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: test1\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              Content-Type: application/octet-stream\r\n\
              \r\n\
              {insert1}\r\n\
              --boundary\r\n\
-             Content-Type: text/plain\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: test2\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              {HEADER_EXPIRATION}: {expiration}\r\n\
+             Content-Type: text/plain\r\n\
              \r\n\
              {insert2}\r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: test3\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
+             \r\n\
+             \r\n\
              --boundary--\r\n",
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
@@ -152,32 +202,32 @@ mod tests {
 
         let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
 
-        let expected_manifest = Manifest {
-            operations: vec![
-                Operation::Insert { key: None },
-                Operation::Get {
-                    key: "abc123".to_string(),
-                },
-                Operation::Insert {
-                    key: Some("xyz789".to_string()),
-                },
-                Operation::Delete {
-                    key: "def456".to_string(),
-                },
-            ],
+        let operations: Vec<_> = batch_request.operations.collect().await;
+        assert_eq!(operations.len(), 4);
+
+        let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
+            panic!("expected get operation");
         };
-        assert_eq!(batch_request.manifest, expected_manifest);
+        assert_eq!(get_op.key, "test0");
 
-        let inserts: Vec<_> = batch_request.inserts.collect().await;
-        assert_eq!(inserts.len(), 2);
+        let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
+            panic!("expected insert operation");
+        };
+        assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
+        assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
+        assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
-        let (metadata1, bytes1) = inserts[0].as_ref().unwrap();
-        assert_eq!(metadata1.content_type, "application/octet-stream");
-        assert_eq!(bytes1.as_ref(), insert1_data);
+        let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
+            panic!("expected insert operation");
+        };
+        assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
+        assert_eq!(insert_op2.metadata.content_type, "text/plain");
+        assert_eq!(insert_op2.metadata.expiration_policy, expiration);
+        assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
-        let (metadata2, bytes2) = inserts[1].as_ref().unwrap();
-        assert_eq!(metadata2.content_type, "text/plain");
-        assert_eq!(metadata2.expiration_policy, expiration);
-        assert_eq!(bytes2.as_ref(), insert2_data);
+        let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
+            panic!("expected delete operation");
+        };
+        assert_eq!(delete_op.key, "test3");
     }
 }
