@@ -533,6 +533,11 @@ dependencies = [
     { name = "zstandard" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pyjwt", extra = ["crypto"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "filetype", specifier = ">=1.2.0" },
@@ -541,6 +546,9 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.2.2" },
     { name = "zstandard", specifier = ">=0.18.0" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" }]
 
 [[package]]
 name = "packaging"
