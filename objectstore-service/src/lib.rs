@@ -21,7 +21,7 @@ use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
 use crate::backend::common::BoxedBackend;
-use crate::id::{ObjectContext, ObjectId};
+use crate::id::{ObjectContext, ObjectId, ObjectKey};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -96,10 +96,15 @@ pub type InsertResult = anyhow::Result<ObjectId>;
 pub type DeleteResult = anyhow::Result<()>;
 
 /// Type alias to represent a stream of insert operations.
-pub type InsertStream =
+pub type PayloadMetadataStream =
     Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>;
 /// Result type for batch insert operations.
 pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
+/// Result type for batch get operations.
+/// TODO: change this
+pub type BatchGetResult = anyhow::Result<Vec<GetResult>>;
+/// Result type for batch delete operations.
+pub type BatchDeleteResult = anyhow::Result<Vec<DeleteResult>>;
 
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
@@ -290,13 +295,61 @@ impl StorageService {
         Ok(())
     }
 
-    /// TODO
+    /// Batch inserts multiple objects.
     pub async fn insert_objects(
         &self,
-        _context: ObjectContext,
-        _inserts: InsertStream,
+        context: &ObjectContext,
+        keys: &[Option<ObjectKey>],
+        mut inserts: PayloadMetadataStream,
     ) -> BatchInsertResult {
-        todo!();
+        let mut results = Vec::new();
+        let mut key_idx = 0;
+
+        while let Some(item) = inserts.next().await {
+            let result = match item {
+                Ok((metadata, bytes)) => {
+                    let key = keys.get(key_idx).and_then(|k| k.clone());
+                    let stream = futures_util::stream::once(async { Ok(bytes) }).boxed();
+                    self.insert_object(context.clone(), key, &metadata, stream)
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            results.push(result);
+            key_idx += 1;
+        }
+
+        Ok(results)
+    }
+
+    /// Batch retrieve multiple objects by their keys.
+    pub async fn get_objects(&self, context: &ObjectContext, keys: &[ObjectKey]) -> BatchGetResult {
+        let mut results = Vec::new();
+
+        for key in keys {
+            let id = ObjectId::new(context.clone(), key.clone());
+            let result = self.get_object(&id).await;
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
+    /// Batch deletes multiple objects by their keys.
+    pub async fn delete_objects(
+        &self,
+        context: &ObjectContext,
+        keys: &[ObjectKey],
+    ) -> BatchDeleteResult {
+        let mut results = Vec::new();
+
+        for key in keys {
+            let id = ObjectId::new(context.clone(), key.clone());
+            let result = self.delete_object(&id).await;
+            results.push(result);
+        }
+
+        Ok(results)
     }
 }
 
