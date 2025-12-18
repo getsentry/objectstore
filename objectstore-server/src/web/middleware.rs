@@ -41,7 +41,7 @@ pub fn make_http_span(request: &Request) -> tracing::Span {
 
 /// A panic handler that logs the panic and turns it into a 500 response.
 ///
-/// Use with the [`CatchPanicLayer`] middleware.
+/// Use with the [`CatchPanicLayer`](tower_http::catch_panic::CatchPanicLayer) middleware.
 pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     let detail = if let Some(s) = err.downcast_ref::<String>() {
         s.clone()

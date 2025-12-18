@@ -4,7 +4,7 @@
 //! middleware, and the HTTP server. It is a tower service that can be run using any compatible
 //! server framework.
 //!
-//! To listen to incoming connections, use the [`server`] function, which opens a TCP listener and
+//! To listen to incoming connections, use the [`server()`] function, which opens a TCP listener and
 //! serves the application.
 //!
 //! # Testing
