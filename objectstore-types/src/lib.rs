@@ -9,7 +9,7 @@
 pub mod scope;
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -195,6 +195,17 @@ pub enum Permission {
     /// The permission required to delete objects from objectstore.
     #[serde(rename = "object.delete")]
     ObjectDelete,
+}
+
+impl Permission {
+    /// Convenience function for creating a set with read, write, and delete permissions.
+    pub fn rwd() -> HashSet<Permission> {
+        HashSet::from([
+            Permission::ObjectRead,
+            Permission::ObjectWrite,
+            Permission::ObjectDelete,
+        ])
+    }
 }
 
 /// Per-object Metadata.
