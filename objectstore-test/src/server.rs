@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use objectstore_server::config::{AuthZVerificationKey, Config, Storage};
-use objectstore_server::http::App;
 use objectstore_server::state::Services;
+use objectstore_server::web::App;
 use objectstore_types::Permission;
 use tempfile::TempDir;
 
