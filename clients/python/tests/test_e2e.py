@@ -231,7 +231,7 @@ def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
         _object_key = session.put(b"test data")
 
 
-def test_connect_timeout() -> None:
+def test_read_timeout() -> None:
     # this server accepts the connection
     # (even though the backlog is 0 and we never call `accept`),
     # but will never reply with anything, thus causing a read timeout
@@ -239,6 +239,28 @@ def test_connect_timeout() -> None:
     addr = s.getsockname()
     url = f"http://127.0.0.1:{addr[1]}"
 
+    client = Client(url, timeout_ms=500, token_generator=TestTokenGenerator.get())
+    test_usecase = Usecase(
+        "test-usecase",
+        compression="zstd",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(
+        test_usecase, org=12345, project=1337, app_slug="email_app"
+    )
+
+    with pytest.raises(urllib3.exceptions.MaxRetryError):
+        session.get("foo")
+
+
+def test_connect_timeout() -> None:
+    # Connect to a blackhole address that should not reply to SYN packets,
+    # causing a connect timeout with the client's default connect timeout.
+    # 10.255.255.1 is commonly unroutable in most environments.
+    url = "http://10.255.255.1:9"
+
+    # Do NOT set timeout_ms to ensure we exercise default timeouts
     client = Client(url, token_generator=TestTokenGenerator.get())
     test_usecase = Usecase(
         "test-usecase",
