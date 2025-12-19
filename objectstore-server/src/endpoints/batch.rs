@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use bytes::BytesMut;
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
@@ -36,7 +37,7 @@ async fn batch(
         HeaderValue::from_str(&format!("multipart/mixed; boundary={boundary}")).unwrap(),
     );
 
-    let parts: Pin<Box<dyn Stream<Item = anyhow::Result<Part>> + Send>> = async_stream::try_stream! {
+    let parts: BoxStream<anyhow::Result<Part>> = async_stream::try_stream! {
             while let Some(operation) = request.operations.next().await {
                 let res = match operation {
                     Ok(operation) => match operation {
