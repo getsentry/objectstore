@@ -117,7 +117,7 @@ where
 
         // XXX: `multer::parse_boundary` requires the content-type to be `multipart/form-data`
         let content_type = content_type.replace("multipart/mixed", "multipart/form-data");
-        let Ok(boundary) = multer::parse_boundary(content_type).context("") else {
+        let Ok(boundary) = multer::parse_boundary(content_type) else {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "failed to parse multipart boundary",
