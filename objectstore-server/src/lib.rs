@@ -13,5 +13,6 @@ pub mod extractors;
 pub mod healthcheck;
 pub mod http;
 pub mod killswitches;
+pub mod multipart;
 pub mod observability;
 pub mod state;
