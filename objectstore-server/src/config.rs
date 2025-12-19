@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 
 use crate::killswitches::Killswitches;
+use crate::rate_limits::RateLimits;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
@@ -870,6 +871,9 @@ pub struct Config {
 
     /// A list of matchers for requests to discard without processing.
     pub killswitches: Killswitches,
+
+    /// Definitions for rate limits to enforce on incoming requests.
+    pub rate_limits: RateLimits,
 }
 
 impl Default for Config {
@@ -890,6 +894,7 @@ impl Default for Config {
             metrics: Metrics::default(),
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
+            rate_limits: RateLimits::default(),
         }
     }
 }

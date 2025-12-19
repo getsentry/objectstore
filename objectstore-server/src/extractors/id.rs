@@ -15,6 +15,7 @@ use crate::state::ServiceState;
 pub enum ObjectRejection {
     Path(PathRejection),
     Killswitched,
+    RateLimited,
 }
 
 impl IntoResponse for ObjectRejection {
@@ -24,6 +25,11 @@ impl IntoResponse for ObjectRejection {
             ObjectRejection::Killswitched => (
                 axum::http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
+            )
+                .into_response(),
+            ObjectRejection::RateLimited => (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "Object access is rate limited",
             )
                 .into_response(),
         }
@@ -51,6 +57,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 
         if state.config.killswitches.matches(id.context()) {
             return Err(ObjectRejection::Killswitched);
+        }
+
+        if !state.rate_limiter.check(id.context()) {
+            return Err(ObjectRejection::RateLimited);
         }
 
         Ok(Xt(id))
@@ -112,6 +122,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 
         if state.config.killswitches.matches(&context) {
             return Err(ObjectRejection::Killswitched);
+        }
+
+        if !state.rate_limiter.check(&context) {
+            return Err(ObjectRejection::RateLimited);
         }
 
         Ok(Xt(context))
