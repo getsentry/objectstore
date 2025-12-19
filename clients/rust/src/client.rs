@@ -7,6 +7,8 @@ use futures_util::stream::BoxStream;
 use objectstore_types::{Compression, ExpirationPolicy, scope};
 use url::Url;
 
+use crate::auth::TokenGenerator;
+
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug)]
@@ -14,6 +16,7 @@ struct ClientBuilderInner {
     service_url: Url,
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
+    token_generator: Option<TokenGenerator>,
 }
 
 impl ClientBuilderInner {
@@ -53,19 +56,17 @@ impl ClientBuilder {
         }
 
         let reqwest_builder = reqwest::Client::builder()
-            // The read timeout "applies to each read operation", so should work fine for larger
-            // transfers that are split into multiple chunks.
-            // We define both as 500ms which is still very conservative, given that we are in the same network,
-            // and expect our backends to respond in <100ms.
-            // This can be overridden by the caller.
-            .connect_timeout(Duration::from_millis(500))
-            .read_timeout(Duration::from_millis(500))
+            // We define just a connection timeout by default but do not limit reads. A connect
+            // timeout of 100ms is still very conservative, but should provide a sensible upper
+            // bound to expected request latencies.
+            .connect_timeout(Duration::from_millis(100))
             .user_agent(USER_AGENT);
 
         Self(Ok(ClientBuilderInner {
             service_url,
             propagate_traces: false,
             reqwest_builder,
+            token_generator: None,
         }))
     }
 
@@ -80,16 +81,16 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets both the connect and the read timeout for the [`reqwest::Client`].
-    /// For more fine-grained configuration, use [`Self::configure_reqwest`].
+    /// Defines a read timeout for the [`reqwest::Client`].
     ///
-    /// By default, a connect and read timeout of 500ms is set.
+    /// The read timeout is defined to be "between consecutive read operations", for example between
+    /// chunks of a streaming response. For more fine-grained configuration of this and other
+    /// timeouts, use [`Self::configure_reqwest`].
+    ///
+    /// By default, no read timeout and a connect timeout of 100ms is set.
     pub fn timeout(self, timeout: Duration) -> Self {
         let Ok(mut inner) = self.0 else { return self };
-        inner.reqwest_builder = inner
-            .reqwest_builder
-            .connect_timeout(timeout)
-            .read_timeout(timeout);
+        inner.reqwest_builder = inner.reqwest_builder.read_timeout(timeout);
         Self(Ok(inner))
     }
 
@@ -102,6 +103,14 @@ impl ClientBuilder {
     {
         let Ok(mut inner) = self.0 else { return self };
         inner.reqwest_builder = closure(inner.reqwest_builder);
+        Self(Ok(inner))
+    }
+
+    /// Sets a [`TokenGenerator`] that will be used to sign authorization tokens before
+    /// sending requests to Objectstore.
+    pub fn token_generator(self, token_generator: TokenGenerator) -> Self {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.token_generator = Some(token_generator);
         Self(Ok(inner))
     }
 
@@ -121,6 +130,7 @@ impl ClientBuilder {
                 reqwest: inner.reqwest_builder.build()?,
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
+                token_generator: inner.token_generator,
             }),
         })
     }
@@ -224,6 +234,11 @@ impl ScopeInner {
     pub(crate) fn usecase(&self) -> &Usecase {
         &self.usecase
     }
+
+    #[inline]
+    pub(crate) fn scopes(&self) -> &scope::Scopes {
+        &self.scopes
+    }
 }
 
 /// A [`Scope`] is a sequence of key-value pairs that defines a (possibly nested) namespace within a
@@ -281,6 +296,7 @@ pub(crate) struct ClientInner {
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,
+    token_generator: Option<TokenGenerator>,
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -288,16 +304,28 @@ pub(crate) struct ClientInner {
 /// To perform CRUD operations, one has to create a Client, and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
 ///
+/// If your Objectstore instance enforces authorization checks, you must provide a
+/// [`TokenGenerator`] on creation.
+///
 /// # Example
 ///
 /// ```no_run
 /// use std::time::Duration;
-/// use objectstore_client::{Client, Usecase};
+/// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
+/// use objectstore_types::Permission;
 ///
 /// # async fn example() -> objectstore_client::Result<()> {
+/// let token_generator = TokenGenerator::new(SecretKey {
+///         secret_key: "<safely inject secret key>".into(),
+///         kid: "my-service".into(),
+///     })?
+///     .expiry_seconds(30)
+///     .permissions(&[Permission::ObjectRead]);
+///
 /// let client = Client::builder("http://localhost:8888/")
 ///     .timeout(Duration::from_secs(1))
 ///     .propagate_traces(true)
+///     .token_generator(token_generator)
 ///     .build()?;
 ///
 /// let session = Usecase::new("my_app")
@@ -384,10 +412,15 @@ impl Session {
         &self,
         method: reqwest::Method,
         object_key: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> crate::Result<reqwest::RequestBuilder> {
         let url = self.object_url(object_key);
 
         let mut builder = self.client.reqwest.request(method, url);
+
+        if let Some(token_generator) = &self.client.token_generator {
+            let token = token_generator.sign_for_scope(&self.scope)?;
+            builder = builder.bearer_auth(token);
+        }
 
         if self.client.propagate_traces {
             let trace_headers =
@@ -397,7 +430,7 @@ impl Session {
             }
         }
 
-        builder
+        Ok(builder)
     }
 }
 

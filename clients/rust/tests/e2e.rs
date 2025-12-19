@@ -1,12 +1,39 @@
-use objectstore_client::{Client, Usecase};
-use objectstore_test::server::TestServer;
+use std::sync::LazyLock;
+
+use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
+use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
 use objectstore_types::Compression;
+
+pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
+    LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
+
+async fn test_server() -> TestServer {
+    TestServer::with_config(config::Config {
+        auth: config::AuthZ {
+            enforce: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+}
+
+fn test_token_generator() -> TokenGenerator {
+    TokenGenerator::new(SecretKey {
+        kid: TEST_EDDSA_KID.into(),
+        secret_key: TEST_EDDSA_PRIVKEY.clone(),
+    })
+    .unwrap()
+}
 
 #[tokio::test]
 async fn stores_uncompressed() {
-    let server = TestServer::new().await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -30,9 +57,12 @@ async fn stores_uncompressed() {
 
 #[tokio::test]
 async fn uses_zstd_by_default() {
-    let server = TestServer::new().await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
@@ -58,9 +88,12 @@ async fn uses_zstd_by_default() {
 
 #[tokio::test]
 async fn deletes_stores_stuff() {
-    let server = TestServer::new().await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -75,9 +108,12 @@ async fn deletes_stores_stuff() {
 
 #[tokio::test]
 async fn stores_under_given_key() {
-    let server = TestServer::new().await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -89,10 +125,31 @@ async fn stores_under_given_key() {
 }
 
 #[tokio::test]
-async fn overwrites_existing_key() {
+async fn stores_structured_keys() {
     let server = TestServer::new().await;
 
     let client = Client::builder(server.url("/")).build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let body = "oh hai!";
+    let request = session.put(body).key("1/shard-0.json");
+    let stored_id = request.send().await.unwrap().key;
+    assert_eq!(stored_id, "1/shard-0.json");
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    let received = response.payload().await.unwrap();
+    assert_eq!(received, body);
+}
+
+#[tokio::test]
+async fn overwrites_existing_key() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -105,4 +162,43 @@ async fn overwrites_existing_key() {
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
     let payload = response.payload().await.unwrap();
     assert_eq!(payload, "new body");
+}
+
+#[tokio::test]
+async fn not_found_with_wrong_scope() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+
+    // First we have to place an object with one scope
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let stored_id = session.put("initial body").send().await.unwrap().key;
+
+    // Now we need to try to fetch the object with a different scope
+    let session = client.session(usecase.for_project(12345, 9999)).unwrap();
+    let response = session.get(&stored_id).send().await.unwrap();
+    assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn fails_with_insufficient_auth_token_perms() {
+    let server = test_server().await;
+
+    let token_generator = test_token_generator().permissions(&[]);
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(token_generator)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let put_result = session.put("initial body").send().await;
+    println!("{:?}", put_result);
+    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
+    assert!(matches!(put_result, Err(Error::Reqwest(_))));
 }

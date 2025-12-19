@@ -4,7 +4,7 @@ use anyhow::Result;
 use argh::FromArgs;
 
 use crate::config::Config;
-use crate::{healthcheck, http, observability};
+use crate::{healthcheck, observability, web};
 
 /// Objectstore API webserver.
 #[derive(Debug, FromArgs)]
@@ -77,7 +77,7 @@ pub fn execute() -> Result<()> {
 
     let result = runtime.block_on(async move {
         match args.command {
-            Command::Run(RunCommand {}) => http::server(config).await,
+            Command::Run(RunCommand {}) => web::server(config).await,
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
             Command::Version(VersionCommand {}) => unreachable!(),
         }

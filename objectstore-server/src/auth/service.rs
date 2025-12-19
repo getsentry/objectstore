@@ -16,7 +16,6 @@ use crate::auth::AuthContext;
 /// ```
 /// use axum::http::StatusCode;
 /// use objectstore_server::auth::AuthAwareService;
-/// use objectstore_server::error::ApiResult;
 ///
 /// async fn my_endpoint(service: AuthAwareService) -> Result<StatusCode, StatusCode> {
 ///     service.delete_object(todo!("pass some ID"))

@@ -77,7 +77,7 @@ impl GetBuilder {
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
         let response = self
             .session
-            .request(reqwest::Method::GET, &self.key)
+            .request(reqwest::Method::GET, &self.key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {

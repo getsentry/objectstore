@@ -10,6 +10,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+jsonwebtoken = { workspace = true }
 objectstore-server = { workspace = true }
+objectstore-types = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

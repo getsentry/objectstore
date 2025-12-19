@@ -26,7 +26,7 @@ futures-util = { workspace = true }
 http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
-jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
+jsonwebtoken = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
 mime = "0.3.17"
@@ -58,11 +58,12 @@ tower-http = { version = "0.6.6", default-features = false, features = [
     "trace",
 ] }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+tracing-subscriber = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 nix = { version = "0.30.1", features = ["signal"] }
+objectstore-test = { workspace = true }
 serde_json = { workspace = true }
 stresstest = { workspace = true }
 tempfile = { workspace = true }

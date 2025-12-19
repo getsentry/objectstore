@@ -121,7 +121,7 @@ impl StorageService {
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> anyhow::Result<ObjectId> {
+    ) -> InsertResult {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
@@ -226,10 +226,7 @@ impl StorageService {
     }
 
     /// Streams the contents of an object stored at the given key.
-    pub async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
+    pub async fn get_object(&self, id: &ObjectId) -> GetResult {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -266,7 +263,7 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> DeleteResult {
         let start = Instant::now();
 
         if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
