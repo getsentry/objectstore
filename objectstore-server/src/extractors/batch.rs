@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::{
     extract::{FromRequest, Request},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
@@ -13,8 +13,6 @@ use multer::Field;
 use multer::{Constraints, Multipart, SizeLimit};
 use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
-
-use crate::error::AnyhowResponse;
 
 #[derive(Debug)]
 pub struct GetOperation {
@@ -95,7 +93,7 @@ impl<S> FromRequest<S> for BatchRequest
 where
     S: Send + Sync,
 {
-    type Rejection = AnyhowResponse;
+    type Rejection = Response;
 
     async fn from_request(request: Request, _: &S) -> Result<Self, Self::Rejection> {
         let Some(content_type) = request
@@ -103,29 +101,29 @@ where
             .get(CONTENT_TYPE)
             .and_then(|ct| ct.to_str().ok())
         else {
-            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type")
-                .into_response()
-                .into());
+            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type").into_response());
         };
 
         let Ok(mime) = content_type.parse::<mime::Mime>() else {
-            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type")
-                .into_response()
-                .into());
+            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type").into_response());
         };
         if !(mime.type_() == mime::MULTIPART && mime.subtype() == "mixed") {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "expected Content-Type: multipart/mixed",
             )
-                .into_response()
-                .into());
+                .into_response());
         }
 
         // XXX: `multer::parse_boundary` requires the content-type to be `multipart/form-data`
         let content_type = content_type.replace("multipart/mixed", "multipart/form-data");
-        let boundary =
-            multer::parse_boundary(content_type).context("failed to parse multipart boundary")?;
+        let Ok(boundary) = multer::parse_boundary(content_type).context("") else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "failed to parse multipart boundary",
+            )
+                .into_response());
+        };
         let mut parts = Multipart::with_constraints(
             request.into_body().into_data_stream(),
             boundary,

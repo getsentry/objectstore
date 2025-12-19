@@ -10,18 +10,16 @@ mod backend;
 pub mod id;
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::Stream;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
 use crate::backend::common::BoxedBackend;
-use crate::id::{ObjectContext, ObjectId, ObjectKey};
+use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB

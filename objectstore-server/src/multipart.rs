@@ -80,29 +80,29 @@ where
         let mut this = self.project();
         match std::mem::replace(this.state, State::Waiting) {
             State::Waiting => match this.parts.as_mut().poll_next(ctx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => Poll::Pending,
                 Poll::Ready(None) => {
                     *this.state = State::SendClosingBoundary;
                     ctx.waker().wake_by_ref();
-                    return Poll::Pending;
+                    Poll::Pending
                 }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
                 Poll::Ready(Some(Ok(p))) => {
                     *this.state = State::SendHeaders(p);
-                    return Poll::Ready(Some(Ok(this.boundary.clone())));
+                    Poll::Ready(Some(Ok(this.boundary.clone())))
                 }
             },
             State::SendHeaders(part) => {
                 *this.state = State::SendBody(part.body);
                 let headers = serialize_headers(part.headers);
-                return Poll::Ready(Some(Ok(headers)));
+                Poll::Ready(Some(Ok(headers)))
             }
             State::SendBody(body) => {
                 // Add \r\n after the body
                 let mut body_with_newline = BytesMut::with_capacity(body.len() + 2);
                 body_with_newline.put(body);
                 body_with_newline.put(&b"\r\n"[..]);
-                return Poll::Ready(Some(Ok(body_with_newline.freeze())));
+                Poll::Ready(Some(Ok(body_with_newline.freeze())))
             }
             State::SendClosingBoundary => {
                 *this.state = State::Done;
@@ -114,10 +114,10 @@ where
                 let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
                 closing.put(boundary_without_crlf.as_bytes());
                 closing.put(&b"--\r\n"[..]);
-                return Poll::Ready(Some(Ok(closing.freeze())));
+                Poll::Ready(Some(Ok(closing.freeze())))
             }
             State::Done => {
-                return Poll::Ready(None);
+                Poll::Ready(None)
             }
         }
     }

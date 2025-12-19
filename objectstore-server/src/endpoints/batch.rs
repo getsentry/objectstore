@@ -13,7 +13,7 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{DeleteResult, GetResult, InsertResult};
 
 use crate::auth::AuthAwareService;
-use crate::error::ApiResult;
+use crate::endpoints::common::ApiResult;
 use crate::extractors::Operation;
 use crate::extractors::{BatchRequest, Xt};
 use crate::multipart::{IntoBytesStream, Part};
@@ -177,11 +177,14 @@ impl IntoPart for DeleteResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::auth::PublicKeyDirectory;
+
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use bytes::Bytes;
     use objectstore_service::StorageConfig;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -201,6 +204,9 @@ mod tests {
         let state = Arc::new(crate::state::Services {
             config: crate::config::Config::default(),
             service: storage_service,
+            key_directory: PublicKeyDirectory {
+                keys: BTreeMap::new(),
+            },
         });
 
         // Build the router with state
