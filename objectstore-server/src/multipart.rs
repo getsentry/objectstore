@@ -1,3 +1,5 @@
+//! Utilities to represent and serialize multipart parts.
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -64,6 +66,8 @@ enum State {
     Waiting,
     SendHeaders(Part),
     SendBody(Bytes),
+    SendClosingBoundary,
+    Done,
 }
 
 impl<S, E> Stream for PartsSerializer<S, E>
@@ -77,7 +81,11 @@ where
         match std::mem::replace(this.state, State::Waiting) {
             State::Waiting => match this.parts.as_mut().poll_next(ctx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.state = State::SendClosingBoundary;
+                    ctx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Ready(Some(Ok(p))) => {
                     *this.state = State::SendHeaders(p);
@@ -90,7 +98,26 @@ where
                 return Poll::Ready(Some(Ok(headers)));
             }
             State::SendBody(body) => {
-                return Poll::Ready(Some(Ok(body)));
+                // Add \r\n after the body
+                let mut body_with_newline = BytesMut::with_capacity(body.len() + 2);
+                body_with_newline.put(body);
+                body_with_newline.put(&b"\r\n"[..]);
+                return Poll::Ready(Some(Ok(body_with_newline.freeze())));
+            }
+            State::SendClosingBoundary => {
+                *this.state = State::Done;
+                // Create closing boundary: --boundary-- (without \r\n in between)
+                // The boundary already has --boundary\r\n, so we need to strip the \r\n
+                // and add --\r\n instead
+                let boundary_str = std::str::from_utf8(this.boundary).unwrap();
+                let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
+                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
+                closing.put(boundary_without_crlf.as_bytes());
+                closing.put(&b"--\r\n"[..]);
+                return Poll::Ready(Some(Ok(closing.freeze())));
+            }
+            State::Done => {
+                return Poll::Ready(None);
             }
         }
     }
