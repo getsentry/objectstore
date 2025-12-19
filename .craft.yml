@@ -1,0 +1,12 @@
+minVersion: "0.27.2"
+changelogPolicy: auto
+artifactProvider:
+  name: none
+statusProvider:
+  name: github
+  config:
+    contexts:
+      - 'Publish to GHCR'
+preReleaseCommand: ""
+targets:
+  - name: github
