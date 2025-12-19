@@ -18,7 +18,10 @@ impl HttpRemote {
     /// Creates a new `HttpRemote` instance with the given remote URL and a default client.
     pub fn new(remote: &str) -> Self {
         Self {
-            client: Client::new(remote).unwrap(),
+            client: Client::builder(remote)
+                .configure_reqwest(|r| r.no_hickory_dns())
+                .build()
+                .unwrap(),
         }
     }
 
