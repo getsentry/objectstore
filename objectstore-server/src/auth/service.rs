@@ -1,7 +1,5 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{
-    DeleteResult, GetResult, InsertResult, InsertStream, PayloadStream, StorageService,
-};
+use objectstore_service::{DeleteResult, GetResult, InsertResult, PayloadStream, StorageService};
 use objectstore_types::{Metadata, Permission};
 
 use crate::auth::AuthContext;
