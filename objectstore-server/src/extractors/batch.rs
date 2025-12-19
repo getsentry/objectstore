@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use futures::Stream;
+use futures::{StreamExt, stream::BoxStream};
 use http::header::CONTENT_TYPE;
 use multer::Field;
 use multer::{Constraints, Multipart, SizeLimit};
@@ -79,7 +79,7 @@ impl Operation {
 }
 
 pub struct BatchRequest {
-    pub operations: Pin<Box<dyn Stream<Item = anyhow::Result<Operation>> + Send>>,
+    pub operations: BoxStream<'static, anyhow::Result<Operation>>,
 }
 
 impl Debug for BatchRequest {
@@ -136,7 +136,7 @@ where
                     .whole_stream(1024 * 1024 * 1024), // 1 GB
             ),
         );
-        let operations = Box::pin(async_stream::try_stream! {
+        let operations = async_stream::try_stream! {
             let mut count = 0;
             while let Some(field) = parts.next_field().await? {
                 if count >= 1000 {
@@ -145,7 +145,8 @@ where
                 count += 1;
                 yield Operation::try_from_field(field).await?;
             }
-        });
+        }
+        .boxed();
 
         Ok(Self { operations })
     }
