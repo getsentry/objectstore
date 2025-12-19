@@ -116,9 +116,7 @@ where
                 closing.put(&b"--\r\n"[..]);
                 Poll::Ready(Some(Ok(closing.freeze())))
             }
-            State::Done => {
-                Poll::Ready(None)
-            }
+            State::Done => Poll::Ready(None),
         }
     }
 }
