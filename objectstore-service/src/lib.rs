@@ -10,13 +10,11 @@ mod backend;
 pub mod id;
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::Stream;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
@@ -94,12 +92,6 @@ pub type GetResult = anyhow::Result<Option<(Metadata, PayloadStream)>>;
 pub type InsertResult = anyhow::Result<ObjectId>;
 /// Result type for delete operations.
 pub type DeleteResult = anyhow::Result<()>;
-
-/// Type alias to represent a stream of insert operations.
-pub type InsertStream =
-    Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>;
-/// Result type for batch insert operations.
-pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
 
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
@@ -288,15 +280,6 @@ impl StorageService {
         );
 
         Ok(())
-    }
-
-    /// TODO
-    pub async fn insert_objects(
-        &self,
-        _context: ObjectContext,
-        _inserts: InsertStream,
-    ) -> BatchInsertResult {
-        todo!();
     }
 }
 
