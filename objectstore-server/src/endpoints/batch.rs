@@ -5,7 +5,7 @@ use axum::routing;
 use objectstore_service::id::ObjectContext;
 
 use crate::auth::AuthAwareService;
-use crate::error::ApiResult;
+use crate::endpoints::common::ApiResult;
 use crate::extractors::{BatchRequest, Xt};
 use crate::state::ServiceState;
 
