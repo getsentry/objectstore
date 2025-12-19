@@ -2240,6 +2240,7 @@ dependencies = [
  "anyhow",
  "argh",
  "async-stream",
+ "async-trait",
  "axum",
  "axum-extra",
  "bytes",

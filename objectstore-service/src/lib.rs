@@ -95,17 +95,6 @@ pub type InsertResult = anyhow::Result<ObjectId>;
 /// Result type for delete operations.
 pub type DeleteResult = anyhow::Result<()>;
 
-/// Type alias to represent a stream of insert operations.
-pub type PayloadMetadataStream =
-    Pin<Box<dyn Stream<Item = Result<(Metadata, Bytes), anyhow::Error>> + Send>>;
-/// Result type for batch insert operations.
-pub type BatchInsertResult = anyhow::Result<Vec<InsertResult>>;
-/// Result type for batch get operations.
-/// TODO: change this
-pub type BatchGetResult = anyhow::Result<Vec<GetResult>>;
-/// Result type for batch delete operations.
-pub type BatchDeleteResult = anyhow::Result<Vec<DeleteResult>>;
-
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
     pub async fn new(
