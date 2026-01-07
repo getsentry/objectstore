@@ -237,7 +237,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Creates a new token bucket with the specified rate limit and burst capacity.
+    /// Creates a new, full token bucket with the specified rate limit and burst capacity.
     ///
     /// - `rps`: tokens refilled per second (sustained rate limit)
     /// - `burst`: initial tokens and burst allowance above sustained rate
@@ -245,7 +245,7 @@ impl TokenBucket {
         Self {
             refill_rate: rps as f64,
             capacity: (rps + burst) as f64,
-            tokens: burst as f64,
+            tokens: (rps + burst) as f64,
             last_update: Instant::now(),
         }
     }
