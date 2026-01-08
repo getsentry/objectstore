@@ -5,7 +5,6 @@ use std::time::Instant;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Rate limits for objectstore.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -116,29 +115,50 @@ pub struct RateLimiter {
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
-    sender: UnboundedSender<usize>,
-    current: Arc<AtomicUsize>,
+    /// Accumulator that's incremented every time an operation that uses bandwidth is executed.
+    accumulator: Arc<AtomicUsize>,
+    /// An estimate of the bandwidth that's currently being utilized in bytes per second.
+    estimate: Arc<AtomicUsize>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel::<usize>();
-        let current = Arc::new(AtomicUsize::new(0));
+        let accumulator = Arc::new(AtomicUsize::new(0));
+        let estimate = Arc::new(AtomicUsize::new(0));
 
-        let current_clone = Arc::clone(&current);
+        let accumulator_clone = Arc::clone(&accumulator);
+        let estimate_clone = Arc::clone(&estimate);
         tokio::task::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-            loop {
-                let _ = receiver;
-                interval.tick().await;
-                current_clone.store(0, std::sync::atomic::Ordering::Relaxed);
-            }
+            Self::estimator(accumulator_clone, estimate_clone).await;
         });
 
         Self {
             config,
-            sender,
-            current,
+            accumulator,
+            estimate,
+        }
+    }
+
+    /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
+    ///
+    /// The calculation is based on the increments of `self.accumulator` happened in the last `tick`.
+    /// Its result is stored in `self.estimate`, which is queried for rate-limiting logic.
+    async fn estimator(accumulator: Arc<AtomicUsize>, average: Arc<AtomicUsize>) {
+        let tick = std::time::Duration::from_millis(50);
+        let mut interval = tokio::time::interval(tick);
+
+        let to_bps = 1.0 / tick.as_secs_f64(); // Conversion factor from bytes to bps
+        const ALPHA: f64 = 0.2; // 20% weight to new sample, 80% to previous average
+        let mut ewma: f64 = 0.0;
+        loop {
+            interval.tick().await;
+            let current = accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let bps = (current as f64) * to_bps;
+            ewma = ALPHA * bps + (1.0 - ALPHA) * ewma;
+
+            let ewma_usize = ewma.floor() as usize;
+            average.store(ewma_usize, std::sync::atomic::Ordering::Relaxed);
+            merni::gauge!("server.bandwidth.ewma"@b: ewma_usize);
         }
     }
 
@@ -146,7 +166,7 @@ impl BandwidthRateLimiter {
         let Some(bps) = self.config.global_bps else {
             return true;
         };
-        self.current.load(std::sync::atomic::Ordering::Relaxed) <= bps
+        self.estimate.load(std::sync::atomic::Ordering::Relaxed) <= bps
     }
 }
 
@@ -167,11 +187,16 @@ impl RateLimiter {
         }
     }
 
+    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn bytes_accumulator(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.bandwidth.accumulator)
+    }
+
     /// Checks if the given context is within the rate limits.
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
     pub fn check(&self, context: &ObjectContext) -> bool {
-        self.check_throughput(context) && self.check_bandwidth()
+        self.check_throughput(context) && self.bandwidth.check()
     }
 
     fn check_throughput(&self, context: &ObjectContext) -> bool {
@@ -220,10 +245,6 @@ impl RateLimiter {
         }
 
         true
-    }
-
-    fn check_bandwidth(&self) -> bool {
-        self.bandwidth.check()
     }
 
     fn create_bucket(&self, rps: u32) -> Mutex<TokenBucket> {

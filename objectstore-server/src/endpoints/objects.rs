@@ -3,10 +3,9 @@ use pin_project_lite::pin_project;
 use std::fmt::Debug;
 use std::io;
 use std::pin::Pin;
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::SystemTime;
-use tokio::sync::mpsc::{self, UnboundedSender};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -48,35 +47,36 @@ pub struct InsertObjectResponse {
 }
 
 pin_project! {
-    pub struct MeteredStream {
+    pub struct MeteredPayloadStream {
         #[pin]
         inner: PayloadStream,
-        sender: UnboundedSender<usize>,
+        counter: Arc<AtomicUsize>,
     }
 }
 
-impl MeteredStream {
-    fn from(inner: PayloadStream, sender: UnboundedSender<usize>) -> Self {
-        Self { inner, sender }
+impl MeteredPayloadStream {
+    fn from(inner: PayloadStream, counter: Arc<AtomicUsize>) -> Self {
+        Self { inner, counter }
     }
 }
 
-impl Stream for MeteredStream {
+impl Debug for MeteredPayloadStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredPayloadStream").finish()
+    }
+}
+
+impl Stream for MeteredPayloadStream {
     type Item = std::io::Result<Bytes>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         let res = this.inner.poll_next(cx);
         if let Poll::Ready(Some(Ok(ref bytes))) = res {
-            let _ = this.sender.send(bytes.len());
+            this.counter
+                .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
         }
         res
-    }
-}
-
-impl Debug for MeteredStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeteredStream").finish()
     }
 }
 
@@ -92,6 +92,8 @@ async fn objects_post(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
+
     let response_id = service
         .insert_object(context, None, &metadata, stream)
         .await?;
@@ -102,10 +104,15 @@ async fn objects_post(
     Ok((StatusCode::CREATED, response).into_response())
 }
 
-async fn object_get(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
+async fn object_get(
+    service: AuthAwareService,
+    State(state): State<ServiceState>,
+    Xt(id): Xt<ObjectId>,
+) -> ApiResult<Response> {
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
 
     let headers = metadata
         .to_headers("", false)
@@ -127,6 +134,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
 async fn object_put(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
     body: Body,
@@ -137,6 +145,7 @@ async fn object_put(
 
     let ObjectId { context, key } = id;
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
     let response_id = service
         .insert_object(context, Some(key), &metadata, stream)
         .await?;
