@@ -1,10 +1,5 @@
 use anyhow::Context as _;
-use pin_project_lite::pin_project;
-use std::fmt::Debug;
 use std::io;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::time::SystemTime;
 
 use axum::body::Body;
@@ -13,17 +8,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use bytes::Bytes;
-use futures_util::{Stream, StreamExt, TryStreamExt};
-use objectstore_service::PayloadStream;
+use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::Metadata;
 use serde::Serialize;
-use std::task::{Context, Poll};
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::ApiResult;
 use crate::extractors::Xt;
+use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
@@ -44,40 +37,6 @@ pub fn router() -> Router<ServiceState> {
 #[derive(Debug, Serialize)]
 pub struct InsertObjectResponse {
     pub key: String,
-}
-
-pin_project! {
-    pub struct MeteredPayloadStream {
-        #[pin]
-        inner: PayloadStream,
-        counter: Arc<AtomicUsize>,
-    }
-}
-
-impl MeteredPayloadStream {
-    fn from(inner: PayloadStream, counter: Arc<AtomicUsize>) -> Self {
-        Self { inner, counter }
-    }
-}
-
-impl Debug for MeteredPayloadStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeteredPayloadStream").finish()
-    }
-}
-
-impl Stream for MeteredPayloadStream {
-    type Item = std::io::Result<Bytes>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        let res = this.inner.poll_next(cx);
-        if let Poll::Ready(Some(Ok(ref bytes))) = res {
-            this.counter
-                .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
-        }
-        res
-    }
 }
 
 async fn objects_post(

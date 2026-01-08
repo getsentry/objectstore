@@ -1,9 +1,15 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::{Mutex, atomic::AtomicUsize};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
+use bytes::Bytes;
+use futures_util::Stream;
+use objectstore_service::PayloadStream;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
+use pin_project_lite::pin_project;
 use serde::{Deserialize, Serialize};
 
 /// Rate limits for objectstore.
@@ -332,5 +338,43 @@ impl TokenBucket {
         } else {
             false
         }
+    }
+}
+
+pin_project! {
+    /// A wrapper around a `PayloadStream` that measures bandwidth usage.
+    ///
+    /// This behaves exactly as a `PayloadStream`, except that every time an item is polled,
+    /// the accumulator is incremented by the size of the returned `Bytes` chunk.
+    pub(crate) struct MeteredPayloadStream {
+        #[pin]
+        inner: PayloadStream,
+        accumulator: Arc<AtomicUsize>,
+    }
+}
+
+impl MeteredPayloadStream {
+    pub fn from(inner: PayloadStream, accumulator: Arc<AtomicUsize>) -> Self {
+        Self { inner, accumulator }
+    }
+}
+
+impl std::fmt::Debug for MeteredPayloadStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredPayloadStream").finish()
+    }
+}
+
+impl Stream for MeteredPayloadStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let res = this.inner.poll_next(cx);
+        if let Poll::Ready(Some(Ok(ref bytes))) = res {
+            this.accumulator
+                .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        res
     }
 }
