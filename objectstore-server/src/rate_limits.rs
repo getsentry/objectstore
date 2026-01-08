@@ -143,7 +143,7 @@ impl BandwidthRateLimiter {
     ///
     /// The calculation is based on the increments of `self.accumulator` happened in the last `tick`.
     /// The estimate is stored in `self.estimate`, which can be queried for bandwidth-based rate-limiting.
-    async fn estimator(accumulator: Arc<AtomicUsize>, average: Arc<AtomicUsize>) {
+    async fn estimator(accumulator: Arc<AtomicUsize>, estimate: Arc<AtomicUsize>) {
         let tick = std::time::Duration::from_millis(50);
         let mut interval = tokio::time::interval(tick);
 
@@ -157,7 +157,7 @@ impl BandwidthRateLimiter {
             ewma = ALPHA * bps + (1.0 - ALPHA) * ewma;
 
             let ewma_usize = ewma.floor() as usize;
-            average.store(ewma_usize, std::sync::atomic::Ordering::Relaxed);
+            estimate.store(ewma_usize, std::sync::atomic::Ordering::Relaxed);
             merni::gauge!("server.bandwidth.ewma"@b: ewma_usize);
         }
     }
