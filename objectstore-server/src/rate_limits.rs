@@ -142,7 +142,7 @@ impl BandwidthRateLimiter {
     /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
     ///
     /// The calculation is based on the increments of `self.accumulator` happened in the last `tick`.
-    /// Its result is stored in `self.estimate`, which is queried for rate-limiting logic.
+    /// The estimate is stored in `self.estimate`, which can be queried for bandwidth-based rate-limiting.
     async fn estimator(accumulator: Arc<AtomicUsize>, average: Arc<AtomicUsize>) {
         let tick = std::time::Duration::from_millis(50);
         let mut interval = tokio::time::interval(tick);
