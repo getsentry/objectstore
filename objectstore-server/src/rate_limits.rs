@@ -1,9 +1,11 @@
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::sync::{Mutex, atomic::AtomicUsize};
 use std::time::Instant;
 
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Rate limits for objectstore.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -96,18 +98,56 @@ pub struct BandwidthLimits {
     /// The overall maximum bandwidth (in bytes per second) per service instance.
     ///
     /// Defaults to `None`, meaning no global bandwidth limit is enforced.
-    pub global_bps: Option<u64>,
+    pub global_bps: Option<usize>,
 }
 
 #[derive(Debug)]
 pub struct RateLimiter {
     config: RateLimits,
+    bandwidth: BandwidthRateLimiter,
     global: Option<Mutex<TokenBucket>>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: papaya::HashMap<String, Mutex<TokenBucket>>,
     scopes: papaya::HashMap<Scopes, Mutex<TokenBucket>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
+}
+
+#[derive(Debug)]
+struct BandwidthRateLimiter {
+    config: BandwidthLimits,
+    sender: UnboundedSender<usize>,
+    current: Arc<AtomicUsize>,
+}
+
+impl BandwidthRateLimiter {
+    fn new(config: BandwidthLimits) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel::<usize>();
+        let current = Arc::new(AtomicUsize::new(0));
+
+        let current_clone = Arc::clone(&current);
+        tokio::task::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                let _ = receiver;
+                interval.tick().await;
+                current_clone.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        Self {
+            config,
+            sender,
+            current,
+        }
+    }
+
+    fn check(&self) -> bool {
+        let Some(bps) = self.config.global_bps else {
+            return true;
+        };
+        self.current.load(std::sync::atomic::Ordering::Relaxed) <= bps
+    }
 }
 
 impl RateLimiter {
@@ -118,7 +158,8 @@ impl RateLimiter {
             .map(|rps| Mutex::new(TokenBucket::new(rps, config.throughput.burst)));
 
         Self {
-            config,
+            config: config.clone(),
+            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
             global,
             usecases: papaya::HashMap::new(),
             scopes: papaya::HashMap::new(),
@@ -130,7 +171,7 @@ impl RateLimiter {
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
     pub fn check(&self, context: &ObjectContext) -> bool {
-        self.check_throughput(context) && self.check_bandwidth(context)
+        self.check_throughput(context) && self.check_bandwidth()
     }
 
     fn check_throughput(&self, context: &ObjectContext) -> bool {
@@ -181,9 +222,8 @@ impl RateLimiter {
         true
     }
 
-    fn check_bandwidth(&self, _context: &ObjectContext) -> bool {
-        // Not implemented
-        true
+    fn check_bandwidth(&self) -> bool {
+        self.bandwidth.check()
     }
 
     fn create_bucket(&self, rps: u32) -> Mutex<TokenBucket> {

@@ -1,16 +1,26 @@
+use anyhow::Context as _;
+use pin_project_lite::pin_project;
+use std::fmt::Debug;
 use std::io;
+use std::pin::Pin;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::SystemTime;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
-use anyhow::Context;
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use futures_util::{StreamExt, TryStreamExt};
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use objectstore_service::PayloadStream;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::Metadata;
 use serde::Serialize;
+use std::task::{Context, Poll};
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::ApiResult;
@@ -37,8 +47,42 @@ pub struct InsertObjectResponse {
     pub key: String,
 }
 
+pin_project! {
+    pub struct MeteredStream {
+        #[pin]
+        inner: PayloadStream,
+        sender: UnboundedSender<usize>,
+    }
+}
+
+impl MeteredStream {
+    fn from(inner: PayloadStream, sender: UnboundedSender<usize>) -> Self {
+        Self { inner, sender }
+    }
+}
+
+impl Stream for MeteredStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let res = this.inner.poll_next(cx);
+        if let Poll::Ready(Some(Ok(ref bytes))) = res {
+            let _ = this.sender.send(bytes.len());
+        }
+        res
+    }
+}
+
+impl Debug for MeteredStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredStream").finish()
+    }
+}
+
 async fn objects_post(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
     body: Body,
