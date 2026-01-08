@@ -56,10 +56,12 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
 
         if state.config.killswitches.matches(id.context()) {
+            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }
 
         if !state.rate_limiter.check(id.context()) {
+            tracing::debug!("Request rejected due to rate limits");
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -121,10 +123,12 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
         populate_sentry_context(&context);
 
         if state.config.killswitches.matches(&context) {
+            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }
 
         if !state.rate_limiter.check(&context) {
+            tracing::debug!("Request rejected due to rate limits");
             return Err(ObjectRejection::RateLimited);
         }
 
