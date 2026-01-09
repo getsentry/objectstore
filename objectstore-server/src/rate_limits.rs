@@ -112,6 +112,27 @@ pub struct RateLimiter {
     throughput: ThroughputRateLimiter,
 }
 
+impl RateLimiter {
+    pub fn new(config: RateLimits) -> Self {
+        Self {
+            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
+            throughput: ThroughputRateLimiter::new(config.throughput),
+        }
+    }
+
+    /// Checks if the given context is within the rate limits.
+    ///
+    /// Returns `true` if the context is within the rate limits, `false` otherwise.
+    pub fn check(&self, context: &ObjectContext) -> bool {
+        self.throughput.check(context) && self.bandwidth.check()
+    }
+
+    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.accumulator)
+    }
+}
+
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
@@ -276,27 +297,6 @@ impl ThroughputRateLimiter {
             (None, Some(p)) => Some(p),
             (None, None) => None,
         }
-    }
-}
-
-impl RateLimiter {
-    pub fn new(config: RateLimits) -> Self {
-        Self {
-            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
-            throughput: ThroughputRateLimiter::new(config.throughput),
-        }
-    }
-
-    /// Checks if the given context is within the rate limits.
-    ///
-    /// Returns `true` if the context is within the rate limits, `false` otherwise.
-    pub fn check(&self, context: &ObjectContext) -> bool {
-        self.throughput.check(context) && self.bandwidth.check()
-    }
-
-    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
-    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.bandwidth.accumulator)
     }
 }
 
