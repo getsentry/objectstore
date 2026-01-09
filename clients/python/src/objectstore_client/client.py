@@ -121,6 +121,8 @@ class Client:
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
             timeouts).
+        token_generator: A [`TokenGenerator`] created with parameters for signing
+            objectstore auth tokens.
     """
 
     def __init__(

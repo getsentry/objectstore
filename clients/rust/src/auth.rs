@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_types::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::ScopeInner;
+
+pub use objectstore_types::Permission;
 
 const DEFAULT_EXPIRY_SECONDS: u64 = 60;
 const DEFAULT_PERMISSIONS: [Permission; 3] = [
