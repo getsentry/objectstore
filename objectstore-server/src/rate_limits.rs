@@ -1,6 +1,13 @@
+use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::atomic::AtomicU64;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use futures_util::Stream;
+use objectstore_service::PayloadStream;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
@@ -102,12 +109,71 @@ pub struct BandwidthLimits {
 #[derive(Debug)]
 pub struct RateLimiter {
     config: RateLimits,
+    bandwidth: BandwidthRateLimiter,
     global: Option<Mutex<TokenBucket>>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: papaya::HashMap<String, Mutex<TokenBucket>>,
     scopes: papaya::HashMap<Scopes, Mutex<TokenBucket>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
+}
+
+#[derive(Debug)]
+struct BandwidthRateLimiter {
+    config: BandwidthLimits,
+    /// Accumulator that's incremented every time an operation that uses bandwidth is executed.
+    accumulator: Arc<AtomicU64>,
+    /// An estimate of the bandwidth that's currently being utilized in bytes per second.
+    estimate: Arc<AtomicU64>,
+}
+
+impl BandwidthRateLimiter {
+    fn new(config: BandwidthLimits) -> Self {
+        let accumulator = Arc::new(AtomicU64::new(0));
+        let estimate = Arc::new(AtomicU64::new(0));
+
+        let accumulator_clone = Arc::clone(&accumulator);
+        let estimate_clone = Arc::clone(&estimate);
+        tokio::task::spawn(async move {
+            Self::estimator(accumulator_clone, estimate_clone).await;
+        });
+
+        Self {
+            config,
+            accumulator,
+            estimate,
+        }
+    }
+
+    /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
+    ///
+    /// The calculation is based on the increments of `self.accumulator` happened in the last `TICK`.
+    /// The estimate is stored in `self.estimate`, which can be queried for bandwidth-based rate-limiting.
+    async fn estimator(accumulator: Arc<AtomicU64>, estimate: Arc<AtomicU64>) {
+        const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
+        const ALPHA: f64 = 0.2; // EWMA alpha parameter: 20% weight to new sample, 80% to previous average
+
+        let mut interval = tokio::time::interval(TICK);
+        let to_bps = 1.0 / TICK.as_secs_f64(); // Conversion factor from bytes to bps
+        let mut ewma: f64 = 0.0;
+        loop {
+            interval.tick().await;
+            let current = accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let bps = (current as f64) * to_bps;
+            ewma = ALPHA * bps + (1.0 - ALPHA) * ewma;
+
+            let ewma_int = ewma.floor() as u64;
+            estimate.store(ewma_int, std::sync::atomic::Ordering::Relaxed);
+            merni::gauge!("server.bandwidth.ewma"@b: ewma_int);
+        }
+    }
+
+    fn check(&self) -> bool {
+        let Some(bps) = self.config.global_bps else {
+            return true;
+        };
+        self.estimate.load(std::sync::atomic::Ordering::Relaxed) <= bps
+    }
 }
 
 impl RateLimiter {
@@ -118,7 +184,8 @@ impl RateLimiter {
             .map(|rps| Mutex::new(TokenBucket::new(rps, config.throughput.burst)));
 
         Self {
-            config,
+            config: config.clone(),
+            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
             global,
             usecases: papaya::HashMap::new(),
             scopes: papaya::HashMap::new(),
@@ -126,11 +193,16 @@ impl RateLimiter {
         }
     }
 
+    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.accumulator)
+    }
+
     /// Checks if the given context is within the rate limits.
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
     pub fn check(&self, context: &ObjectContext) -> bool {
-        self.check_throughput(context) && self.check_bandwidth(context)
+        self.check_throughput(context) && self.bandwidth.check()
     }
 
     fn check_throughput(&self, context: &ObjectContext) -> bool {
@@ -178,11 +250,6 @@ impl RateLimiter {
             }
         }
 
-        true
-    }
-
-    fn check_bandwidth(&self, _context: &ObjectContext) -> bool {
-        // Not implemented
         true
     }
 
@@ -271,5 +338,42 @@ impl TokenBucket {
         } else {
             false
         }
+    }
+}
+
+/// A wrapper around a `PayloadStream` that measures bandwidth usage.
+///
+/// This behaves exactly as a `PayloadStream`, except that every time an item is polled,
+/// the accumulator is incremented by the size of the returned `Bytes` chunk.
+pub(crate) struct MeteredPayloadStream {
+    inner: PayloadStream,
+    accumulator: Arc<AtomicU64>,
+}
+
+impl MeteredPayloadStream {
+    pub fn from(inner: PayloadStream, accumulator: Arc<AtomicU64>) -> Self {
+        Self { inner, accumulator }
+    }
+}
+
+impl std::fmt::Debug for MeteredPayloadStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredPayloadStream")
+            .field("accumulator", &self.accumulator)
+            .finish()
+    }
+}
+
+impl Stream for MeteredPayloadStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let res = this.inner.as_mut().poll_next(cx);
+        if let Poll::Ready(Some(Ok(ref bytes))) = res {
+            this.accumulator
+                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        res
     }
 }
