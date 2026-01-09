@@ -7,6 +7,7 @@ use tokio::runtime::Handle;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
+use crate::rate_limits::RateLimiter;
 
 /// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
@@ -31,6 +32,8 @@ pub struct Services {
     /// The `kid` header field from incoming authorization tokens should correspond to a public key
     /// in this directory that can be used to verify the token.
     pub key_directory: PublicKeyDirectory,
+    /// Stateful admission-based rate limiter for incoming requests.
+    pub rate_limiter: RateLimiter,
 }
 
 impl Services {
@@ -45,12 +48,14 @@ impl Services {
         let long_term = map_storage_config(&config.long_term_storage);
         let service = StorageService::new(high_volume, long_term).await?;
 
-        let key_directory: PublicKeyDirectory = (&config.auth).try_into()?;
+        let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
+        let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
         Ok(Arc::new(Self {
             config,
             service,
             key_directory,
+            rate_limiter,
         }))
     }
 }
