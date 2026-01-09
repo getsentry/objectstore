@@ -1,7 +1,6 @@
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
 use bigtable_rs::bigtable::BigTableConnection;
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -10,6 +9,7 @@ use tokio::runtime::Handle;
 
 use crate::PayloadStream;
 use crate::backend::common::Backend;
+use crate::error::BackendError;
 use crate::id::ObjectId;
 
 /// Connection timeout used for the initial connection to BigQuery.
@@ -57,7 +57,7 @@ impl BigTableBackend {
         instance_name: &str,
         table_name: &str,
         connections: Option<usize>,
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         let bigtable = if let Some(endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
                 endpoint,
@@ -97,7 +97,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> Result<v2::MutateRowResponse>
+    ) -> Result<v2::MutateRowResponse, BackendError>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
@@ -125,8 +125,11 @@ impl BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
-                return response.with_context(|| {
-                    format!("failed mutating bigtable row performing a `{action}`")
+                return response.map_err(|e| {
+                    BackendError::network_with_cause(
+                        format!("failed mutating bigtable row performing a `{action}`"),
+                        e,
+                    )
                 });
             }
             retry_count += 1;
@@ -141,18 +144,20 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> Result<v2::MutateRowResponse> {
+    ) -> Result<v2::MutateRowResponse, BackendError> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
             ExpirationPolicy::TimeToLive(ttl) => (
                 FAMILY_GC,
-                ttl_to_micros(ttl, access_time).context("TTL out of range")?,
+                ttl_to_micros(ttl, access_time)
+                    .ok_or_else(|| BackendError::encoding("TTL out of range"))?,
             ),
             ExpirationPolicy::TimeToIdle(tti) => (
                 FAMILY_GC,
-                ttl_to_micros(tti, access_time).context("TTL out of range")?,
+                ttl_to_micros(tti, access_time)
+                    .ok_or_else(|| BackendError::encoding("TTL out of range"))?,
             ),
         };
 
@@ -169,7 +174,8 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                value: serde_json::to_vec(metadata).with_context(|| "failed to encode metadata")?,
+                value: serde_json::to_vec(metadata)
+                    .map_err(|e| BackendError::encoding_with_cause("failed to encode metadata", e))?,
             }),
         ];
         self.mutate(path, mutations, action).await
@@ -188,7 +194,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> Result<()> {
+    ) -> Result<(), BackendError> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -202,7 +208,10 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -226,7 +235,9 @@ impl Backend for BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.read_failures": 1);
                 }
-                break response?;
+                break response.map_err(|e| {
+                    BackendError::network_with_cause("failed reading bigtable row", e)
+                })?;
             }
             retry_count += 1;
             merni::counter!("bigtable.read_retry": 1);
@@ -252,8 +263,9 @@ impl Backend for BigTableBackend {
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value)
-                        .with_context(|| "failed to decode metadata")?;
+                    metadata = serde_json::from_slice(&cell.value).map_err(|e| {
+                        BackendError::decoding_with_cause("failed to decode metadata", e)
+                    })?;
                 }
                 _ => {
                     // TODO: Log unknown column
@@ -267,7 +279,8 @@ impl Backend for BigTableBackend {
         metadata.time_expires = expire_at;
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time)
+        {
             tracing::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -288,7 +301,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -336,7 +349,7 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<BigTableBackend> {
+    async fn create_test_backend() -> anyhow::Result<BigTableBackend> {
         BigTableBackend::new(
             Some("localhost:8086"),
             "testing",
@@ -351,7 +364,7 @@ mod tests {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
+    async fn read_to_vec(mut stream: PayloadStream) -> anyhow::Result<Vec<u8>> {
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
             payload.extend(&chunk);
@@ -367,7 +380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_roundtrip() -> Result<()> {
+    async fn test_roundtrip() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -394,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent() -> Result<()> {
+    async fn test_get_nonexistent() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -405,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_nonexistent() -> Result<()> {
+    async fn test_delete_nonexistent() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -415,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_overwrite() -> Result<()> {
+    async fn test_overwrite() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -448,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_after_delete() -> Result<()> {
+    async fn test_read_after_delete() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -467,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ttl_immediate() -> Result<()> {
+    async fn test_ttl_immediate() -> anyhow::Result<()> {
         // NB: We create a TTL that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 
@@ -490,7 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tti_immediate() -> Result<()> {
+    async fn test_tti_immediate() -> anyhow::Result<()> {
         // NB: We create a TTI that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 

@@ -7,6 +7,7 @@
 
 // TODO(ja): Re-organize modules
 mod backend;
+pub mod error;
 pub mod id;
 
 use std::path::Path;
@@ -112,12 +113,16 @@ impl StorageService {
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> anyhow::Result<ObjectId> {
+    ) -> Result<ObjectId, error::ServiceError> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
         let mut backend = BackendChoice::HighVolume;
-        while let Some(chunk) = stream.try_next().await? {
+        while let Some(chunk) = stream
+            .try_next()
+            .await
+            .map_err(error::ServiceError::StreamRead)?
+        {
             first_chunk.extend_from_slice(&chunk);
 
             if first_chunk.len() > BACKEND_SIZE_THRESHOLD {
@@ -220,7 +225,7 @@ impl StorageService {
     pub async fn get_object(
         &self,
         id: &ObjectId,
-    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
+    ) -> Result<Option<(Metadata, PayloadStream)>, error::ServiceError> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -257,7 +262,7 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> Result<(), error::ServiceError> {
         let start = Instant::now();
 
         if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {

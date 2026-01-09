@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
-use anyhow::{Context, Result};
+use anyhow::Context as _;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::PayloadStream;
 use crate::backend::common::{self, Backend};
+use crate::error::BackendError;
 use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
@@ -109,7 +110,7 @@ impl GcsObject {
     }
 
     /// Converts GCS JSON object metadata to our Metadata type.
-    pub fn into_metadata(mut self) -> Result<Metadata> {
+    pub fn into_metadata(mut self) -> Result<Metadata, BackendError> {
         // Remove ignored metadata keys that are set by the GCS emulator.
         self.metadata.remove(&GcsMetaKey::EmulatorIgnored);
 
@@ -117,12 +118,25 @@ impl GcsObject {
             .metadata
             .remove(&GcsMetaKey::Expiration)
             .map(|s| s.parse())
-            .transpose()?
+            .transpose()
+            .map_err(|e: objectstore_types::Error| {
+                BackendError::decoding_with_cause("failed to parse expiration policy", e)
+            })?
             .unwrap_or_default();
 
         let content_type = self.content_type;
-        let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
-        let size = self.size.map(|size| size.parse()).transpose()?;
+        let compression = self
+            .content_encoding
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: objectstore_types::Error| {
+                BackendError::decoding_with_cause("failed to parse compression", e)
+            })?;
+        let size = self
+            .size
+            .map(|size| size.parse())
+            .transpose()
+            .map_err(|e| BackendError::decoding_with_cause("failed to parse size", e))?;
         let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
@@ -131,7 +145,7 @@ impl GcsObject {
             if let GcsMetaKey::Custom(custom_key) = key {
                 custom.insert(custom_key, value);
             } else {
-                anyhow::bail!("unexpected metadata");
+                return Err(BackendError::decoding("unexpected metadata in GCS response"));
             }
         }
 
@@ -162,7 +176,7 @@ enum GcsMetaKey {
 }
 
 impl std::str::FromStr for GcsMetaKey {
-    type Err = anyhow::Error;
+    type Err = BackendError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if matches!(s, "x_emulator_upload" | "x_testbench_upload") {
@@ -171,10 +185,18 @@ impl std::str::FromStr for GcsMetaKey {
 
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
-            Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
+            Some(unknown) => {
+                return Err(BackendError::decoding(format!(
+                    "unknown builtin metadata key: {unknown}"
+                )))
+            }
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
-                None => anyhow::bail!("invalid GCS metadata key format: {s}"),
+                None => {
+                    return Err(BackendError::decoding(format!(
+                        "invalid GCS metadata key format: {s}"
+                    )))
+                }
             },
         })
     }
@@ -218,7 +240,7 @@ pub struct GcsBackend {
 
 impl GcsBackend {
     /// Creates an authenticated GCS JSON API backend bound to the given bucket.
-    pub async fn new(endpoint: Option<&str>, bucket: &str) -> Result<Self> {
+    pub async fn new(endpoint: Option<&str>, bucket: &str) -> anyhow::Result<Self> {
         let (endpoint, token_provider) = match endpoint {
             Some(emulator_host) => (emulator_host, None),
             None => (DEFAULT_ENDPOINT, Some(gcp_auth::provider().await?)),
@@ -233,23 +255,23 @@ impl GcsBackend {
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
-    fn object_url(&self, id: &ObjectId) -> Result<Url> {
+    fn object_url(&self, id: &ObjectId) -> Result<Url, BackendError> {
         let mut url = self.endpoint.clone();
 
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .map_err(|()| BackendError::invalid_response("invalid GCS endpoint path", None))?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
         Ok(url)
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url> {
+    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url, BackendError> {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .map_err(|()| BackendError::invalid_response("invalid GCS endpoint path", None))?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
         url.query_pairs_mut()
@@ -260,16 +282,27 @@ impl GcsBackend {
     }
 
     /// Creates a request builder with the appropriate authentication.
-    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
+    async fn request(
+        &self,
+        method: Method,
+        url: impl IntoUrl,
+    ) -> Result<RequestBuilder, BackendError> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
-            let token = provider.token(TOKEN_SCOPES).await?;
+            let token = provider
+                .token(TOKEN_SCOPES)
+                .await
+                .map_err(|e| BackendError::network_with_cause("failed to get auth token", e))?;
             builder = builder.bearer_auth(token.as_str());
         }
         Ok(builder)
     }
 
-    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<()> {
+    async fn update_custom_time(
+        &self,
+        object_url: Url,
+        custom_time: SystemTime,
+    ) -> Result<(), BackendError> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -281,9 +314,15 @@ impl GcsBackend {
             .await?
             .json(&CustomTimeRequest { custom_time })
             .send()
-            .await?
+            .await
+            .map_err(|e| BackendError::network_with_cause("failed to update custom time", e))?
             .error_for_status()
-            .context("failed to update expiration time for object with TTI")?;
+            .map_err(|e| {
+                BackendError::invalid_response(
+                    "failed to update expiration time for object with TTI",
+                    e.status().map(|s| s.as_u16()),
+                )
+            })?;
 
         Ok(())
     }
@@ -310,7 +349,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<()> {
+    ) -> Result<(), BackendError> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
@@ -319,13 +358,18 @@ impl Backend for GcsBackend {
         let multipart = multipart::Form::new()
             .part(
                 "metadata",
-                multipart::Part::text(serde_json::to_string(&gcs_metadata)?)
-                    .mime_str("application/json")?,
+                multipart::Part::text(
+                    serde_json::to_string(&gcs_metadata)
+                        .map_err(|e| BackendError::encoding_with_cause("failed to encode metadata", e))?,
+                )
+                .mime_str("application/json")
+                .map_err(|e| BackendError::encoding_with_cause("invalid mime type for metadata", e))?,
             )
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
-                    .mime_str(&metadata.content_type)?,
+                    .mime_str(&metadata.content_type)
+                    .map_err(|e| BackendError::encoding_with_cause("invalid content type", e))?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -338,36 +382,48 @@ impl Backend for GcsBackend {
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
             .send()
-            .await?
+            .await
+            .map_err(|e| BackendError::network_with_cause("failed to send upload request", e))?
             .error_for_status()
-            .context("failed to upload object via multipart")?;
+            .map_err(|e| {
+                BackendError::invalid_response(
+                    "failed to upload object via multipart",
+                    e.status().map(|s| s.as_u16()),
+                )
+            })?;
 
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
             .request(Method::GET, object_url.clone())
             .await?
             .send()
-            .await?;
+            .await
+            .map_err(|e| BackendError::network_with_cause("failed to get object metadata", e))?;
 
         if metadata_response.status() == StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
             return Ok(None);
         }
 
-        let metadata_response = metadata_response
-            .error_for_status()
-            .context("failed to get object metadata")?;
+        let metadata_response = metadata_response.error_for_status().map_err(|e| {
+            BackendError::invalid_response(
+                "failed to get object metadata",
+                e.status().map(|s| s.as_u16()),
+            )
+        })?;
 
-        let gcs_metadata: GcsObject = metadata_response
-            .json()
-            .await
-            .context("failed to parse object metadata")?;
+        let gcs_metadata: GcsObject = metadata_response.json().await.map_err(|e| {
+            BackendError::decoding_with_cause("failed to parse object metadata", e)
+        })?;
 
         // TODO: Store custom_time directly in metadata.
         let expire_at = gcs_metadata.custom_time;
@@ -377,7 +433,8 @@ impl Backend for GcsBackend {
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time)
+        {
             tracing::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -398,9 +455,15 @@ impl Backend for GcsBackend {
             .request(Method::GET, download_url)
             .await?
             .send()
-            .await?
+            .await
+            .map_err(|e| BackendError::network_with_cause("failed to get object payload", e))?
             .error_for_status()
-            .context("failed to get object payload")?;
+            .map_err(|e| {
+                BackendError::invalid_response(
+                    "failed to get object payload",
+                    e.status().map(|s| s.as_u16()),
+                )
+            })?;
 
         let stream = payload_response
             .bytes_stream()
@@ -411,20 +474,24 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
         tracing::debug!("Deleting from GCS backend");
         let response = self
             .request(Method::DELETE, self.object_url(id)?)
             .await?
             .send()
-            .await?;
+            .await
+            .map_err(|e| BackendError::network_with_cause("failed to send delete request", e))?;
 
         // Do not error for objects that do not exist
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response
-                .error_for_status()
-                .context("failed to delete object")?;
+            response.error_for_status().map_err(|e| {
+                BackendError::invalid_response(
+                    "failed to delete object",
+                    e.status().map(|s| s.as_u16()),
+                )
+            })?;
         }
 
         Ok(())
@@ -445,7 +512,7 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<GcsBackend> {
+    async fn create_test_backend() -> anyhow::Result<GcsBackend> {
         GcsBackend::new(Some("http://localhost:8087"), "test-bucket").await
     }
 
@@ -453,7 +520,7 @@ mod tests {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
     }
 
-    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
+    async fn read_to_vec(mut stream: PayloadStream) -> anyhow::Result<Vec<u8>> {
         let mut payload = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
             payload.extend(&chunk);
@@ -469,7 +536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_roundtrip() -> Result<()> {
+    async fn test_roundtrip() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -501,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent() -> Result<()> {
+    async fn test_get_nonexistent() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -512,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_nonexistent() -> Result<()> {
+    async fn test_delete_nonexistent() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -522,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_overwrite() -> Result<()> {
+    async fn test_overwrite() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -555,7 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_after_delete() -> Result<()> {
+    async fn test_read_after_delete() -> anyhow::Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -574,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ttl_immediate() -> Result<()> {
+    async fn test_ttl_immediate() -> anyhow::Result<()> {
         // NB: We create a TTL that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 
@@ -597,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tti_immediate() -> Result<()> {
+    async fn test_tti_immediate() -> anyhow::Result<()> {
         // NB: We create a TTI that immediately expires in this tests. This might be optimized away
         // in a future implementation, so we will have to update this test accordingly.
 
