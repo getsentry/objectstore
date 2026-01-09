@@ -54,7 +54,7 @@ async fn test_killswitches() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_througput_global_rps_limit() -> Result<()> {
+async fn test_throughput_global_rps_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
@@ -244,16 +244,6 @@ async fn test_throughput_rule() -> Result<()> {
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
 
-    // Refill bucket
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    // After waiting, request matching rule should succeed again
-    let response = client
-        .get(server.url("/v1/objects/restricted/org=42/nonexistent"))
-        .send()
-        .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
-
     // Different usecase should not be affected by rule
     let response = client
         .get(server.url("/v1/objects/other/org=42/nonexistent"))
@@ -264,6 +254,16 @@ async fn test_throughput_rule() -> Result<()> {
     // Same usecase but different scope should not be affected by rule
     let response = client
         .get(server.url("/v1/objects/restricted/org=43/nonexistent"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Refill bucket
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // After waiting, request matching rule should succeed again
+    let response = client
+        .get(server.url("/v1/objects/restricted/org=42/nonexistent"))
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
