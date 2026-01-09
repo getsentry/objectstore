@@ -108,14 +108,8 @@ pub struct BandwidthLimits {
 
 #[derive(Debug)]
 pub struct RateLimiter {
-    config: RateLimits,
     bandwidth: BandwidthRateLimiter,
-    global: Option<Mutex<TokenBucket>>,
-    // NB: These maps grow unbounded but we accept this as we expect an overall limited
-    // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: papaya::HashMap<String, Mutex<TokenBucket>>,
-    scopes: papaya::HashMap<Scopes, Mutex<TokenBucket>>,
-    rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
+    throughput: ThroughputRateLimiter,
 }
 
 #[derive(Debug)]
@@ -176,16 +170,25 @@ impl BandwidthRateLimiter {
     }
 }
 
-impl RateLimiter {
-    pub fn new(config: RateLimits) -> Self {
+#[derive(Debug)]
+struct ThroughputRateLimiter {
+    config: ThroughputLimits,
+    global: Option<Mutex<TokenBucket>>,
+    // NB: These maps grow unbounded but we accept this as we expect an overall limited
+    // number of usecases and scopes. We emit gauge metrics to monitor their size.
+    usecases: papaya::HashMap<String, Mutex<TokenBucket>>,
+    scopes: papaya::HashMap<Scopes, Mutex<TokenBucket>>,
+    rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
+}
+
+impl ThroughputRateLimiter {
+    fn new(config: ThroughputLimits) -> Self {
         let global = config
-            .throughput
             .global_rps
-            .map(|rps| Mutex::new(TokenBucket::new(rps, config.throughput.burst)));
+            .map(|rps| Mutex::new(TokenBucket::new(rps, config.burst)));
 
         Self {
-            config: config.clone(),
-            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
+            config,
             global,
             usecases: papaya::HashMap::new(),
             scopes: papaya::HashMap::new(),
@@ -193,19 +196,7 @@ impl RateLimiter {
         }
     }
 
-    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
-    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.bandwidth.accumulator)
-    }
-
-    /// Checks if the given context is within the rate limits.
-    ///
-    /// Returns `true` if the context is within the rate limits, `false` otherwise.
-    pub fn check(&self, context: &ObjectContext) -> bool {
-        self.check_throughput(context) && self.bandwidth.check()
-    }
-
-    fn check_throughput(&self, context: &ObjectContext) -> bool {
+    fn check(&self, context: &ObjectContext) -> bool {
         // NB: We intentionally use unwrap and crash the server if the mutexes are poisoned.
 
         // Global check
@@ -236,7 +227,7 @@ impl RateLimiter {
         }
 
         // Rule checks - each matching rule has its own dedicated bucket
-        for (idx, rule) in self.config.throughput.rules.iter().enumerate() {
+        for (idx, rule) in self.config.rules.iter().enumerate() {
             if !rule.matches(context) {
                 continue;
             }
@@ -254,20 +245,20 @@ impl RateLimiter {
     }
 
     fn create_bucket(&self, rps: u32) -> Mutex<TokenBucket> {
-        Mutex::new(TokenBucket::new(rps, self.config.throughput.burst))
+        Mutex::new(TokenBucket::new(rps, self.config.burst))
     }
 
     /// Returns the effective RPS for per-usecase limiting, if configured.
     fn usecase_rps(&self) -> Option<u32> {
-        let global_rps = self.config.throughput.global_rps?;
-        let pct = self.config.throughput.usecase_pct?;
+        let global_rps = self.config.global_rps?;
+        let pct = self.config.usecase_pct?;
         Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
     }
 
     /// Returns the effective RPS for per-scope limiting, if configured.
     fn scope_rps(&self) -> Option<u32> {
-        let global_rps = self.config.throughput.global_rps?;
-        let pct = self.config.throughput.scope_pct?;
+        let global_rps = self.config.global_rps?;
+        let pct = self.config.scope_pct?;
         Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
     }
 
@@ -275,7 +266,6 @@ impl RateLimiter {
     fn rule_rps(&self, rule: &ThroughputRule) -> Option<u32> {
         let pct_limit = rule.pct.and_then(|p| {
             self.config
-                .throughput
                 .global_rps
                 .map(|g| ((g as f64) * (p as f64 / 100.0)) as u32)
         });
@@ -286,6 +276,27 @@ impl RateLimiter {
             (None, Some(p)) => Some(p),
             (None, None) => None,
         }
+    }
+}
+
+impl RateLimiter {
+    pub fn new(config: RateLimits) -> Self {
+        Self {
+            bandwidth: BandwidthRateLimiter::new(config.bandwidth),
+            throughput: ThroughputRateLimiter::new(config.throughput),
+        }
+    }
+
+    /// Checks if the given context is within the rate limits.
+    ///
+    /// Returns `true` if the context is within the rate limits, `false` otherwise.
+    pub fn check(&self, context: &ObjectContext) -> bool {
+        self.throughput.check(context) && self.bandwidth.check()
+    }
+
+    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.accumulator)
     }
 }
 
