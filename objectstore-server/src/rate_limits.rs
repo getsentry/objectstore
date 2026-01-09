@@ -6,7 +6,7 @@ use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
 
 /// Rate limits for objectstore.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct RateLimits {
     /// Limits the number of requests per second per service instance.
     pub throughput: ThroughputLimits,
@@ -14,7 +14,7 @@ pub struct RateLimits {
     pub bandwidth: BandwidthLimits,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputLimits {
     /// The overall maximum number of requests per second per service instance.
     ///
@@ -45,7 +45,7 @@ pub struct ThroughputLimits {
     pub rules: Vec<ThroughputRule>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputRule {
     /// Optional usecase to match.
     ///
@@ -91,7 +91,7 @@ impl ThroughputRule {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct BandwidthLimits {
     /// The overall maximum bandwidth (in bytes per second) per service instance.
     ///
@@ -237,7 +237,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Creates a new token bucket with the specified rate limit and burst capacity.
+    /// Creates a new, full token bucket with the specified rate limit and burst capacity.
     ///
     /// - `rps`: tokens refilled per second (sustained rate limit)
     /// - `burst`: initial tokens and burst allowance above sustained rate
@@ -245,7 +245,7 @@ impl TokenBucket {
         Self {
             refill_rate: rps as f64,
             capacity: (rps + burst) as f64,
-            tokens: burst as f64,
+            tokens: (rps + burst) as f64,
             last_update: Instant::now(),
         }
     }
