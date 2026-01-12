@@ -330,7 +330,8 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     (millis * 1000)
         .try_into()
         .map_err(|e| BackendError::Generic {
-            context: "Bigtable TTL calculation: failed to convert duration to i64 microseconds".to_string(),
+            context: "Bigtable TTL calculation: failed to convert duration to i64 microseconds"
+                .to_string(),
             cause: Some(Box::new(e)),
         })
 }
