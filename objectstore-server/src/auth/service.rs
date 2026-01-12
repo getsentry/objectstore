@@ -65,10 +65,7 @@ impl AuthAwareService {
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
-    pub async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> ApiResult<Option<(Metadata, PayloadStream)>> {
+    pub async fn get_object(&self, id: &ObjectId) -> ApiResult<Option<(Metadata, PayloadStream)>> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
         Ok(self.service.get_object(id).await?)
     }
