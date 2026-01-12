@@ -1,14 +1,18 @@
 //! Error types for the objectstore API layer.
 
+use std::error::Error;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use objectstore_service::ServiceError;
-use thiserror::Error;
+use serde::{Deserialize, Serialize};
+use thiserror::Error as ThisError;
 
 use crate::auth::AuthError;
 
 /// Error type for API operations, encompassing service, auth, and rate limiting errors.
-#[derive(Debug, Error)]
+#[derive(Debug, ThisError)]
 pub enum ApiError {
     /// Errors from the service layer (storage backends, streaming, etc.).
     #[error("service error: {0}")]
@@ -30,13 +34,40 @@ pub enum ApiError {
 /// Result type for API operations.
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// A JSON error response returned by the API.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ApiErrorResponse {
+    /// The main error message.
+    #[serde(default)]
+    detail: Option<String>,
+    /// Chain of error causes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    causes: Vec<String>,
+}
+
+impl ApiErrorResponse {
+    /// Creates an error response from an error, extracting the full cause chain.
+    pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
+        let detail = Some(error.to_string());
+
+        let mut causes = Vec::new();
+        let mut source = error.source();
+        while let Some(s) = source {
+            causes.push(s.to_string());
+            source = s.source();
+        }
+
+        Self { detail, causes }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::Service(err) => {
                 // Log service errors as they're unexpected
                 tracing::error!(
-                    error = err as &dyn std::error::Error,
+                    error = err as &dyn Error,
                     "service error handling request"
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -47,7 +78,7 @@ impl IntoResponse for ApiError {
             | ApiError::Auth(AuthError::NotPermitted) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::InitFailure(_))
             | ApiError::Auth(AuthError::InternalError(_)) => {
-                tracing::error!(error = &self as &dyn std::error::Error, "auth system error");
+                tracing::error!(error = &self as &dyn Error, "auth system error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             ApiError::BadRequest(msg) => {
@@ -57,6 +88,7 @@ impl IntoResponse for ApiError {
             ApiError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         };
 
-        status.into_response()
+        let body = ApiErrorResponse::from_error(&self);
+        (status, Json(body)).into_response()
     }
 }
