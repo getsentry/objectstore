@@ -165,7 +165,7 @@ impl BigTableBackend {
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
                 value: serde_json::to_vec(metadata).map_err(|cause| BackendError::Serde {
-                    context: "failed to serialize metadata for BigTable write".to_string(),
+                    context: "failed to serialize metadata".to_string(),
                     cause,
                 })?,
             }),
@@ -225,7 +225,7 @@ impl Backend for BigTableBackend {
                     merni::counter!("bigtable.read_failures": 1);
                 }
                 break response.map_err(|e| BackendError::Generic {
-                    context: "failed reading bigtable rows".to_string(),
+                    context: "failed to read bigtable rows".to_string(),
                     cause: Box::new(e),
                 })?;
             }
@@ -255,7 +255,7 @@ impl Backend for BigTableBackend {
                 self::COLUMN_METADATA => {
                     metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
                         BackendError::Serde {
-                            context: "failed to deserialize metadata from BigTable".to_string(),
+                            context: "failed to deserialize metadata".to_string(),
                             cause,
                         }
                     })?;
@@ -330,10 +330,7 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
         .try_into()
         .map_err(|e| BackendError::Generic {
             context: "Timestamp out of range".to_string(),
-            cause: Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{}", e),
-            )),
+            cause: Box::new(e),
         })
 }
 
