@@ -164,7 +164,10 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                value: serde_json::to_vec(metadata)?,
+                value: serde_json::to_vec(metadata).map_err(|cause| BackendError::Serde {
+                    context: "failed to serialize metadata for BigTable write".to_string(),
+                    cause,
+                })?,
             }),
         ];
         self.mutate(path, mutations, action).await
@@ -253,7 +256,10 @@ impl Backend for BigTableBackend {
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value)?;
+                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| BackendError::Serde {
+                        context: "failed to deserialize metadata from BigTable".to_string(),
+                        cause,
+                    })?;
                 }
                 _ => {
                     // TODO: Log unknown column

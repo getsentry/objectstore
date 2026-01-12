@@ -39,8 +39,12 @@ pub enum BackendError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("serde error: {0}")]
-    Serde(#[from] serde_json::Error),
+    #[error("serde error: {context}")]
+    Serde {
+        context: String,
+        #[source]
+        cause: serde_json::Error,
+    },
 
     #[error("reqwest error: {context}")]
     Reqwest {

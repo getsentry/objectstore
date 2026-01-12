@@ -333,10 +333,15 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
+        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| BackendError::Serde {
+            context: "failed to serialize metadata for GCS upload".to_string(),
+            cause,
+        })?;
+
         let multipart = multipart::Form::new()
             .part(
                 "metadata",
-                multipart::Part::text(serde_json::to_string(&gcs_metadata)?)
+                multipart::Part::text(metadata_json)
                     .mime_str("application/json")
                     .map_err(|cause| BackendError::Reqwest {
                         context: "failed to set mime type for metadata".to_string(),

@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::PayloadStream;
-use crate::backend::common::{Backend, BackendResult};
+use crate::backend::common::{Backend, BackendError, BackendResult};
 use crate::id::ObjectId;
 
 #[derive(Debug)]
@@ -49,7 +49,10 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(metadata)?;
+        let metadata_json = serde_json::to_string(metadata).map_err(|cause| BackendError::Serde {
+            context: "failed to serialize metadata for local filesystem write".to_string(),
+            cause,
+        })?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
@@ -82,7 +85,10 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata = serde_json::from_str(metadata_line.trim_end())?;
+        let metadata: Metadata = serde_json::from_str(metadata_line.trim_end()).map_err(|cause| BackendError::Serde {
+            context: "failed to deserialize metadata from local filesystem".to_string(),
+            cause,
+        })?;
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
