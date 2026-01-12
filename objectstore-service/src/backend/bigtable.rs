@@ -126,7 +126,7 @@ impl BigTableBackend {
                     merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
                 return response.map_err(|e| BackendError::Generic {
-                    message: format!("failed mutating bigtable row performing a `{action}`"),
+                    context: format!("failed mutating bigtable row performing a `{action}`"),
                     cause: Box::new(e),
                 });
             }
@@ -225,7 +225,7 @@ impl Backend for BigTableBackend {
                     merni::counter!("bigtable.read_failures": 1);
                 }
                 break response.map_err(|e| BackendError::Generic {
-                    message: "failed reading bigtable rows".to_string(),
+                    context: "failed reading bigtable rows".to_string(),
                     cause: Box::new(e),
                 })?;
             }
@@ -308,18 +308,18 @@ impl Backend for BigTableBackend {
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
-        message: "TTL duration overflow".to_string(),
+        context: "TTL duration overflow".to_string(),
         cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| BackendError::Generic {
-            message: "Invalid system time".to_string(),
+            context: "Invalid system time".to_string(),
             cause: Box::new(e),
         })?
         .as_millis();
     (millis * 1000).try_into().map_err(|e| BackendError::Generic {
-        message: "Timestamp out of range".to_string(),
+        context: "Timestamp out of range".to_string(),
         cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e))),
     })
 }

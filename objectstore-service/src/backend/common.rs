@@ -42,8 +42,12 @@ pub enum BackendError {
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
+    #[error("reqwest error: {context}")]
+    Reqwest {
+        context: String,
+        #[source]
+        cause: reqwest::Error,
+    },
 
     #[error("metadata de/serialization error: {0}")]
     Metadata(#[from] objectstore_types::Error),
@@ -51,9 +55,9 @@ pub enum BackendError {
     #[error("GCP authentication error: {0}")]
     GcpAuth(#[from] gcp_auth::Error),
 
-    #[error("storage backend error: {message}")]
+    #[error("storage backend error: {context}")]
     Generic {
-        message: String,
+        context: String,
         #[source]
         cause: Box<dyn std::error::Error + Send + Sync>,
     },

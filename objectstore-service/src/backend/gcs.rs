@@ -243,7 +243,7 @@ impl GcsBackend {
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
-                message: "invalid GCS endpoint path".to_string(),
+                context: "invalid GCS endpoint path".to_string(),
                 cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
@@ -257,7 +257,7 @@ impl GcsBackend {
 
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
-                message: "invalid GCS endpoint path".to_string(),
+                context: "invalid GCS endpoint path".to_string(),
                 cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
@@ -291,8 +291,16 @@ impl GcsBackend {
             .await?
             .json(&CustomTimeRequest { custom_time })
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send update custom time request".to_string(),
+                cause,
+            })?
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to update expiration time for object with TTI".to_string(),
+                cause,
+            })?;
 
         Ok(())
     }
@@ -329,12 +337,20 @@ impl Backend for GcsBackend {
             .part(
                 "metadata",
                 multipart::Part::text(serde_json::to_string(&gcs_metadata)?)
-                    .mime_str("application/json")?,
+                    .mime_str("application/json")
+                    .map_err(|cause| BackendError::Reqwest {
+                        context: "failed to set mime type for metadata".to_string(),
+                        cause,
+                    })?,
             )
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
-                    .mime_str(&metadata.content_type)?,
+                    .mime_str(&metadata.content_type)
+                    .map_err(|cause| BackendError::Reqwest {
+                        context: "failed to set mime type for media".to_string(),
+                        cause,
+                    })?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -347,8 +363,16 @@ impl Backend for GcsBackend {
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send multipart upload request".to_string(),
+                cause,
+            })?
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to upload object via multipart".to_string(),
+                cause,
+            })?;
 
         Ok(())
     }
@@ -364,16 +388,31 @@ impl Backend for GcsBackend {
             .request(Method::GET, object_url.clone())
             .await?
             .send()
-            .await?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send get metadata request".to_string(),
+                cause,
+            })?;
 
         if metadata_response.status() == StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
             return Ok(None);
         }
 
-        let metadata_response = metadata_response.error_for_status()?;
+        let metadata_response = metadata_response
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to get object metadata".to_string(),
+                cause,
+            })?;
 
-        let gcs_metadata: GcsObject = metadata_response.json().await?;
+        let gcs_metadata: GcsObject = metadata_response
+            .json()
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to parse object metadata".to_string(),
+                cause,
+            })?;
 
         // TODO: Store custom_time directly in metadata.
         let expire_at = gcs_metadata.custom_time;
@@ -404,8 +443,16 @@ impl Backend for GcsBackend {
             .request(Method::GET, download_url)
             .await?
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send get payload request".to_string(),
+                cause,
+            })?
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to get object payload".to_string(),
+                cause,
+            })?;
 
         let stream = payload_response
             .bytes_stream()
@@ -422,12 +469,19 @@ impl Backend for GcsBackend {
             .request(Method::DELETE, self.object_url(id)?)
             .await?
             .send()
-            .await?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send delete request".to_string(),
+                cause,
+            })?;
 
         // Do not error for objects that do not exist
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response.error_for_status()?;
+            response.error_for_status().map_err(|cause| BackendError::Reqwest {
+                context: "failed to delete object".to_string(),
+                cause,
+            })?;
         }
 
         Ok(())

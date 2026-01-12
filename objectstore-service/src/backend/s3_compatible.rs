@@ -6,7 +6,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::PayloadStream;
-use crate::backend::common::{self, Backend, BackendResult};
+use crate::backend::common::{self, Backend, BackendError, BackendResult};
 use crate::id::ObjectId;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -106,8 +106,16 @@ where
             .header("x-goog-metadata-directive", "REPLACE")
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send TTI update request".to_string(),
+                cause,
+            })?
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to update expiration time for object with TTI".to_string(),
+                cause,
+            })?;
 
         Ok(())
     }
@@ -153,8 +161,16 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .body(Body::wrap_stream(stream))
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send put request".to_string(),
+                cause,
+            })?
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to put object".to_string(),
+                cause,
+            })?;
 
         Ok(())
     }
@@ -167,13 +183,24 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(id);
 
-        let response = self.request(Method::GET, &object_url).await?.send().await?;
+        let response = self
+            .request(Method::GET, &object_url)
+            .await?
+            .send()
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send get request".to_string(),
+                cause,
+            })?;
         if response.status() == StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
             return Ok(None);
         }
 
-        let response = response.error_for_status()?;
+        let response = response.error_for_status().map_err(|cause| BackendError::Reqwest {
+            context: "failed to get object".to_string(),
+            cause,
+        })?;
 
         let headers = response.headers();
         // TODO: Populate size in metadata
@@ -209,12 +236,19 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .request(Method::DELETE, self.object_url(id))
             .await?
             .send()
-            .await?;
+            .await
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to send delete request".to_string(),
+                cause,
+            })?;
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response.error_for_status()?;
+            response.error_for_status().map_err(|cause| BackendError::Reqwest {
+                context: "failed to delete object".to_string(),
+                cause,
+            })?;
         }
 
         Ok(())
