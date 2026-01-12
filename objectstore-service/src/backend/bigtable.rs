@@ -147,20 +147,8 @@ impl BigTableBackend {
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-            ExpirationPolicy::TimeToLive(ttl) => (
-                FAMILY_GC,
-                ttl_to_micros(ttl, access_time).ok_or_else(|| BackendError::Generic {
-                    message: "TTL out of range".to_string(),
-                    cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
-                })?,
-            ),
-            ExpirationPolicy::TimeToIdle(tti) => (
-                FAMILY_GC,
-                ttl_to_micros(tti, access_time).ok_or_else(|| BackendError::Generic {
-                    message: "TTI out of range".to_string(),
-                    cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
-                })?,
-            ),
+            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, access_time)?),
+            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, access_time)?),
         };
 
         let mutations = [
@@ -318,13 +306,22 @@ impl Backend for BigTableBackend {
 /// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
-fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Option<i64> {
-    let deadline = from.checked_add(ttl)?;
+fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64, BackendError> {
+    let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
+        message: "TTL duration overflow".to_string(),
+        cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
+    })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?
+        .map_err(|e| BackendError::Generic {
+            message: "Invalid system time".to_string(),
+            cause: Box::new(e),
+        })?
         .as_millis();
-    (millis * 1000).try_into().ok()
+    (millis * 1000).try_into().map_err(|e| BackendError::Generic {
+        message: "Timestamp out of range".to_string(),
+        cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e))),
+    })
 }
 
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.
