@@ -13,8 +13,7 @@ use objectstore_types::Metadata;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::ApiResult;
-use crate::error::ApiError;
+use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
 use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;

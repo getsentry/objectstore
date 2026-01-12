@@ -7,7 +7,6 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod endpoints;
-pub mod error;
 pub mod extractors;
 pub mod healthcheck;
 pub mod killswitches;

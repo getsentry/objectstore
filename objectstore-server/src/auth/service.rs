@@ -3,7 +3,7 @@ use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::{Metadata, Permission};
 
 use crate::auth::AuthContext;
-use crate::error::ApiResult;
+use crate::endpoints::common::ApiResult;
 
 /// Wrapper around [`StorageService`] that ensures each operation is authorized.
 ///

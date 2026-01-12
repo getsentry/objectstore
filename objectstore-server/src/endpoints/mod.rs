@@ -6,7 +6,7 @@ use axum::Router;
 
 use crate::state::ServiceState;
 
-mod common;
+pub mod common;
 mod health;
 mod objects;
 
