@@ -68,18 +68,14 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::Client(_) => StatusCode::BAD_REQUEST,
 
-            ApiError::Server(_) => {
-                tracing::error!(error = &self as &dyn Error, "internal server error");
+            ApiError::Auth(AuthError::InternalError(_)) => {
+                tracing::error!(error = &self as &dyn Error, "internal auth error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            ApiError::Auth(_) => StatusCode::UNAUTHORIZED,
 
-            ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Auth(AuthError::ValidationFailure(_))
-            | ApiError::Auth(AuthError::VerificationFailure)
-            | ApiError::Auth(AuthError::NotPermitted) => StatusCode::UNAUTHORIZED,
-
-            ApiError::Auth(AuthError::InternalError(_)) => {
-                tracing::error!(error = &self as &dyn Error, "auth system error");
+            ApiError::Server(_) => {
+                tracing::error!(error = &self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
