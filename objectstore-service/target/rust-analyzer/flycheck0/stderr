@@ -1,0 +1,310 @@
+   0.199177125s  INFO prepare_target{force=false package_id=objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust) target="objectstore_client"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("objectstore_client", ["lib"], "/Users/lcian/repos/objectstore/clients/rust/src/lib.rs", Edition2024) }
+   0.199191958s  INFO prepare_target{force=false package_id=objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust) target="objectstore_client"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-client-5738101dc522afec/test-lib-objectstore_client`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.201675417s  INFO prepare_target{force=false package_id=objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test) target="objectstore_test"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("objectstore_test", ["lib"], "/Users/lcian/repos/objectstore/objectstore-test/src/lib.rs", Edition2024) }
+   0.201679708s  INFO prepare_target{force=false package_id=objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test) target="objectstore_test"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-test-2e6c330ba029780c/lib-objectstore_test`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   9: cargo::ops::cargo_compile::compile_ws
+  10: cargo::ops::cargo_compile::compile_with_exec
+  11: cargo::ops::cargo_compile::compile
+  12: cargo::commands::check::exec
+  13: <cargo::cli::Exec>::exec
+  14: cargo::main
+  15: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  16: std::rt::lang_start::<()>::{closure#0}
+  17: std::rt::lang_start_internal
+  18: _main
+   0.202046292s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore_server"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("objectstore_server", ["lib"], "/Users/lcian/repos/objectstore/objectstore-server/src/lib.rs", Edition2024) }
+   0.202049375s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore_server"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-d782bfab446392ca/lib-objectstore_server`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: cargo::core::compiler::compile
+   9: <cargo::core::compiler::build_runner::BuildRunner>::compile
+  10: cargo::ops::cargo_compile::compile_ws
+  11: cargo::ops::cargo_compile::compile_with_exec
+  12: cargo::ops::cargo_compile::compile
+  13: cargo::commands::check::exec
+  14: <cargo::cli::Exec>::exec
+  15: cargo::main
+  16: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  17: std::rt::lang_start::<()>::{closure#0}
+  18: std::rt::lang_start_internal
+  19: _main
+   0.205585875s  INFO prepare_target{force=false package_id=objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service) target="objectstore_service"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("objectstore_service", ["lib"], "/Users/lcian/repos/objectstore/objectstore-service/src/lib.rs", Edition2024) }
+   0.205591542s  INFO prepare_target{force=false package_id=objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service) target="objectstore_service"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-service-3c02d25a4707a348/lib-objectstore_service`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: cargo::core::compiler::compile
+   9: cargo::core::compiler::compile
+  10: <cargo::core::compiler::build_runner::BuildRunner>::compile
+  11: cargo::ops::cargo_compile::compile_ws
+  12: cargo::ops::cargo_compile::compile_with_exec
+  13: cargo::ops::cargo_compile::compile
+  14: cargo::commands::check::exec
+  15: <cargo::cli::Exec>::exec
+  16: cargo::main
+  17: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  18: std::rt::lang_start::<()>::{closure#0}
+  19: std::rt::lang_start_internal
+  20: _main
+   0.213846333s  INFO prepare_target{force=false package_id=objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust) target="e2e"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust)/Check { test: true }/TargetInner { kind: "test", name: "e2e", benched: false, ..: with_path("/Users/lcian/repos/objectstore/clients/rust/tests/e2e.rs", Edition2024) }
+   0.213852750s  INFO prepare_target{force=false package_id=objectstore-client v0.0.15 (/Users/lcian/repos/objectstore/clients/rust) target="e2e"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-client-6e183661f985671a/test-integration-test-e2e`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.215227208s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore_server"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("objectstore_server", ["lib"], "/Users/lcian/repos/objectstore/objectstore-server/src/lib.rs", Edition2024) }
+   0.215232250s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore_server"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-f5b85b517af1357e/test-lib-objectstore_server`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.216701917s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: false }/TargetInner { name: "objectstore", doc: true, ..: with_path("/Users/lcian/repos/objectstore/objectstore-server/src/main.rs", Edition2024) }
+   0.216705167s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-58a1b3c74c584c7f/bin-objectstore`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.217485417s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: true }/TargetInner { name: "objectstore", doc: true, ..: with_path("/Users/lcian/repos/objectstore/objectstore-server/src/main.rs", Edition2024) }
+   0.217488208s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="objectstore"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-e199e91f623cf1d2/test-bin-objectstore`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.218358625s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="limits"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: true }/TargetInner { kind: "test", name: "limits", benched: false, ..: with_path("/Users/lcian/repos/objectstore/objectstore-server/tests/limits.rs", Edition2024) }
+   0.218361667s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="limits"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-72aa840ff0771494/test-integration-test-limits`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.219194125s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="stresstest"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server)/Check { test: true }/TargetInner { kind: "test", name: "stresstest", benched: false, ..: with_path("/Users/lcian/repos/objectstore/objectstore-server/tests/stresstest.rs", Edition2024) }
+   0.219197042s  INFO prepare_target{force=false package_id=objectstore-server v0.1.0 (/Users/lcian/repos/objectstore/objectstore-server) target="stresstest"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-server-471901636d93ca59/test-integration-test-stresstest`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.220052375s  INFO prepare_target{force=false package_id=objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service) target="objectstore_service"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("objectstore_service", ["lib"], "/Users/lcian/repos/objectstore/objectstore-service/src/lib.rs", Edition2024) }
+   0.220055875s  INFO prepare_target{force=false package_id=objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service) target="objectstore_service"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-service-102577b27885ee73/test-lib-objectstore_service`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.220692625s  INFO prepare_target{force=false package_id=objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test) target="objectstore_test"}: cargo::core::compiler::fingerprint: fingerprint error for objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("objectstore_test", ["lib"], "/Users/lcian/repos/objectstore/objectstore-test/src/lib.rs", Edition2024) }
+   0.220696083s  INFO prepare_target{force=false package_id=objectstore-test v0.1.0 (/Users/lcian/repos/objectstore/objectstore-test) target="objectstore_test"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lcian/repos/objectstore/target/debug/.fingerprint/objectstore-test-2ab3a8f417066c6f/test-lib-objectstore_test`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+    Checking objectstore-service v0.1.0 (/Users/lcian/repos/objectstore/objectstore-service)
+error: could not compile `objectstore-service` (lib) due to 13 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `objectstore-service` (lib test) due to 13 previous errors

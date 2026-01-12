@@ -1,10 +1,10 @@
 use std::fmt::Debug;
 
-use anyhow::Result;
 use objectstore_types::Metadata;
 
 use crate::PayloadStream;
 use crate::id::ObjectId;
+use thiserror::Error;
 
 /// User agent string used for outgoing requests.
 ///
@@ -25,13 +25,35 @@ pub trait Backend: Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<()>;
+    ) -> Result<(), BackendError>;
 
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>>;
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError>;
 
     /// Deletes the object at the given path.
-    async fn delete_object(&self, id: &ObjectId) -> Result<()>;
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError>;
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum BackendError {
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("storage backend error: {message}")]
+    Generic {
+        message: String,
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Creates a reqwest client with required defaults.

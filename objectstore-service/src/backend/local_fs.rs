@@ -2,7 +2,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 
-use anyhow::Result;
 use futures_util::StreamExt;
 use objectstore_types::Metadata;
 use tokio::fs::OpenOptions;
@@ -10,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::PayloadStream;
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, BackendError};
 use crate::id::ObjectId;
 
 #[derive(Debug)]
@@ -36,7 +35,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BackendError> {
         let path = self.path.join(id.as_storage_path().to_string());
         tracing::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
@@ -65,7 +64,10 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -87,7 +89,7 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
         tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let result = tokio::fs::remove_file(path).await;
