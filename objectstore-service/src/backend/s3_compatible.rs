@@ -26,7 +26,7 @@ pub trait Token: Send + Sync {
 }
 
 pub trait TokenProvider: Send + Sync + 'static {
-    fn get_token(&self) -> impl Future<Output = BackendResult<impl Token>> + Send;
+    fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
 }
 
 // this only exists because we have to provide *some* kind of provider
@@ -35,7 +35,7 @@ pub struct NoToken;
 
 impl TokenProvider for NoToken {
     #[allow(refining_impl_trait_internal)] // otherwise, returning `!` will not implement the required traits
-    async fn get_token(&self) -> BackendResult<NoToken> {
+    async fn get_token(&self) -> anyhow::Result<NoToken> {
         unimplemented!()
     }
 }
@@ -80,7 +80,16 @@ where
     async fn request(&self, method: Method, url: impl IntoUrl) -> BackendResult<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
-            builder = builder.bearer_auth(provider.get_token().await?.as_str());
+            builder = builder.bearer_auth(
+                provider
+                    .get_token()
+                    .await
+                    .map_err(|err| BackendError::Generic {
+                        context: "failed to get token for S3 compatible backend".to_owned(),
+                        cause: err.into(),
+                    })?
+                    .as_str(),
+            );
         }
         Ok(builder)
     }

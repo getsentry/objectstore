@@ -51,7 +51,7 @@ impl Backend for LocalFsBackend {
 
         let metadata_json =
             serde_json::to_string(metadata).map_err(|cause| BackendError::Serde {
-                context: "failed to serialize metadata for local filesystem write".to_string(),
+                context: "failed to serialize metadata".to_string(),
                 cause,
             })?;
         writer.write_all(metadata_json.as_bytes()).await?;
@@ -86,7 +86,7 @@ impl Backend for LocalFsBackend {
         let metadata: Metadata =
             serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
                 BackendError::Serde {
-                    context: "failed to deserialize metadata from local filesystem".to_string(),
+                    context: "failed to deserialize metadata".to_string(),
                     cause,
                 }
             })?;
