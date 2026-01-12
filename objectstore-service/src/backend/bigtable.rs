@@ -9,7 +9,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
 use crate::PayloadStream;
-use crate::backend::common::{Backend, BackendError};
+use crate::backend::common::{Backend, BackendError, BackendResult};
 use crate::id::ObjectId;
 
 /// Connection timeout used for the initial connection to BigQuery.
@@ -97,7 +97,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> Result<v2::MutateRowResponse, BackendError>
+    ) -> BackendResult<v2::MutateRowResponse>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
@@ -142,7 +142,7 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> Result<v2::MutateRowResponse, BackendError> {
+    ) -> BackendResult<v2::MutateRowResponse> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
@@ -183,7 +183,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> Result<(), BackendError> {
+    ) -> BackendResult<()> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -200,7 +200,7 @@ impl Backend for BigTableBackend {
     async fn get_object(
         &self,
         id: &ObjectId,
-    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
+    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -288,7 +288,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
+    async fn delete_object(&self, id: &ObjectId) -> BackendResult<()> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -306,7 +306,7 @@ impl Backend for BigTableBackend {
 /// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
-fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64, BackendError> {
+fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
         message: "TTL duration overflow".to_string(),
         cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),

@@ -25,16 +25,13 @@ pub trait Backend: Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<(), BackendError>;
+    ) -> BackendResult<()>;
 
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError>;
+    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>>;
 
     /// Deletes the object at the given path.
-    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError>;
+    async fn delete_object(&self, id: &ObjectId) -> BackendResult<()>;
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +58,9 @@ pub enum BackendError {
         cause: Box<dyn std::error::Error + Send + Sync>,
     },
 }
+
+/// Result type for backend operations.
+pub(crate) type BackendResult<T> = Result<T, BackendError>;
 
 /// Creates a reqwest client with required defaults.
 pub fn reqwest_client() -> reqwest::Client {

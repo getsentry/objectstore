@@ -11,7 +11,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::PayloadStream;
-use crate::backend::common::{self, Backend, BackendError};
+use crate::backend::common::{self, Backend, BackendError, BackendResult};
 use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
@@ -237,7 +237,7 @@ impl GcsBackend {
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
-    fn object_url(&self, id: &ObjectId) -> Result<Url, BackendError> {
+    fn object_url(&self, id: &ObjectId) -> BackendResult<Url> {
         let mut url = self.endpoint.clone();
 
         let path = id.as_storage_path().to_string();
@@ -252,7 +252,7 @@ impl GcsBackend {
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url, BackendError> {
+    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> BackendResult<Url> {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
@@ -270,7 +270,7 @@ impl GcsBackend {
     }
 
     /// Creates a request builder with the appropriate authentication.
-    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder, BackendError> {
+    async fn request(&self, method: Method, url: impl IntoUrl) -> BackendResult<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
             let token = provider.token(TOKEN_SCOPES).await?;
@@ -279,7 +279,7 @@ impl GcsBackend {
         Ok(builder)
     }
 
-    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<(), BackendError> {
+    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> BackendResult<()> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -319,7 +319,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<(), BackendError> {
+    ) -> BackendResult<()> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
@@ -357,7 +357,7 @@ impl Backend for GcsBackend {
     async fn get_object(
         &self,
         id: &ObjectId,
-    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
+    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
@@ -416,7 +416,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
+    async fn delete_object(&self, id: &ObjectId) -> BackendResult<()> {
         tracing::debug!("Deleting from GCS backend");
         let response = self
             .request(Method::DELETE, self.object_url(id)?)

@@ -6,7 +6,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::PayloadStream;
-use crate::backend::common::{self, Backend, BackendError};
+use crate::backend::common::{self, Backend, BackendResult};
 use crate::id::ObjectId;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -26,7 +26,7 @@ pub trait Token: Send + Sync {
 }
 
 pub trait TokenProvider: Send + Sync + 'static {
-    fn get_token(&self) -> impl Future<Output = Result<impl Token, BackendError>> + Send;
+    fn get_token(&self) -> impl Future<Output = BackendResult<impl Token>> + Send;
 }
 
 // this only exists because we have to provide *some* kind of provider
@@ -35,7 +35,7 @@ pub struct NoToken;
 
 impl TokenProvider for NoToken {
     #[allow(refining_impl_trait_internal)] // otherwise, returning `!` will not implement the required traits
-    async fn get_token(&self) -> Result<NoToken, BackendError> {
+    async fn get_token(&self) -> BackendResult<NoToken> {
         unimplemented!()
     }
 }
@@ -81,7 +81,7 @@ where
         &self,
         method: Method,
         url: impl IntoUrl,
-    ) -> Result<RequestBuilder, BackendError> {
+    ) -> BackendResult<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
@@ -94,7 +94,7 @@ where
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-    ) -> Result<(), BackendError> {
+    ) -> BackendResult<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
         self.request(Method::PUT, self.object_url(id))
@@ -146,7 +146,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<(), BackendError> {
+    ) -> BackendResult<()> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
@@ -163,7 +163,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn get_object(
         &self,
         id: &ObjectId,
-    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
+    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(id);
 
@@ -203,7 +203,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
+    async fn delete_object(&self, id: &ObjectId) -> BackendResult<()> {
         tracing::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
