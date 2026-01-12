@@ -25,10 +25,6 @@ pub enum ApiError {
     /// Errors indicating malformed or illegal requests.
     #[error("bad request: {0}")]
     BadRequest(String),
-
-    /// Rate limiting errors.
-    #[error("rate limit exceeded")]
-    RateLimited,
 }
 
 /// Result type for API operations.
@@ -65,8 +61,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
-
-            ApiError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
