@@ -68,7 +68,6 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::Client(_) => StatusCode::BAD_REQUEST,
 
-            // Auth errors: distinguish between authentication (401) and authorization (403)
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
