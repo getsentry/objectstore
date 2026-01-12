@@ -316,20 +316,24 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
         context: "TTL duration overflow".to_string(),
         cause: Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Duration overflow",
+            format!(
+                "{} plus {}s cannot be represented as SystemTime",
+                humantime::format_rfc3339_seconds(from),
+                ttl.as_secs()
+            ),
         )),
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| BackendError::Generic {
-            context: "Invalid system time".to_string(),
+            context: "invalid duration calculation".to_string(),
             cause: Box::new(e),
         })?
         .as_millis();
     (millis * 1000)
         .try_into()
         .map_err(|e| BackendError::Generic {
-            context: "Timestamp out of range".to_string(),
+            context: "failed to convert duration".to_string(),
             cause: Box::new(e),
         })
 }
