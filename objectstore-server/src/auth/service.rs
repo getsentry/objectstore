@@ -3,6 +3,7 @@ use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::{Metadata, Permission};
 
 use crate::auth::AuthContext;
+use crate::error::ApiResult;
 
 /// Wrapper around [`StorageService`] that ensures each operation is authorized.
 ///
@@ -40,7 +41,7 @@ impl AuthAwareService {
         Self { service, context }
     }
 
-    fn assert_authorized(&self, perm: Permission, context: &ObjectContext) -> anyhow::Result<()> {
+    fn assert_authorized(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
         if let Some(auth) = &self.context {
             auth.assert_authorized(perm, context)?;
         }
@@ -55,25 +56,26 @@ impl AuthAwareService {
         key: Option<String>,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> anyhow::Result<ObjectId> {
+    ) -> ApiResult<ObjectId> {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
-        self.service
+        Ok(self
+            .service
             .insert_object(context, key, metadata, stream)
-            .await
+            .await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
     pub async fn get_object(
         &self,
         id: &ObjectId,
-    ) -> anyhow::Result<Option<(Metadata, PayloadStream)>> {
+    ) -> ApiResult<Option<(Metadata, PayloadStream)>> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
-        self.service.get_object(id).await
+        Ok(self.service.get_object(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
-    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> ApiResult<()> {
         self.assert_authorized(Permission::ObjectDelete, id.context())?;
-        self.service.delete_object(id).await
+        Ok(self.service.delete_object(id).await?)
     }
 }

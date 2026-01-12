@@ -9,8 +9,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
 use crate::PayloadStream;
-use crate::backend::common::{Backend, BackendError, BackendResult};
+use crate::backend::common::Backend;
 use crate::id::ObjectId;
+use crate::{ServiceError, ServiceResult};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -97,7 +98,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> BackendResult<v2::MutateRowResponse>
+    ) -> ServiceResult<v2::MutateRowResponse>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
@@ -125,7 +126,7 @@ impl BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
-                return response.map_err(|e| BackendError::Generic {
+                return response.map_err(|e| ServiceError::Generic {
                     context: format!("Bigtable: failed mutating row performing a `{action}`"),
                     cause: Some(Box::new(e)),
                 });
@@ -142,7 +143,7 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> BackendResult<v2::MutateRowResponse> {
+    ) -> ServiceResult<v2::MutateRowResponse> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
@@ -164,7 +165,7 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                value: serde_json::to_vec(metadata).map_err(|cause| BackendError::Serde {
+                value: serde_json::to_vec(metadata).map_err(|cause| ServiceError::Serde {
                     context: "failed to serialize metadata".to_string(),
                     cause,
                 })?,
@@ -186,7 +187,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> BackendResult<()> {
+    ) -> ServiceResult<()> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -200,7 +201,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -224,7 +225,7 @@ impl Backend for BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.read_failures": 1);
                 }
-                break response.map_err(|e| BackendError::Generic {
+                break response.map_err(|e| ServiceError::Generic {
                     context: "Bigtable: failed to read rows".to_string(),
                     cause: Some(Box::new(e)),
                 })?;
@@ -254,7 +255,7 @@ impl Backend for BigTableBackend {
                 }
                 self::COLUMN_METADATA => {
                     metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                        BackendError::Serde {
+                        ServiceError::Serde {
                             context: "failed to deserialize metadata".to_string(),
                             cause,
                         }
@@ -293,7 +294,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> BackendResult<()> {
+    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -311,8 +312,8 @@ impl Backend for BigTableBackend {
 /// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
-fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
+fn ttl_to_micros(ttl: Duration, from: SystemTime) -> ServiceResult<i64> {
+    let deadline = from.checked_add(ttl).ok_or_else(|| ServiceError::Generic {
         context: format!(
             "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
             humantime::format_rfc3339_seconds(from),
@@ -322,7 +323,7 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| BackendError::Generic {
+        .map_err(|e| ServiceError::Generic {
             context: format!(
                 "unable to get duration since UNIX_EPOCH for SystemTime {}",
                 humantime::format_rfc3339_seconds(deadline)
@@ -332,7 +333,7 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
         .as_millis();
     (millis * 1000)
         .try_into()
-        .map_err(|e| BackendError::Generic {
+        .map_err(|e| ServiceError::Generic {
             context: format!("failed to convert {}ms to i64 microseconds", millis),
             cause: Some(Box::new(e)),
         })
