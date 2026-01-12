@@ -38,7 +38,7 @@ pub trait Backend: Debug + Send + Sync + 'static {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum BackendError {
+pub enum BackendError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -47,6 +47,12 @@ pub(crate) enum BackendError {
 
     #[error("reqwest error: {0}")]
     Reqwest(#[from] reqwest::Error),
+
+    #[error("metadata de/serialization error: {0}")]
+    Metadata(#[from] objectstore_types::Error),
+
+    #[error("GCP authentication error: {0}")]
+    GcpAuth(#[from] gcp_auth::Error),
 
     #[error("storage backend error: {message}")]
     Generic {

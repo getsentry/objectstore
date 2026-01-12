@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigtable_rs::bigtable::BigTableConnection;
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -9,7 +9,7 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
 use crate::PayloadStream;
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, BackendError};
 use crate::id::ObjectId;
 
 /// Connection timeout used for the initial connection to BigQuery.
@@ -97,7 +97,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> Result<v2::MutateRowResponse>
+    ) -> Result<v2::MutateRowResponse, BackendError>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
@@ -125,8 +125,9 @@ impl BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
-                return response.with_context(|| {
-                    format!("failed mutating bigtable row performing a `{action}`")
+                return response.map_err(|e| BackendError::Generic {
+                    message: format!("failed mutating bigtable row performing a `{action}`"),
+                    cause: Box::new(e),
                 });
             }
             retry_count += 1;
@@ -141,18 +142,24 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> Result<v2::MutateRowResponse> {
+    ) -> Result<v2::MutateRowResponse, BackendError> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
             ExpirationPolicy::TimeToLive(ttl) => (
                 FAMILY_GC,
-                ttl_to_micros(ttl, access_time).context("TTL out of range")?,
+                ttl_to_micros(ttl, access_time).ok_or_else(|| BackendError::Generic {
+                    message: "TTL out of range".to_string(),
+                    cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
+                })?,
             ),
             ExpirationPolicy::TimeToIdle(tti) => (
                 FAMILY_GC,
-                ttl_to_micros(tti, access_time).context("TTL out of range")?,
+                ttl_to_micros(tti, access_time).ok_or_else(|| BackendError::Generic {
+                    message: "TTI out of range".to_string(),
+                    cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
+                })?,
             ),
         };
 
@@ -169,7 +176,7 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                value: serde_json::to_vec(metadata).with_context(|| "failed to encode metadata")?,
+                value: serde_json::to_vec(metadata)?,
             }),
         ];
         self.mutate(path, mutations, action).await
@@ -188,7 +195,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> Result<()> {
+    ) -> Result<(), BackendError> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -202,7 +209,10 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -226,7 +236,10 @@ impl Backend for BigTableBackend {
                 if response.is_err() {
                     merni::counter!("bigtable.read_failures": 1);
                 }
-                break response?;
+                break response.map_err(|e| BackendError::Generic {
+                    message: "failed reading bigtable rows".to_string(),
+                    cause: Box::new(e),
+                })?;
             }
             retry_count += 1;
             merni::counter!("bigtable.read_retry": 1);
@@ -252,8 +265,7 @@ impl Backend for BigTableBackend {
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value)
-                        .with_context(|| "failed to decode metadata")?;
+                    metadata = serde_json::from_slice(&cell.value)?;
                 }
                 _ => {
                     // TODO: Log unknown column
@@ -288,7 +300,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();

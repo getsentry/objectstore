@@ -1,7 +1,6 @@
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
-use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
@@ -108,8 +107,7 @@ where
             .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
             .send()
             .await?
-            .error_for_status()
-            .context("failed to update expiration time for object with TTI")?;
+            .error_for_status()?;
 
         Ok(())
     }
@@ -156,8 +154,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await?
-            .error_for_status()
-            .context("failed to put object")?;
+            .error_for_status()?;
 
         Ok(())
     }
@@ -176,9 +173,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             return Ok(None);
         }
 
-        let response = response
-            .error_for_status()
-            .context("failed to get object")?;
+        let response = response.error_for_status()?;
 
         let headers = response.headers();
         // TODO: Populate size in metadata
@@ -219,9 +214,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response
-                .error_for_status()
-                .context("failed to delete object")?;
+            response.error_for_status()?;
         }
 
         Ok(())

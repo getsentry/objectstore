@@ -11,7 +11,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::PayloadStream;
-use crate::backend::common::{self, Backend};
+use crate::backend::common::{self, Backend, BackendError};
 use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
@@ -109,7 +109,7 @@ impl GcsObject {
     }
 
     /// Converts GCS JSON object metadata to our Metadata type.
-    pub fn into_metadata(mut self) -> Result<Metadata> {
+    pub fn into_metadata(mut self) -> Result<Metadata, objectstore_types::Error> {
         // Remove ignored metadata keys that are set by the GCS emulator.
         self.metadata.remove(&GcsMetaKey::EmulatorIgnored);
 
@@ -122,7 +122,11 @@ impl GcsObject {
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
-        let size = self.size.map(|size| size.parse()).transpose()?;
+        let size = self
+            .size
+            .map(|size| size.parse())
+            .transpose()
+            .map_err(|_| objectstore_types::Error::Header(None))?;
         let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
@@ -131,7 +135,7 @@ impl GcsObject {
             if let GcsMetaKey::Custom(custom_key) = key {
                 custom.insert(custom_key, value);
             } else {
-                anyhow::bail!("unexpected metadata");
+                return Err(objectstore_types::Error::Header(None));
             }
         }
 
@@ -233,23 +237,29 @@ impl GcsBackend {
     }
 
     /// Formats the GCS object (metadata) URL for the given key.
-    fn object_url(&self, id: &ObjectId) -> Result<Url> {
+    fn object_url(&self, id: &ObjectId) -> Result<Url, BackendError> {
         let mut url = self.endpoint.clone();
 
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .map_err(|()| BackendError::Generic {
+                message: "invalid GCS endpoint path".to_string(),
+                cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
+            })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
         Ok(url)
     }
 
     /// Formats the GCS upload URL for the given upload type.
-    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url> {
+    fn upload_url(&self, id: &ObjectId, upload_type: &str) -> Result<Url, BackendError> {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
-            .map_err(|()| anyhow::anyhow!("invalid GCS endpoint path"))?
+            .map_err(|()| BackendError::Generic {
+                message: "invalid GCS endpoint path".to_string(),
+                cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
+            })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
         url.query_pairs_mut()
@@ -260,7 +270,7 @@ impl GcsBackend {
     }
 
     /// Creates a request builder with the appropriate authentication.
-    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
+    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder, BackendError> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
             let token = provider.token(TOKEN_SCOPES).await?;
@@ -269,7 +279,7 @@ impl GcsBackend {
         Ok(builder)
     }
 
-    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<()> {
+    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<(), BackendError> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -282,8 +292,7 @@ impl GcsBackend {
             .json(&CustomTimeRequest { custom_time })
             .send()
             .await?
-            .error_for_status()
-            .context("failed to update expiration time for object with TTI")?;
+            .error_for_status()?;
 
         Ok(())
     }
@@ -310,7 +319,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<()> {
+    ) -> Result<(), BackendError> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
@@ -339,14 +348,16 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await?
-            .error_for_status()
-            .context("failed to upload object via multipart")?;
+            .error_for_status()?;
 
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Metadata, PayloadStream)>, BackendError> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
@@ -360,14 +371,9 @@ impl Backend for GcsBackend {
             return Ok(None);
         }
 
-        let metadata_response = metadata_response
-            .error_for_status()
-            .context("failed to get object metadata")?;
+        let metadata_response = metadata_response.error_for_status()?;
 
-        let gcs_metadata: GcsObject = metadata_response
-            .json()
-            .await
-            .context("failed to parse object metadata")?;
+        let gcs_metadata: GcsObject = metadata_response.json().await?;
 
         // TODO: Store custom_time directly in metadata.
         let expire_at = gcs_metadata.custom_time;
@@ -399,8 +405,7 @@ impl Backend for GcsBackend {
             .await?
             .send()
             .await?
-            .error_for_status()
-            .context("failed to get object payload")?;
+            .error_for_status()?;
 
         let stream = payload_response
             .bytes_stream()
@@ -411,7 +416,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<(), BackendError> {
         tracing::debug!("Deleting from GCS backend");
         let response = self
             .request(Method::DELETE, self.object_url(id)?)
@@ -422,9 +427,7 @@ impl Backend for GcsBackend {
         // Do not error for objects that do not exist
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response
-                .error_for_status()
-                .context("failed to delete object")?;
+            response.error_for_status()?;
         }
 
         Ok(())
