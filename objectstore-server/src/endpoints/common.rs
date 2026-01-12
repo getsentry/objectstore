@@ -11,18 +11,18 @@ use thiserror::Error;
 
 use crate::auth::AuthError;
 
-/// Error type for API operations, encompassing service, auth, and rate limiting errors.
+/// Error type for API operations.
 #[derive(Debug, Error)]
 pub enum ApiError {
-    /// Errors from the service layer (storage backends, streaming, etc.).
+    /// Errors from the service layer (payload streaming, storage service API, etc.).
     #[error("service error: {0}")]
     Service(#[from] ServiceError),
 
     /// Authorization/authentication errors.
-    #[error("authorization error: {0}")]
+    #[error("auth error: {0}")]
     Auth(#[from] AuthError),
 
-    /// Errors related to metadata extraction or validation.
+    /// Errors indicating malformed or illegal requests.
     #[error("bad request: {0}")]
     BadRequest(String),
 
@@ -64,7 +64,10 @@ impl ApiErrorResponse {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+
+            ApiError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure)
@@ -74,11 +77,8 @@ impl IntoResponse for ApiError {
                 tracing::error!(error = &self as &dyn Error, "auth system error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            ApiError::BadRequest(msg) => {
-                tracing::debug!("bad request: {}", msg);
-                StatusCode::BAD_REQUEST
-            }
-            ApiError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+
+            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let body = ApiErrorResponse::from_error(&self);
