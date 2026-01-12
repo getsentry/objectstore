@@ -200,10 +200,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -256,9 +253,11 @@ impl Backend for BigTableBackend {
                     // TODO: Log if the timestamp is invalid.
                 }
                 self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| BackendError::Serde {
-                        context: "failed to deserialize metadata from BigTable".to_string(),
-                        cause,
+                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
+                        BackendError::Serde {
+                            context: "failed to deserialize metadata from BigTable".to_string(),
+                            cause,
+                        }
                     })?;
                 }
                 _ => {
@@ -315,7 +314,10 @@ impl Backend for BigTableBackend {
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
         context: "TTL duration overflow".to_string(),
-        cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Duration overflow")),
+        cause: Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Duration overflow",
+        )),
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -324,10 +326,15 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
             cause: Box::new(e),
         })?
         .as_millis();
-    (millis * 1000).try_into().map_err(|e| BackendError::Generic {
-        context: "Timestamp out of range".to_string(),
-        cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e))),
-    })
+    (millis * 1000)
+        .try_into()
+        .map_err(|e| BackendError::Generic {
+            context: "Timestamp out of range".to_string(),
+            cause: Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{}", e),
+            )),
+        })
 }
 
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.

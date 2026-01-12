@@ -77,11 +77,7 @@ where
     T: TokenProvider,
 {
     /// Creates a request builder with the appropriate authentication.
-    async fn request(
-        &self,
-        method: Method,
-        url: impl IntoUrl,
-    ) -> BackendResult<RequestBuilder> {
+    async fn request(&self, method: Method, url: impl IntoUrl) -> BackendResult<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(provider.get_token().await?.as_str());
@@ -90,11 +86,7 @@ where
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> BackendResult<()> {
+    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> BackendResult<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
         self.request(Method::PUT, self.object_url(id))
@@ -176,10 +168,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(id);
 
@@ -197,10 +186,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             return Ok(None);
         }
 
-        let response = response.error_for_status().map_err(|cause| BackendError::Reqwest {
-            context: "failed to get object".to_string(),
-            cause,
-        })?;
+        let response = response
+            .error_for_status()
+            .map_err(|cause| BackendError::Reqwest {
+                context: "failed to get object".to_string(),
+                cause,
+            })?;
 
         let headers = response.headers();
         // TODO: Populate size in metadata
@@ -245,10 +236,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response.error_for_status().map_err(|cause| BackendError::Reqwest {
-                context: "failed to delete object".to_string(),
-                cause,
-            })?;
+            response
+                .error_for_status()
+                .map_err(|cause| BackendError::Reqwest {
+                    context: "failed to delete object".to_string(),
+                    cause,
+                })?;
         }
 
         Ok(())

@@ -49,10 +49,11 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(metadata).map_err(|cause| BackendError::Serde {
-            context: "failed to serialize metadata for local filesystem write".to_string(),
-            cause,
-        })?;
+        let metadata_json =
+            serde_json::to_string(metadata).map_err(|cause| BackendError::Serde {
+                context: "failed to serialize metadata for local filesystem write".to_string(),
+                cause,
+            })?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
@@ -67,10 +68,7 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -85,10 +83,13 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata = serde_json::from_str(metadata_line.trim_end()).map_err(|cause| BackendError::Serde {
-            context: "failed to deserialize metadata from local filesystem".to_string(),
-            cause,
-        })?;
+        let metadata: Metadata =
+            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
+                BackendError::Serde {
+                    context: "failed to deserialize metadata from local filesystem".to_string(),
+                    cause,
+                }
+            })?;
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
