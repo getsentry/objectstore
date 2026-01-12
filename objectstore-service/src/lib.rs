@@ -7,6 +7,8 @@
 
 // TODO(ja): Re-organize modules
 mod backend;
+mod error;
+pub use error::{ServiceError, ServiceResult};
 pub mod id;
 
 use std::path::Path;
