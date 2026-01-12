@@ -25,7 +25,8 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let context = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)?;
+        let context = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
+            .inspect_err(|err| tracing::debug!("Authorization rejected: `{:?}`", err))?;
 
         Ok(AuthAwareService::new(state.service.clone(), Some(context)))
     }
