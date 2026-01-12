@@ -37,10 +37,9 @@ jobs:
 
       - name: Prepare release
         uses: getsentry/craft@v2
-        env:
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         with:
           version: ${{ inputs.version }}
           force: ${{ inputs.force }}
           merge_target: ${{ inputs.merge_target }}
           path: clients
+        secrets: inherit
