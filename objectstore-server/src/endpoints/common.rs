@@ -23,7 +23,7 @@ pub enum ApiError {
     Auth(#[from] AuthError),
 
     /// Errors from the service layer (payload streaming, storage service API, etc.).
-    #[error("internal server error")]
+    #[error("server error: {0}")]
     Server(#[source] Box<dyn Error + Send + Sync>),
 }
 
