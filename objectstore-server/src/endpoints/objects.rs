@@ -46,7 +46,7 @@ async fn objects_post(
     body: Body,
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(|e| {
-        ApiError::BadRequest(format!("failed to extract metadata from headers: {}", e))
+        ApiError::Client(format!("failed to extract metadata from headers: {}", e))
     })?;
     metadata.time_created = Some(SystemTime::now());
 
@@ -74,7 +74,7 @@ async fn object_get(
     let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
 
     let headers = metadata.to_headers("", false).map_err(|e| {
-        ApiError::BadRequest(format!("failed to convert metadata to headers: {}", e))
+        ApiError::Client(format!("failed to convert metadata to headers: {}", e))
     })?;
     Ok((headers, Body::from_stream(stream)).into_response())
 }
@@ -85,7 +85,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
     };
 
     let headers = metadata.to_headers("", false).map_err(|e| {
-        ApiError::BadRequest(format!("failed to convert metadata to headers: {}", e))
+        ApiError::Client(format!("failed to convert metadata to headers: {}", e))
     })?;
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
@@ -99,7 +99,7 @@ async fn object_put(
     body: Body,
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(|e| {
-        ApiError::BadRequest(format!("failed to extract metadata from headers: {}", e))
+        ApiError::Client(format!("failed to extract metadata from headers: {}", e))
     })?;
     metadata.time_created = Some(SystemTime::now());
 
