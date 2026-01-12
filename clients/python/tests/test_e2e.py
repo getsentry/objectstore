@@ -225,7 +225,7 @@ def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    with pytest.raises(RequestError, check=lambda e: e.status == 401):
+    with pytest.raises(RequestError, check=lambda e: e.status == 403):
         _object_key = session.put(b"test data")
 
 
