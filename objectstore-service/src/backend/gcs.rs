@@ -109,7 +109,7 @@ impl GcsObject {
     }
 
     /// Converts GCS JSON object metadata to our Metadata type.
-    pub fn into_metadata(mut self) -> Result<Metadata, objectstore_types::Error> {
+    pub fn into_metadata(mut self) -> BackendResult<Metadata> {
         // Remove ignored metadata keys that are set by the GCS emulator.
         self.metadata.remove(&GcsMetaKey::EmulatorIgnored);
 
@@ -126,7 +126,10 @@ impl GcsObject {
             .size
             .map(|size| size.parse())
             .transpose()
-            .map_err(|_| objectstore_types::Error::Header(None))?;
+            .map_err(|e| BackendError::Generic {
+                context: "failed to parse size from GCS metadata".to_string(),
+                cause: Box::new(e),
+            })?;
         let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
@@ -135,7 +138,13 @@ impl GcsObject {
             if let GcsMetaKey::Custom(custom_key) = key {
                 custom.insert(custom_key, value);
             } else {
-                return Err(objectstore_types::Error::Header(None));
+                return Err(BackendError::Generic {
+                    context: "unexpected built-in metadata key in GCS object metadata".to_string(),
+                    cause: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unexpected key: {}", key),
+                    )),
+                });
             }
         }
 
@@ -244,7 +253,10 @@ impl GcsBackend {
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
                 context: "invalid GCS endpoint path".to_string(),
-                cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
+                cause: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "cannot be base",
+                )),
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
@@ -258,7 +270,10 @@ impl GcsBackend {
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
                 context: "invalid GCS endpoint path".to_string(),
-                cause: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot be base")),
+                cause: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "cannot be base",
+                )),
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
@@ -279,7 +294,11 @@ impl GcsBackend {
         Ok(builder)
     }
 
-    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> BackendResult<()> {
+    async fn update_custom_time(
+        &self,
+        object_url: Url,
+        custom_time: SystemTime,
+    ) -> BackendResult<()> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -333,10 +352,11 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
-        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| BackendError::Serde {
-            context: "failed to serialize metadata for GCS upload".to_string(),
-            cause,
-        })?;
+        let metadata_json =
+            serde_json::to_string(&gcs_metadata).map_err(|cause| BackendError::Serde {
+                context: "failed to serialize metadata for GCS upload".to_string(),
+                cause,
+            })?;
 
         let multipart = multipart::Form::new()
             .part(
@@ -383,10 +403,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> BackendResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> BackendResult<Option<(Metadata, PayloadStream)>> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
@@ -404,20 +421,22 @@ impl Backend for GcsBackend {
             return Ok(None);
         }
 
-        let metadata_response = metadata_response
-            .error_for_status()
-            .map_err(|cause| BackendError::Reqwest {
-                context: "failed to get object metadata".to_string(),
-                cause,
-            })?;
+        let metadata_response =
+            metadata_response
+                .error_for_status()
+                .map_err(|cause| BackendError::Reqwest {
+                    context: "failed to get object metadata".to_string(),
+                    cause,
+                })?;
 
-        let gcs_metadata: GcsObject = metadata_response
-            .json()
-            .await
-            .map_err(|cause| BackendError::Reqwest {
-                context: "failed to parse object metadata".to_string(),
-                cause,
-            })?;
+        let gcs_metadata: GcsObject =
+            metadata_response
+                .json()
+                .await
+                .map_err(|cause| BackendError::Reqwest {
+                    context: "failed to parse object metadata".to_string(),
+                    cause,
+                })?;
 
         // TODO: Store custom_time directly in metadata.
         let expire_at = gcs_metadata.custom_time;
@@ -483,10 +502,12 @@ impl Backend for GcsBackend {
         // Do not error for objects that do not exist
         if response.status() != StatusCode::NOT_FOUND {
             tracing::debug!("Object not found");
-            response.error_for_status().map_err(|cause| BackendError::Reqwest {
-                context: "failed to delete object".to_string(),
-                cause,
-            })?;
+            response
+                .error_for_status()
+                .map_err(|cause| BackendError::Reqwest {
+                    context: "failed to delete object".to_string(),
+                    cause,
+                })?;
         }
 
         Ok(())
