@@ -255,7 +255,7 @@ impl GcsBackend {
                 context: "invalid GCS endpoint path".to_string(),
                 cause: Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "cannot be base",
+                    format!("{} cannot be base", self.endpoint.clone()),
                 )),
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
@@ -272,7 +272,7 @@ impl GcsBackend {
                 context: "invalid GCS endpoint path".to_string(),
                 cause: Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "cannot be base",
+                    format!("{} cannot be base", self.endpoint.clone()),
                 )),
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
@@ -363,18 +363,15 @@ impl Backend for GcsBackend {
                 "metadata",
                 multipart::Part::text(metadata_json)
                     .mime_str("application/json")
-                    .map_err(|cause| BackendError::Reqwest {
-                        context: "failed to set mime type for metadata".to_string(),
-                        cause,
-                    })?,
+                    .expect("application/json is a valid mime type"),
             )
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
                     .mime_str(&metadata.content_type)
-                    .map_err(|cause| BackendError::Reqwest {
-                        context: "failed to set mime type for media".to_string(),
-                        cause,
+                    .map_err(|e| BackendError::Generic {
+                        context: format!("invalid mime type: {}", &metadata.content_type),
+                        cause: Box::new(e),
                     })?,
             );
 
@@ -434,7 +431,7 @@ impl Backend for GcsBackend {
                 .json()
                 .await
                 .map_err(|cause| BackendError::Reqwest {
-                    context: "failed to parse object metadata".to_string(),
+                    context: "failed to parse object metadata response".to_string(),
                     cause,
                 })?;
 
