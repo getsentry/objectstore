@@ -22,7 +22,7 @@ pub enum ApiError {
     #[error("auth error: {0}")]
     Auth(#[from] AuthError),
 
-    /// Errors from the service layer (payload streaming, storage service API, etc.).
+    /// Server errors, indicating that something went wrong when receiving or executing a request.
     #[error("server error: {0}")]
     Server(#[source] Box<dyn Error + Send + Sync>),
 }
@@ -77,8 +77,8 @@ impl IntoResponse for ApiError {
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure)
             | ApiError::Auth(AuthError::NotPermitted) => StatusCode::UNAUTHORIZED,
-            ApiError::Auth(AuthError::InitFailure(_))
-            | ApiError::Auth(AuthError::InternalError(_)) => {
+
+            ApiError::Auth(AuthError::InternalError(_)) => {
                 tracing::error!(error = &self as &dyn Error, "auth system error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
