@@ -2,17 +2,17 @@
 
 use std::error::Error;
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use objectstore_service::ServiceError;
 use serde::{Deserialize, Serialize};
-use thiserror::Error as ThisError;
+use thiserror::Error;
 
 use crate::auth::AuthError;
 
 /// Error type for API operations, encompassing service, auth, and rate limiting errors.
-#[derive(Debug, ThisError)]
+#[derive(Debug, Error)]
 pub enum ApiError {
     /// Errors from the service layer (storage backends, streaming, etc.).
     #[error("service error: {0}")]
@@ -64,14 +64,7 @@ impl ApiErrorResponse {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            ApiError::Service(err) => {
-                // Log service errors as they're unexpected
-                tracing::error!(
-                    error = err as &dyn Error,
-                    "service error handling request"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure)
