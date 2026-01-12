@@ -126,8 +126,8 @@ impl BigTableBackend {
                     merni::counter!("bigtable.mutate_failures": 1, "action" => action);
                 }
                 return response.map_err(|e| BackendError::Generic {
-                    context: format!("failed mutating bigtable row performing a `{action}`"),
-                    cause: Box::new(e),
+                    context: format!("Bigtable: failed mutating row performing a `{action}`"),
+                    cause: Some(Box::new(e)),
                 });
             }
             retry_count += 1;
@@ -225,8 +225,8 @@ impl Backend for BigTableBackend {
                     merni::counter!("bigtable.read_failures": 1);
                 }
                 break response.map_err(|e| BackendError::Generic {
-                    context: "failed to read bigtable rows".to_string(),
-                    cause: Box::new(e),
+                    context: "Bigtable: failed to read rows".to_string(),
+                    cause: Some(Box::new(e)),
                 })?;
             }
             retry_count += 1;
@@ -313,28 +313,25 @@ impl Backend for BigTableBackend {
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     let deadline = from.checked_add(ttl).ok_or_else(|| BackendError::Generic {
-        context: "TTL duration overflow".to_string(),
-        cause: Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "{} plus {}s cannot be represented as SystemTime",
-                humantime::format_rfc3339_seconds(from),
-                ttl.as_secs()
-            ),
-        )),
+        context: format!(
+            "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
+            humantime::format_rfc3339_seconds(from),
+            ttl.as_secs()
+        ),
+        cause: None,
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| BackendError::Generic {
-            context: "invalid duration calculation".to_string(),
-            cause: Box::new(e),
+            context: "Bigtable TTL calculation: invalid duration since UNIX_EPOCH".to_string(),
+            cause: Some(Box::new(e)),
         })?
         .as_millis();
     (millis * 1000)
         .try_into()
         .map_err(|e| BackendError::Generic {
-            context: "failed to convert duration".to_string(),
-            cause: Box::new(e),
+            context: "Bigtable TTL calculation: failed to convert duration to i64 microseconds".to_string(),
+            cause: Some(Box::new(e)),
         })
 }
 

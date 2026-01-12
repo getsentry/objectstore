@@ -73,7 +73,7 @@ pub enum BackendError {
     Generic {
         context: String,
         #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 }
 

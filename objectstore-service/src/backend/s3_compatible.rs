@@ -85,8 +85,8 @@ where
                     .get_token()
                     .await
                     .map_err(|err| BackendError::Generic {
-                        context: "failed to get token for S3 compatible backend".to_owned(),
-                        cause: err.into(),
+                        context: "S3: failed to get authentication token".to_owned(),
+                        cause: Some(err.into()),
                     })?
                     .as_str(),
             );
@@ -109,12 +109,12 @@ where
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send TTI update request".to_string(),
+                context: "S3: failed to send TTI update request".to_string(),
                 cause,
             })?
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to update expiration time for object with TTI".to_string(),
+                context: "S3: failed to update expiration time for object with TTI".to_string(),
                 cause,
             })?;
 
@@ -164,12 +164,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send put request".to_string(),
+                context: "S3: failed to send put request".to_string(),
                 cause,
             })?
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to put object".to_string(),
+                context: "S3: failed to put object".to_string(),
                 cause,
             })?;
 
@@ -187,7 +187,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send get request".to_string(),
+                context: "S3: failed to send get request".to_string(),
                 cause,
             })?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -198,7 +198,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         let response = response
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to get object".to_string(),
+                context: "S3: failed to get object".to_string(),
                 cause,
             })?;
 
@@ -238,7 +238,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send delete request".to_string(),
+                context: "S3: failed to send delete request".to_string(),
                 cause,
             })?;
 
@@ -248,7 +248,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             response
                 .error_for_status()
                 .map_err(|cause| BackendError::Reqwest {
-                    context: "failed to delete object".to_string(),
+                    context: "S3: failed to delete object".to_string(),
                     cause,
                 })?;
         }

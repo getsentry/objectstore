@@ -127,8 +127,8 @@ impl GcsObject {
             .map(|size| size.parse())
             .transpose()
             .map_err(|e| BackendError::Generic {
-                context: "failed to parse size from GCS metadata".to_string(),
-                cause: Box::new(e),
+                context: "GCS: failed to parse size from object metadata".to_string(),
+                cause: Some(Box::new(e)),
             })?;
         let time_created = self.time_created;
 
@@ -139,11 +139,11 @@ impl GcsObject {
                 custom.insert(custom_key, value);
             } else {
                 return Err(BackendError::Generic {
-                    context: "unexpected built-in metadata key in GCS object metadata".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("unexpected key: {}", key),
-                    )),
+                    context: format!(
+                        "GCS: unexpected built-in metadata key in object metadata: {}",
+                        key
+                    ),
+                    cause: None,
                 });
             }
         }
@@ -252,11 +252,11 @@ impl GcsBackend {
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
-                context: "invalid GCS endpoint path".to_string(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("{} cannot be base", self.endpoint.clone()),
-                )),
+                context: format!(
+                    "GCS: invalid endpoint URL, {} cannot be a base",
+                    self.endpoint
+                ),
+                cause: None,
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
@@ -269,11 +269,11 @@ impl GcsBackend {
 
         url.path_segments_mut()
             .map_err(|()| BackendError::Generic {
-                context: "invalid GCS endpoint path".to_string(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("{} cannot be base", self.endpoint.clone()),
-                )),
+                context: format!(
+                    "GCS: invalid endpoint URL, {} cannot be a base",
+                    self.endpoint
+                ),
+                cause: None,
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
@@ -312,12 +312,12 @@ impl GcsBackend {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send update custom time request".to_string(),
+                context: "GCS: failed to send update custom time request".to_string(),
                 cause,
             })?
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to update expiration time for object with TTI".to_string(),
+                context: "GCS: failed to update expiration time for object with TTI".to_string(),
                 cause,
             })?;
 
@@ -371,7 +371,7 @@ impl Backend for GcsBackend {
                     .mime_str(&metadata.content_type)
                     .map_err(|e| BackendError::Generic {
                         context: format!("invalid mime type: {}", &metadata.content_type),
-                        cause: Box::new(e),
+                        cause: Some(Box::new(e)),
                     })?,
             );
 
@@ -387,12 +387,12 @@ impl Backend for GcsBackend {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send multipart upload request".to_string(),
+                context: "GCS: failed to send multipart upload request".to_string(),
                 cause,
             })?
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to upload object via multipart".to_string(),
+                context: "GCS: failed to upload object via multipart".to_string(),
                 cause,
             })?;
 
@@ -409,7 +409,7 @@ impl Backend for GcsBackend {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send get metadata request".to_string(),
+                context: "GCS: failed to send get metadata request".to_string(),
                 cause,
             })?;
 
@@ -422,7 +422,7 @@ impl Backend for GcsBackend {
             metadata_response
                 .error_for_status()
                 .map_err(|cause| BackendError::Reqwest {
-                    context: "failed to get object metadata".to_string(),
+                    context: "GCS: failed to get object metadata".to_string(),
                     cause,
                 })?;
 
@@ -431,7 +431,7 @@ impl Backend for GcsBackend {
                 .json()
                 .await
                 .map_err(|cause| BackendError::Reqwest {
-                    context: "failed to parse object metadata response".to_string(),
+                    context: "GCS: failed to parse object metadata response".to_string(),
                     cause,
                 })?;
 
@@ -466,12 +466,12 @@ impl Backend for GcsBackend {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send get payload request".to_string(),
+                context: "GCS: failed to send get payload request".to_string(),
                 cause,
             })?
             .error_for_status()
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to get object payload".to_string(),
+                context: "GCS: failed to get object payload".to_string(),
                 cause,
             })?;
 
@@ -492,7 +492,7 @@ impl Backend for GcsBackend {
             .send()
             .await
             .map_err(|cause| BackendError::Reqwest {
-                context: "failed to send delete request".to_string(),
+                context: "GCS: failed to send delete request".to_string(),
                 cause,
             })?;
 
@@ -502,7 +502,7 @@ impl Backend for GcsBackend {
             response
                 .error_for_status()
                 .map_err(|cause| BackendError::Reqwest {
-                    context: "failed to delete object".to_string(),
+                    context: "GCS: failed to delete object".to_string(),
                     cause,
                 })?;
         }
