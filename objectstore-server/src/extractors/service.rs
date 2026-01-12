@@ -1,13 +1,14 @@
 use axum::extract::FromRequestParts;
-use axum::http::{StatusCode, header, request::Parts};
+use axum::http::{header, request::Parts};
 
 use crate::auth::{AuthAwareService, AuthContext};
+use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
 impl FromRequestParts<ServiceState> for AuthAwareService {
-    type Rejection = StatusCode;
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -24,11 +25,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let context =
-            AuthContext::from_encoded_jwt(encoded_token, &state.key_directory).map_err(|err| {
-                tracing::debug!("Authorization rejected: `{:?}`", err);
-                StatusCode::UNAUTHORIZED
-            })?;
+        let context = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)?;
 
         Ok(AuthAwareService::new(state.service.clone(), Some(context)))
     }
