@@ -323,15 +323,17 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> BackendResult<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| BackendError::Generic {
-            context: "Bigtable TTL calculation: invalid duration since UNIX_EPOCH".to_string(),
+            context: format!(
+                "unable to get duration since UNIX_EPOCH for SystemTime {}",
+                humantime::format_rfc3339_seconds(deadline)
+            ),
             cause: Some(Box::new(e)),
         })?
         .as_millis();
     (millis * 1000)
         .try_into()
         .map_err(|e| BackendError::Generic {
-            context: "Bigtable TTL calculation: failed to convert duration to i64 microseconds"
-                .to_string(),
+            context: format!("failed to convert {}ms to i64 microseconds", millis),
             cause: Some(Box::new(e)),
         })
 }
