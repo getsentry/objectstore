@@ -7,9 +7,7 @@
 
 // TODO(ja): Re-organize modules
 mod backend;
-mod error;
 pub mod id;
-pub use error::ServiceError;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -114,7 +112,7 @@ impl StorageService {
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> Result<ObjectId, ServiceError> {
+    ) -> anyhow::Result<ObjectId> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();

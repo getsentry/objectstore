@@ -60,7 +60,6 @@ impl AuthAwareService {
         self.service
             .insert_object(context, key, metadata, stream)
             .await
-            .map_err(Into::into)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
