@@ -22,15 +22,9 @@ pub enum ApiError {
     #[error("auth error: {0}")]
     Auth(#[from] AuthError),
 
-    /// Server errors, indicating that something went wrong when receiving or executing a request.
-    #[error("server error: {0}")]
-    Server(#[source] Box<dyn Error + Send + Sync>),
-}
-
-impl From<ServiceError> for ApiError {
-    fn from(err: ServiceError) -> Self {
-        ApiError::Server(Box::new(err))
-    }
+    /// Service errors, indicating that something went wrong when receiving or executing a request.
+    #[error("service error: {0}")]
+    Service(#[from] ServiceError),
 }
 
 /// Result type for API operations.
@@ -77,7 +71,7 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
-            ApiError::Server(_) => {
+            ApiError::Service(_) => {
                 tracing::error!(error = &self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
