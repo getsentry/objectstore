@@ -1,5 +1,5 @@
 /data
-/target
+/**/target
 recipe.json
 profile.json.gz
 .envrc.private
