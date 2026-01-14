@@ -3,10 +3,6 @@ use thiserror::Error;
 /// Error type for different authorization failure scenarios.
 #[derive(Error, Debug, PartialEq)]
 pub enum AuthError {
-    /// Indicates failure to initialize the auth system (e.g. a configured key is malformed).
-    #[error("failed to initialize auth system: {0}")]
-    InitFailure(String),
-
     /// Indicates that something about the request prevented authorization verification from
     /// happening properly.
     #[error("bad request: {0}")]

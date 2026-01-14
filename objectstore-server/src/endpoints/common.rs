@@ -1,42 +1,83 @@
-//!
-//! This is mostly adapted from <https://github.com/tokio-rs/axum/blob/main/examples/anyhow-error-response/src/main.rs>
+//! Common types and utilities for API endpoints.
 
+use std::error::Error;
+
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use objectstore_service::ServiceError;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-pub enum AnyhowResponse {
-    Error(anyhow::Error),
-    Response(Response),
+use crate::auth::AuthError;
+
+/// Error type for API operations.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    /// Errors indicating malformed or illegal requests.
+    #[error("client error: {0}")]
+    Client(String),
+
+    /// Authorization/authentication errors.
+    #[error("auth error: {0}")]
+    Auth(#[from] AuthError),
+
+    /// Service errors, indicating that something went wrong when receiving or executing a request.
+    #[error("service error: {0}")]
+    Service(#[from] ServiceError),
 }
 
-pub type ApiResult<T> = std::result::Result<T, AnyhowResponse>;
+/// Result type for API operations.
+pub type ApiResult<T> = Result<T, ApiError>;
 
-impl IntoResponse for AnyhowResponse {
-    fn into_response(self) -> Response {
-        match self {
-            AnyhowResponse::Error(error) => {
-                tracing::error!(
-                    error = error.as_ref() as &dyn std::error::Error,
-                    "error handling request"
-                );
+/// A JSON error response returned by the API.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ApiErrorResponse {
+    /// The main error message.
+    #[serde(default)]
+    detail: Option<String>,
+    /// Chain of error causes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    causes: Vec<String>,
+}
 
-                // TODO: Support more nuanced return codes for validation errors etc. See
-                // Relay's ApiErrorResponse and BadStoreRequest as examples.
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-            AnyhowResponse::Response(response) => response,
+impl ApiErrorResponse {
+    /// Creates an error response from an error, extracting the full cause chain.
+    pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
+        let detail = Some(error.to_string());
+
+        let mut causes = Vec::new();
+        let mut source = error.source();
+        while let Some(s) = source {
+            causes.push(s.to_string());
+            source = s.source();
         }
+
+        Self { detail, causes }
     }
 }
 
-impl From<Response> for AnyhowResponse {
-    fn from(response: Response) -> Self {
-        Self::Response(response)
-    }
-}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ApiError::Client(_) => StatusCode::BAD_REQUEST,
 
-impl From<anyhow::Error> for AnyhowResponse {
-    fn from(err: anyhow::Error) -> Self {
-        Self::Error(err)
+            ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Auth(AuthError::ValidationFailure(_))
+            | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
+            ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
+            ApiError::Auth(AuthError::InternalError(_)) => {
+                tracing::error!(error = &self as &dyn Error, "auth system error");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+
+            ApiError::Service(_) => {
+                tracing::error!(error = &self as &dyn Error, "error handling request");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+
+        let body = ApiErrorResponse::from_error(&self);
+        (status, Json(body)).into_response()
     }
 }

@@ -1,18 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use anyhow::Context;
 use jsonwebtoken::DecodingKey;
 use objectstore_types::Permission;
 
-use crate::auth::AuthError;
 use crate::config::{AuthZ, AuthZVerificationKey};
 
-fn read_key_from_file(filename: &Path) -> Result<DecodingKey, AuthError> {
-    let key_content = std::fs::read_to_string(filename).map_err(|_| {
-        AuthError::InitFailure(format!("key could not be read from '{filename:?}'"))
-    })?;
-    DecodingKey::from_ed_pem(key_content.as_bytes())
-        .map_err(|_| AuthError::InitFailure("key could not be parsed".into()))
+fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
+    let key_content = std::fs::read_to_string(filename).context("reading key")?;
+    DecodingKey::from_ed_pem(key_content.as_bytes()).context("parsing key")
 }
 
 /// Configures the EdDSA public key(s) and permissions used to verify tokens from a single `kid`.
@@ -36,15 +33,16 @@ pub struct PublicKeyConfig {
 }
 
 impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
-    type Error = AuthError;
-    fn try_from(key_config: &AuthZVerificationKey) -> Result<Self, Self::Error> {
+    type Error = anyhow::Error;
+
+    fn try_from(key_config: &AuthZVerificationKey) -> Result<Self, anyhow::Error> {
         Ok(Self {
             max_permissions: key_config.max_permissions.clone(),
             key_versions: key_config
                 .key_files
                 .iter()
                 .map(|filename| read_key_from_file(filename))
-                .collect::<Result<Vec<DecodingKey>, AuthError>>()?,
+                .collect::<anyhow::Result<Vec<DecodingKey>>>()?,
         })
     }
 }
@@ -61,7 +59,7 @@ pub struct PublicKeyDirectory {
 }
 
 impl TryFrom<&AuthZ> for PublicKeyDirectory {
-    type Error = AuthError;
+    type Error = anyhow::Error;
 
     fn try_from(auth_config: &AuthZ) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -69,7 +67,7 @@ impl TryFrom<&AuthZ> for PublicKeyDirectory {
                 .keys
                 .iter()
                 .map(|(kid, key)| Ok((kid.clone(), key.try_into()?)))
-                .collect::<Result<BTreeMap<String, PublicKeyConfig>, AuthError>>()?,
+                .collect::<Result<BTreeMap<String, PublicKeyConfig>, anyhow::Error>>()?,
         })
     }
 }
