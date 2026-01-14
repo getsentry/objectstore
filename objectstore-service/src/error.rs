@@ -1,8 +1,6 @@
-//! Error types for the objectstore service layer.
-
 use thiserror::Error;
 
-/// Error type for service operations, encompassing backend and streaming errors.
+/// Error type for service operations.
 #[derive(Debug, Error)]
 pub enum ServiceError {
     /// IO errors related to payload streaming or file operations.
