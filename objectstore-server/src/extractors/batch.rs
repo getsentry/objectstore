@@ -67,7 +67,7 @@ impl Operation {
                 payload: field.bytes().await?,
             }),
             "delete" => {
-                let key = key.context("missing object key for delet operation")?;
+                let key = key.context("missing object key for delete operation")?;
                 Operation::Delete(DeleteOperation { key })
             }
             _ => anyhow::bail!("invalid {HEADER_BATCH_OPERATION_KIND} header"),
