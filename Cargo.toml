@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["objectstore-*", "clients/rust", "stresstest"]
+members = ["objectstore-*", "clients/rust", "stresstest", "sleep"]
 default-members = ["objectstore-server"]
 
 [profile.dev]
@@ -27,6 +27,7 @@ objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-types = { path = "objectstore-types", version = "0.0.15" }
 stresstest = { path = "stresstest" }
+sleep = { path = "sleep" }
 
 anyhow = "1.0.69"
 async-trait = "0.1.88"
