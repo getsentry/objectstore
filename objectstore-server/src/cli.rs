@@ -64,7 +64,6 @@ pub fn execute() -> Result<()> {
         return Ok(());
     }
 
-    // Sleep command, runs before full initialization.
     if let Command::Sleep(SleepCommand { seconds }) = args.command {
         thread::sleep(Duration::from_secs(seconds));
         return Ok(());
