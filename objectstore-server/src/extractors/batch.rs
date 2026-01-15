@@ -58,11 +58,18 @@ impl Operation {
                 let key = key.context("missing object key for get operation")?;
                 Operation::Get(GetOperation { key })
             }
-            "insert" => Operation::Insert(InsertOperation {
-                key,
-                metadata: Metadata::from_headers(field.headers(), "")?,
-                payload: field.bytes().await.map_err(|e| anyhow::anyhow!("{e}"))?,
-            }),
+            "insert" => {
+                let metadata = Metadata::from_headers(field.headers(), "")?;
+                let payload = field.bytes().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                if payload.len() > MAX_FIELD_SIZE {
+                    anyhow::bail!("field size exceeds {MAX_FIELD_SIZE} bytes limit");
+                }
+                Operation::Insert(InsertOperation {
+                    key,
+                    metadata,
+                    payload,
+                })
+            }
             "delete" => {
                 let key = key.context("missing object key for delete operation")?;
                 Operation::Delete(DeleteOperation { key })
@@ -86,6 +93,9 @@ impl Debug for BatchRequest {
 pub const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 
+const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
+const MAX_OPERATIONS: usize = 1000;
+
 impl<S> FromRequest<S> for BatchRequest
 where
     S: Send + Sync,
@@ -100,8 +110,8 @@ where
         let operations = async_stream::try_stream! {
             let mut count = 0;
             while let Some(field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!("{e}"))? {
-                if count >= 1000 {
-                    Err(anyhow::anyhow!("exceeded limit of 1000 operations per batch request"))?;
+                if count >= MAX_OPERATIONS {
+                    Err(anyhow::anyhow!("exceeded limit of {MAX_OPERATIONS} operations per batch request"))?;
                 }
                 count += 1;
                 yield Operation::try_from_field(field).await?;
