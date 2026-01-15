@@ -48,8 +48,6 @@ jobs:
         run: |
           cargo build --release --locked --target=${{ matrix.target }} --bin objectstore
           cp target/${{ matrix.target }}/release/objectstore ./objectstore
-          cargo build --release --locked --target=${{ matrix.target }} -p sleep --bin sleep
-          cp target/${{ matrix.target }}/release/sleep ./sleep
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1

@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use argh::FromArgs;
@@ -23,6 +25,7 @@ enum Command {
     Run(RunCommand),
     Healthcheck(HealthcheckCommand),
     Version(VersionCommand),
+    Sleep(SleepCommand),
 }
 
 /// run the objectstore web server
@@ -43,6 +46,14 @@ struct HealthcheckCommand {}
 #[argh(subcommand, name = "version")]
 struct VersionCommand {}
 
+/// sleep for the specified number of seconds
+#[derive(Debug, FromArgs)]
+#[argh(subcommand, name = "sleep")]
+struct SleepCommand {
+    #[argh(positional)]
+    seconds: u64,
+}
+
 /// Bootstrap the runtime and execute the CLI command.
 pub fn execute() -> Result<()> {
     let args: Args = argh::from_env();
@@ -50,6 +61,12 @@ pub fn execute() -> Result<()> {
     // Special switch to just print the version and exit.
     if let Command::Version(_) = args.command {
         println!("{}", env!("OBJECTSTORE_RELEASE"));
+        return Ok(());
+    }
+
+    // Sleep command, runs before full initialization.
+    if let Command::Sleep(SleepCommand { seconds }) = args.command {
+        thread::sleep(Duration::from_secs(seconds));
         return Ok(());
     }
 
@@ -79,7 +96,9 @@ pub fn execute() -> Result<()> {
         match args.command {
             Command::Run(RunCommand {}) => web::server(config).await,
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
-            Command::Version(VersionCommand {}) => unreachable!(),
+            Command::Version(VersionCommand {}) | Command::Sleep(SleepCommand { .. }) => {
+                unreachable!()
+            }
         }
     });
 
