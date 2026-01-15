@@ -29,7 +29,6 @@ jsonwebtoken = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
 mime = "0.3.17"
-multer = "3.1.0"
 num_cpus = "1.17.0"
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }

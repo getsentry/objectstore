@@ -2,15 +2,12 @@ use std::fmt::Debug;
 
 use anyhow::Context;
 use axum::{
-    extract::{FromRequest, Request},
+    extract::{FromRequest, Multipart, Request, multipart::Field},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
-use http::header::CONTENT_TYPE;
-use multer::Field;
-use multer::{Constraints, Multipart, SizeLimit};
 use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
 
@@ -64,7 +61,7 @@ impl Operation {
             "insert" => Operation::Insert(InsertOperation {
                 key,
                 metadata: Metadata::from_headers(field.headers(), "")?,
-                payload: field.bytes().await?,
+                payload: field.bytes().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             }),
             "delete" => {
                 let key = key.context("missing object key for delete operation")?;
@@ -95,48 +92,14 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request(request: Request, _: &S) -> Result<Self, Self::Rejection> {
-        let Some(content_type) = request
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|ct| ct.to_str().ok())
-        else {
-            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type").into_response());
-        };
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let mut multipart = Multipart::from_request(request, state)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.body_text()).into_response())?;
 
-        let Ok(mime) = content_type.parse::<mime::Mime>() else {
-            return Err((StatusCode::BAD_REQUEST, "expected valid Content-Type").into_response());
-        };
-        if !(mime.type_() == mime::MULTIPART && mime.subtype() == "mixed") {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "expected Content-Type: multipart/mixed",
-            )
-                .into_response());
-        }
-
-        // XXX: `multer::parse_boundary` requires the content-type to be `multipart/form-data`
-        let content_type = content_type.replace("multipart/mixed", "multipart/form-data");
-        let Ok(boundary) = multer::parse_boundary(content_type) else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "failed to parse multipart boundary",
-            )
-                .into_response());
-        };
-        let mut parts = Multipart::with_constraints(
-            request.into_body().into_data_stream(),
-            boundary,
-            Constraints::new().size_limit(
-                // TODO(lcian): tentative limits that should be tested
-                SizeLimit::new()
-                    .per_field(1024 * 1024) // 1 MB
-                    .whole_stream(1024 * 1024 * 1024), // 1 GB
-            ),
-        );
         let operations = async_stream::try_stream! {
             let mut count = 0;
-            while let Some(field) = parts.next_field().await? {
+            while let Some(field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!("{e}"))? {
                 if count >= 1000 {
                     Err(anyhow::anyhow!("exceeded limit of 1000 operations per batch request"))?;
                 }
@@ -195,7 +158,7 @@ mod tests {
         );
 
         let request = Request::builder()
-            .header(CONTENT_TYPE, "multipart/mixed; boundary=boundary")
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
             .body(Body::from(body))
             .unwrap();
 

@@ -2256,7 +2256,6 @@ dependencies = [
  "merni",
  "mimalloc",
  "mime",
- "multer",
  "nix",
  "num_cpus",
  "objectstore-service",
