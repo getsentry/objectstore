@@ -7,6 +7,8 @@
 
 // TODO(ja): Re-organize modules
 mod backend;
+mod error;
+pub use error::{ServiceError, ServiceResult};
 pub mod id;
 
 use std::path::Path;
@@ -119,7 +121,7 @@ impl StorageService {
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> InsertResult {
+    ) -> ServiceResult<ObjectId> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
@@ -224,7 +226,10 @@ impl StorageService {
     }
 
     /// Streams the contents of an object stored at the given key.
-    pub async fn get_object(&self, id: &ObjectId) -> GetResult {
+    pub async fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -261,7 +266,7 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, id: &ObjectId) -> DeleteResult {
+    pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
         let start = Instant::now();
 
         if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {

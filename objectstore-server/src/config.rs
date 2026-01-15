@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 
 use crate::killswitches::Killswitches;
+use crate::rate_limits::RateLimits;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
@@ -870,6 +871,9 @@ pub struct Config {
 
     /// A list of matchers for requests to discard without processing.
     pub killswitches: Killswitches,
+
+    /// Definitions for rate limits to enforce on incoming requests.
+    pub rate_limits: RateLimits,
 }
 
 impl Default for Config {
@@ -890,6 +894,7 @@ impl Default for Config {
             metrics: Metrics::default(),
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
+            rate_limits: RateLimits::default(),
         }
     }
 }
@@ -928,6 +933,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
+    use crate::rate_limits::{BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule};
 
     use super::*;
 
@@ -1178,6 +1184,66 @@ mod tests {
 
             let config = Config::load(Some(tempfile.path())).unwrap();
             assert_eq!(&config.killswitches.0, &expected,);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_rate_limits_with_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                rate_limits:
+                  throughput:
+                    global_rps: 1000
+                    burst: 100
+                    usecase_pct: 50
+                    scope_pct: 25
+                    rules:
+                      - usecase: "high_priority"
+                        scopes:
+                          - ["org", "123"]
+                        rps: 500
+                      - scopes:
+                          - ["org", "456"]
+                          - ["project", "789"]
+                        pct: 10
+                "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let expected = RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(1000),
+                    burst: 100,
+                    usecase_pct: Some(50),
+                    scope_pct: Some(25),
+                    rules: vec![
+                        ThroughputRule {
+                            usecase: Some("high_priority".to_string()),
+                            scopes: vec![("org".to_string(), "123".to_string())],
+                            rps: Some(500),
+                            pct: None,
+                        },
+                        ThroughputRule {
+                            usecase: None,
+                            scopes: vec![
+                                ("org".to_string(), "456".to_string()),
+                                ("project".to_string(), "789".to_string()),
+                            ],
+                            rps: None,
+                            pct: Some(10),
+                        },
+                    ],
+                },
+                bandwidth: BandwidthLimits::default(),
+            };
+
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert_eq!(config.rate_limits, expected);
 
             Ok(())
         });

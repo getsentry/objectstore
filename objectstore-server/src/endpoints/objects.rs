@@ -1,13 +1,14 @@
 use std::io;
 use std::time::SystemTime;
 
-use anyhow::Context;
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
 use futures_util::{StreamExt, TryStreamExt};
+use objectstore_service::ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::Metadata;
 use serde::Serialize;
@@ -15,6 +16,7 @@ use serde::Serialize;
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::ApiResult;
 use crate::extractors::Xt;
+use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
@@ -39,15 +41,17 @@ pub struct InsertObjectResponse {
 
 async fn objects_post(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let mut metadata =
-        Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
+    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
+
     let response_id = service
         .insert_object(context, None, &metadata, stream)
         .await?;
@@ -58,14 +62,17 @@ async fn objects_post(
     Ok((StatusCode::CREATED, response).into_response())
 }
 
-async fn object_get(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
+async fn object_get(
+    service: AuthAwareService,
+    State(state): State<ServiceState>,
+    Xt(id): Xt<ObjectId>,
+) -> ApiResult<Response> {
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
 
-    let headers = metadata
-        .to_headers("", false)
-        .context("extracting metadata from headers")?;
+    let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
@@ -74,25 +81,24 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let headers = metadata
-        .to_headers("", false)
-        .context("extracting metadata from headers")?;
+    let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
 }
 
 async fn object_put(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<Response> {
-    let mut metadata =
-        Metadata::from_headers(&headers, "").context("extracting metadata from headers")?;
+    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
 
     let ObjectId { context, key } = id;
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
+    let stream = MeteredPayloadStream::from(stream, state.rate_limiter.bytes_accumulator()).boxed();
     let response_id = service
         .insert_object(context, Some(key), &metadata, stream)
         .await?;

@@ -15,6 +15,7 @@ use crate::state::ServiceState;
 pub enum ObjectRejection {
     Path(PathRejection),
     Killswitched,
+    RateLimited,
 }
 
 impl IntoResponse for ObjectRejection {
@@ -24,6 +25,11 @@ impl IntoResponse for ObjectRejection {
             ObjectRejection::Killswitched => (
                 axum::http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
+            )
+                .into_response(),
+            ObjectRejection::RateLimited => (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "Object access is rate limited",
             )
                 .into_response(),
         }
@@ -50,7 +56,13 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
 
         if state.config.killswitches.matches(id.context()) {
+            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
+        }
+
+        if !state.rate_limiter.check(id.context()) {
+            tracing::debug!("Request rejected due to rate limits");
+            return Err(ObjectRejection::RateLimited);
         }
 
         Ok(Xt(id))
@@ -111,7 +123,13 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
         populate_sentry_context(&context);
 
         if state.config.killswitches.matches(&context) {
+            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
+        }
+
+        if !state.rate_limiter.check(&context) {
+            tracing::debug!("Request rejected due to rate limits");
+            return Err(ObjectRejection::RateLimited);
         }
 
         Ok(Xt(context))

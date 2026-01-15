@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.0.15
+
+### New Features ✨
+
+#### Auth
+
+- Python client support for bearer auth by @matt-codecov in [#240](https://github.com/getsentry/objectstore/pull/240)
+- Rust client support for bearer auth by @matt-codecov in [#237](https://github.com/getsentry/objectstore/pull/237)
+
+### Bug Fixes 🐛
+
+- (python) Set timeout correctly and update test by @jan-auer in [#242](https://github.com/getsentry/objectstore/pull/242)
+
+### Build / dependencies / internal 🔧
+
+- (clients) Change defaults for timeouts by @jan-auer in [#246](https://github.com/getsentry/objectstore/pull/246)
+- Fix ci and add python client comment about token_generator by @matt-codecov in [#252](https://github.com/getsentry/objectstore/pull/252)
+- Move `Permission`, `Scope`, `Scopes` to `objectstore_types` and use in Rust client by @matt-codecov in [#236](https://github.com/getsentry/objectstore/pull/236)
+
+### Other
+
+- tests(client): enable authorization tokens in e2e client tests by @matt-codecov in [#231](https://github.com/getsentry/objectstore/pull/231)
+- test(client): Add tests for keys containing slashes by @jan-auer in [#245](https://github.com/getsentry/objectstore/pull/245)
+
 ## 0.0.14
 
 ### New Features ✨

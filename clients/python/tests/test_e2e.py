@@ -225,9 +225,7 @@ def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    # TODO: When server errors cause appropriate status codes to be returned,
-    # ensure this is 403
-    with pytest.raises(RequestError, check=lambda e: e.status == 500):
+    with pytest.raises(RequestError, check=lambda e: e.status == 403):
         _object_key = session.put(b"test data")
 
 

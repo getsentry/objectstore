@@ -12,5 +12,6 @@ pub mod extractors;
 pub mod healthcheck;
 pub mod killswitches;
 pub mod observability;
+pub mod rate_limits;
 pub mod state;
 pub mod web;
