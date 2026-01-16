@@ -1,15 +1,36 @@
 use std::fmt::Debug;
 
-use anyhow::Context;
-use axum::{
-    extract::{FromRequest, Multipart, Request, multipart::Field},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+use axum::extract::{
+    FromRequest, Multipart, Request,
+    multipart::{Field, MultipartError, MultipartRejection},
 };
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
+use thiserror::Error;
+
+use crate::endpoints::common::ApiError;
+
+/// Errors that can occur when processing or executing batch operations.
+#[derive(Debug, Error)]
+pub enum BatchError {
+    /// Malformed request.
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
+    /// Errors in parsing or reading a multipart request body.
+    #[error("multipart error: {0}")]
+    Multipart(#[from] MultipartError),
+
+    /// Errors related to de/serialization and parsing of object metadata.
+    #[error("metadata error: {0}")]
+    Metadata(#[from] objectstore_types::Error),
+
+    /// Size or cardinality limit exceeded.
+    #[error("batch limit exceeded: {0}")]
+    LimitExceeded(String),
+}
 
 #[derive(Debug)]
 pub struct GetOperation {
@@ -36,33 +57,49 @@ pub enum Operation {
 }
 
 impl Operation {
-    async fn try_from_field(field: Field<'_>) -> anyhow::Result<Self> {
+    async fn try_from_field(field: Field<'_>) -> Result<Self, BatchError> {
         let kind = field
             .headers()
             .get(HEADER_BATCH_OPERATION_KIND)
-            .ok_or(anyhow::anyhow!(
-                "missing {HEADER_BATCH_OPERATION_KIND} header"
-            ))?;
+            .ok_or_else(|| {
+                BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KIND} header"))
+            })?;
         let kind = kind
             .to_str()
-            .context(format!("invalid {HEADER_BATCH_OPERATION_KIND} header"))?
+            .map_err(|_| {
+                BatchError::BadRequest(format!(
+                    "unable to convert {HEADER_BATCH_OPERATION_KIND} header value to string"
+                ))
+            })?
             .to_lowercase();
 
         let key = match field.headers().get(HEADER_BATCH_OPERATION_KEY) {
-            Some(key) => Some(key.to_str().context("invalid object key")?.to_owned()),
+            Some(key) => Some(
+                key.to_str()
+                    .map_err(|_| {
+                        BatchError::BadRequest(format!(
+                            "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
+                        ))
+                    })?
+                    .to_owned(),
+            ),
             None => None,
         };
 
         let operation = match kind.as_str() {
             "get" => {
-                let key = key.context("missing object key for get operation")?;
+                let key = key.ok_or_else(|| {
+                    BatchError::BadRequest("missing object key for get operation".to_string())
+                })?;
                 Operation::Get(GetOperation { key })
             }
             "insert" => {
                 let metadata = Metadata::from_headers(field.headers(), "")?;
-                let payload = field.bytes().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let payload = field.bytes().await?;
                 if payload.len() > MAX_FIELD_SIZE {
-                    anyhow::bail!("field size exceeds {MAX_FIELD_SIZE} bytes limit");
+                    return Err(BatchError::LimitExceeded(format!(
+                        "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
+                    )));
                 }
                 Operation::Insert(InsertOperation {
                     key,
@@ -71,17 +108,23 @@ impl Operation {
                 })
             }
             "delete" => {
-                let key = key.context("missing object key for delete operation")?;
+                let key = key.ok_or_else(|| {
+                    BatchError::BadRequest("missing object key for delete operation".to_string())
+                })?;
                 Operation::Delete(DeleteOperation { key })
             }
-            _ => anyhow::bail!("invalid {HEADER_BATCH_OPERATION_KIND} header"),
+            _ => {
+                return Err(BatchError::BadRequest(format!(
+                    "invalid operation kind: {kind}"
+                )));
+            }
         };
         Ok(operation)
     }
 }
 
 pub struct BatchRequest {
-    pub operations: BoxStream<'static, anyhow::Result<Operation>>,
+    pub operations: BoxStream<'static, Result<Operation, BatchError>>,
 }
 
 impl Debug for BatchRequest {
@@ -100,18 +143,18 @@ impl<S> FromRequest<S> for BatchRequest
 where
     S: Send + Sync,
 {
-    type Rejection = Response;
+    type Rejection = MultipartRejection;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let mut multipart = Multipart::from_request(request, state)
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.body_text()).into_response())?;
+        let mut multipart = Multipart::from_request(request, state).await?;
 
         let operations = async_stream::try_stream! {
             let mut count = 0;
-            while let Some(field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!("{e}"))? {
+            while let Some(field) = multipart.next_field().await? {
                 if count >= MAX_OPERATIONS {
-                    Err(anyhow::anyhow!("exceeded limit of {MAX_OPERATIONS} operations per batch request"))?;
+                    Err(BatchError::LimitExceeded(format!(
+                        "exceeded {MAX_OPERATIONS} operations per batch request"
+                    )))?;
                 }
                 count += 1;
                 yield Operation::try_from_field(field).await?;

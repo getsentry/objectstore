@@ -10,4 +10,6 @@ mod service;
 #[derive(Debug)]
 pub struct Xt<T>(pub T);
 
-pub use batch::{BatchRequest, DeleteOperation, GetOperation, InsertOperation, Operation};
+pub use batch::{
+    BatchError, BatchRequest, DeleteOperation, GetOperation, InsertOperation, Operation,
+};
