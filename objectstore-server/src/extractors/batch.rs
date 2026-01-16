@@ -10,7 +10,6 @@ use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
 use thiserror::Error;
 
-
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
 pub enum BatchError {
@@ -243,5 +242,59 @@ mod tests {
             panic!("expected delete operation");
         };
         assert_eq!(delete_op.key, "test3");
+    }
+
+    #[tokio::test]
+    async fn test_max_operations_limit_enforced() {
+        let mut body = String::new();
+        for i in 0..(MAX_OPERATIONS + 1) {
+            body.push_str(&format!(
+                "--boundary\r\n\
+                 {HEADER_BATCH_OPERATION_KEY}: test{i}\r\n\
+                 {HEADER_BATCH_OPERATION_KIND}: get\r\n\
+                 \r\n\
+                 \r\n"
+            ));
+        }
+        body.push_str("--boundary--\r\n");
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
+        let operations: Vec<_> = batch_request.operations.collect().await;
+
+        assert_eq!(operations.len(), MAX_OPERATIONS + 1);
+        matches!(
+            &operations[MAX_OPERATIONS],
+            Err(BatchError::LimitExceeded(_))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_operation_body_size_limit_enforced() {
+        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: test\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n\
+             {large_payload}\r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
+        let operations: Vec<_> = batch_request.operations.collect().await;
+
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));
     }
 }
