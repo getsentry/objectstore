@@ -22,13 +22,11 @@ elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
-http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
 merni = { workspace = true }
 mimalloc = { workspace = true }
-mime = "0.3.17"
 num_cpus = "1.17.0"
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
