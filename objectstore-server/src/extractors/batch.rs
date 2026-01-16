@@ -10,7 +10,6 @@ use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
 use thiserror::Error;
 
-use crate::endpoints::common::ApiError;
 
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
