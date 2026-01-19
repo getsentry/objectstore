@@ -30,16 +30,16 @@ pub fn router() -> Router<ServiceState> {
 }
 
 #[derive(Debug)]
-enum BatchResult {
-    Get {
-        key: String,
-        result: ApiResult<Option<(Metadata, Bytes)>>,
-    },
+struct BatchResult {
+    key: Option<String>,
+    inner: BatchResultInner,
+}
+
+#[derive(Debug)]
+enum BatchResultInner {
+    Get(ApiResult<Option<(Metadata, Bytes)>>),
     Insert(ApiResult<ObjectId>),
-    Delete {
-        key: String,
-        result: ApiResult<()>,
-    },
+    Delete(ApiResult<()>),
     Error(BatchError),
 }
 
@@ -51,30 +51,28 @@ impl IntoPart for BatchError {
             StatusCode::BAD_REQUEST.as_u16().into(),
         );
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-        let body = serde_json::json!({
-            "detail": self.to_string(),
-        });
-        let body = serde_json::to_vec(&body).unwrap().into();
+        let body = serde_json::to_vec(&ApiErrorResponse::from_error(&self))
+            .unwrap()
+            .into();
         Part::new(headers, body)
     }
 }
 
 impl IntoPart for BatchResult {
     fn into_part(self) -> Part {
-        match self {
-            BatchResult::Get { key, result } => {
-                let mut part = result.into_part();
-                part.add_header(HEADER_BATCH_OPERATION_KEY, key.parse().unwrap());
-                part
-            }
-            BatchResult::Insert(result) => result.into_part(),
-            BatchResult::Delete { key, result } => {
-                let mut part = result.into_part();
-                part.add_header(HEADER_BATCH_OPERATION_KEY, key.parse().unwrap());
-                part
-            }
-            BatchResult::Error(err) => err.into_part(),
+        let mut part = match self.inner {
+            BatchResultInner::Get(result) => result.into_part(),
+            BatchResultInner::Insert(result) => result.into_part(),
+            BatchResultInner::Delete(result) => result.into_part(),
+            BatchResultInner::Error(err) => err.into_part(),
+        };
+
+        // Add key header if present
+        if let Some(key) = self.key {
+            part.add_header(HEADER_BATCH_OPERATION_KEY, key.parse().unwrap());
         }
+
+        part
     }
 }
 
@@ -105,24 +103,37 @@ async fn batch(
                                 Err(err) => Err(err),
                             };
 
-                            BatchResult::Get { key, result: buffered_result }
+                            BatchResult {
+                                key: Some(key),
+                                inner: BatchResultInner::Get(buffered_result),
+                            }
                         }
                         BatchOperation::Insert(insert) => {
+                            let key = insert.key.clone();
                             let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
                             let result = service
                                 .insert_object(context.clone(), insert.key, &insert.metadata, stream)
                                 .await;
-                            BatchResult::Insert(result)
+                            BatchResult {
+                                key,
+                                inner: BatchResultInner::Insert(result),
+                            }
                         }
                         BatchOperation::Delete(delete) => {
                             let key = delete.key.clone();
                             let result = service
                                 .delete_object(&ObjectId::new(context.clone(), delete.key))
                                 .await;
-                            BatchResult::Delete { key, result }
+                            BatchResult {
+                                key: Some(key),
+                                inner: BatchResultInner::Delete(result),
+                            }
                         }
                     },
-                    Err(e) => BatchResult::Error(e)
+                    Err(e) => BatchResult {
+                        key: None,
+                        inner: BatchResultInner::Error(e),
+                    }
                 };
                 yield result;
             }

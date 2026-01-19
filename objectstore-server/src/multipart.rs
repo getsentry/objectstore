@@ -1,7 +1,5 @@
 //! Utilities for Multipart streaming responses.
 
-use std::pin::Pin;
-
 use axum::body::Body;
 use axum::response::IntoResponse as _;
 use axum::response::Response;
