@@ -31,6 +31,15 @@ impl Part {
             body: Bytes::new(),
         }
     }
+
+    /// Adds a header to this part.
+    pub fn add_header(
+        &mut self,
+        name: impl http::header::IntoHeaderName,
+        value: http::HeaderValue,
+    ) {
+        self.headers.insert(name, value);
+    }
 }
 
 pub trait MultipartIntoResponse<E> {
@@ -102,6 +111,11 @@ fn serialize_headers(headers: HeaderMap) -> Bytes {
     }
     b.put(&b"\r\n"[..]);
     b.freeze()
+}
+
+#[async_trait::async_trait]
+pub trait IntoPart {
+    async fn into_part(self) -> Part;
 }
 
 #[cfg(test)]
