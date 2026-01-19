@@ -1,13 +1,15 @@
-//! Utilities for multipart streaming responses.
-//! This has been adapted from https://github.com/scottlamb/multipart-stream-rs.
+//! Utilities for Multipart streaming responses.
 
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
+use axum::body::Body;
+use axum::response::IntoResponse as _;
+use axum::response::Response;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::Stream;
+use futures::StreamExt;
 use http::HeaderMap;
-use pin_project::pin_project;
+use http::header::CONTENT_TYPE;
 
 /// A Multipart part.
 #[derive(Debug)]
@@ -31,94 +33,62 @@ impl Part {
     }
 }
 
-pub trait IntoBytesStream<E> {
-    fn into_bytes_stream(self, boundary: String) -> impl Stream<Item = Result<Bytes, E>>;
+pub trait MultipartIntoResponse<E> {
+    fn into_response(self, boundary: String) -> Response;
 }
 
-impl<S, E> IntoBytesStream<E> for S
+impl<S, E> MultipartIntoResponse<E> for S
 where
-    S: Stream<Item = Result<Part, E>> + Send,
+    S: Stream<Item = Result<Part, E>> + Send + 'static,
+    E: std::error::Error + Send + Sync + 'static,
 {
-    fn into_bytes_stream(self, boundary: String) -> impl Stream<Item = Result<Bytes, E>> {
-        let mut b = BytesMut::with_capacity(boundary.len() + 4);
-        b.put(&b"--"[..]);
-        b.put(boundary.as_bytes());
-        b.put(&b"\r\n"[..]);
-        PartsSerializer {
-            parts: self,
-            boundary: b.freeze(),
-            state: State::Waiting,
-        }
-    }
-}
+    fn into_response(self, boundary: String) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary=\"{}\"", &boundary)
+                .parse()
+                .unwrap(),
+        );
 
-#[pin_project]
-struct PartsSerializer<S, E>
-where
-    S: Stream<Item = Result<Part, E>>,
-{
-    #[pin]
-    parts: S,
-    boundary: Bytes,
-    state: State,
-}
+        let body_stream: Pin<
+            Box<dyn Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> + Send>,
+        > = async_stream::try_stream! {
+            let mut boundary_bytes = BytesMut::with_capacity(boundary.len() + 4);
+            boundary_bytes.put(&b"--"[..]);
+            boundary_bytes.put(boundary.as_bytes());
+            boundary_bytes.put(&b"\r\n"[..]);
+            let boundary = boundary_bytes.freeze();
 
-enum State {
-    Waiting,
-    SendHeaders(Part),
-    SendBody(Bytes),
-    SendClosingBoundary,
-    Done,
-}
+            let parts = self;
+            futures::pin_mut!(parts);
+            while let Some(part) = parts.next().await {
+                let Ok(part) = part else {
+                    unreachable!();
+                };
 
-impl<S, E> Stream for PartsSerializer<S, E>
-where
-    S: Stream<Item = Result<Part, E>>,
-{
-    type Item = Result<Bytes, E>;
+                yield boundary.clone();
+                yield serialize_headers(part.headers);
 
-    fn poll_next(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = self.project();
-        match std::mem::replace(this.state, State::Waiting) {
-            State::Waiting => match this.parts.as_mut().poll_next(ctx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(None) => {
-                    *this.state = State::SendClosingBoundary;
-                    ctx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-                Poll::Ready(Some(Ok(p))) => {
-                    *this.state = State::SendHeaders(p);
-                    Poll::Ready(Some(Ok(this.boundary.clone())))
-                }
-            },
-            State::SendHeaders(part) => {
-                *this.state = State::SendBody(part.body);
-                let headers = serialize_headers(part.headers);
-                Poll::Ready(Some(Ok(headers)))
-            }
-            State::SendBody(body) => {
-                // Add \r\n after the body
-                let mut body_with_newline = BytesMut::with_capacity(body.len() + 2);
-                body_with_newline.put(body);
+                let mut body_with_newline = BytesMut::with_capacity(part.body.len() + 2);
+                body_with_newline.put(part.body);
                 body_with_newline.put(&b"\r\n"[..]);
-                Poll::Ready(Some(Ok(body_with_newline.freeze())))
+                yield body_with_newline.freeze();
             }
-            State::SendClosingBoundary => {
-                *this.state = State::Done;
-                // Create closing boundary: --boundary-- (without \r\n in between)
-                // The boundary already has --boundary\r\n, so we need to strip the \r\n
-                // and add --\r\n instead
-                let boundary_str = std::str::from_utf8(this.boundary).unwrap();
-                let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
-                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
-                closing.put(boundary_without_crlf.as_bytes());
-                closing.put(&b"--\r\n"[..]);
-                Poll::Ready(Some(Ok(closing.freeze())))
-            }
-            State::Done => Poll::Ready(None),
+
+            // Yield closing boundary: --boundary-- (without \r\n in between)
+            // The boundary already has --boundary\r\n, so we need to strip the \r\n
+            // and add --\r\n instead
+            let boundary_str = std::str::from_utf8(&boundary).unwrap();
+            let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
+            let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
+            closing.put(boundary_without_crlf.as_bytes());
+            closing.put(&b"--\r\n"[..]);
+            yield closing.freeze();
         }
+        .boxed();
+
+        (headers, Body::from_stream(body_stream)).into_response()
     }
 }
 
@@ -132,4 +102,130 @@ fn serialize_headers(headers: HeaderMap) -> Bytes {
     }
     b.put(&b"\r\n"[..]);
     b.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_multipart_serialization() {
+        // Create a stream of parts
+        let parts = futures::stream::iter(vec![
+            Ok::<_, std::convert::Infallible>(Part::new(
+                {
+                    let mut headers = HeaderMap::new();
+                    headers.insert("Content-Type", "text/plain".parse().unwrap());
+                    headers.insert(
+                        "Content-Disposition",
+                        "form-data; name=\"field1\"".parse().unwrap(),
+                    );
+                    headers
+                },
+                Bytes::from("Hello World"),
+            )),
+            Ok(Part::new(
+                {
+                    let mut headers = HeaderMap::new();
+                    headers.insert("Content-Type", "application/json".parse().unwrap());
+                    headers
+                },
+                Bytes::from(r#"{"key":"value"}"#),
+            )),
+        ]);
+
+        // Convert to bytes stream
+        let boundary = "test-boundary".to_string();
+        let stream = parts.into_bytes_stream(boundary.clone());
+        futures::pin_mut!(stream);
+
+        // Collect all bytes
+        let mut result = BytesMut::new();
+        while let Some(chunk) = stream.next().await {
+            result.put(chunk.unwrap());
+        }
+
+        let result_str = String::from_utf8(result.to_vec()).unwrap();
+
+        // Verify the structure
+        let expected = concat!(
+            "--test-boundary\r\n",
+            "content-type: text/plain\r\n",
+            "content-disposition: form-data; name=\"field1\"\r\n",
+            "\r\n",
+            "Hello World\r\n",
+            "--test-boundary\r\n",
+            "content-type: application/json\r\n",
+            "\r\n",
+            r#"{"key":"value"}"#,
+            "\r\n",
+            "--test-boundary--\r\n",
+        );
+
+        assert_eq!(result_str, expected);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_with_empty_body() {
+        let parts = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+            Part::headers_only({
+                let mut headers = HeaderMap::new();
+                headers.insert("Content-Type", "text/plain".parse().unwrap());
+                headers
+            }),
+        )]);
+
+        let boundary = "boundary123".to_string();
+        let stream = parts.into_bytes_stream(boundary);
+        futures::pin_mut!(stream);
+
+        let mut result = BytesMut::new();
+        while let Some(chunk) = stream.next().await {
+            result.put(chunk.unwrap());
+        }
+
+        let result_str = String::from_utf8(result.to_vec()).unwrap();
+
+        let expected = concat!(
+            "--boundary123\r\n",
+            "content-type: text/plain\r\n",
+            "\r\n",
+            "\r\n",
+            "--boundary123--\r\n",
+        );
+
+        assert_eq!(result_str, expected);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_error_propagation() {
+        // Create a stream that will error
+        let parts = futures::stream::iter(vec![
+            Ok(Part::new(HeaderMap::new(), Bytes::from("first"))),
+            Err("test error"),
+            Ok(Part::new(HeaderMap::new(), Bytes::from("third"))),
+        ]);
+
+        let stream = parts.into_bytes_stream("boundary".to_string());
+        futures::pin_mut!(stream);
+
+        // Collect until we hit the error
+        let mut chunks = Vec::new();
+        let mut count = 0;
+        while let Some(chunk) = stream.next().await {
+            count += 1;
+            match chunk {
+                Ok(bytes) => {
+                    println!("{:?}", bytes);
+                    chunks.push(bytes)
+                }
+                Err(e) => {
+                    assert_eq!(e, "test error");
+                }
+            }
+        }
+
+        assert_eq!(count, 4);
+    }
 }
