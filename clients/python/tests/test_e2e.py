@@ -150,8 +150,9 @@ def test_full_cycle(server_url: str) -> None:
 
     session.delete(object_key)
 
-    with pytest.raises(RequestError, check=lambda e: e.status == 404):
+    with pytest.raises(RequestError) as exc_info:
         session.get(object_key)
+    assert exc_info.value.status == 404
 
 
 def test_full_cycle_uncompressed(server_url: str) -> None:
@@ -210,8 +211,9 @@ def test_not_found_with_different_scope(server_url: str) -> None:
 
     # Now make sure we can't fetch it
     session = client.session(test_usecase, org=42, project=9999)
-    with pytest.raises(RequestError, check=lambda e: e.status == 404):
+    with pytest.raises(RequestError) as exc_info:
         session.get(object_key)
+    assert exc_info.value.status == 404
 
 
 def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
@@ -225,8 +227,9 @@ def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    with pytest.raises(RequestError, check=lambda e: e.status == 403):
+    with pytest.raises(RequestError) as exc_info:
         _object_key = session.put(b"test data")
+    assert exc_info.value.status == 403
 
 
 def test_read_timeout() -> None:
