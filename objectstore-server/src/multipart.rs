@@ -21,26 +21,44 @@ pub struct Part {
 }
 
 impl Part {
-    /// Creates a new Multipart part with headers and body.
-    pub fn new(headers: HeaderMap, body: Bytes) -> Self {
-        Part { headers, body }
-    }
+    /// Creates a new Multipart part with the specified name, content type, body, and optional filename.
+    ///
+    /// Additional headers can be provided, but if they contain `Content-Type`, it will be ignored
+    /// in favor of the provided `content_type` parameter.
+    pub fn new(
+        name: impl AsRef<str>,
+        content_type: impl AsRef<str>,
+        body: Bytes,
+        filename: Option<impl AsRef<str>>,
+        additional_headers: HeaderMap,
+    ) -> Self {
+        use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
-    /// Creates a new Multipart part with headers only.
-    pub fn headers_only(headers: HeaderMap) -> Self {
-        Part {
-            headers,
-            body: Bytes::new(),
+        let mut headers = HeaderMap::new();
+
+        // Build Content-Disposition header
+        let mut disposition = format!("form-data; name=\"{}\"", name.as_ref());
+        if let Some(fname) = filename {
+            disposition.push_str(&format!("; filename=\"{}\"", fname.as_ref()));
         }
-    }
+        headers.insert(CONTENT_DISPOSITION, disposition.parse().expect("valid header value"));
 
-    /// Inserts a header into this part's headers.
-    pub fn insert_header(
-        &mut self,
-        name: impl http::header::IntoHeaderName,
-        value: http::HeaderValue,
-    ) {
-        self.headers.insert(name, value);
+        // Set Content-Type
+        headers.insert(
+            CONTENT_TYPE,
+            content_type.as_ref().parse().expect("valid content type"),
+        );
+
+        // Merge additional headers, skipping Content-Type
+        for (name, value) in additional_headers {
+            if let Some(name) = name {
+                if name != CONTENT_TYPE {
+                    headers.insert(name, value);
+                }
+            }
+        }
+
+        Part { headers, body }
     }
 }
 
@@ -119,7 +137,6 @@ fn serialize_body(body: Bytes) -> Bytes {
 mod tests {
     use super::*;
     use axum_extra::response::multiple::{MultipartForm, Part as AxumPart};
-    use http::header::CONTENT_DISPOSITION;
 
     /// Validates that our `Multipart` streaming response matches what `axum` would construct when using its
     /// built-in `MultipartForm`.
@@ -159,26 +176,20 @@ mod tests {
         let boundary = content_type.split("boundary=").nth(1).unwrap();
 
         let parts = vec![
-            {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    CONTENT_DISPOSITION,
-                    "form-data; name=\"metadata\"".parse().unwrap(),
-                );
-                headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-                Part::new(headers, Bytes::from(r#"{"key":"value"}"#))
-            },
-            {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    CONTENT_DISPOSITION,
-                    "form-data; name=\"file\"; filename=\"data.bin\""
-                        .parse()
-                        .unwrap(),
-                );
-                headers.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-                Part::new(headers, Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]))
-            },
+            Part::new(
+                "metadata",
+                "application/json",
+                Bytes::from(r#"{"key":"value"}"#),
+                None::<String>,
+                HeaderMap::new(),
+            ),
+            Part::new(
+                "file",
+                "application/octet-stream",
+                Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
+                Some("data.bin"),
+                HeaderMap::new(),
+            ),
         ];
         let response = futures::stream::iter(parts).into_response(boundary.to_string());
 
