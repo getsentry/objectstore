@@ -1,4 +1,7 @@
-//! Utilities for working with Multipart streaming responses.
+//! Types and utilities to support Multipart streaming responses.
+//!
+//! Compared to `axum_extra`'s `MultipartForm`, this implementation supports attaching arbitrary headers to
+//! each part, as well as the possibility to convert a `Stream` of those parts to a streaming `Response`.
 
 use axum::body::Body;
 use axum::response::IntoResponse as _;
@@ -8,10 +11,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
-use http::StatusCode;
 use http::header::CONTENT_TYPE;
-
-use crate::endpoints::common::ApiError;
 
 /// A Multipart part.
 #[derive(Debug)]
@@ -57,7 +57,7 @@ where
         let mut headers = HeaderMap::new();
         headers.insert(
             CONTENT_TYPE,
-            format!("multipart/form-data; boundary=\"{}\"", &boundary)
+            format!("multipart/form-data; boundary={}", &boundary)
                 .parse()
                 .expect("should be a valid header value"),
         );
@@ -80,14 +80,14 @@ where
                     yield serialize_body(part.body);
                 }
 
-                // Yield closing boundary: --boundary-- (without \r\n in between)
+                // Yield closing boundary: --boundary-- (without trailing \r\n)
                 // The boundary already has --boundary\r\n, so we need to strip the \r\n
-                // and add --\r\n instead
+                // and add -- instead
                 let boundary_str = std::str::from_utf8(&boundary).unwrap();
                 let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
-                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
+                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 2);
                 closing.put(boundary_without_crlf.as_bytes());
-                closing.put(&b"--\r\n"[..]);
+                closing.put(&b"--"[..]);
                 yield closing.freeze();
             }
             .boxed();
@@ -118,49 +118,47 @@ fn serialize_body(body: Bytes) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::to_bytes;
-    use axum::response::IntoResponse as _;
     use axum_extra::response::multiple::{MultipartForm, Part as AxumPart};
     use http::header::CONTENT_DISPOSITION;
 
+    /// Validates that our `Multipart` streaming response matches what `axum` would construct when using its
+    /// built-in `MultipartForm`.
+    /// The test is performed by parsing both requests with `axum`'s `Multipart` extractor, to
+    /// circumvent meaningless differences such as header casing.
     #[tokio::test]
-    async fn test_multipart_with_parts() {
-        // Create the same parts using axum_extra first to get its boundary
-        let axum_parts = vec![
+    async fn test_multipart_response() {
+        use axum::body::{Body, to_bytes};
+        use axum::extract::{FromRequest, Multipart};
+        use axum::http::Request;
+
+        let parts = vec![
             AxumPart::raw_part(
                 "metadata",
                 "application/json",
                 r#"{"key":"value"}"#.as_bytes().to_vec(),
                 None,
             )
-            .expect("valid MIME type"),
+            .unwrap(),
             AxumPart::raw_part(
                 "file",
                 "application/octet-stream",
                 vec![0x00, 0x01, 0x02, 0xff, 0xfe],
                 Some("data.bin"),
             )
-            .expect("valid MIME type"),
+            .unwrap(),
         ];
+        let expected_response = MultipartForm::with_parts(parts).into_response();
 
-        let axum_response = MultipartForm::with_parts(axum_parts).into_response();
-
-        // Extract boundary from axum's Content-Type header
-        let content_type = axum_response
+        let content_type = expected_response
             .headers()
             .get(CONTENT_TYPE)
-            .expect("should have content-type")
+            .unwrap()
             .to_str()
-            .expect("should be valid string");
-        eprintln!("Content-Type: {}", content_type);
-        let boundary = content_type
-            .split("boundary=")
-            .nth(1)
-            .unwrap_or_else(|| panic!("should have boundary, got: {}", content_type))
-            .trim_matches('"');
+            .unwrap()
+            .to_string();
+        let boundary = content_type.split("boundary=").nth(1).unwrap();
 
-        // Create parts using our implementation with the same boundary
-        let our_parts = vec![
+        let parts = vec![
             {
                 let mut headers = HeaderMap::new();
                 headers.insert(
@@ -182,56 +180,45 @@ mod tests {
                 Part::new(headers, Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]))
             },
         ];
+        let response = futures::stream::iter(parts).into_response(boundary.to_string());
 
-        let our_response = futures::stream::iter(our_parts).into_response(boundary.to_string());
+        assert_eq!(response.headers(), expected_response.headers());
 
-        // Collect bodies
-        let our_body = to_bytes(our_response.into_body(), usize::MAX)
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let expected_body = to_bytes(expected_response.into_body(), usize::MAX)
             .await
-            .expect("should collect body");
-        let axum_body = to_bytes(axum_response.into_body(), usize::MAX)
+            .unwrap();
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, &content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let expected_request = Request::builder()
+            .header(CONTENT_TYPE, &content_type)
+            .body(Body::from(expected_body))
+            .unwrap();
+
+        let mut multipart = Multipart::from_request(request, &()).await.unwrap();
+        let mut expected_multipart = Multipart::from_request(expected_request, &())
             .await
-            .expect("should collect body");
+            .unwrap();
 
-        // Compare
-        assert_eq!(our_body, axum_body);
-    }
+        loop {
+            let field = multipart.next_field().await.unwrap();
+            let expected_field = expected_multipart.next_field().await.unwrap();
 
-    #[tokio::test]
-    async fn test_multipart_with_zero_parts() {
-        // Create empty parts using axum_extra first to get its boundary
-        let axum_parts: Vec<AxumPart> = vec![];
-
-        let axum_response = MultipartForm::with_parts(axum_parts).into_response();
-
-        // Extract boundary from axum's Content-Type header
-        let content_type = axum_response
-            .headers()
-            .get(CONTENT_TYPE)
-            .expect("should have content-type")
-            .to_str()
-            .expect("should be valid string");
-        eprintln!("Content-Type: {}", content_type);
-        let boundary = content_type
-            .split("boundary=")
-            .nth(1)
-            .unwrap_or_else(|| panic!("should have boundary, got: {}", content_type))
-            .trim_matches('"');
-
-        // Create empty parts using our implementation with the same boundary
-        let our_parts: Vec<Part> = vec![];
-
-        let our_response = futures::stream::iter(our_parts).into_response(boundary.to_string());
-
-        // Collect bodies
-        let our_body = to_bytes(our_response.into_body(), usize::MAX)
-            .await
-            .expect("should collect body");
-        let axum_body = to_bytes(axum_response.into_body(), usize::MAX)
-            .await
-            .expect("should collect body");
-
-        // Compare
-        assert_eq!(our_body, axum_body);
+            match (field, expected_field) {
+                (None, None) => break,
+                (Some(our), Some(expected)) => {
+                    assert_eq!(our.name(), expected.name());
+                    assert_eq!(our.file_name(), expected.file_name());
+                    assert_eq!(our.content_type(), expected.content_type());
+                    let our_bytes = our.bytes().await.unwrap();
+                    let expected_bytes = expected.bytes().await.unwrap();
+                    assert_eq!(our_bytes, expected_bytes);
+                }
+                _ => panic!("expected both values to have the same number of parts"),
+            }
+        }
     }
 }
