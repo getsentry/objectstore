@@ -8,6 +8,7 @@ use axum::response::Response;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::Stream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use http::HeaderMap;
 use http::header::CONTENT_TYPE;
 
@@ -42,14 +43,14 @@ impl Part {
     }
 }
 
-pub trait MultipartIntoResponse<E> {
+pub trait IntoMultipartResponse {
     fn into_response(self, boundary: String) -> Response;
 }
 
-impl<S, E> MultipartIntoResponse<E> for S
+impl<S, T> IntoMultipartResponse for S
 where
-    S: Stream<Item = Result<Part, E>> + Send + 'static,
-    E: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = T> + Send + 'static,
+    T: IntoPart + Send,
 {
     fn into_response(self, boundary: String) -> Response {
         let mut headers = HeaderMap::new();
@@ -60,42 +61,39 @@ where
                 .unwrap(),
         );
 
-        let body_stream: Pin<
-            Box<dyn Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> + Send>,
-        > = async_stream::try_stream! {
-            let mut boundary_bytes = BytesMut::with_capacity(boundary.len() + 4);
-            boundary_bytes.put(&b"--"[..]);
-            boundary_bytes.put(boundary.as_bytes());
-            boundary_bytes.put(&b"\r\n"[..]);
-            let boundary = boundary_bytes.freeze();
+        let body_stream: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
+            async_stream::try_stream! {
+                let mut boundary_bytes = BytesMut::with_capacity(boundary.len() + 4);
+                boundary_bytes.put(&b"--"[..]);
+                boundary_bytes.put(boundary.as_bytes());
+                boundary_bytes.put(&b"\r\n"[..]);
+                let boundary = boundary_bytes.freeze();
 
-            let parts = self;
-            futures::pin_mut!(parts);
-            while let Some(part) = parts.next().await {
-                let Ok(part) = part else {
-                    unreachable!();
-                };
+                let items = self;
+                futures::pin_mut!(items);
+                while let Some(item) = items.next().await {
+                    let part = item.into_part();
 
-                yield boundary.clone();
-                yield serialize_headers(part.headers);
+                    yield boundary.clone();
+                    yield serialize_headers(part.headers);
 
-                let mut body_with_newline = BytesMut::with_capacity(part.body.len() + 2);
-                body_with_newline.put(part.body);
-                body_with_newline.put(&b"\r\n"[..]);
-                yield body_with_newline.freeze();
+                    let mut body_with_newline = BytesMut::with_capacity(part.body.len() + 2);
+                    body_with_newline.put(part.body);
+                    body_with_newline.put(&b"\r\n"[..]);
+                    yield body_with_newline.freeze();
+                }
+
+                // Yield closing boundary: --boundary-- (without \r\n in between)
+                // The boundary already has --boundary\r\n, so we need to strip the \r\n
+                // and add --\r\n instead
+                let boundary_str = std::str::from_utf8(&boundary).unwrap();
+                let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
+                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
+                closing.put(boundary_without_crlf.as_bytes());
+                closing.put(&b"--\r\n"[..]);
+                yield closing.freeze();
             }
-
-            // Yield closing boundary: --boundary-- (without \r\n in between)
-            // The boundary already has --boundary\r\n, so we need to strip the \r\n
-            // and add --\r\n instead
-            let boundary_str = std::str::from_utf8(&boundary).unwrap();
-            let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
-            let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 4);
-            closing.put(boundary_without_crlf.as_bytes());
-            closing.put(&b"--\r\n"[..]);
-            yield closing.freeze();
-        }
-        .boxed();
+            .boxed();
 
         (headers, Body::from_stream(body_stream)).into_response()
     }
@@ -113,9 +111,8 @@ fn serialize_headers(headers: HeaderMap) -> Bytes {
     b.freeze()
 }
 
-#[async_trait::async_trait]
 pub trait IntoPart {
-    async fn into_part(self) -> Part;
+    fn into_part(self) -> Part;
 }
 
 #[cfg(test)]
