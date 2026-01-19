@@ -57,9 +57,9 @@ impl ApiErrorResponse {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let status = match &self {
+impl ApiError {
+    pub fn status(&self) -> StatusCode {
+        match self {
             ApiError::Client(_) => StatusCode::BAD_REQUEST,
 
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
@@ -67,17 +67,21 @@ impl IntoResponse for ApiError {
             | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => {
-                tracing::error!(error = &self as &dyn Error, "auth system error");
+                tracing::error!(error = self as &dyn Error, "auth system error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
             ApiError::Service(_) => {
-                tracing::error!(error = &self as &dyn Error, "error handling request");
+                tracing::error!(error = self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-        };
+        }
+    }
+}
 
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
         let body = ApiErrorResponse::from_error(&self);
-        (status, Json(body)).into_response()
+        (self.status(), Json(body)).into_response()
     }
 }

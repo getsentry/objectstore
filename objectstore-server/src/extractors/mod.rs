@@ -11,5 +11,5 @@ mod service;
 pub struct Xt<T>(pub T);
 
 pub use batch::{
-    BatchError, BatchRequest, DeleteOperation, GetOperation, InsertOperation, Operation,
+    BatchError, BatchOperation, BatchRequest, DeleteOperation, GetOperation, InsertOperation,
 };

@@ -48,13 +48,13 @@ pub struct DeleteOperation {
 }
 
 #[derive(Debug)]
-pub enum Operation {
+pub enum BatchOperation {
     Get(GetOperation),
     Insert(InsertOperation),
     Delete(DeleteOperation),
 }
 
-impl Operation {
+impl BatchOperation {
     async fn try_from_field(field: Field<'_>) -> Result<Self, BatchError> {
         let kind = field
             .headers()
@@ -89,7 +89,7 @@ impl Operation {
                 let key = key.ok_or_else(|| {
                     BatchError::BadRequest("missing object key for get operation".to_string())
                 })?;
-                Operation::Get(GetOperation { key })
+                BatchOperation::Get(GetOperation { key })
             }
             "insert" => {
                 let metadata = Metadata::from_headers(field.headers(), "")?;
@@ -99,7 +99,7 @@ impl Operation {
                         "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
                     )));
                 }
-                Operation::Insert(InsertOperation {
+                BatchOperation::Insert(InsertOperation {
                     key,
                     metadata,
                     payload,
@@ -109,7 +109,7 @@ impl Operation {
                 let key = key.ok_or_else(|| {
                     BatchError::BadRequest("missing object key for delete operation".to_string())
                 })?;
-                Operation::Delete(DeleteOperation { key })
+                BatchOperation::Delete(DeleteOperation { key })
             }
             _ => {
                 return Err(BatchError::BadRequest(format!(
@@ -122,7 +122,7 @@ impl Operation {
 }
 
 pub struct BatchRequest {
-    pub operations: BoxStream<'static, Result<Operation, BatchError>>,
+    pub operations: BoxStream<'static, Result<BatchOperation, BatchError>>,
 }
 
 impl Debug for BatchRequest {
@@ -155,7 +155,7 @@ where
                     )))?;
                 }
                 count += 1;
-                yield Operation::try_from_field(field).await?;
+                yield BatchOperation::try_from_field(field).await?;
             }
         }
         .boxed();
@@ -218,19 +218,19 @@ mod tests {
         let operations: Vec<_> = batch_request.operations.collect().await;
         assert_eq!(operations.len(), 4);
 
-        let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
+        let BatchOperation::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
         assert_eq!(get_op.key, "test0");
 
-        let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
+        let BatchOperation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
-        let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
+        let BatchOperation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
-        let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
+        let BatchOperation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
             panic!("expected delete operation");
         };
         assert_eq!(delete_op.key, "test3");
