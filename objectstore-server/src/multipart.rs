@@ -51,11 +51,10 @@ impl Part {
 
         // Merge additional headers, skipping Content-Type
         for (name, value) in additional_headers {
-            if let Some(name) = name {
-                if name != CONTENT_TYPE {
+            if let Some(name) = name
+                && name != CONTENT_TYPE {
                     headers.insert(name, value);
                 }
-            }
         }
 
         Part { headers, body }
