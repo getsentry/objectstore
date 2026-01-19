@@ -6,6 +6,10 @@ requires-python = ">=3.11"
 [tool.uv]
 required-version = ">=0.9.18"
 
+[[tool.uv.index]]
+url = "https://pypi.devinfra.sentry.io/simple"
+default = true
+
 [tool.uv.workspace]
 members = [
     "clients/python",
