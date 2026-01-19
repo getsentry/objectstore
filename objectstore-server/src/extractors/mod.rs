@@ -1,3 +1,4 @@
+mod batch;
 mod id;
 mod service;
 
@@ -8,3 +9,7 @@ mod service;
 /// `Xt<T>` for this to work.
 #[derive(Debug)]
 pub struct Xt<T>(pub T);
+
+pub use batch::{
+    BatchError, BatchRequest, DeleteOperation, GetOperation, InsertOperation, Operation,
+};
