@@ -41,7 +41,10 @@ impl Part {
         if let Some(fname) = filename {
             disposition.push_str(&format!("; filename=\"{}\"", fname.as_ref()));
         }
-        headers.insert(CONTENT_DISPOSITION, disposition.parse().expect("valid header value"));
+        headers.insert(
+            CONTENT_DISPOSITION,
+            disposition.parse().expect("valid header value"),
+        );
 
         // Set Content-Type
         headers.insert(
@@ -52,9 +55,10 @@ impl Part {
         // Merge additional headers, skipping Content-Type
         for (name, value) in additional_headers {
             if let Some(name) = name
-                && name != CONTENT_TYPE {
-                    headers.insert(name, value);
-                }
+                && name != CONTENT_TYPE
+            {
+                headers.insert(name, value);
+            }
         }
 
         Part { headers, body }
