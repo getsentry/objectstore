@@ -22,6 +22,7 @@ elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
+http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -58,6 +59,7 @@ uuid = { workspace = true, features = ["v7"] }
 papaya = "0.2.3"
 
 [dev-dependencies]
+axum-extra = { version = "0.10.1", features = ["multipart"] }
 nix = { version = "0.30.1", features = ["signal"] }
 objectstore-test = { workspace = true }
 serde_json = { workspace = true }
