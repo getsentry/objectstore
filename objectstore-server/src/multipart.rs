@@ -34,14 +34,8 @@ impl Part {
         if let Some(filename) = filename {
             disposition.push_str(&format!("; filename=\"{}\"", filename));
         }
-        headers.insert(
-            CONTENT_DISPOSITION,
-            disposition.parse()?,
-        );
-        headers.insert(
-            CONTENT_TYPE,
-            content_type.parse()?,
-        );
+        headers.insert(CONTENT_DISPOSITION, disposition.parse()?);
+        headers.insert(CONTENT_TYPE, content_type.parse()?);
 
         Ok(Part { headers, body })
     }
