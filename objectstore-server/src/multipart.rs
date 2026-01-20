@@ -85,13 +85,8 @@ where
                     yield serialize_body(part.body);
                 }
 
-                // Yield closing boundary: --boundary-- (without trailing \r\n)
-                // The boundary already has --boundary\r\n, so we need to strip the \r\n
-                // and add -- instead
-                let boundary_str = std::str::from_utf8(&boundary).expect("valid UTF-8");
-                let boundary_without_crlf = boundary_str.trim_end_matches("\r\n");
-                let mut closing = BytesMut::with_capacity(boundary_without_crlf.len() + 2);
-                closing.put(boundary_without_crlf.as_bytes());
+                let mut closing = BytesMut::with_capacity(boundary.len());
+                closing.put(boundary.slice(..boundary.len() - 2)); // don't take trailing \r\n
                 closing.put(&b"--"[..]);
                 yield closing.freeze();
             }
