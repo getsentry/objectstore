@@ -202,32 +202,32 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
+        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
 
-        let operations: Vec<_> = batch_request.requests.collect().await;
+        let operations: Vec<_> = batch_request.0.collect().await;
         assert_eq!(operations.len(), 4);
 
-        let Request::Get(get_op) = &operations[0].as_ref().unwrap() else {
+        let BatchRequest::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
         assert_eq!(get_op.key, "test0");
 
-        let Request::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
+        let BatchRequest::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
+        assert_eq!(insert_op1.key, "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
-        let Request::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
+        let BatchRequest::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
+        assert_eq!(insert_op2.key, "test2");
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
-        let Request::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
+        let BatchRequest::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
             panic!("expected delete operation");
         };
         assert_eq!(delete_op.key, "test3");
@@ -252,8 +252,8 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.requests.collect().await;
+        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
         matches!(
@@ -280,8 +280,8 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.requests.collect().await;
+        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), 1);
         assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));

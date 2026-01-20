@@ -1,17 +1,14 @@
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing;
-use bytes::Bytes;
 use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_service::{DeleteResponse, GetResponse, InsertResponse};
-use objectstore_types::Metadata;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult};
+use crate::endpoints::common::ApiResult;
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchRequest, BatchRequestStream};
 use crate::multipart::{IntoMultipartResponse, Part};
@@ -106,7 +103,7 @@ async fn batch(
 }
 
 impl From<BatchResponse> for Part {
-    fn from(value: BatchResponse) -> Self {
+    fn from(_value: BatchResponse) -> Self {
         todo!()
     }
 }
