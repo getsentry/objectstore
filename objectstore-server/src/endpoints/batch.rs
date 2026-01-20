@@ -8,7 +8,7 @@ use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_service::{DeleteResponse, GetResponse, InsertResponse};
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::ApiResult;
+use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchRequest, BatchRequestStream};
 use crate::multipart::{IntoMultipartResponse, Part};
@@ -50,7 +50,7 @@ pub struct BatchDeleteResponse {
 
 #[derive(Debug)]
 pub struct BatchErrorResponse {
-    pub error: BatchError,
+    pub error: ApiError<BatchError>,
 }
 
 enum BatchResponse {
@@ -92,7 +92,7 @@ async fn batch(
                             BatchResponse::Delete(BatchDeleteResponse { key, result })
                         }
                     },
-                    Err(error) => BatchResponse::Error(BatchErrorResponse { error }),
+                    Err(error) => BatchResponse::Error(BatchErrorResponse { error: error.into() }),
                 };
                 yield result;
             }
