@@ -29,21 +29,21 @@ impl Part {
         body: Bytes,
         filename: Option<&str>,
         mut headers: HeaderMap,
-    ) -> Self {
+    ) -> Result<Self, http::header::InvalidHeaderValue> {
         let mut disposition = format!("form-data; name=\"{}\"", name);
         if let Some(filename) = filename {
             disposition.push_str(&format!("; filename=\"{}\"", filename));
         }
         headers.insert(
             CONTENT_DISPOSITION,
-            disposition.parse().expect("valid header value"),
+            disposition.parse()?,
         );
         headers.insert(
             CONTENT_TYPE,
-            content_type.parse().expect("valid content type"),
+            content_type.parse()?,
         );
 
-        Part { headers, body }
+        Ok(Part { headers, body })
     }
 }
 
@@ -136,14 +136,16 @@ mod tests {
                 Bytes::from(r#"{"key":"value"}"#),
                 None,
                 HeaderMap::new(),
-            ),
+            )
+            .unwrap(),
             Part::new(
                 "file",
                 "application/octet-stream",
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
                 Some("data.bin"),
                 extra_headers,
-            ),
+            )
+            .unwrap(),
         ];
         let boundary: u128 = 0xdeadbeef;
         let response = futures::stream::iter(parts).into_response(boundary);
