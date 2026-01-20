@@ -28,6 +28,16 @@ pub enum BatchError {
     /// Size or cardinality limit exceeded.
     #[error("batch limit exceeded: {0}")]
     LimitExceeded(String),
+
+    /// Errors encountered when serializing batch response parts.
+    #[error("response part serialization error: {context}")]
+    ResponseSerialization {
+        /// Context describing what was being serialized.
+        context: String,
+        /// The underlying error.
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 #[derive(Debug)]

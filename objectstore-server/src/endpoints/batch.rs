@@ -14,7 +14,9 @@ use objectstore_types::Metadata;
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchRequest, BatchRequestStream, HEADER_BATCH_OPERATION_KEY};
+use crate::extractors::batch::{
+    BatchError, BatchRequest, BatchRequestStream, HEADER_BATCH_OPERATION_KEY,
+};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
 
@@ -119,88 +121,129 @@ async fn batch(
     responses.into_multipart_response(r)
 }
 
-impl From<BatchResponse> for Part {
-    fn from(value: BatchResponse) -> Self {
+fn create_success_part(
+    key: &ObjectKey,
+    status: u16,
+    content_type: &str,
+    body: Bytes,
+    additional_headers: Option<HeaderMap>,
+) -> Result<Part, BatchError> {
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        HEADER_BATCH_OPERATION_KEY,
+        key.parse().map_err(|e: http::header::InvalidHeaderValue| {
+            BatchError::ResponseSerialization {
+                context: "parsing operation key header".to_string(),
+                cause: Box::new(e),
+            }
+        })?,
+    );
+
+    headers.insert(
+        HEADER_BATCH_OPERATION_STATUS,
+        status
+            .to_string()
+            .parse()
+            .map_err(
+                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
+                    context: "parsing status code header".to_string(),
+                    cause: Box::new(e),
+                },
+            )?,
+    );
+
+    if let Some(additional) = additional_headers {
+        headers.extend(additional);
+    }
+
+    Part::new("operation", content_type, body, None, headers).map_err(|e| {
+        BatchError::ResponseSerialization {
+            context: "creating multipart Part".to_string(),
+            cause: Box::new(e),
+        }
+    })
+}
+
+fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, BatchError> {
+    let mut headers = HeaderMap::new();
+
+    if let Some(key) = key {
+        headers.insert(
+            HEADER_BATCH_OPERATION_KEY,
+            key.parse().map_err(|e: http::header::InvalidHeaderValue| {
+                BatchError::ResponseSerialization {
+                    context: "parsing operation key header".to_string(),
+                    cause: Box::new(e),
+                }
+            })?,
+        );
+    }
+
+    headers.insert(
+        HEADER_BATCH_OPERATION_STATUS,
+        error.status().as_u16().to_string().parse().map_err(
+            |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
+                context: "parsing status code header".to_string(),
+                cause: Box::new(e),
+            },
+        )?,
+    );
+
+    let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).map_err(|e| {
+        BatchError::ResponseSerialization {
+            context: "serializing error response to JSON".to_string(),
+            cause: Box::new(e),
+        }
+    })?;
+
+    Part::new(
+        "operation",
+        "application/json",
+        Bytes::from(error_body),
+        None,
+        headers,
+    )
+    .map_err(|e| BatchError::ResponseSerialization {
+        context: "creating multipart Part for error".to_string(),
+        cause: Box::new(e),
+    })
+}
+
+impl TryFrom<BatchResponse> for Part {
+    type Error = BatchError;
+
+    fn try_from(value: BatchResponse) -> Result<Self, Self::Error> {
         match value {
-            BatchResponse::Get(BatchGetResponse { key, result }) => {
-                let mut headers = HeaderMap::new();
-
-                match result {
-                    Ok(Some((metadata, bytes))) => {
-                        headers.insert(HEADER_BATCH_OPERATION_KEY, key.parse().expect("valid header value"));
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, "200".parse().expect("valid header value"));
-
-                        let metadata_headers = metadata.to_headers("", false).expect("valid metadata headers");
-                        headers.extend(metadata_headers);
-
-                        Part::new("operation", &metadata.content_type, bytes, None, headers).expect("valid part")
-                    }
-                    Ok(None) => {
-                        headers.insert(HEADER_BATCH_OPERATION_KEY, key.parse().expect("valid header value"));
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, "404".parse().expect("valid header value"));
-
-                        Part::new("operation", "application/octet-stream", Bytes::new(), None, headers).expect("valid part")
-                    }
-                    Err(error) => {
-                        headers.insert(HEADER_BATCH_OPERATION_KEY, key.parse().expect("valid header value"));
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, error.status().as_u16().to_string().parse().expect("valid header value"));
-
-                        let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(&error))
-                            .expect("serializable error");
-
-                        Part::new("operation", "application/json", Bytes::from(error_body), None, headers)
-                            .expect("valid part")
-                    }
+            BatchResponse::Get(BatchGetResponse { key, result }) => match result {
+                Ok(Some((metadata, bytes))) => {
+                    let metadata_headers = metadata.to_headers("", false)?;
+                    create_success_part(
+                        &key,
+                        200,
+                        &metadata.content_type,
+                        bytes,
+                        Some(metadata_headers),
+                    )
                 }
-            }
-            BatchResponse::Insert(BatchInsertResponse { key, result }) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(HEADER_BATCH_OPERATION_KEY, key.parse().expect("valid header value"));
-
-                match result {
-                    Ok(_) => {
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, "201".parse().expect("valid header value"));
-                        Part::new("operation", "application/octet-stream", Bytes::new(), None, headers)
-                            .expect("valid part")
-                    }
-                    Err(error) => {
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, error.status().as_u16().to_string().parse().expect("valid header value"));
-
-                        let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(&error))
-                            .expect("serializable error");
-
-                        Part::new("operation", "application/json", Bytes::from(error_body), None, headers)
-                            .expect("valid part")
-                    }
+                Ok(None) => {
+                    create_success_part(&key, 404, "application/octet-stream", Bytes::new(), None)
                 }
-            }
-            BatchResponse::Delete(BatchDeleteResponse { key, result }) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(HEADER_BATCH_OPERATION_KEY, key.parse().expect("valid header value"));
-
-                match result {
-                    Ok(_) => {
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, "204".parse().expect("valid header value"));
-                        Part::new("operation", "application/octet-stream", Bytes::new(), None, headers)
-                            .expect("valid part")
-                    }
-                    Err(error) => {
-                        headers.insert(HEADER_BATCH_OPERATION_STATUS, error.status().as_u16().to_string().parse().expect("valid header value"));
-
-                        let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(&error))
-                            .expect("serializable error");
-
-                        Part::new("operation", "application/json", Bytes::from(error_body), None, headers)
-                            .expect("valid part")
-                    }
+                Err(error) => create_error_part(Some(&key), &error),
+            },
+            BatchResponse::Insert(BatchInsertResponse { key, result }) => match result {
+                Ok(_) => {
+                    create_success_part(&key, 201, "application/octet-stream", Bytes::new(), None)
                 }
-            }
-            BatchResponse::Error(BatchErrorResponse { error }) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(HEADER_BATCH_OPERATION_STATUS, error.status().as_u16().to_string().parse().expect("valid header value"));
-                let body = serde_json::to_vec(&ApiErrorResponse::from_error(&error)).expect("serializable error");
-                Part::new("operation", "application/json", Bytes::from(body), None, headers).expect("valid part")
-            }
+                Err(error) => create_error_part(Some(&key), &error),
+            },
+            BatchResponse::Delete(BatchDeleteResponse { key, result }) => match result {
+                Ok(_) => {
+                    create_success_part(&key, 204, "application/octet-stream", Bytes::new(), None)
+                }
+                Err(error) => create_error_part(Some(&key), &error),
+            },
+            BatchResponse::Error(BatchErrorResponse { error }) => create_error_part(None, &error),
         }
     }
 }
