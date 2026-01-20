@@ -12,6 +12,12 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
 use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use thiserror::Error;
+
+/// Error type for multipart response conversion failures.
+#[derive(Debug, Error)]
+#[error("failed to convert item to multipart Part")]
+pub struct MultipartResponseError(#[from] pub Box<dyn std::error::Error + Send + Sync>);
 
 /// A part in a Multipart response.
 #[derive(Debug)]
@@ -45,10 +51,11 @@ pub trait IntoMultipartResponse {
     fn into_multipart_response(self, boundary: u128) -> Response;
 }
 
-impl<S, T> IntoMultipartResponse for S
+impl<S, T, E> IntoMultipartResponse for S
 where
     S: Stream<Item = T> + Send + 'static,
-    T: Into<Part> + Send,
+    T: TryInto<Part, Error = E> + Send,
+    E: std::error::Error + Send + Sync + 'static,
 {
     fn into_multipart_response(self, boundary: u128) -> Response {
         let boundary_str = format!("os-boundary-{:032x}", boundary);
@@ -73,10 +80,19 @@ where
                 let items = self;
                 futures::pin_mut!(items);
                 while let Some(item) = items.next().await {
-                    yield boundary.clone();
-                    let part = item.into();
-                    yield serialize_headers(part.headers);
-                    yield serialize_body(part.body);
+                    match item.try_into() {
+                        Ok(part) => {
+                            yield boundary.clone();
+                            yield serialize_headers(part.headers);
+                            yield serialize_body(part.body);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = &e as &dyn std::error::Error,
+                                "failed to convert item to multipart Part, skipping"
+                            );
+                        }
+                    }
                 }
 
                 let mut closing = BytesMut::with_capacity(boundary.len());
