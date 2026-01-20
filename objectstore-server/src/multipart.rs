@@ -31,7 +31,7 @@ impl Part {
     /// and headers.
     pub fn new(
         name: &str,
-        content_type: &str,
+        content_type: Option<&str>,
         body: Bytes,
         filename: Option<&str>,
         mut headers: HeaderMap,
@@ -41,7 +41,9 @@ impl Part {
             disposition.push_str(&format!("; filename=\"{}\"", filename));
         }
         headers.insert(CONTENT_DISPOSITION, disposition.parse()?);
-        headers.insert(CONTENT_TYPE, content_type.parse()?);
+        if let Some(content_type) = content_type {
+            headers.insert(CONTENT_TYPE, content_type.parse()?);
+        }
 
         Ok(Part { headers, body })
     }
@@ -142,7 +144,7 @@ mod tests {
         let parts = vec![
             Part::new(
                 "metadata",
-                "application/json",
+                Some("application/json"),
                 Bytes::from(r#"{"key":"value"}"#),
                 None,
                 HeaderMap::new(),
@@ -150,7 +152,7 @@ mod tests {
             .unwrap(),
             Part::new(
                 "file",
-                "application/octet-stream",
+                Some("application/octet-stream"),
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
                 Some("data.bin"),
                 extra_headers,
