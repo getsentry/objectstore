@@ -72,7 +72,10 @@ impl ApiError {
             | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
-                tracing::error!(error = self as &dyn Error, "error serializing batch response");
+                tracing::error!(
+                    error = self as &dyn Error,
+                    "error serializing batch response"
+                );
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
