@@ -27,16 +27,24 @@ pub struct Part {
 }
 
 impl Part {
-    /// Creates a new Multipart part with the given content type, body, and headers.
-    /// The name is hardcoded to "part".
+    /// Creates a new Multipart part with the given name, content type, body, optional filename,
+    /// and headers.
     pub fn new(
-        content_type: &str,
+        name: &str,
+        content_type: Option<&str>,
         body: Bytes,
+        filename: Option<&str>,
         mut headers: HeaderMap,
     ) -> Result<Self, http::header::InvalidHeaderValue> {
-        let disposition = "form-data; name=part";
+        let mut disposition = format!("form-data; name=\"{}\"", name);
+        if let Some(filename) = filename {
+            disposition.push_str(&format!("; filename=\"{}\"", filename));
+        }
         headers.insert(CONTENT_DISPOSITION, disposition.parse()?);
-        headers.insert(CONTENT_TYPE, content_type.parse()?);
+        if let Some(content_type) = content_type {
+            headers.insert(CONTENT_TYPE, content_type.parse()?);
+        }
+
         Ok(Part { headers, body })
     }
 }
@@ -66,9 +74,7 @@ where
             CONTENT_TYPE,
             format!("multipart/form-data; boundary=\"{}\"", &boundary_str)
                 .parse()
-                .expect(
-                    "valid header value, as we always define it as \"os-boundary-X\" where X are hex digits",
-                ),
+                .expect("valid header value, as it only contains hex digits"),
         );
 
         let body: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
@@ -103,8 +109,7 @@ where
 }
 
 fn serialize_headers(headers: HeaderMap) -> Bytes {
-    // https://github.com/hyperium/hyper/blob/0f0b6ed3ac55ac1682afd2104cb8d0385149249a/src/proto/h1/role.rs#L399
-    let mut res = BytesMut::with_capacity(30 + 30 * headers.len());
+    let mut res = BytesMut::with_capacity(10 + 15 * headers.len());
     for (name, value) in &headers {
         res.put(name.as_str().as_bytes());
         res.put(&b": "[..]);
@@ -138,14 +143,18 @@ mod tests {
         extra_headers.insert("X-File-Id", "12345".parse().unwrap());
         let parts = vec![
             Part::new(
-                "application/json",
+                "metadata",
+                Some("application/json"),
                 Bytes::from(r#"{"key":"value"}"#),
+                None,
                 HeaderMap::new(),
             )
             .unwrap(),
             Part::new(
-                "application/octet-stream",
+                "file",
+                Some("application/octet-stream"),
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
+                Some("data.bin"),
                 extra_headers,
             )
             .unwrap(),
@@ -173,15 +182,15 @@ mod tests {
         let mut multipart = Multipart::from_request(request, &()).await.unwrap();
 
         let field = multipart.next_field().await.unwrap().unwrap();
-        assert_eq!(field.name(), Some("part"));
+        assert_eq!(field.name(), Some("metadata"));
         assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/json"));
         assert_eq!(field.headers().len(), 2);
         assert_eq!(field.bytes().await.unwrap(), r#"{"key":"value"}"#);
 
         let field = multipart.next_field().await.unwrap().unwrap();
-        assert_eq!(field.name(), Some("part"));
-        assert_eq!(field.file_name(), None);
+        assert_eq!(field.name(), Some("file"));
+        assert_eq!(field.file_name(), Some("data.bin"));
         assert_eq!(field.content_type(), Some("application/octet-stream"));
         assert_eq!(field.headers().len(), 4);
         assert_eq!(

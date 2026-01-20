@@ -124,7 +124,7 @@ async fn batch(
 fn create_success_part(
     key: &ObjectKey,
     status: u16,
-    content_type: &str,
+    content_type: Option<&str>,
     body: Bytes,
     additional_headers: Option<HeaderMap>,
 ) -> Result<Part, BatchError> {
@@ -157,7 +157,7 @@ fn create_success_part(
         headers.extend(additional);
     }
 
-    Part::new("operation", content_type, body, None, headers).map_err(|e| {
+    Part::new("part", content_type, body, None, headers).map_err(|e| {
         BatchError::ResponseSerialization {
             context: "creating multipart Part".to_string(),
             cause: Box::new(e),
@@ -198,8 +198,8 @@ fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, 
     })?;
 
     Part::new(
-        "operation",
-        "application/json",
+        "part",
+        Some("application/json"),
         Bytes::from(error_body),
         None,
         headers,
@@ -221,26 +221,20 @@ impl TryFrom<BatchResponse> for Part {
                     create_success_part(
                         &key,
                         200,
-                        &metadata.content_type,
+                        Some(&metadata.content_type),
                         bytes,
                         Some(metadata_headers),
                     )
                 }
-                Ok(None) => {
-                    create_success_part(&key, 404, "application/octet-stream", Bytes::new(), None)
-                }
+                Ok(None) => create_success_part(&key, 404, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             BatchResponse::Insert(BatchInsertResponse { key, result }) => match result {
-                Ok(_) => {
-                    create_success_part(&key, 201, "application/octet-stream", Bytes::new(), None)
-                }
+                Ok(_) => create_success_part(&key, 201, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             BatchResponse::Delete(BatchDeleteResponse { key, result }) => match result {
-                Ok(_) => {
-                    create_success_part(&key, 204, "application/octet-stream", Bytes::new(), None)
-                }
+                Ok(_) => create_success_part(&key, 204, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             BatchResponse::Error(BatchErrorResponse { error }) => create_error_part(None, &error),
