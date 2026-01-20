@@ -36,7 +36,7 @@ impl Part {
 }
 
 pub trait IntoMultipartResponse {
-    fn into_response(self, boundary: u128) -> Response;
+    fn into_multipart_response(self, boundary: u128) -> Response;
 }
 
 impl<S, T> IntoMultipartResponse for S
@@ -44,7 +44,7 @@ where
     S: Stream<Item = T> + Send + 'static,
     T: Into<Part> + Send,
 {
-    fn into_response(self, boundary: u128) -> Response {
+    fn into_multipart_response(self, boundary: u128) -> Response {
         let boundary_str = format!("os-boundary-{:032x}", boundary);
         let boundary = {
             let mut bytes = BytesMut::with_capacity(boundary_str.len() + 4);
@@ -135,7 +135,7 @@ mod tests {
             .unwrap(),
         ];
         let boundary: u128 = 0xdeadbeef;
-        let response = futures::stream::iter(parts).into_response(boundary);
+        let response = futures::stream::iter(parts).into_multipart_response(boundary);
 
         let boundary = format!("os-boundary-{:032x}", boundary);
         let content_type_str = format!("multipart/form-data; boundary=\"{}\"", boundary);
