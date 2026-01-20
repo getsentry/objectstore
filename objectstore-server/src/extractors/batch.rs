@@ -202,7 +202,9 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
+        let batch_request = BatchRequestStream::from_request(request, &())
+            .await
+            .unwrap();
 
         let operations: Vec<_> = batch_request.0.collect().await;
         assert_eq!(operations.len(), 4);
@@ -252,7 +254,9 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
+        let batch_request = BatchRequestStream::from_request(request, &())
+            .await
+            .unwrap();
         let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
@@ -280,7 +284,9 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &()).await.unwrap();
+        let batch_request = BatchRequestStream::from_request(request, &())
+            .await
+            .unwrap();
         let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), 1);
