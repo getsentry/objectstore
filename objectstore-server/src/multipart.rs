@@ -83,7 +83,7 @@ where
                             yield serialize_body(part.body);
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            tracing::error!(
                                 error = &e as &dyn std::error::Error,
                                 "failed to convert item to multipart Part, skipping"
                             );
