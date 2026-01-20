@@ -50,7 +50,7 @@ pub struct BatchDeleteResponse {
 
 #[derive(Debug)]
 pub struct BatchErrorResponse {
-    pub error: ApiError<BatchError>,
+    pub error: ApiError,
 }
 
 enum BatchResponse {
