@@ -58,6 +58,13 @@ where
 {
     fn into_response(self, boundary: u128) -> Response {
         let boundary_str = format!("os-boundary-{:032x}", boundary);
+        let boundary = {
+            let mut bytes = BytesMut::with_capacity(boundary_str.len() + 4);
+            bytes.put(&b"--"[..]);
+            bytes.put(boundary_str.as_bytes());
+            bytes.put(&b"\r\n"[..]);
+            bytes.freeze()
+        };
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -67,13 +74,6 @@ where
                 .expect("valid header value, as it only contains hex digits"),
         );
 
-        let boundary = {
-            let mut bytes = BytesMut::with_capacity(boundary_str.len() + 4);
-            bytes.put(&b"--"[..]);
-            bytes.put(boundary_str.as_bytes());
-            bytes.put(&b"\r\n"[..]);
-            bytes.freeze()
-        };
         let body: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
             async_stream::try_stream! {
                 let items = self;
