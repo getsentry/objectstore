@@ -126,6 +126,9 @@ mod tests {
     /// that's parsed as expected by `axum::extract::Multipart`.
     #[tokio::test]
     async fn test_multipart_response() {
+        let mut extra_headers = HeaderMap::new();
+        extra_headers.insert("X-Custom-Header", "custom-value".parse().unwrap());
+        extra_headers.insert("X-File-Id", "12345".parse().unwrap());
         let parts = vec![
             Part::new(
                 "metadata",
@@ -139,7 +142,7 @@ mod tests {
                 "application/octet-stream",
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
                 Some("data.bin"),
-                HeaderMap::new(),
+                extra_headers,
             ),
         ];
         let boundary: u128 = 0xdeadbeef;
@@ -170,17 +173,21 @@ mod tests {
         assert_eq!(field.content_type(), Some("application/json"));
         assert_eq!(field.bytes().await.unwrap(), r#"{"key":"value"}"#);
 
-        // Verify second field (file)
         let field = multipart.next_field().await.unwrap().unwrap();
         assert_eq!(field.name(), Some("file"));
         assert_eq!(field.file_name(), Some("data.bin"));
         assert_eq!(field.content_type(), Some("application/octet-stream"));
         assert_eq!(
+            field.headers().get("X-Custom-Header").unwrap(),
+            "custom-value"
+        );
+        assert_eq!(field.headers().get("X-File-Id").unwrap(), "12345");
+
+        assert_eq!(
             field.bytes().await.unwrap(),
             vec![0x00, 0x01, 0x02, 0xff, 0xfe]
         );
 
-        // Verify no more fields
         assert!(multipart.next_field().await.unwrap().is_none());
     }
 }
