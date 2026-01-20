@@ -12,12 +12,6 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
 use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use thiserror::Error;
-
-/// Error type for multipart response conversion failures.
-#[derive(Debug, Error)]
-#[error("failed to convert item to multipart Part")]
-pub struct MultipartResponseError(#[from] pub Box<dyn std::error::Error + Send + Sync>);
 
 /// A part in a Multipart response.
 #[derive(Debug)]
