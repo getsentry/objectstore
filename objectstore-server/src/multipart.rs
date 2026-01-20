@@ -171,18 +171,21 @@ mod tests {
         assert_eq!(field.name(), Some("metadata"));
         assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/json"));
+        assert_eq!(field.headers().len(), 2);
         assert_eq!(field.bytes().await.unwrap(), r#"{"key":"value"}"#);
 
         let field = multipart.next_field().await.unwrap().unwrap();
         assert_eq!(field.name(), Some("file"));
         assert_eq!(field.file_name(), Some("data.bin"));
         assert_eq!(field.content_type(), Some("application/octet-stream"));
+        assert_eq!(field.headers().len(), 4);
         assert_eq!(
             field.headers().get("X-Custom-Header").unwrap(),
             "custom-value"
         );
         assert_eq!(field.headers().get("X-File-Id").unwrap(), "12345");
-
+        assert!(field.headers().get("content-disposition").is_some());
+        assert!(field.headers().get("content-type").is_some());
         assert_eq!(
             field.bytes().await.unwrap(),
             vec![0x00, 0x01, 0x02, 0xff, 0xfe]
