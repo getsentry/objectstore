@@ -12,11 +12,10 @@ use objectstore_service::{DeleteResponse, InsertResponse};
 use objectstore_types::Metadata;
 
 use crate::auth::AuthAwareService;
+use crate::batch::HEADER_BATCH_OPERATION_KEY;
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
-use crate::extractors::batch::{
-    BatchError, BatchRequest, BatchRequestStream, HEADER_BATCH_OPERATION_KEY,
-};
+use crate::extractors::batch::{BatchError, BatchRequest, BatchRequestStream};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
 
