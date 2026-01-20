@@ -5,6 +5,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod auth;
+pub mod batch;
 pub mod cli;
 pub mod config;
 pub mod endpoints;

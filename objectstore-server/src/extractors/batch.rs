@@ -10,6 +10,8 @@ use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
 use thiserror::Error;
 
+use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
+
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
 pub enum BatchError {
@@ -129,9 +131,6 @@ impl Debug for BatchRequestStream {
         f.debug_struct("BatchRequestStream").finish()
     }
 }
-
-pub const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
-pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 
 const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_OPERATIONS: usize = 1000;
