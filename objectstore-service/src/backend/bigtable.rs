@@ -8,10 +8,9 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 
-use crate::PayloadStream;
 use crate::backend::common::Backend;
 use crate::id::ObjectId;
-use crate::{ServiceError, ServiceResult};
+use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -187,7 +186,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -201,7 +200,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -294,7 +293,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();

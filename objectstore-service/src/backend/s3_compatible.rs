@@ -5,10 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::PayloadStream;
 use crate::backend::common::{self, Backend};
 use crate::id::ObjectId;
-use crate::{ServiceError, ServiceResult};
+use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -156,7 +155,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
@@ -178,7 +177,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from s3_compatible backend");
         let object_url = self.object_url(id);
 
@@ -231,7 +230,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
