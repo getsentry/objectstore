@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::auth::AuthError;
+use crate::extractors::batch::BatchError;
 
 /// Error type for API operations.
 #[derive(Debug, Error)]
@@ -25,6 +26,10 @@ pub enum ApiError {
     /// Service errors, indicating that something went wrong when receiving or executing a request.
     #[error("service error: {0}")]
     Service(#[from] ServiceError),
+
+    /// Errors encountered when parsing or executing a batch request.
+    #[error("batch error: {0}")]
+    Batch(#[from] BatchError),
 }
 
 /// Result type for API operations.
@@ -61,6 +66,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::Client(_) => StatusCode::BAD_REQUEST,
+
+            ApiError::Batch(BatchError::BadRequest(_))
+            | ApiError::Batch(BatchError::Metadata(_))
+            | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
 
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))

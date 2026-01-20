@@ -31,30 +31,30 @@ pub enum BatchError {
 }
 
 #[derive(Debug)]
-pub struct GetOperation {
+pub struct BatchGetRequest {
     pub key: ObjectKey,
 }
 
 #[derive(Debug)]
-pub struct InsertOperation {
-    pub key: Option<ObjectKey>,
+pub struct BatchInsertRequest {
+    pub key: ObjectKey,
     pub metadata: Metadata,
     pub payload: Bytes,
 }
 
 #[derive(Debug)]
-pub struct DeleteOperation {
+pub struct BatchDeleteRequest {
     pub key: ObjectKey,
 }
 
 #[derive(Debug)]
-pub enum Operation {
-    Get(GetOperation),
-    Insert(InsertOperation),
-    Delete(DeleteOperation),
+pub enum BatchRequest {
+    Get(BatchGetRequest),
+    Insert(BatchInsertRequest),
+    Delete(BatchDeleteRequest),
 }
 
-impl Operation {
+impl BatchRequest {
     async fn try_from_field(field: Field<'_>) -> Result<Self, BatchError> {
         let kind = field
             .headers()
@@ -71,26 +71,22 @@ impl Operation {
             })?
             .to_lowercase();
 
-        let key = match field.headers().get(HEADER_BATCH_OPERATION_KEY) {
-            Some(key) => Some(
-                key.to_str()
-                    .map_err(|_| {
-                        BatchError::BadRequest(format!(
-                            "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
-                        ))
-                    })?
-                    .to_owned(),
-            ),
-            None => None,
-        };
+        let key = field
+            .headers()
+            .get(HEADER_BATCH_OPERATION_KEY)
+            .ok_or_else(|| {
+                BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KEY} header"))
+            })?
+            .to_str()
+            .map_err(|_| {
+                BatchError::BadRequest(format!(
+                    "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
+                ))
+            })?
+            .to_owned();
 
         let operation = match kind.as_str() {
-            "get" => {
-                let key = key.ok_or_else(|| {
-                    BatchError::BadRequest("missing object key for get operation".to_string())
-                })?;
-                Operation::Get(GetOperation { key })
-            }
+            "get" => BatchRequest::Get(BatchGetRequest { key }),
             "insert" => {
                 let metadata = Metadata::from_headers(field.headers(), "")?;
                 let payload = field.bytes().await?;
@@ -99,18 +95,13 @@ impl Operation {
                         "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
                     )));
                 }
-                Operation::Insert(InsertOperation {
+                BatchRequest::Insert(BatchInsertRequest {
                     key,
                     metadata,
                     payload,
                 })
             }
-            "delete" => {
-                let key = key.ok_or_else(|| {
-                    BatchError::BadRequest("missing object key for delete operation".to_string())
-                })?;
-                Operation::Delete(DeleteOperation { key })
-            }
+            "delete" => BatchRequest::Delete(BatchDeleteRequest { key }),
             _ => {
                 return Err(BatchError::BadRequest(format!(
                     "invalid operation kind: {kind}"
@@ -121,13 +112,11 @@ impl Operation {
     }
 }
 
-pub struct BatchRequest {
-    pub operations: BoxStream<'static, Result<Operation, BatchError>>,
-}
+pub struct BatchRequestStream(pub BoxStream<'static, Result<BatchRequest, BatchError>>);
 
-impl Debug for BatchRequest {
+impl Debug for BatchRequestStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchRequest").finish()
+        f.debug_struct("BatchRequestStream").finish()
     }
 }
 
@@ -137,7 +126,7 @@ pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_OPERATIONS: usize = 1000;
 
-impl<S> FromRequest<S> for BatchRequest
+impl<S> FromRequest<S> for BatchRequestStream
 where
     S: Send + Sync,
 {
@@ -146,7 +135,7 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let mut multipart = Multipart::from_request(request, state).await?;
 
-        let operations = async_stream::try_stream! {
+        let requests = async_stream::try_stream! {
             let mut count = 0;
             while let Some(field) = multipart.next_field().await? {
                 if count >= MAX_OPERATIONS {
@@ -155,12 +144,12 @@ where
                     )))?;
                 }
                 count += 1;
-                yield Operation::try_from_field(field).await?;
+                yield BatchRequest::try_from_field(field).await?;
             }
         }
         .boxed();
 
-        Ok(Self { operations })
+        Ok(Self(requests))
     }
 }
 
@@ -215,22 +204,22 @@ mod tests {
 
         let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
 
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let operations: Vec<_> = batch_request.requests.collect().await;
         assert_eq!(operations.len(), 4);
 
-        let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
+        let Request::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
         assert_eq!(get_op.key, "test0");
 
-        let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
+        let Request::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
-        let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
+        let Request::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
@@ -238,7 +227,7 @@ mod tests {
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
-        let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
+        let Request::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
             panic!("expected delete operation");
         };
         assert_eq!(delete_op.key, "test3");
@@ -264,7 +253,7 @@ mod tests {
             .unwrap();
 
         let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let operations: Vec<_> = batch_request.requests.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
         matches!(
@@ -292,7 +281,7 @@ mod tests {
             .unwrap();
 
         let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let operations: Vec<_> = batch_request.requests.collect().await;
 
         assert_eq!(operations.len(), 1);
         assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));
