@@ -146,7 +146,7 @@ mod tests {
         let response = futures::stream::iter(parts).into_response(boundary);
 
         let boundary = format!("os-boundary-{:032x}", boundary);
-        let content_type_str = format!("multipart/form-data; boundary={}", boundary);
+        let content_type_str = format!("multipart/form-data; boundary=\"{}\"", boundary);
         assert_eq!(
             response
                 .headers()
