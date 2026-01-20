@@ -10,10 +10,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::PayloadStream;
 use crate::backend::common::{self, Backend};
 use crate::id::ObjectId;
-use crate::{ServiceError, ServiceResult};
+use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -347,7 +346,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
@@ -401,7 +400,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let metadata_response = self
@@ -485,7 +484,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from GCS backend");
         let response = self
             .request(Method::DELETE, self.object_url(id)?)
