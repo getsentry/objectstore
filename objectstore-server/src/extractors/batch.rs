@@ -31,6 +31,10 @@ pub enum BatchError {
     #[error("batch limit exceeded: {0}")]
     LimitExceeded(String),
 
+    /// Operation rejected due to rate limiting.
+    #[error("rate limited")]
+    RateLimited,
+
     /// Errors encountered when serializing batch response parts.
     #[error("response part serialization error: {context}")]
     ResponseSerialization {

@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::response::Response;
 use axum::routing;
 use bytes::{Bytes, BytesMut};
@@ -19,6 +19,7 @@ use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchRequest, BatchRequestStream};
 use crate::multipart::{IntoMultipartResponse, Part};
+use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
@@ -70,11 +71,20 @@ enum BatchResponse {
 
 async fn batch(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     mut requests: BatchRequestStream,
 ) -> Response {
     let responses: BoxStream<BatchResponse> = async_stream::stream! {
             while let Some(operation) = requests.0.next().await {
+                if !state.rate_limiter.check(&context) {
+                    tracing::debug!("Batch operation rejected due to rate limits");
+                    yield BatchResponse::Error(BatchErrorResponse {
+                        error: BatchError::RateLimited.into(),
+                    });
+                    continue;
+                }
+
                 let result = match operation {
                     Ok(operation) => match operation {
                         BatchRequest::Get(get) => {
@@ -85,7 +95,11 @@ async fn batch(
 
                             let result = match result {
                                 Ok(Some((metadata, stream))) => {
-                                    match stream.try_collect::<BytesMut>().await {
+                                    let metered_stream = MeteredPayloadStream::from(
+                                        stream,
+                                        state.rate_limiter.bytes_accumulator()
+                                    );
+                                    match metered_stream.try_collect::<BytesMut>().await {
                                         Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
                                         Err(e) => Err(ApiError::Service(e.into())),
                                     }
@@ -100,6 +114,11 @@ async fn batch(
                             let key = insert.key.clone();
                             let mut metadata = insert.metadata;
                             metadata.time_created = Some(SystemTime::now());
+
+                            let payload_len = insert.payload.len() as u64;
+                            state.rate_limiter.bytes_accumulator()
+                                .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
+
                             let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
                             let result = service
                                 .insert_object(context.clone(), Some(insert.key), &metadata, stream)
