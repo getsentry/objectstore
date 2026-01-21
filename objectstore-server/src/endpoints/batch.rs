@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::response::Response;
@@ -96,9 +98,11 @@ async fn batch(
                         }
                         BatchRequest::Insert(insert) => {
                             let key = insert.key.clone();
+                            let mut metadata = insert.metadata;
+                            metadata.time_created = Some(SystemTime::now());
                             let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
                             let result = service
-                                .insert_object(context.clone(), Some(insert.key), &insert.metadata, stream)
+                                .insert_object(context.clone(), Some(insert.key), &metadata, stream)
                                 .await;
                             BatchResponse::Insert(BatchInsertResponse { key, result })
                         }
