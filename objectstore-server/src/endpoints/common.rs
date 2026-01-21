@@ -71,6 +71,7 @@ impl ApiError {
             | ApiError::Batch(BatchError::Metadata(_))
             | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::Batch(BatchError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
                 tracing::error!(
                     error = self as &dyn Error,
