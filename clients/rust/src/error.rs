@@ -25,6 +25,15 @@ pub enum Error {
         /// The URL error message.
         message: String,
     },
+    /// Error parsing multipart response.
+    #[error("failed to parse multipart response: {0}")]
+    MultipartParse(#[from] multer::Error),
+    /// Invalid multipart boundary.
+    #[error("invalid or missing multipart boundary")]
+    InvalidBoundary,
+    /// Invalid header value.
+    #[error("invalid header value: {0}")]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
 }
 
 /// A convenience alias that defaults our [`Error`] type.

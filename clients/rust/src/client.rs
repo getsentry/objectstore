@@ -386,6 +386,32 @@ pub struct Session {
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {
+    /// Creates a new batch request builder.
+    ///
+    /// Use this to send multiple operations in a single HTTP request.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use objectstore_client::{Client, Usecase};
+    /// # async fn example() -> objectstore_client::Result<()> {
+    /// let client = Client::new("http://localhost:8888/")?;
+    /// let session = client.session(Usecase::new("my_app").for_organization(12345))?;
+    ///
+    /// let response = session
+    ///     .many()
+    ///     .add_put(session.put("Hello, world!").key("key1"))
+    ///     .add_get(session.get("key2"))
+    ///     .add_delete(session.delete("key3"))
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn many(&self) -> crate::batch::BatchBuilder {
+        crate::batch::BatchBuilder::new(self.clone())
+    }
+
     /// Generates a GET url to the object with the given `key`.
     ///
     /// This can then be used by downstream services to fetch the given object.
@@ -431,6 +457,39 @@ impl Session {
         }
 
         Ok(builder)
+    }
+
+    /// Creates a POST request builder for the batch endpoint.
+    pub(crate) fn batch_request(&self) -> crate::Result<(url::Url, reqwest::RequestBuilder)> {
+        let mut url = self.client.service_url.clone();
+
+        // path_segments_mut can only error if the url is cannot-be-a-base,
+        // and we check that in ClientBuilder::new, therefore this will never panic.
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .push("objects:batch")
+            .push(self.scope.usecase().name())
+            .push(&self.scope.scopes().as_api_path().to_string())
+            .push(""); // trailing slash
+        drop(segments);
+
+        let mut builder = self.client.reqwest.post(url.clone());
+
+        if let Some(token_generator) = &self.client.token_generator {
+            let token = token_generator.sign_for_scope(&self.scope)?;
+            builder = builder.bearer_auth(token);
+        }
+
+        if self.client.propagate_traces {
+            let trace_headers =
+                sentry_core::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
+            for (header_name, value) in trace_headers.into_iter().flatten() {
+                builder = builder.header(header_name, value);
+            }
+        }
+
+        Ok((url, builder))
     }
 }
 

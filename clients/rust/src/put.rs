@@ -22,16 +22,30 @@ pub struct PutResponse {
     pub key: String,
 }
 
-pub(crate) enum PutBody {
+/// Internal representation of a PUT body - can be either a buffer or a stream.
+pub enum PutBody {
+    /// In-memory buffer.
     Buffer(Bytes),
+    /// Streaming body.
     Stream(ClientStream),
 }
 
 impl fmt::Debug for PutBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PutBody").finish_non_exhaustive()
+        match self {
+            PutBody::Buffer(b) => f.debug_tuple("Buffer").field(&b.len()).finish(),
+            PutBody::Stream(_) => f.debug_tuple("Stream").finish(),
+        }
     }
 }
+
+impl PutBody {
+    /// Returns true if this is a buffer body.
+    pub fn is_buffer(&self) -> bool {
+        matches!(self, PutBody::Buffer(_))
+    }
+}
+
 
 impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder {
@@ -169,5 +183,19 @@ impl PutBuilder {
 
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status()?.json().await?)
+    }
+
+    /// Converts this builder into a batch operation.
+    pub(crate) fn into_batch_operation(self) -> crate::batch::BatchOperation {
+        let payload = match self.body {
+            PutBody::Buffer(bytes) => crate::batch::BatchPutPayload::Buffer(bytes),
+            PutBody::Stream(stream) => crate::batch::BatchPutPayload::Stream(stream),
+        };
+
+        crate::batch::BatchOperation::Put {
+            key: self.key.unwrap_or_default(),
+            payload,
+            metadata: self.metadata,
+        }
     }
 }

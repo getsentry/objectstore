@@ -17,9 +17,11 @@ futures-util = { workspace = true }
 infer = { version = "0.19.0", default-features = false }
 jsonwebtoken = { workspace = true }
 objectstore-types = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+multer = "3"
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 # See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211
 tokio = "1.45.0"

@@ -3,6 +3,7 @@
 #![warn(missing_debug_implementations)]
 
 mod auth;
+pub mod batch;
 mod client;
 mod delete;
 mod error;
@@ -13,6 +14,10 @@ pub mod utils;
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
 pub use auth::*;
+pub use batch::{
+    BatchBuilder, BatchDeleteResult, BatchGetResult, BatchOperationError, BatchPutResult,
+    BatchResponse, BatchResponseItem,
+};
 pub use client::*;
 pub use delete::*;
 pub use error::*;

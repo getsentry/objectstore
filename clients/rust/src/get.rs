@@ -98,4 +98,12 @@ impl GetBuilder {
 
         Ok(Some(GetResponse { metadata, stream }))
     }
+
+    /// Converts this builder into a batch operation.
+    pub(crate) fn into_batch_operation(self) -> crate::batch::BatchOperation {
+        crate::batch::BatchOperation::Get {
+            key: self.key,
+            decompress: self.decompress,
+        }
+    }
 }

@@ -29,4 +29,9 @@ impl DeleteBuilder {
             .await?;
         Ok(())
     }
+
+    /// Converts this builder into a batch operation.
+    pub(crate) fn into_batch_operation(self) -> crate::batch::BatchOperation {
+        crate::batch::BatchOperation::Delete { key: self.key }
+    }
 }

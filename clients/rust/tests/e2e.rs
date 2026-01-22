@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
 
-use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{
+    BatchGetResult, BatchResponseItem, Client, Error, SecretKey, TokenGenerator, Usecase,
+};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
 use objectstore_types::Compression;
 
@@ -201,4 +203,153 @@ async fn fails_with_insufficient_auth_token_perms() {
     println!("{:?}", put_result);
     // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
     assert!(matches!(put_result, Err(Error::Reqwest(_))));
+}
+
+#[tokio::test]
+async fn batch_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // Test batch with mixed operations
+    let response = session
+        .many()
+        .add_put(session.put("hello").key("batch-key1"))
+        .add_put(session.put("world").key("batch-key2"))
+        .add_get(session.get("batch-key1"))
+        .add_get(session.get("nonexistent-key"))
+        .add_delete(session.delete("batch-key2"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.len(), 5);
+
+    let items: Vec<_> = response.into_iter().collect();
+
+    // First two should be puts
+    assert!(matches!(&items[0], BatchResponseItem::Put { key, result } if key == "batch-key1" && result.is_ok()));
+    assert!(matches!(&items[1], BatchResponseItem::Put { key, result } if key == "batch-key2" && result.is_ok()));
+
+    // Third should be a get that found the object
+    match &items[2] {
+        BatchResponseItem::Get { key, result } => {
+            assert_eq!(key, "batch-key1");
+            match result.as_ref().unwrap() {
+                BatchGetResult::Found { payload, .. } => {
+                    assert_eq!(payload.as_ref(), b"hello");
+                }
+                BatchGetResult::NotFound => panic!("expected found"),
+            }
+        }
+        _ => panic!("expected get"),
+    }
+
+    // Fourth should be a get that didn't find the object
+    match &items[3] {
+        BatchResponseItem::Get { key, result } => {
+            assert_eq!(key, "nonexistent-key");
+            assert!(matches!(result.as_ref().unwrap(), BatchGetResult::NotFound));
+        }
+        _ => panic!("expected get"),
+    }
+
+    // Fifth should be a delete
+    assert!(matches!(&items[4], BatchResponseItem::Delete { key, result } if key == "batch-key2" && result.is_ok()));
+
+    // Verify the delete worked
+    let get_result = session.get("batch-key2").send().await.unwrap();
+    assert!(get_result.is_none());
+}
+
+#[tokio::test]
+async fn batch_empty() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let response = session.many().send().await.unwrap();
+    assert!(response.is_empty());
+}
+
+#[tokio::test]
+async fn batch_with_compression() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // Put with default compression (zstd) and get with automatic decompression
+    let response = session
+        .many()
+        .add_put(session.put("compressible data that is longer to benefit from compression").key("compressed-key"))
+        .add_get(session.get("compressed-key"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.len(), 2);
+
+    let items: Vec<_> = response.into_iter().collect();
+
+    // Verify the get returns decompressed data
+    match &items[1] {
+        BatchResponseItem::Get { result: Ok(BatchGetResult::Found { payload, metadata }), .. } => {
+            assert_eq!(payload.as_ref(), b"compressible data that is longer to benefit from compression");
+            // Metadata should show no compression since we auto-decompressed
+            assert!(metadata.compression.is_none());
+        }
+        _ => panic!("expected get found"),
+    }
+}
+
+#[tokio::test]
+async fn batch_get_without_decompression() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // First put some compressed data
+    let body = "test data for compression";
+    let stored_key = session.put(body).send().await.unwrap().key;
+
+    // Batch get without decompression
+    let response = session
+        .many()
+        .add_get(session.get(&stored_key).decompress(false))
+        .send()
+        .await
+        .unwrap();
+
+    let items: Vec<_> = response.into_iter().collect();
+
+    match &items[0] {
+        BatchResponseItem::Get { result: Ok(BatchGetResult::Found { payload, metadata }), .. } => {
+            // Should still be compressed
+            assert_eq!(metadata.compression, Some(Compression::Zstd));
+            // Decompress and verify
+            let decompressed = zstd::bulk::decompress(payload, 1024).unwrap();
+            assert_eq!(decompressed, body.as_bytes());
+        }
+        _ => panic!("expected get found"),
+    }
 }
