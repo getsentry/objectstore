@@ -187,14 +187,9 @@ impl PutBuilder {
 
     /// Converts this builder into a batch operation.
     pub(crate) fn into_batch_operation(self) -> crate::batch::BatchOperation {
-        let payload = match self.body {
-            PutBody::Buffer(bytes) => crate::batch::BatchPutPayload::Buffer(bytes),
-            PutBody::Stream(stream) => crate::batch::BatchPutPayload::Stream(stream),
-        };
-
         crate::batch::BatchOperation::Put {
             key: self.key.unwrap_or_default(),
-            payload,
+            payload: self.body,
             metadata: self.metadata,
         }
     }

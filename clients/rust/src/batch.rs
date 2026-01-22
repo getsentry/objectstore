@@ -50,7 +50,8 @@ use reqwest::Body;
 use serde::Deserialize;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::{ClientStream, Compression, DeleteBuilder, GetBuilder, PutBuilder, Session};
+use crate::put::PutBody;
+use crate::{Compression, DeleteBuilder, GetBuilder, PutBuilder, Session};
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
@@ -59,25 +60,10 @@ const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 /// Maximum number of operations per batch request.
 const MAX_OPERATIONS_PER_BATCH: usize = 1000;
 
-/// Payload for a batch PUT operation - can be either bytes or a stream.
-pub(crate) enum BatchPutPayload {
-    Buffer(Bytes),
-    Stream(ClientStream),
-}
-
-impl fmt::Debug for BatchPutPayload {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BatchPutPayload::Buffer(b) => f.debug_tuple("Buffer").field(&b.len()).finish(),
-            BatchPutPayload::Stream(_) => f.debug_tuple("Stream").finish(),
-        }
-    }
-}
-
 /// Internal representation of a batch operation.
 pub(crate) enum BatchOperation {
     Get { key: String, decompress: bool },
-    Put { key: String, payload: BatchPutPayload, metadata: Metadata },
+    Put { key: String, payload: PutBody, metadata: Metadata },
     Delete { key: String },
 }
 
@@ -330,22 +316,22 @@ fn encode_operations(operations: Vec<BatchOperation>) -> crate::Result<Form> {
                 headers.insert(HEADER_BATCH_OPERATION_KIND, kind.parse()?);
 
                 match (metadata.compression, payload) {
-                    (Some(Compression::Zstd), BatchPutPayload::Buffer(bytes)) => {
+                    (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
                         let cursor = Cursor::new(bytes);
                         let encoder = ZstdEncoder::new(cursor);
                         let stream = ReaderStream::new(encoder);
                         Part::stream(Body::wrap_stream(stream)).headers(headers)
                     }
-                    (Some(Compression::Zstd), BatchPutPayload::Stream(stream)) => {
+                    (Some(Compression::Zstd), PutBody::Stream(stream)) => {
                         let reader = StreamReader::new(stream);
                         let encoder = ZstdEncoder::new(reader);
                         let stream = ReaderStream::new(encoder);
                         Part::stream(Body::wrap_stream(stream)).headers(headers)
                     }
-                    (None, BatchPutPayload::Buffer(bytes)) => {
+                    (None, PutBody::Buffer(bytes)) => {
                         Part::bytes(bytes.to_vec()).headers(headers)
                     }
-                    (None, BatchPutPayload::Stream(stream)) => {
+                    (None, PutBody::Stream(stream)) => {
                         Part::stream(Body::wrap_stream(stream)).headers(headers)
                     }
                 }
