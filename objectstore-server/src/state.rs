@@ -76,12 +76,14 @@ fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
             instance_name,
             table_name,
             connections,
+            max_concurrency,
         } => StorageConfig::BigTable {
             endpoint: endpoint.as_deref(),
             project_id,
             instance_name,
             table_name,
             connections: *connections,
+            max_concurrency: *max_concurrency,
         },
     }
 }

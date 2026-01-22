@@ -71,6 +71,11 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
+            ApiError::Service(ServiceError::Backpressure { .. }) => {
+                tracing::warn!(error = &self as &dyn Error, "backend at capacity");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+
             ApiError::Service(_) => {
                 tracing::error!(error = &self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR

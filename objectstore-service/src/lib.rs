@@ -7,7 +7,9 @@
 
 // TODO(ja): Re-organize modules
 mod backend;
+pub mod concurrency;
 mod error;
+pub use concurrency::{ConcurrencyGuard, ConcurrencyLimiter};
 pub use error::{ServiceError, ServiceResult};
 pub mod id;
 
@@ -85,6 +87,10 @@ pub enum StorageConfig<'a> {
         ///
         /// Defaults to 2x the number of worker threads.
         connections: Option<usize>,
+        /// Maximum number of concurrent operations to BigTable.
+        ///
+        /// Defaults to 10x the number of connections.
+        max_concurrency: Option<usize>,
     },
 }
 
@@ -308,6 +314,7 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             instance_name,
             table_name,
             connections,
+            max_concurrency,
         } => Box::new(
             backend::bigtable::BigTableBackend::new(
                 endpoint,
@@ -315,6 +322,7 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
                 instance_name,
                 table_name,
                 connections,
+                max_concurrency,
             )
             .await?,
         ),

@@ -10,6 +10,7 @@ use tokio::runtime::Handle;
 
 use crate::PayloadStream;
 use crate::backend::common::Backend;
+use crate::concurrency::ConcurrencyLimiter;
 use crate::id::ObjectId;
 use crate::{ServiceError, ServiceResult};
 
@@ -35,6 +36,7 @@ const FAMILY_MANUAL: &str = "fm";
 
 pub struct BigTableBackend {
     bigtable: BigTableConnection,
+    limiter: ConcurrencyLimiter,
 
     instance_path: String,
     table_path: String,
@@ -58,35 +60,57 @@ impl BigTableBackend {
         instance_name: &str,
         table_name: &str,
         connections: Option<usize>,
+        max_concurrency: Option<usize>,
     ) -> Result<Self> {
-        let bigtable = if let Some(endpoint) = endpoint {
-            BigTableConnection::new_with_emulator(
+        let connections = if let Some(endpoint) = endpoint {
+            let bigtable = BigTableConnection::new_with_emulator(
                 endpoint,
                 project_id,
                 instance_name,
                 false, // is_read_only
                 Some(CONNECT_TIMEOUT),
-            )?
-        } else {
-            let token_provider = gcp_auth::provider().await?;
-            // TODO on connections: Idle connections are automatically closed in “a few minutes”.
-            // We need to make sure that on longer idle periods the channels are re-opened.
-            let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
+            )?;
 
-            BigTableConnection::new_with_token_provider(
-                project_id,
-                instance_name,
-                false, // is_read_only
-                connections,
-                Some(CONNECT_TIMEOUT),
-                token_provider.clone(),
-            )?
+            let client = bigtable.client();
+
+            // For emulator, use default connection count for calculating concurrency
+            let conns = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
+            let max_concurrency = max_concurrency.unwrap_or(conns * 10);
+            let limiter = ConcurrencyLimiter::new(max_concurrency, "bigtable");
+
+            return Ok(Self {
+                bigtable,
+                limiter,
+                instance_path: format!("projects/{project_id}/instances/{instance_name}"),
+                table_path: client.get_full_table_name(table_name),
+                table_name: table_name.to_owned(),
+            });
+        } else {
+            connections.unwrap_or(2 * Handle::current().metrics().num_workers())
         };
+
+        let token_provider = gcp_auth::provider().await?;
+        // TODO on connections: Idle connections are automatically closed in "a few minutes".
+        // We need to make sure that on longer idle periods the channels are re-opened.
+
+        let bigtable = BigTableConnection::new_with_token_provider(
+            project_id,
+            instance_name,
+            false, // is_read_only
+            connections,
+            Some(CONNECT_TIMEOUT),
+            token_provider.clone(),
+        )?;
 
         let client = bigtable.client();
 
+        // Default: 10 operations per connection
+        let max_concurrency = max_concurrency.unwrap_or(connections * 10);
+        let limiter = ConcurrencyLimiter::new(max_concurrency, "bigtable");
+
         Ok(Self {
             bigtable,
+            limiter,
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
             table_path: client.get_full_table_name(table_name),
             table_name: table_name.to_owned(),
@@ -188,6 +212,8 @@ impl Backend for BigTableBackend {
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> ServiceResult<()> {
+        let _guard = self.limiter.try_acquire()?;
+
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -202,6 +228,8 @@ impl Backend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+        let _guard = self.limiter.try_acquire()?;
+
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -295,6 +323,8 @@ impl Backend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+        let _guard = self.limiter.try_acquire()?;
+
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -366,6 +396,7 @@ mod tests {
             "testing",
             "objectstore",
             "objectstore",
+            None,
             None,
         )
         .await

@@ -301,6 +301,26 @@ pub enum Storage {
         /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
         /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
         connections: Option<usize>,
+
+        /// Maximum number of concurrent operations to Bigtable.
+        ///
+        /// This controls backpressure management for the Bigtable backend. When the limit
+        /// is reached, new requests will be rejected with a 503 error.
+        ///
+        /// # Default
+        ///
+        /// `None` (defaults to 10x the number of connections)
+        ///
+        /// # Environment Variables
+        ///
+        /// - `OS__HIGH_VOLUME_STORAGE__MAX_CONCURRENCY=160` (optional)
+        /// - `OS__LONG_TERM_STORAGE__MAX_CONCURRENCY=160` (optional)
+        ///
+        /// # Important
+        ///
+        /// Ensure your configured rate limits are lower than the effective capacity:
+        /// `capacity (RPS) ≈ max_concurrency / avg_operation_latency_seconds`
+        max_concurrency: Option<usize>,
     },
 }
 

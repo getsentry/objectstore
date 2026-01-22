@@ -48,6 +48,18 @@ pub enum ServiceError {
         #[source]
         cause: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+
+    /// Backend is at capacity and cannot accept more requests.
+    ///
+    /// This indicates backpressure from the storage backend. The request should be retried
+    /// after a delay or the client should reduce their request rate.
+    #[error("backend at capacity: {context}")]
+    Backpressure {
+        /// Context describing which backend is at capacity.
+        context: String,
+        /// The maximum concurrency limit that was reached.
+        max_concurrency: usize,
+    },
 }
 
 /// Result type for service operations.
