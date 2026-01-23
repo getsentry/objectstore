@@ -16,7 +16,7 @@ use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::Metadata;
 
 use crate::auth::AuthAwareService;
-use crate::batch::HEADER_BATCH_OPERATION_KEY;
+use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchOperationStream, Operation};
@@ -178,6 +178,17 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
     )
     .trim()
     .to_owned();
+
+    headers.insert(
+        HEADER_BATCH_OPERATION_KIND,
+        kind.parse()
+            .map_err(
+                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
+                    context: "parsing operation kind header".to_string(),
+                    cause: Box::new(e),
+                },
+            )?,
+    );
 
     headers.insert(
         HEADER_BATCH_OPERATION_STATUS,

@@ -9,7 +9,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::Compression;
 
-use crate::{ClientStream, Session};
+use crate::{ClientStream, ObjectKey, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
 ///
@@ -59,7 +59,7 @@ impl Session {
 #[derive(Debug)]
 pub struct GetBuilder {
     session: Session,
-    key: String,
+    key: ObjectKey,
     decompress: bool,
 }
 

@@ -12,6 +12,9 @@ pub mod utils;
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
+/// A key that uniquely identifies an object within its usecase and scopes.
+pub type ObjectKey = String;
+
 pub use auth::*;
 pub use client::*;
 pub use delete::*;

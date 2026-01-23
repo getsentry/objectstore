@@ -13,13 +13,13 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::{Compression, ExpirationPolicy};
 
-use crate::{ClientStream, Session};
+use crate::{ClientStream, ObjectKey, Session};
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
 pub struct PutResponse {
     /// The key of the object, as stored.
-    pub key: String,
+    pub key: ObjectKey,
 }
 
 pub(crate) enum PutBody {
@@ -74,7 +74,7 @@ impl Session {
 pub struct PutBuilder {
     session: Session,
     metadata: Metadata,
-    key: Option<String>,
+    key: Option<ObjectKey>,
     body: PutBody,
 }
 
