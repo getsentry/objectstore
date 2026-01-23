@@ -58,9 +58,9 @@ impl Session {
 /// A [`get`](Session::get) request builder.
 #[derive(Debug)]
 pub struct GetBuilder {
-    session: Session,
-    key: ObjectKey,
-    decompress: bool,
+    pub(crate) session: Session,
+    pub(crate) key: ObjectKey,
+    pub(crate) decompress: bool,
 }
 
 impl GetBuilder {

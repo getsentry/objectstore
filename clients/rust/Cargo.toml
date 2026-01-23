@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 tokio = "1.45.0"
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
+uuid = { workspace = true }
 
 [dev-dependencies]
 objectstore-test = { workspace = true }

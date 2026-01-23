@@ -72,10 +72,10 @@ impl Session {
 /// A [`put`](Session::put) request builder.
 #[derive(Debug)]
 pub struct PutBuilder {
-    session: Session,
-    metadata: Metadata,
-    key: Option<ObjectKey>,
-    body: PutBody,
+    pub(crate) session: Session,
+    pub(crate) metadata: Metadata,
+    pub(crate) key: Option<ObjectKey>,
+    pub(crate) body: PutBody,
 }
 
 impl PutBuilder {
@@ -132,6 +132,26 @@ impl PutBuilder {
     }
 }
 
+/// Compresses the body if compression is specified.
+pub(crate) fn compress_body(body: PutBody, compression: Option<Compression>) -> Body {
+    match (compression, body) {
+        (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
+            let cursor = Cursor::new(bytes);
+            let encoder = ZstdEncoder::new(cursor);
+            let stream = ReaderStream::new(encoder);
+            Body::wrap_stream(stream)
+        }
+        (Some(Compression::Zstd), PutBody::Stream(stream)) => {
+            let stream = StreamReader::new(stream);
+            let encoder = ZstdEncoder::new(stream);
+            let stream = ReaderStream::new(encoder);
+            Body::wrap_stream(stream)
+        }
+        (None, PutBody::Buffer(bytes)) => bytes.into(),
+        (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
+    }
+}
+
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
 // However, `IntoFuture` needs to define the resulting future as an associated type,
 // and "impl trait in associated type position" is not yet stable :-(
@@ -147,23 +167,7 @@ impl PutBuilder {
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
 
-        let body = match (self.metadata.compression, self.body) {
-            (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
-                let cursor = Cursor::new(bytes);
-                let encoder = ZstdEncoder::new(cursor);
-                let stream = ReaderStream::new(encoder);
-                Body::wrap_stream(stream)
-            }
-            (Some(Compression::Zstd), PutBody::Stream(stream)) => {
-                let stream = StreamReader::new(stream);
-                let encoder = ZstdEncoder::new(stream);
-                let stream = ReaderStream::new(encoder);
-                Body::wrap_stream(stream)
-            }
-            (None, PutBody::Buffer(bytes)) => bytes.into(),
-            (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
-            // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
-        };
+        let body = compress_body(self.body, self.metadata.compression);
 
         builder = builder.headers(self.metadata.to_headers("", false)?);
 

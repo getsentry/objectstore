@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{Client, Error, OperationResult, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
 use objectstore_types::Compression;
 
@@ -201,4 +201,118 @@ async fn fails_with_insufficient_auth_token_perms() {
     println!("{:?}", put_result);
     // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
     assert!(matches!(put_result, Err(Error::Reqwest(_))));
+}
+
+#[tokio::test]
+async fn batch_mixed_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // First, store an object that we'll retrieve and delete in the batch
+    let existing_key = session
+        .put("existing object")
+        .compression(None)
+        .key("batch-test-existing")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    // Build a batch with: GET existing, INSERT new, DELETE existing
+    let results: Vec<_> = session
+        .many()
+        .push(session.get(&existing_key))
+        .push(session.put("new batch object").compression(None).key("batch-test-new"))
+        .push(session.delete(&existing_key))
+        .send()
+        .await
+        .unwrap()
+        .collect();
+
+    assert_eq!(results.len(), 3);
+
+    // Verify results (order may not be guaranteed, so we check by type)
+    let mut get_count = 0;
+    let mut put_count = 0;
+    let mut delete_count = 0;
+
+    for result in &results {
+        match result {
+            OperationResult::Get(key, Ok(Some(response))) => {
+                assert_eq!(key, "batch-test-existing");
+                let payload = response.metadata.content_type.clone();
+                assert!(!payload.is_empty());
+                get_count += 1;
+            }
+            OperationResult::Get(_, Ok(None)) => {
+                panic!("Expected to find the object");
+            }
+            OperationResult::Put(key, Ok(_)) => {
+                assert_eq!(key, "batch-test-new");
+                put_count += 1;
+            }
+            OperationResult::Delete(key, Ok(())) => {
+                assert_eq!(key, "batch-test-existing");
+                delete_count += 1;
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+    }
+
+    assert_eq!(get_count, 1);
+    assert_eq!(put_count, 1);
+    assert_eq!(delete_count, 1);
+
+    // Verify the new object was stored
+    let response = session.get("batch-test-new").send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "new batch object");
+
+    // Verify the old object was deleted
+    let response = session.get(&existing_key).send().await.unwrap();
+    assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn batch_insert_auto_generated_key() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // Insert without providing a key - should auto-generate a UUID
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("auto-key object").compression(None))
+        .send()
+        .await
+        .unwrap()
+        .collect();
+
+    assert_eq!(results.len(), 1);
+
+    let generated_key = match &results[0] {
+        OperationResult::Put(key, Ok(_)) => {
+            // Key should be a valid UUID (36 characters with hyphens)
+            assert_eq!(key.len(), 36);
+            assert!(key.chars().filter(|c| *c == '-').count() == 4);
+            key.clone()
+        }
+        other => panic!("Expected Put result, got: {:?}", other),
+    };
+
+    // Verify the object was stored under the generated key
+    let response = session.get(&generated_key).send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "auto-key object");
 }

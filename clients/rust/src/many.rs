@@ -2,9 +2,12 @@ use std::io;
 
 use futures_util::StreamExt as _;
 use multer::Field;
-use reqwest::header::CONTENT_TYPE;
+use objectstore_types::Metadata;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::multipart::Part;
 
 use crate::error::Error;
+use crate::put::{PutBody, compress_body};
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
     Session,
@@ -42,24 +45,100 @@ impl Session {
 /// You can construct a [`BatchOperation`] out of a [`GetBuilder`], [`PutBuilder`], or
 /// [`DeleteBuilder`] using their [`From<T>`] implementation.
 #[derive(Debug)]
-pub struct BatchOperation {}
+pub(crate) enum BatchOperation {
+    Get {
+        key: ObjectKey,
+        decompress: bool,
+    },
+    Insert {
+        key: ObjectKey,
+        metadata: Metadata,
+        body: PutBody,
+    },
+    Delete {
+        key: ObjectKey,
+    },
+}
 
 impl From<GetBuilder> for BatchOperation {
-    fn from(_value: GetBuilder) -> Self {
-        todo!()
+    fn from(value: GetBuilder) -> Self {
+        BatchOperation::Get {
+            key: value.key,
+            decompress: value.decompress,
+        }
     }
 }
 
 impl From<PutBuilder> for BatchOperation {
-    fn from(_value: PutBuilder) -> Self {
-        todo!()
+    fn from(value: PutBuilder) -> Self {
+        let key = value
+            .key
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        BatchOperation::Insert {
+            key,
+            metadata: value.metadata,
+            body: value.body,
+        }
     }
 }
 
 impl From<DeleteBuilder> for BatchOperation {
-    fn from(_value: DeleteBuilder) -> Self {
-        todo!()
+    fn from(value: DeleteBuilder) -> Self {
+        BatchOperation::Delete { key: value.key }
     }
+}
+
+impl BatchOperation {
+    async fn into_part(self) -> crate::Result<Part> {
+        match self {
+            BatchOperation::Get { key, .. } => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
+                    HeaderValue::from_static("get"),
+                );
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
+                    key_to_header_value(&key)?,
+                );
+                Ok(Part::text("").headers(headers))
+            }
+            BatchOperation::Insert { key, metadata, body } => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
+                    HeaderValue::from_static("insert"),
+                );
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
+                    key_to_header_value(&key)?,
+                );
+                // Add metadata headers (includes compression info)
+                headers.extend(metadata.to_headers("", false)?);
+
+                let body = compress_body(body, metadata.compression);
+                Ok(Part::stream(body).headers(headers))
+            }
+            BatchOperation::Delete { key } => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
+                    HeaderValue::from_static("delete"),
+                );
+                headers.insert(
+                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
+                    key_to_header_value(&key)?,
+                );
+                Ok(Part::text("").headers(headers))
+            }
+        }
+    }
+}
+
+fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
+    HeaderValue::try_from(key).map_err(|e| {
+        Error::MalformedResponse(format!("invalid object key for header value: {e}"))
+    })
 }
 
 /// The result of an individual operation.
@@ -156,7 +235,13 @@ impl ManyBuilder {
     /// Executes all enqueued operations, returning an iterator over their results.
     /// The results are not guaranteed to be in the same order as the original enqueuing order.
     pub async fn send(self) -> crate::Result<impl Iterator<Item = OperationResult>> {
-        let request = self.session.batch_request()?;
+        let mut form = reqwest::multipart::Form::new();
+        for (i, op) in self.operations.into_iter().enumerate() {
+            let part = op.into_part().await?;
+            form = form.part(format!("part{i}"), part);
+        }
+
+        let request = self.session.batch_request()?.multipart(form);
         let response = request.send().await?.error_for_status()?;
 
         let boundary = response

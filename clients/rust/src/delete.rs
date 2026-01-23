@@ -16,8 +16,8 @@ impl Session {
 /// A [`delete`](Session::delete) request builder.
 #[derive(Debug)]
 pub struct DeleteBuilder {
-    session: Session,
-    key: ObjectKey,
+    pub(crate) session: Session,
+    pub(crate) key: ObjectKey,
 }
 
 impl DeleteBuilder {
