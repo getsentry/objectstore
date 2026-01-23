@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::io;
 
+use async_compression::tokio::bufread::ZstdDecoder;
 use futures_util::StreamExt as _;
 use multer::Field;
-use objectstore_types::Metadata;
+use objectstore_types::{Compression, Metadata};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::Error;
 use crate::put::{PutBody, compress_body};
@@ -48,17 +51,27 @@ impl Session {
 /// You can construct a [`BatchOperation`] out of a [`GetBuilder`], [`PutBuilder`], or
 /// [`DeleteBuilder`] using their [`From<T>`] implementation.
 #[derive(Debug)]
-pub(crate) enum BatchOperation {
+#[non_exhaustive]
+pub enum BatchOperation {
+    /// A GET operation.
     Get {
+        /// The object key.
         key: ObjectKey,
+        /// Whether to decompress the response.
         decompress: bool,
     },
+    /// An INSERT operation.
     Insert {
+        /// The object key.
         key: ObjectKey,
+        /// The object metadata.
         metadata: Metadata,
+        /// The object body.
         body: PutBody,
     },
+    /// A DELETE operation.
     Delete {
+        /// The object key.
         key: ObjectKey,
     },
 }
@@ -106,7 +119,11 @@ impl BatchOperation {
                 );
                 Ok(Part::text("").headers(headers))
             }
-            BatchOperation::Insert { key, metadata, body } => {
+            BatchOperation::Insert {
+                key,
+                metadata,
+                body,
+            } => {
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
@@ -139,9 +156,8 @@ impl BatchOperation {
 }
 
 fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
-    HeaderValue::try_from(key).map_err(|e| {
-        Error::MalformedResponse(format!("invalid object key for header value: {e}"))
-    })
+    HeaderValue::try_from(key)
+        .map_err(|e| Error::MalformedResponse(format!("invalid object key for header value: {e}")))
 }
 
 /// The result of an individual operation.
@@ -161,14 +177,17 @@ pub enum OperationResult {
 }
 
 impl OperationResult {
-    async fn from_field(field: Field<'_>) -> Self {
-        match Self::try_from_field(field).await {
+    async fn from_field(field: Field<'_>, decompress_map: &HashMap<ObjectKey, bool>) -> Self {
+        match Self::try_from_field(field, decompress_map).await {
             Ok(result) => result,
             Err(e) => OperationResult::Error(e),
         }
     }
 
-    async fn try_from_field(field: Field<'_>) -> Result<Self, Error> {
+    async fn try_from_field(
+        field: Field<'_>,
+        decompress_map: &HashMap<ObjectKey, bool>,
+    ) -> Result<Self, Error> {
         let mut headers = field.headers().clone();
         let key = headers
             .remove(HEADER_BATCH_OPERATION_KEY)
@@ -215,8 +234,20 @@ impl OperationResult {
                 if status == 404 {
                     Ok(OperationResult::Get(key, Ok(None)))
                 } else {
-                    let metadata = objectstore_types::Metadata::from_headers(&headers, "")?;
-                    let stream = futures_util::stream::once(async move { Ok(body) }).boxed();
+                    let mut metadata = Metadata::from_headers(&headers, "")?;
+                    let should_decompress = decompress_map.get(&key).copied().unwrap_or(false);
+
+                    let stream = match (metadata.compression, should_decompress) {
+                        (Some(Compression::Zstd), true) => {
+                            metadata.compression = None;
+                            let stream = futures_util::stream::once(async move {
+                                Ok::<_, io::Error>(body)
+                            });
+                            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream)))
+                                .boxed()
+                        }
+                        _ => futures_util::stream::once(async move { Ok(body) }).boxed(),
+                    };
 
                     Ok(OperationResult::Get(
                         key,
@@ -250,7 +281,19 @@ impl ManyBuilder {
         Ok(all_results.into_iter())
     }
 
-    async fn send_batch(&self, operations: Vec<BatchOperation>) -> crate::Result<Vec<OperationResult>> {
+    async fn send_batch(
+        &self,
+        operations: Vec<BatchOperation>,
+    ) -> crate::Result<Vec<OperationResult>> {
+        // Build decompress map for GET operations
+        let decompress_map: HashMap<ObjectKey, bool> = operations
+            .iter()
+            .filter_map(|op| match op {
+                BatchOperation::Get { key, decompress } => Some((key.clone(), *decompress)),
+                _ => None,
+            })
+            .collect();
+
         let mut form = reqwest::multipart::Form::new();
         for (i, op) in operations.into_iter().enumerate() {
             let part = op.into_part().await?;
@@ -272,7 +315,7 @@ impl ManyBuilder {
 
         let mut results = Vec::new();
         while let Some(field) = multipart.next_field().await? {
-            results.push(OperationResult::from_field(field).await);
+            results.push(OperationResult::from_field(field, &decompress_map).await);
         }
 
         Ok(results)

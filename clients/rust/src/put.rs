@@ -22,8 +22,12 @@ pub struct PutResponse {
     pub key: ObjectKey,
 }
 
-pub(crate) enum PutBody {
+/// The body of a PUT request.
+#[non_exhaustive]
+pub enum PutBody {
+    /// A buffered body.
     Buffer(Bytes),
+    /// A streaming body.
     Stream(ClientStream),
 }
 

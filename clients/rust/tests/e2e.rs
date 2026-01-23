@@ -228,7 +228,12 @@ async fn batch_mixed_operations() {
     let results: Vec<_> = session
         .many()
         .push(session.get(&existing_key))
-        .push(session.put("new batch object").compression(None).key("batch-test-new"))
+        .push(
+            session
+                .put("new batch object")
+                .compression(None)
+                .key("batch-test-new"),
+        )
         .push(session.delete(&existing_key))
         .send()
         .await
@@ -315,4 +320,42 @@ async fn batch_insert_auto_generated_key() {
     let response = session.get(&generated_key).send().await.unwrap().unwrap();
     let payload = response.payload().await.unwrap();
     assert_eq!(payload, "auto-key object");
+}
+
+#[tokio::test]
+async fn batch_get_with_decompression() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // Store an object with default compression (zstd)
+    let key = session
+        .put("compressed content")
+        .key("batch-get-test")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    // Retrieve via batch GET (decompress=true by default)
+    let results: Vec<_> = session
+        .many()
+        .push(session.get(&key))
+        .send()
+        .await
+        .unwrap()
+        .collect();
+
+    assert_eq!(results.len(), 1);
+
+    let OperationResult::Get(_, Ok(Some(response))) = results.into_iter().next().unwrap() else {
+        panic!("Expected Get result with Some");
+    };
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "compressed content");
 }

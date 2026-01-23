@@ -432,6 +432,21 @@ impl Session {
 
         Ok(builder)
     }
+    pub(crate) fn request(
+        &self,
+        method: reqwest::Method,
+        object_key: &str,
+    ) -> crate::Result<RequestBuilder> {
+        let url = self.object_url(object_key);
+        let builder = self.client.reqwest.request(method, url);
+        self.prepare_builder(builder)
+    }
+
+    pub(crate) fn batch_request(&self) -> crate::Result<reqwest::RequestBuilder> {
+        let url = self.batch_url();
+        let builder = self.client.reqwest.post(url);
+        self.prepare_builder(builder)
+    }
 }
 
 #[cfg(test)]
