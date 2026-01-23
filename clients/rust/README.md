@@ -89,7 +89,7 @@ async fn example() -> Result<()> {
 
 ### Many API
 
-The Many API allows you to enqueue multiple requests that the client can decide to execute as a single batch request to minimize network overhead.
+The Many API allows you to enqueue multiple requests that the client can execute using Objectstore's batch endpoint, minimizing network overhead.
 
 ```rust
 use objectstore_client::{Client, Usecase, OperationResult, Result};
