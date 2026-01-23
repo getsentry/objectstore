@@ -87,6 +87,40 @@ async fn example() -> Result<()> {
 }
 ```
 
+### Many API
+
+The Many API allows you to enqueue multiple requests that the client can decide to execute as a single batch request to minimize network overhead.
+
+```rust
+use objectstore_client::{Client, Usecase, OperationResult, Result};
+
+async fn example_batch() -> Result<()> {
+    let client = Client::new("http://localhost:8888/")?;
+    let session = Usecase::new("attachments")
+        .for_project(42, 1337)
+        .session(&client)?;
+
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("file1 contents").key("file1"))
+        .push(session.put("file2 contents").key("file2"))
+        .push(session.put("file3 contents").key("file3"))
+        .send()
+        .await?
+        .collect();
+
+    for result in results {
+        match result {
+            OperationResult::Put(key, Ok(_)) => {}
+            OperationResult::Put(key, Err(e)) => return Err(e),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+```
+
 See the [API docs](https://getsentry.github.io/objectstore/rust/objectstore_client/) for more in-depth documentation.
 
 ## License
