@@ -191,20 +191,10 @@ impl OperationResult {
         let mut headers = field.headers().clone();
         let key = headers
             .remove(HEADER_BATCH_OPERATION_KEY)
-            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
-            .ok_or_else(|| {
-                Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
-                ))
-            })?;
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
         let kind = headers
             .remove(HEADER_BATCH_OPERATION_KIND)
-            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
-            .ok_or_else(|| {
-                Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_KIND} header"
-                ))
-            })?;
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
         let status: u16 = headers
             .remove(HEADER_BATCH_OPERATION_STATUS)
             .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
@@ -213,6 +203,25 @@ impl OperationResult {
                     "missing or invalid {HEADER_BATCH_OPERATION_STATUS} header"
                 ))
             })?;
+
+        // If both key and kind are missing, this is a request-level error (e.g., rate limiting)
+        // that applies to the entire batch rather than a specific operation.
+        let (key, kind) = match (key, kind) {
+            (Some(k), Some(kd)) => (k, kd),
+            (None, None) => {
+                // Request-level error: extract error details from body and status
+                let body = field.bytes().await?;
+                let message = String::from_utf8_lossy(&body).into_owned();
+                return Err(Error::OperationError { status, message });
+            }
+            _ => {
+                // One header present but not the other is malformed
+                return Err(Error::MalformedResponse(format!(
+                    "inconsistent batch headers: both {HEADER_BATCH_OPERATION_KEY} and \
+                     {HEADER_BATCH_OPERATION_KIND} must be present or absent together"
+                )));
+            }
+        };
 
         let body = field.bytes().await?;
 
