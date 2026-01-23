@@ -240,11 +240,9 @@ impl OperationResult {
                     let stream = match (metadata.compression, should_decompress) {
                         (Some(Compression::Zstd), true) => {
                             metadata.compression = None;
-                            let stream = futures_util::stream::once(async move {
-                                Ok::<_, io::Error>(body)
-                            });
-                            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream)))
-                                .boxed()
+                            let stream =
+                                futures_util::stream::once(async move { Ok::<_, io::Error>(body) });
+                            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
                         }
                         _ => futures_util::stream::once(async move { Ok(body) }).boxed(),
                     };
