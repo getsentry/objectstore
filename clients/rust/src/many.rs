@@ -17,6 +17,9 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
+/// Maximum number of operations per batch request (server limit).
+const MAX_BATCH_SIZE: usize = 1000;
+
 /// A builder that can be used to enqueue multiple operations.
 ///
 /// The client can optionally execute the operations as batch requests, leading to
@@ -234,9 +237,22 @@ impl OperationResult {
 impl ManyBuilder {
     /// Executes all enqueued operations, returning an iterator over their results.
     /// The results are not guaranteed to be in the same order as the original enqueuing order.
-    pub async fn send(self) -> crate::Result<impl Iterator<Item = OperationResult>> {
+    pub async fn send(mut self) -> crate::Result<impl Iterator<Item = OperationResult>> {
+        let mut all_results = Vec::new();
+
+        while !self.operations.is_empty() {
+            let chunk_size = self.operations.len().min(MAX_BATCH_SIZE);
+            let chunk: Vec<_> = self.operations.drain(..chunk_size).collect();
+            let results = self.send_batch(chunk).await?;
+            all_results.extend(results);
+        }
+
+        Ok(all_results.into_iter())
+    }
+
+    async fn send_batch(&self, operations: Vec<BatchOperation>) -> crate::Result<Vec<OperationResult>> {
         let mut form = reqwest::multipart::Form::new();
-        for (i, op) in self.operations.into_iter().enumerate() {
+        for (i, op) in operations.into_iter().enumerate() {
             let part = op.into_part().await?;
             form = form.part(format!("part{i}"), part);
         }
@@ -259,7 +275,7 @@ impl ManyBuilder {
             results.push(OperationResult::from_field(field).await);
         }
 
-        Ok(results.into_iter())
+        Ok(results)
     }
 
     /// Enqueues an operation.
