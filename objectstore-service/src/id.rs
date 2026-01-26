@@ -11,9 +11,9 @@ use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
 
-/// Defines where an object belongs within the object store.
+/// Defines where an object, or batch of objects, belongs within the object store.
 ///
-/// This is part of the full object identifier, see [`ObjectId`].
+/// This is part of the full object identifier for single objects, see [`ObjectId`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectContext {
     /// The usecase, or "product" this object belongs to.
@@ -73,8 +73,11 @@ pub struct ObjectId {
     /// a key makes a unique identifier.
     ///
     /// Keys can be assigned by the service. For this, use [`ObjectId::random`].
-    pub key: String,
+    pub key: ObjectKey,
 }
+
+/// A key that uniquely identifies an object within its usecase and scopes.
+pub type ObjectKey = String;
 
 impl ObjectId {
     /// Creates a new `ObjectId` with the given `context` and `key`.
