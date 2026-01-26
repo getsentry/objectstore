@@ -8,9 +8,9 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::id::ObjectId;
-use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
+use crate::{PayloadStream, ServiceError, ServiceResult};
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -35,7 +35,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<DeleteResponse> {
+    ) -> ServiceResult<PutResponse> {
         let path = self.path.join(id.as_storage_path().to_string());
         tracing::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;

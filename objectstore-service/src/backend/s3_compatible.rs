@@ -5,9 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::backend::common::{self, Backend};
+use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::id::ObjectId;
-use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
+use crate::{PayloadStream, ServiceError, ServiceResult};
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -155,7 +155,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<DeleteResponse> {
+    ) -> ServiceResult<PutResponse> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?

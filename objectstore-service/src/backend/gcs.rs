@@ -10,9 +10,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::common::{self, Backend};
+use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::id::ObjectId;
-use crate::{DeleteResponse, GetResponse, PayloadStream, ServiceError, ServiceResult};
+use crate::{PayloadStream, ServiceError, ServiceResult};
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -346,7 +346,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<DeleteResponse> {
+    ) -> ServiceResult<PutResponse> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
