@@ -21,22 +21,16 @@ pub struct Part {
 }
 
 impl Part {
-    /// Creates a new Multipart part with the given name, content type, body, optional filename,
-    /// and headers.
+    /// Creates a new Multipart part with the given content type, body, and headers.
+    /// The name is hardcoded to "part".
     pub fn new(
-        name: &str,
         content_type: &str,
         body: Bytes,
-        filename: Option<&str>,
         mut headers: HeaderMap,
     ) -> Result<Self, http::header::InvalidHeaderValue> {
-        let mut disposition = format!("form-data; name=\"{}\"", name);
-        if let Some(filename) = filename {
-            disposition.push_str(&format!("; filename=\"{}\"", filename));
-        }
+        let disposition = "form-data; name=part";
         headers.insert(CONTENT_DISPOSITION, disposition.parse()?);
         headers.insert(CONTENT_TYPE, content_type.parse()?);
-
         Ok(Part { headers, body })
     }
 }
@@ -127,18 +121,14 @@ mod tests {
         extra_headers.insert("X-File-Id", "12345".parse().unwrap());
         let parts = vec![
             Part::new(
-                "metadata",
                 "application/json",
                 Bytes::from(r#"{"key":"value"}"#),
-                None,
                 HeaderMap::new(),
             )
             .unwrap(),
             Part::new(
-                "file",
                 "application/octet-stream",
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
-                Some("data.bin"),
                 extra_headers,
             )
             .unwrap(),
@@ -166,15 +156,15 @@ mod tests {
         let mut multipart = Multipart::from_request(request, &()).await.unwrap();
 
         let field = multipart.next_field().await.unwrap().unwrap();
-        assert_eq!(field.name(), Some("metadata"));
+        assert_eq!(field.name(), Some("part"));
         assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/json"));
         assert_eq!(field.headers().len(), 2);
         assert_eq!(field.bytes().await.unwrap(), r#"{"key":"value"}"#);
 
         let field = multipart.next_field().await.unwrap().unwrap();
-        assert_eq!(field.name(), Some("file"));
-        assert_eq!(field.file_name(), Some("data.bin"));
+        assert_eq!(field.name(), Some("part"));
+        assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/octet-stream"));
         assert_eq!(field.headers().len(), 4);
         assert_eq!(
