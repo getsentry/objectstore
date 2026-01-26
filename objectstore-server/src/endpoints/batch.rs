@@ -179,11 +179,9 @@ fn create_success_part(
         headers.extend(additional);
     }
 
-    Part::new("part", content_type, body, None, headers).map_err(|e| {
-        BatchError::ResponseSerialization {
-            context: "creating multipart Part".to_string(),
-            cause: Box::new(e),
-        }
+    Part::new(body, headers, content_type).map_err(|e| BatchError::ResponseSerialization {
+        context: "creating multipart Part".to_string(),
+        cause: Box::new(e),
     })
 }
 
@@ -219,16 +217,11 @@ fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, 
         }
     })?;
 
-    Part::new(
-        "part",
-        Some("application/json"),
-        Bytes::from(error_body),
-        None,
-        headers,
-    )
-    .map_err(|e| BatchError::ResponseSerialization {
-        context: "creating multipart Part for error".to_string(),
-        cause: Box::new(e),
+    Part::new(Bytes::from(error_body), headers, None).map_err(|e| {
+        BatchError::ResponseSerialization {
+            context: "creating multipart Part for error".to_string(),
+            cause: Box::new(e),
+        }
     })
 }
 
