@@ -8,7 +8,7 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use http::HeaderMap;
+use http::{HeaderMap, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::Metadata;
 
@@ -144,7 +144,7 @@ async fn batch(
 
 fn create_success_part(
     key: &ObjectKey,
-    status: u16,
+    status: StatusCode,
     content_type: Option<&str>,
     body: Bytes,
     additional_headers: Option<HeaderMap>,
@@ -161,17 +161,24 @@ fn create_success_part(
         })?,
     );
 
+    let status_str = format!(
+        "{} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    )
+    .trim()
+    .to_string();
+
     headers.insert(
         HEADER_BATCH_OPERATION_STATUS,
-        status
-            .to_string()
+        status_str
             .parse()
-            .map_err(
-                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
+            .map_err(|e: http::header::InvalidHeaderValue| {
+                BatchError::ResponseSerialization {
                     context: "parsing status code header".to_string(),
                     cause: Box::new(e),
-                },
-            )?,
+                }
+            })?,
     );
 
     if let Some(additional) = additional_headers {
@@ -199,14 +206,25 @@ fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, 
         );
     }
 
+    let status = error.status();
+    let status_str = format!(
+        "{} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    )
+    .trim()
+    .to_string();
+
     headers.insert(
         HEADER_BATCH_OPERATION_STATUS,
-        error.status().as_u16().to_string().parse().map_err(
-            |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
-                context: "parsing status code header".to_string(),
-                cause: Box::new(e),
-            },
-        )?,
+        status_str
+            .parse()
+            .map_err(|e: http::header::InvalidHeaderValue| {
+                BatchError::ResponseSerialization {
+                    context: "parsing status code header".to_string(),
+                    cause: Box::new(e),
+                }
+            })?,
     );
 
     let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).map_err(|e| {
@@ -234,21 +252,21 @@ impl TryFrom<OperationResponse> for Part {
                     let metadata_headers = metadata.to_headers("", false)?;
                     create_success_part(
                         &key,
-                        200,
+                        StatusCode::OK,
                         Some(&metadata.content_type),
                         bytes,
                         Some(metadata_headers),
                     )
                 }
-                Ok(None) => create_success_part(&key, 404, None, Bytes::new(), None),
+                Ok(None) => create_success_part(&key, StatusCode::NOT_FOUND, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             OperationResponse::Insert(InsertResponse { key, result }) => match result {
-                Ok(_) => create_success_part(&key, 201, None, Bytes::new(), None),
+                Ok(_) => create_success_part(&key, StatusCode::CREATED, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             OperationResponse::Delete(DeleteResponse { key, result }) => match result {
-                Ok(_) => create_success_part(&key, 204, None, Bytes::new(), None),
+                Ok(_) => create_success_part(&key, StatusCode::NO_CONTENT, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
             OperationResponse::Error(ErrorResponse { error }) => create_error_part(None, &error),
