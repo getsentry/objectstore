@@ -139,7 +139,7 @@ mod tests {
             .unwrap(),
             Part::new(
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
-                HeaderMap::new(),
+                extra_headers,
                 Some("application/octet-stream"),
             )
             .unwrap(),
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(field.name(), Some("part"));
         assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/octet-stream"));
-        assert_eq!(field.headers().len(), 2);
+        assert_eq!(field.headers().len(), 4);
         assert_eq!(
             field.headers().get("X-Custom-Header").unwrap(),
             "custom-value"
