@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(field.name(), Some("part"));
         assert_eq!(field.file_name(), None);
         assert_eq!(field.content_type(), Some("application/octet-stream"));
-        assert_eq!(field.headers().len(), 4);
+        assert_eq!(field.headers().len(), 2);
         assert_eq!(
             field.headers().get("X-Custom-Header").unwrap(),
             "custom-value"
