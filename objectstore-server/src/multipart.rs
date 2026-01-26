@@ -65,7 +65,9 @@ where
             CONTENT_TYPE,
             format!("multipart/form-data; boundary=\"{}\"", &boundary_str)
                 .parse()
-                .expect("valid header value, as it only contains hex digits"),
+                .expect(
+                    "valid header value, as we always define it as \"os-boundary-X\" where X are hex digits",
+                ),
         );
 
         let body: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
