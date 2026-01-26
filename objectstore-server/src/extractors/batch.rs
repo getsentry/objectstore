@@ -47,30 +47,30 @@ pub enum BatchError {
 }
 
 #[derive(Debug)]
-pub struct BatchGetRequest {
+pub struct GetOperation {
     pub key: ObjectKey,
 }
 
 #[derive(Debug)]
-pub struct BatchInsertRequest {
+pub struct InsertOperation {
     pub key: ObjectKey,
     pub metadata: Metadata,
     pub payload: Bytes,
 }
 
 #[derive(Debug)]
-pub struct BatchDeleteRequest {
+pub struct DeleteOperation {
     pub key: ObjectKey,
 }
 
 #[derive(Debug)]
-pub enum BatchRequest {
-    Get(BatchGetRequest),
-    Insert(BatchInsertRequest),
-    Delete(BatchDeleteRequest),
+pub enum Operation {
+    Get(GetOperation),
+    Insert(InsertOperation),
+    Delete(DeleteOperation),
 }
 
-impl BatchRequest {
+impl Operation {
     async fn try_from_field(field: Field<'_>) -> Result<Self, BatchError> {
         let kind = field
             .headers()
@@ -102,7 +102,7 @@ impl BatchRequest {
             .to_owned();
 
         let operation = match kind.as_str() {
-            "get" => BatchRequest::Get(BatchGetRequest { key }),
+            "get" => Operation::Get(GetOperation { key }),
             "insert" => {
                 let metadata = Metadata::from_headers(field.headers(), "")?;
                 let payload = field.bytes().await?;
@@ -111,13 +111,13 @@ impl BatchRequest {
                         "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
                     )));
                 }
-                BatchRequest::Insert(BatchInsertRequest {
+                Operation::Insert(InsertOperation {
                     key,
                     metadata,
                     payload,
                 })
             }
-            "delete" => BatchRequest::Delete(BatchDeleteRequest { key }),
+            "delete" => Operation::Delete(DeleteOperation { key }),
             _ => {
                 return Err(BatchError::BadRequest(format!(
                     "invalid operation kind: {kind}"
@@ -128,7 +128,7 @@ impl BatchRequest {
     }
 }
 
-pub struct BatchRequestStream(pub BoxStream<'static, Result<BatchRequest, BatchError>>);
+pub struct BatchRequestStream(pub BoxStream<'static, Result<Operation, BatchError>>);
 
 impl Debug for BatchRequestStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,7 +157,7 @@ where
                     )))?;
                 }
                 count += 1;
-                yield BatchRequest::try_from_field(field).await?;
+                yield Operation::try_from_field(field).await?;
             }
         }
         .boxed();
@@ -222,19 +222,19 @@ mod tests {
         let operations: Vec<_> = batch_request.0.collect().await;
         assert_eq!(operations.len(), 4);
 
-        let BatchRequest::Get(get_op) = &operations[0].as_ref().unwrap() else {
+        let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
         assert_eq!(get_op.key, "test0");
 
-        let BatchRequest::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
+        let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op1.key, "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
-        let BatchRequest::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
+        let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op2.key, "test2");
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
-        let BatchRequest::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
+        let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
             panic!("expected delete operation");
         };
         assert_eq!(delete_op.key, "test3");

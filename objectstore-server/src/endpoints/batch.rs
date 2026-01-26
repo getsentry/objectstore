@@ -10,14 +10,13 @@ use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
-use objectstore_service::{DeleteResponse, InsertResponse};
 use objectstore_types::Metadata;
 
 use crate::auth::AuthAwareService;
 use crate::batch::HEADER_BATCH_OPERATION_KEY;
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchError, BatchRequest, BatchRequestStream};
+use crate::extractors::batch::{BatchError, BatchRequestStream, Operation};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
@@ -32,12 +31,12 @@ pub fn router() -> Router<ServiceState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
 }
 
-struct BatchGetResponse {
+struct GetResponse {
     pub key: ObjectKey,
     pub result: ApiResult<Option<(Metadata, Bytes)>>,
 }
 
-impl std::fmt::Debug for BatchGetResponse {
+impl std::fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchGetResponse")
             .field("key", &self.key)
@@ -46,27 +45,27 @@ impl std::fmt::Debug for BatchGetResponse {
 }
 
 #[derive(Debug)]
-pub struct BatchInsertResponse {
+struct InsertResponse {
     pub key: ObjectKey,
-    pub result: ApiResult<InsertResponse>,
+    pub result: ApiResult<objectstore_service::InsertResponse>,
 }
 
 #[derive(Debug)]
-pub struct BatchDeleteResponse {
+struct DeleteResponse {
     pub key: ObjectKey,
-    pub result: ApiResult<DeleteResponse>,
+    pub result: ApiResult<objectstore_service::DeleteResponse>,
 }
 
 #[derive(Debug)]
-pub struct BatchErrorResponse {
+struct ErrorResponse {
     pub error: ApiError,
 }
 
-enum BatchResponse {
-    Get(BatchGetResponse),
-    Insert(BatchInsertResponse),
-    Delete(BatchDeleteResponse),
-    Error(BatchErrorResponse),
+enum OperationResponse {
+    Get(GetResponse),
+    Insert(InsertResponse),
+    Delete(DeleteResponse),
+    Error(ErrorResponse),
 }
 
 async fn batch(
@@ -75,11 +74,11 @@ async fn batch(
     Xt(context): Xt<ObjectContext>,
     mut requests: BatchRequestStream,
 ) -> Response {
-    let responses: BoxStream<BatchResponse> = async_stream::stream! {
+    let responses: BoxStream<OperationResponse> = async_stream::stream! {
             while let Some(operation) = requests.0.next().await {
                 if !state.rate_limiter.check(&context) {
                     tracing::debug!("Batch operation rejected due to rate limits");
-                    yield BatchResponse::Error(BatchErrorResponse {
+                    yield OperationResponse::Error(ErrorResponse {
                         error: BatchError::RateLimited.into(),
                     });
                     continue;
@@ -87,7 +86,7 @@ async fn batch(
 
                 let result = match operation {
                     Ok(operation) => match operation {
-                        BatchRequest::Get(get) => {
+                        Operation::Get(get) => {
                             let key = get.key.clone();
                             let result = service
                                 .get_object(&ObjectId::new(context.clone(), get.key))
@@ -108,9 +107,9 @@ async fn batch(
                                 Err(e) => Err(e),
                             };
 
-                            BatchResponse::Get(BatchGetResponse{ key, result })
+                            OperationResponse::Get(GetResponse{ key, result })
                         }
-                        BatchRequest::Insert(insert) => {
+                        Operation::Insert(insert) => {
                             let key = insert.key.clone();
                             let mut metadata = insert.metadata;
                             metadata.time_created = Some(SystemTime::now());
@@ -123,17 +122,17 @@ async fn batch(
                             let result = service
                                 .insert_object(context.clone(), Some(insert.key), &metadata, stream)
                                 .await;
-                            BatchResponse::Insert(BatchInsertResponse { key, result })
+                            OperationResponse::Insert(InsertResponse { key, result })
                         }
-                        BatchRequest::Delete(delete) => {
+                        Operation::Delete(delete) => {
                             let key = delete.key.clone();
                             let result = service
                                 .delete_object(&ObjectId::new(context.clone(), delete.key))
                                 .await;
-                            BatchResponse::Delete(BatchDeleteResponse { key, result })
+                            OperationResponse::Delete(DeleteResponse { key, result })
                         }
                     },
-                    Err(error) => BatchResponse::Error(BatchErrorResponse { error: error.into() }),
+                    Err(error) => OperationResponse::Error(ErrorResponse { error: error.into() }),
                 };
                 yield result;
             }
@@ -225,12 +224,12 @@ fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, 
     })
 }
 
-impl TryFrom<BatchResponse> for Part {
+impl TryFrom<OperationResponse> for Part {
     type Error = BatchError;
 
-    fn try_from(value: BatchResponse) -> Result<Self, Self::Error> {
+    fn try_from(value: OperationResponse) -> Result<Self, Self::Error> {
         match value {
-            BatchResponse::Get(BatchGetResponse { key, result }) => match result {
+            OperationResponse::Get(GetResponse { key, result }) => match result {
                 Ok(Some((metadata, bytes))) => {
                     let metadata_headers = metadata.to_headers("", false)?;
                     create_success_part(
@@ -244,15 +243,15 @@ impl TryFrom<BatchResponse> for Part {
                 Ok(None) => create_success_part(&key, 404, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
-            BatchResponse::Insert(BatchInsertResponse { key, result }) => match result {
+            OperationResponse::Insert(InsertResponse { key, result }) => match result {
                 Ok(_) => create_success_part(&key, 201, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
-            BatchResponse::Delete(BatchDeleteResponse { key, result }) => match result {
+            OperationResponse::Delete(DeleteResponse { key, result }) => match result {
                 Ok(_) => create_success_part(&key, 204, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
-            BatchResponse::Error(BatchErrorResponse { error }) => create_error_part(None, &error),
+            OperationResponse::Error(ErrorResponse { error }) => create_error_part(None, &error),
         }
     }
 }
