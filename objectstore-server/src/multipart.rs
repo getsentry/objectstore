@@ -87,7 +87,8 @@ where
 }
 
 fn serialize_headers(headers: HeaderMap) -> Bytes {
-    let mut res = BytesMut::with_capacity(10 + 15 * headers.len());
+    // https://github.com/hyperium/hyper/blob/0f0b6ed3ac55ac1682afd2104cb8d0385149249a/src/proto/h1/role.rs#L399
+    let mut res = BytesMut::with_capacity(30 + 30 * headers.len());
     for (name, value) in &headers {
         res.put(name.as_str().as_bytes());
         res.put(&b": "[..]);
