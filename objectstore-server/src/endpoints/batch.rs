@@ -198,7 +198,6 @@ fn create_success_part(
     if let Some(additional) = additional_headers {
         headers.extend(additional);
     }
-
     Part::new(body, headers, content_type)
 }
 
@@ -209,7 +208,14 @@ fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Part {
     }
     insert_status_header(&mut headers, error.status());
 
-    let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).unwrap_or_default();
+    let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error))
+        .inspect_err(|err| {
+            tracing::error!(
+                error = err as &dyn std::error::Error,
+                "error serializing ApiErrorResponse, this should never happen"
+            )
+        })
+        .unwrap_or_default();
     Part::new(Bytes::from(error_body), headers, None)
 }
 
@@ -244,7 +250,7 @@ impl From<OperationResponse> for Part {
             },
             OperationResponse::Insert(InsertResponse { key, result }) => match result {
                 // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
-                // layer doesn't allow us to distinguish between them at the moment
+                // layer doesn't allow us to distinguish between them currently
                 Ok(_) => create_success_part(&key, StatusCode::CREATED, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
