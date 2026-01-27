@@ -107,6 +107,7 @@ async fn example_batch() -> Result<()> {
         .push(session.put("file3 contents").key("file3"))
         .send()
         .await?
+        .into_iter()
         .collect();
 
     for result in results {
