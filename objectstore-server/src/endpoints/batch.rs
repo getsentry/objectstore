@@ -16,7 +16,7 @@ use crate::auth::AuthAwareService;
 use crate::batch::HEADER_BATCH_OPERATION_KEY;
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchError, BatchRequestStream, Operation};
+use crate::extractors::batch::{BatchError, BatchOperationStream, Operation};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
@@ -72,7 +72,7 @@ async fn batch(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
-    mut requests: BatchRequestStream,
+    mut requests: BatchOperationStream,
 ) -> Response {
     let responses: BoxStream<OperationResponse> = async_stream::stream! {
             while let Some(operation) = requests.0.next().await {

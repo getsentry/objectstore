@@ -128,18 +128,18 @@ impl Operation {
     }
 }
 
-pub struct BatchRequestStream(pub BoxStream<'static, Result<Operation, BatchError>>);
+pub struct BatchOperationStream(pub BoxStream<'static, Result<Operation, BatchError>>);
 
-impl Debug for BatchRequestStream {
+impl Debug for BatchOperationStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchRequestStream").finish()
+        f.debug_struct("BatchOperationStream").finish()
     }
 }
 
 const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_OPERATIONS: usize = 1000;
 
-impl<S> FromRequest<S> for BatchRequestStream
+impl<S> FromRequest<S> for BatchOperationStream
 where
     S: Send + Sync,
 {
@@ -215,7 +215,7 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &())
+        let batch_request = BatchOperationStream::from_request(request, &())
             .await
             .unwrap();
 
@@ -267,7 +267,7 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &())
+        let batch_request = BatchOperationStream::from_request(request, &())
             .await
             .unwrap();
         let operations: Vec<_> = batch_request.0.collect().await;
@@ -297,7 +297,7 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequestStream::from_request(request, &())
+        let batch_request = BatchOperationStream::from_request(request, &())
             .await
             .unwrap();
         let operations: Vec<_> = batch_request.0.collect().await;
