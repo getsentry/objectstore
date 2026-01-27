@@ -133,7 +133,7 @@ impl PutBuilder {
 }
 
 /// Compresses the body if compression is specified.
-pub(crate) fn compress_body(body: PutBody, compression: Option<Compression>) -> Body {
+pub(crate) fn maybe_compress_body(body: PutBody, compression: Option<Compression>) -> Body {
     match (compression, body) {
         (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
             let cursor = Cursor::new(bytes);
@@ -167,7 +167,7 @@ impl PutBuilder {
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
 
-        let body = compress_body(self.body, self.metadata.compression);
+        let body = maybe_compress_body(self.body, self.metadata.compression);
 
         builder = builder.headers(self.metadata.to_headers("", false)?);
 

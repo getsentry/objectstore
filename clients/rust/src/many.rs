@@ -12,7 +12,7 @@ use reqwest::multipart::Part;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::Error;
-use crate::put::{PutBody, compress_body};
+use crate::put::{PutBody, maybe_compress_body};
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
     Session,
@@ -36,10 +36,10 @@ pub struct ManyBuilder {
 }
 
 impl Session {
-    /// Creates as [`ManyBuilder`] associated with this session.
+    /// Creates a [`ManyBuilder`] associated with this session.
     ///
-    /// A [`ManyBuilder`] can be used to execute multiple operations, which the client can choose to
-    /// execute as batch requests via a dedicated endpoint, minimizing network overhead.
+    /// A [`ManyBuilder`] can be used to enqueue multiple operations, which the client can choose to
+    /// send as batch requests via a dedicated endpoint, minimizing network overhead.
     pub fn many(&self) -> ManyBuilder {
         ManyBuilder {
             session: self.clone(),
@@ -48,28 +48,18 @@ impl Session {
     }
 }
 
-/// An individual operation in a batch request.
 #[derive(Debug)]
-pub(crate) enum BatchOperation {
-    /// A GET operation.
+enum BatchOperation {
     Get {
-        /// The object key.
         key: ObjectKey,
-        /// Whether to decompress the response.
         decompress: bool,
     },
-    /// An INSERT operation.
     Insert {
-        /// The object key.
         key: ObjectKey,
-        /// The object metadata.
         metadata: Metadata,
-        /// The object body.
         body: PutBody,
     },
-    /// A DELETE operation.
     Delete {
-        /// The object key.
         key: ObjectKey,
     },
 }
@@ -85,6 +75,7 @@ impl From<GetBuilder> for BatchOperation {
 
 impl From<PutBuilder> for BatchOperation {
     fn from(value: PutBuilder) -> Self {
+        // XXX: batch PUTs need to carry a key by design
         let key = value
             .key
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -131,10 +122,9 @@ impl BatchOperation {
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
                     key_to_header_value(&key)?,
                 );
-                // Add metadata headers (includes compression info)
                 headers.extend(metadata.to_headers("", false)?);
 
-                let body = compress_body(body, metadata.compression);
+                let body = maybe_compress_body(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -170,8 +160,8 @@ pub enum OperationResult {
     Delete(ObjectKey, Result<DeleteResponse, Error>),
     /// The server returned an error for one of the operations, but it's impossible to determine
     /// which one exactly.
-    /// This can happen if either the client or the server encounter parsing errors or unexpected
-    /// request or response formats.
+    /// This can happen if either the client or the server encounter parsing errors, batch size
+    /// limits  or unexpected request/response formats.
     Error(Error),
 }
 
@@ -218,12 +208,9 @@ impl OperationResult {
                 ))
             })?;
 
-        // If both key and kind are missing, this is a request-level error (e.g., rate limiting)
-        // that applies to the entire batch rather than a specific operation.
         let (key, kind) = match (key, kind) {
             (Some(k), Some(kd)) => (k, kd),
             (None, None) => {
-                // Request-level error: extract error details from body and status
                 let body = field.bytes().await?;
                 let message = String::from_utf8_lossy(&body).into_owned();
                 return Err(Error::OperationError { status, message });
@@ -306,7 +293,6 @@ impl ManyBuilder {
         &self,
         operations: Vec<BatchOperation>,
     ) -> crate::Result<Vec<OperationResult>> {
-        // Build decompress map for GET operations
         let decompress_map: HashMap<ObjectKey, bool> = operations
             .iter()
             .filter_map(|op| match op {
@@ -316,9 +302,9 @@ impl ManyBuilder {
             .collect();
 
         let mut form = reqwest::multipart::Form::new();
-        for (i, op) in operations.into_iter().enumerate() {
+        for op in operations.into_iter() {
             let part = op.into_part().await?;
-            form = form.part(format!("part{i}"), part);
+            form = form.part("part", part);
         }
 
         let request = self.session.batch_request()?.multipart(form);
