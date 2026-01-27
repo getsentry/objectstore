@@ -187,8 +187,7 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
 fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
     headers.insert(
         HEADER_BATCH_OPERATION_KIND,
-        kind.parse()
-            .expect("operation kind is always a valid header value"),
+        kind.parse().expect("always a valid header value"),
     );
 }
 
