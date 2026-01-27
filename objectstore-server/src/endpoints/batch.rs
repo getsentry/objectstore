@@ -184,8 +184,17 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
     );
 }
 
+fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
+    headers.insert(
+        HEADER_BATCH_OPERATION_KIND,
+        kind.parse()
+            .expect("operation kind is always a valid header value"),
+    );
+}
+
 fn create_success_part(
     key: &ObjectKey,
+    kind: &str,
     status: StatusCode,
     content_type: Option<HeaderValue>,
     body: Bytes,
@@ -193,6 +202,7 @@ fn create_success_part(
 ) -> Part {
     let mut headers = HeaderMap::new();
     insert_key_header(&mut headers, key);
+    insert_kind_header(&mut headers, kind);
     insert_status_header(&mut headers, status);
     if let Some(additional) = additional_headers {
         headers.extend(additional);
@@ -200,10 +210,13 @@ fn create_success_part(
     Part::new(body, headers, content_type)
 }
 
-fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Part {
+fn create_error_part(key: Option<&ObjectKey>, kind: Option<&str>, error: &ApiError) -> Part {
     let mut headers = HeaderMap::new();
     if let Some(key) = key {
         insert_key_header(&mut headers, key);
+    }
+    if let Some(kind) = kind {
+        insert_kind_header(&mut headers, kind);
     }
     insert_status_header(&mut headers, error.status());
 
@@ -231,36 +244,54 @@ impl From<OperationResponse> for Part {
                                 cause: Box::new(err),
                             }
                             .into();
-                            return create_error_part(Some(&key), &err);
+                            return create_error_part(Some(&key), Some("get"), &err);
                         }
                     };
                     create_success_part(
                         &key,
+                        "get",
                         StatusCode::OK,
                         metadata_headers.remove(CONTENT_TYPE),
                         bytes,
                         Some(metadata_headers),
                     )
                 }
-                Ok(None) => {
-                    create_success_part(&key, StatusCode::NOT_FOUND, None, Bytes::new(), None)
-                }
-                Err(error) => create_error_part(Some(&key), &error),
+                Ok(None) => create_success_part(
+                    &key,
+                    "get",
+                    StatusCode::NOT_FOUND,
+                    None,
+                    Bytes::new(),
+                    None,
+                ),
+                Err(error) => create_error_part(Some(&key), Some("get"), &error),
             },
             OperationResponse::Insert(InsertResponse { key, result }) => match result {
                 // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
                 // layer doesn't allow us to distinguish between them currently
-                Ok(_) => create_success_part(&key, StatusCode::CREATED, None, Bytes::new(), None),
-                Err(error) => create_error_part(Some(&key), &error),
+                Ok(_) => create_success_part(
+                    &key,
+                    "insert",
+                    StatusCode::CREATED,
+                    None,
+                    Bytes::new(),
+                    None,
+                ),
+                Err(error) => create_error_part(Some(&key), Some("insert"), &error),
             },
             OperationResponse::Delete(DeleteResponse { key, result }) => match result {
-                Ok(_) => {
-                    create_success_part(&key, StatusCode::NO_CONTENT, None, Bytes::new(), None)
-                }
-                Err(error) => create_error_part(Some(&key), &error),
+                Ok(_) => create_success_part(
+                    &key,
+                    "delete",
+                    StatusCode::NO_CONTENT,
+                    None,
+                    Bytes::new(),
+                    None,
+                ),
+                Err(error) => create_error_part(Some(&key), Some("delete"), &error),
             },
             OperationResponse::Error(ErrorResponse { key, error }) => {
-                create_error_part(key.as_ref(), &error)
+                create_error_part(key.as_ref(), None, &error)
             }
         }
     }

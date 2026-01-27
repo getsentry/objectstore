@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io;
 
 use async_compression::tokio::bufread::ZstdDecoder;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use futures_util::StreamExt as _;
 use multer::Field;
 use objectstore_types::{Compression, Metadata};
@@ -156,7 +158,8 @@ impl BatchOperation {
 }
 
 fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
-    HeaderValue::try_from(key)
+    let encoded = BASE64_STANDARD.encode(key.as_bytes());
+    HeaderValue::try_from(encoded)
         .map_err(|e| Error::MalformedResponse(format!("invalid object key for header value: {e}")))
 }
 
@@ -189,15 +192,30 @@ impl OperationResult {
         decompress_map: &HashMap<ObjectKey, bool>,
     ) -> Result<Self, Error> {
         let mut headers = field.headers().clone();
-        let key = headers
-            .remove(HEADER_BATCH_OPERATION_KEY)
-            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
+        let key = headers.remove(HEADER_BATCH_OPERATION_KEY).and_then(|v| {
+            v.to_str().ok().and_then(|encoded| {
+                BASE64_STANDARD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            })
+        });
         let kind = headers
             .remove(HEADER_BATCH_OPERATION_KIND)
             .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
         let status: u16 = headers
             .remove(HEADER_BATCH_OPERATION_STATUS)
-            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
+            .and_then(|v| {
+                v.to_str().ok().and_then(|s| {
+                    // Status header format is "code reason" (e.g., "200 OK")
+                    // Split on first space and parse the code
+                    s.split_once(' ')
+                        .map(|(code, _)| code)
+                        .unwrap_or(s)
+                        .parse()
+                        .ok()
+                })
+            })
             .ok_or_else(|| {
                 Error::MalformedResponse(format!(
                     "missing or invalid {HEADER_BATCH_OPERATION_STATUS} header"

@@ -2220,6 +2220,7 @@ version = "0.0.15"
 dependencies = [
  "async-compression",
  "async-stream",
+ "base64",
  "bytes",
  "futures-util",
  "infer",
