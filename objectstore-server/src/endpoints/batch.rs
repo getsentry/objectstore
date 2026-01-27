@@ -178,18 +178,6 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
     )
     .trim()
     .to_owned();
-
-    headers.insert(
-        HEADER_BATCH_OPERATION_KIND,
-        kind.parse()
-            .map_err(
-                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
-                    context: "parsing operation kind header".to_string(),
-                    cause: Box::new(e),
-                },
-            )?,
-    );
-
     headers.insert(
         HEADER_BATCH_OPERATION_STATUS,
         status_str.parse().expect("always a valid header value"),

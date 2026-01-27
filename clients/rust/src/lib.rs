@@ -7,6 +7,7 @@ mod client;
 mod delete;
 mod error;
 mod get;
+mod many;
 mod put;
 pub mod utils;
 
@@ -20,4 +21,5 @@ pub use client::*;
 pub use delete::*;
 pub use error::*;
 pub use get::*;
+pub use many::*;
 pub use put::*;

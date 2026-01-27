@@ -12,12 +12,14 @@ publish = true
 
 [dependencies]
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
+async-stream = "0.3.6"
 bytes = { workspace = true }
 futures-util = { workspace = true }
 infer = { version = "0.19.0", default-features = false }
 jsonwebtoken = { workspace = true }
+multer = "3.1.0"
 objectstore-types = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }

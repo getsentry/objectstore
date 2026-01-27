@@ -34,8 +34,6 @@ pub enum Error {
     /// Error when parsing a batch response part.
     #[error("batch response error: {0}")]
     BatchResponse(String),
-    // TODO: map reqwest::Error to this variant so that individual and `many` requests report
-    // errors in the same way.
     /// Error that indicates failure of an individual operation in a `many` request.
     #[error("operation error (HTTP status code {status}): {message}")]
     OperationError {

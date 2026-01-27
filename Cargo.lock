@@ -2219,10 +2219,12 @@ name = "objectstore-client"
 version = "0.0.15"
 dependencies = [
  "async-compression",
+ "async-stream",
  "bytes",
  "futures-util",
  "infer",
  "jsonwebtoken",
+ "multer",
  "objectstore-test",
  "objectstore-types",
  "reqwest",
