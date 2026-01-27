@@ -238,6 +238,7 @@ async fn batch_mixed_operations() {
         .send()
         .await
         .unwrap()
+        .into_iter()
         .collect();
 
     assert_eq!(results.len(), 3);
@@ -302,6 +303,7 @@ async fn batch_insert_auto_generated_key() {
         .send()
         .await
         .unwrap()
+        .into_iter()
         .collect();
 
     assert_eq!(results.len(), 1);
@@ -349,6 +351,7 @@ async fn batch_get_with_decompression() {
         .send()
         .await
         .unwrap()
+        .into_iter()
         .collect();
 
     assert_eq!(results.len(), 1);
