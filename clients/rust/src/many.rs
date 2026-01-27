@@ -293,18 +293,9 @@ impl OperationResults {
             .0
             .into_iter()
             .filter_map(|res| match res {
-                OperationResult::Get(_, get) => match get {
-                    Ok(_) => None,
-                    Err(err) => Some(err),
-                },
-                OperationResult::Put(_, put) => match put {
-                    Ok(_) => None,
-                    Err(err) => Some(err),
-                },
-                OperationResult::Delete(_, delete) => match delete {
-                    Ok(_) => None,
-                    Err(err) => Some(err),
-                },
+                OperationResult::Get(_, get) => get.err(),
+                OperationResult::Put(_, put) => put.err(),
+                OperationResult::Delete(_, delete) => delete.err(),
                 OperationResult::Error(error) => Some(error),
             })
             .collect();
