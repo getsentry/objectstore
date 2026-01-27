@@ -202,29 +202,33 @@ mod tests {
         let expiration = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
         let body = format!(
             "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test0\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key0}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: get\r\n\
              \r\n\
              \r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test1\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key1}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              Content-Type: application/octet-stream\r\n\
              \r\n\
              {insert1}\r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test2\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key2}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              {HEADER_EXPIRATION}: {expiration}\r\n\
              Content-Type: text/plain\r\n\
              \r\n\
              {insert2}\r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test3\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key3}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
              \r\n\
              \r\n\
              --boundary--\r\n",
+            key0 = BASE64_STANDARD.encode("test0"),
+            key1 = BASE64_STANDARD.encode("test1"),
+            key2 = BASE64_STANDARD.encode("test2"),
+            key3 = BASE64_STANDARD.encode("test3"),
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
         );
@@ -271,9 +275,10 @@ mod tests {
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
         for i in 0..(MAX_OPERATIONS + 1) {
+            let key = BASE64_STANDARD.encode(format!("test{i}"));
             body.push_str(&format!(
                 "--boundary\r\n\
-                 {HEADER_BATCH_OPERATION_KEY}: test{i}\r\n\
+                 {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
                  {HEADER_BATCH_OPERATION_KIND}: get\r\n\
                  \r\n\
                  \r\n"
@@ -301,9 +306,10 @@ mod tests {
     #[tokio::test]
     async fn test_operation_body_size_limit_enforced() {
         let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let key = BASE64_STANDARD.encode("test");
         let body = format!(
             "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              Content-Type: application/octet-stream\r\n\
              \r\n\

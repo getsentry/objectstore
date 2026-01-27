@@ -123,15 +123,13 @@ mod tests {
             Part::new(
                 Bytes::from(r#"{"key":"value"}"#),
                 HeaderMap::new(),
-                Some("application/json"),
-            )
-            .unwrap(),
+                Some(HeaderValue::from_static("application/json")),
+            ),
             Part::new(
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
                 extra_headers,
-                Some("application/octet-stream"),
-            )
-            .unwrap(),
+                Some(HeaderValue::from_static("application/octet-stream")),
+            ),
         ];
         let boundary: u128 = 0xdeadbeef;
         let response = futures::stream::iter(parts).into_multipart_response(boundary);
