@@ -10,7 +10,8 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use http::{HeaderMap, StatusCode};
+use http::header::CONTENT_TYPE;
+use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::Metadata;
 
@@ -187,58 +188,51 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
 fn create_success_part(
     key: &ObjectKey,
     status: StatusCode,
-    content_type: Option<&str>,
+    content_type: Option<HeaderValue>,
     body: Bytes,
     additional_headers: Option<HeaderMap>,
-) -> Result<Part, BatchError> {
+) -> Part {
     let mut headers = HeaderMap::new();
     insert_key_header(&mut headers, key);
     insert_status_header(&mut headers, status);
-
     if let Some(additional) = additional_headers {
         headers.extend(additional);
     }
 
-    Part::new(body, headers, content_type).map_err(|e| BatchError::ResponseSerialization {
-        context: "creating multipart Part".to_string(),
-        cause: Box::new(e),
-    })
+    Part::new(body, headers, content_type)
 }
 
-fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, BatchError> {
+fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Part {
     let mut headers = HeaderMap::new();
     if let Some(key) = key {
         insert_key_header(&mut headers, key);
     }
     insert_status_header(&mut headers, error.status());
 
-    let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).map_err(|e| {
-        BatchError::ResponseSerialization {
-            context: "serializing error response to JSON".to_string(),
-            cause: Box::new(e),
-        }
-    })?;
-
-    Part::new(Bytes::from(error_body), headers, None).map_err(|e| {
-        BatchError::ResponseSerialization {
-            context: "creating multipart Part for error".to_string(),
-            cause: Box::new(e),
-        }
-    })
+    let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).unwrap_or_default();
+    Part::new(Bytes::from(error_body), headers, None)
 }
 
-impl TryFrom<OperationResponse> for Part {
-    type Error = BatchError;
-
-    fn try_from(value: OperationResponse) -> Result<Self, Self::Error> {
+impl From<OperationResponse> for Part {
+    fn from(value: OperationResponse) -> Self {
         match value {
             OperationResponse::Get(GetResponse { key, result }) => match result {
                 Ok(Some((metadata, bytes))) => {
-                    let metadata_headers = metadata.to_headers("", false)?;
+                    let mut metadata_headers = match metadata.to_headers("", false) {
+                        Ok(headers) => headers,
+                        Err(err) => {
+                            let err = BatchError::ResponseSerialization {
+                                context: "serializing object metadata".to_owned(),
+                                cause: Box::new(err),
+                            }
+                            .into();
+                            return create_error_part(Some(&key), &err);
+                        }
+                    };
                     create_success_part(
                         &key,
                         StatusCode::OK,
-                        Some(&metadata.content_type),
+                        metadata_headers.remove(CONTENT_TYPE),
                         bytes,
                         Some(metadata_headers),
                     )
@@ -249,6 +243,8 @@ impl TryFrom<OperationResponse> for Part {
                 Err(error) => create_error_part(Some(&key), &error),
             },
             OperationResponse::Insert(InsertResponse { key, result }) => match result {
+                // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
+                // layer doesn't allow us to distinguish between them at the moment
                 Ok(_) => create_success_part(&key, StatusCode::CREATED, None, Bytes::new(), None),
                 Err(error) => create_error_part(Some(&key), &error),
             },
