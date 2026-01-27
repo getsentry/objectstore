@@ -4,6 +4,8 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::id::ObjectKey;
@@ -87,7 +89,7 @@ impl Operation {
             })?
             .to_lowercase();
 
-        let key = field
+        let key_header = field
             .headers()
             .get(HEADER_BATCH_OPERATION_KEY)
             .ok_or_else(|| {
@@ -98,8 +100,17 @@ impl Operation {
                 BatchError::BadRequest(format!(
                     "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
                 ))
-            })?
-            .to_owned();
+            })?;
+        let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
+            BatchError::BadRequest(format!(
+                "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
+            ))
+        })?;
+        let key = String::from_utf8(key_bytes).map_err(|_| {
+            BatchError::BadRequest(format!(
+                "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
+            ))
+        })?;
 
         let operation = match kind.as_str() {
             "get" => Operation::Get(GetOperation { key }),
@@ -125,6 +136,14 @@ impl Operation {
             }
         };
         Ok(operation)
+    }
+
+    pub fn key(&self) -> &ObjectKey {
+        match self {
+            Operation::Get(op) => &op.key,
+            Operation::Insert(op) => &op.key,
+            Operation::Delete(op) => &op.key,
+        }
     }
 }
 

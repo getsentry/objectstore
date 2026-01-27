@@ -4,6 +4,8 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::response::Response;
 use axum::routing;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -58,9 +60,11 @@ struct DeleteResponse {
 
 #[derive(Debug)]
 struct ErrorResponse {
+    pub key: Option<ObjectKey>,
     pub error: ApiError,
 }
 
+#[derive(Debug)]
 enum OperationResponse {
     Get(GetResponse),
     Insert(InsertResponse),
@@ -75,71 +79,109 @@ async fn batch(
     mut requests: BatchOperationStream,
 ) -> Response {
     let responses: BoxStream<OperationResponse> = async_stream::stream! {
-            while let Some(operation) = requests.0.next().await {
-                if !state.rate_limiter.check(&context) {
-                    tracing::debug!("Batch operation rejected due to rate limits");
-                    yield OperationResponse::Error(ErrorResponse {
-                        error: BatchError::RateLimited.into(),
-                    });
-                    continue;
+        while let Some(operation) = requests.0.next().await {
+            let (operation, key) = match operation {
+                Ok(op) => {
+                    let key = op.key().clone();
+                    (Ok(op), Some(key))
                 }
+                Err(e) => (Err(e), None),
+            };
 
-                let result = match operation {
-                    Ok(operation) => match operation {
-                        Operation::Get(get) => {
-                            let key = get.key.clone();
-                            let result = service
-                                .get_object(&ObjectId::new(context.clone(), get.key))
-                                .await;
-
-                            let result = match result {
-                                Ok(Some((metadata, stream))) => {
-                                    let metered_stream = MeteredPayloadStream::from(
-                                        stream,
-                                        state.rate_limiter.bytes_accumulator()
-                                    );
-                                    match metered_stream.try_collect::<BytesMut>().await {
-                                        Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
-                                        Err(e) => Err(ApiError::Service(e.into())),
-                                    }
-                                }
-                                Ok(None) => Ok(None),
-                                Err(e) => Err(e),
-                            };
-
-                            OperationResponse::Get(GetResponse{ key, result })
-                        }
-                        Operation::Insert(insert) => {
-                            let key = insert.key.clone();
-                            let mut metadata = insert.metadata;
-                            metadata.time_created = Some(SystemTime::now());
-
-                            let payload_len = insert.payload.len() as u64;
-                            state.rate_limiter.bytes_accumulator()
-                                .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
-
-                            let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
-                            let result = service
-                                .insert_object(context.clone(), Some(insert.key), &metadata, stream)
-                                .await;
-                            OperationResponse::Insert(InsertResponse { key, result })
-                        }
-                        Operation::Delete(delete) => {
-                            let key = delete.key.clone();
-                            let result = service
-                                .delete_object(&ObjectId::new(context.clone(), delete.key))
-                                .await;
-                            OperationResponse::Delete(DeleteResponse { key, result })
-                        }
-                    },
-                    Err(error) => OperationResponse::Error(ErrorResponse { error: error.into() }),
-                };
-                yield result;
+            if !state.rate_limiter.check(&context) {
+                tracing::debug!("Batch operation rejected due to rate limits");
+                yield OperationResponse::Error(ErrorResponse {
+                    key,
+                    error: BatchError::RateLimited.into(),
+                });
+                continue;
             }
-        }.boxed();
+
+            let result = match operation {
+                Ok(operation) => match operation {
+                    Operation::Get(get) => {
+                        let key = get.key.clone();
+                        let result = service
+                            .get_object(&ObjectId::new(context.clone(), get.key))
+                            .await;
+
+                        let result = match result {
+                            Ok(Some((metadata, stream))) => {
+                                let metered_stream = MeteredPayloadStream::from(
+                                    stream,
+                                    state.rate_limiter.bytes_accumulator()
+                                );
+                                match metered_stream.try_collect::<BytesMut>().await {
+                                    Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
+                                    Err(e) => Err(ApiError::Service(e.into())),
+                                }
+                            }
+                            Ok(None) => Ok(None),
+                            Err(e) => Err(e),
+                        };
+
+                        OperationResponse::Get(GetResponse { key, result })
+                    }
+                    Operation::Insert(insert) => {
+                        let key = insert.key.clone();
+                        let mut metadata = insert.metadata;
+                        metadata.time_created = Some(SystemTime::now());
+
+                        let payload_len = insert.payload.len() as u64;
+                        state.rate_limiter.bytes_accumulator()
+                            .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
+
+                        let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
+                        let result = service
+                            .insert_object(context.clone(), Some(insert.key), &metadata, stream)
+                            .await;
+                        OperationResponse::Insert(InsertResponse { key, result })
+                    }
+                    Operation::Delete(delete) => {
+                        let key = delete.key.clone();
+                        let result = service
+                            .delete_object(&ObjectId::new(context.clone(), delete.key))
+                            .await;
+                        OperationResponse::Delete(DeleteResponse { key, result })
+                    }
+                },
+                Err(error) => OperationResponse::Error(ErrorResponse {
+                    key,
+                    error: error.into(),
+                }),
+            };
+            yield result;
+        }
+    }
+    .boxed();
 
     let r = rand::random::<u128>();
     responses.into_multipart_response(r)
+}
+
+fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
+    let encoded = BASE64_STANDARD.encode(key.as_bytes());
+    headers.insert(
+        HEADER_BATCH_OPERATION_KEY,
+        encoded
+            .parse()
+            .expect("base64 encoded string is always a valid header value"),
+    );
+}
+
+fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
+    let status_str = format!(
+        "{} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    )
+    .trim()
+    .to_owned();
+
+    headers.insert(
+        HEADER_BATCH_OPERATION_STATUS,
+        status_str.parse().expect("always a valid header value"),
+    );
 }
 
 fn create_success_part(
@@ -150,36 +192,8 @@ fn create_success_part(
     additional_headers: Option<HeaderMap>,
 ) -> Result<Part, BatchError> {
     let mut headers = HeaderMap::new();
-
-    headers.insert(
-        HEADER_BATCH_OPERATION_KEY,
-        key.parse().map_err(|e: http::header::InvalidHeaderValue| {
-            BatchError::ResponseSerialization {
-                context: "parsing operation key header".to_string(),
-                cause: Box::new(e),
-            }
-        })?,
-    );
-
-    let status_str = format!(
-        "{} {}",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("")
-    )
-    .trim()
-    .to_string();
-
-    headers.insert(
-        HEADER_BATCH_OPERATION_STATUS,
-        status_str
-            .parse()
-            .map_err(
-                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
-                    context: "parsing status code header".to_string(),
-                    cause: Box::new(e),
-                },
-            )?,
-    );
+    insert_key_header(&mut headers, key);
+    insert_status_header(&mut headers, status);
 
     if let Some(additional) = additional_headers {
         headers.extend(additional);
@@ -193,39 +207,10 @@ fn create_success_part(
 
 fn create_error_part(key: Option<&ObjectKey>, error: &ApiError) -> Result<Part, BatchError> {
     let mut headers = HeaderMap::new();
-
     if let Some(key) = key {
-        headers.insert(
-            HEADER_BATCH_OPERATION_KEY,
-            key.parse().map_err(|e: http::header::InvalidHeaderValue| {
-                BatchError::ResponseSerialization {
-                    context: "parsing operation key header".to_string(),
-                    cause: Box::new(e),
-                }
-            })?,
-        );
+        insert_key_header(&mut headers, key);
     }
-
-    let status = error.status();
-    let status_str = format!(
-        "{} {}",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("")
-    )
-    .trim()
-    .to_string();
-
-    headers.insert(
-        HEADER_BATCH_OPERATION_STATUS,
-        status_str
-            .parse()
-            .map_err(
-                |e: http::header::InvalidHeaderValue| BatchError::ResponseSerialization {
-                    context: "parsing status code header".to_string(),
-                    cause: Box::new(e),
-                },
-            )?,
-    );
+    insert_status_header(&mut headers, error.status());
 
     let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error)).map_err(|e| {
         BatchError::ResponseSerialization {
@@ -273,7 +258,9 @@ impl TryFrom<OperationResponse> for Part {
                 }
                 Err(error) => create_error_part(Some(&key), &error),
             },
-            OperationResponse::Error(ErrorResponse { error }) => create_error_part(None, &error),
+            OperationResponse::Error(ErrorResponse { key, error }) => {
+                create_error_part(key.as_ref(), &error)
+            }
         }
     }
 }
