@@ -273,10 +273,52 @@ impl OperationResult {
     }
 }
 
+/// Container for the results of all operations in a many request.
+#[derive(Debug)]
+pub struct OperationResults(Vec<OperationResult>);
+
+impl IntoIterator for OperationResults {
+    type Item = OperationResult;
+    type IntoIter = std::vec::IntoIter<OperationResult>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl OperationResults {
+    /// Consumes the results, returning an error if any of the operations failed.
+    pub fn error_for_failures(self) -> crate::Result<(), Vec<crate::Error>> {
+        let errs: Vec<_> = self
+            .0
+            .into_iter()
+            .filter_map(|res| match res {
+                OperationResult::Get(_, get) => match get {
+                    Ok(_) => None,
+                    Err(err) => Some(err),
+                },
+                OperationResult::Put(_, put) => match put {
+                    Ok(_) => None,
+                    Err(err) => Some(err),
+                },
+                OperationResult::Delete(_, delete) => match delete {
+                    Ok(_) => None,
+                    Err(err) => Some(err),
+                },
+                OperationResult::Error(error) => Some(error),
+            })
+            .collect();
+        if errs.is_empty() {
+            return Ok(());
+        }
+        Err(errs)
+    }
+}
+
 impl ManyBuilder {
     /// Executes all enqueued operations, returning an iterator over their results.
     /// The results are not guaranteed to be in the same order as the original enqueuing order.
-    pub async fn send(mut self) -> crate::Result<impl Iterator<Item = OperationResult>> {
+    pub async fn send(mut self) -> crate::Result<OperationResults> {
         let mut all_results = Vec::new();
 
         while !self.operations.is_empty() {
@@ -286,7 +328,7 @@ impl ManyBuilder {
             all_results.extend(results);
         }
 
-        Ok(all_results.into_iter())
+        Ok(OperationResults(all_results))
     }
 
     async fn send_batch(
