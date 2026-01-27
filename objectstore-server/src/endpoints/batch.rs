@@ -40,7 +40,7 @@ struct GetResponse {
 
 impl std::fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchGetResponse")
+        f.debug_struct("GetResponse")
             .field("key", &self.key)
             .finish()
     }
