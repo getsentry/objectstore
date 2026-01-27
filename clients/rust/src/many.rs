@@ -49,12 +49,8 @@ impl Session {
 }
 
 /// An individual operation in a batch request.
-///
-/// You can construct a [`BatchOperation`] out of a [`GetBuilder`], [`PutBuilder`], or
-/// [`DeleteBuilder`] using their [`From<T>`] implementation.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum BatchOperation {
+pub(crate) enum BatchOperation {
     /// A GET operation.
     Get {
         /// The object key.
@@ -347,6 +343,10 @@ impl ManyBuilder {
     }
 
     /// Enqueues an operation.
+    ///
+    /// This method takes a [`GetBuilder`]/[`PutBuilder`]/[`DeleteBuilder`], which you can
+    /// construct using [`Session::get`]/[`Session::put`]/[`Session::delete`].
+    #[allow(private_bounds)]
     pub fn push<B: Into<BatchOperation>>(mut self, builder: B) -> Self {
         self.operations.push(builder.into());
         self
