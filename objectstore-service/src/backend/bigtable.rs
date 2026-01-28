@@ -19,7 +19,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
-/// How often to retry failed `mutate` operations
+/// How many times to retry failed operations
 const REQUEST_RETRY_COUNT: usize = 2;
 
 /// Column that stores the raw payload (compressed).
