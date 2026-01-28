@@ -270,7 +270,7 @@ impl Backend for BigTableBackend {
                     }
                     retry_count += 1;
                     merni::counter!("bigtable.read_retry": 1);
-                    tracing::warn!(retry_count = retry_count, "Retrying read");
+                    tracing::debug!(retry_count = retry_count, "Retrying read");
                 }
             }
         };
