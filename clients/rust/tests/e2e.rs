@@ -200,7 +200,6 @@ async fn fails_with_insufficient_auth_token_perms() {
 
     let put_result = session.put("initial body").send().await;
     println!("{:?}", put_result);
-    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
     match put_result {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
