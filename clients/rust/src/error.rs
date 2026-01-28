@@ -25,6 +25,23 @@ pub enum Error {
         /// The URL error message.
         message: String,
     },
+    /// Error when parsing a multipart response.
+    #[error(transparent)]
+    Multipart(#[from] multer::Error),
+    /// Error when the server returned a malformed response.
+    #[error("{0}")]
+    MalformedResponse(String),
+    /// Error when parsing a batch response part.
+    #[error("batch response error: {0}")]
+    BatchResponse(String),
+    /// Error that indicates failure of an individual operation in a `many` request.
+    #[error("operation error (HTTP status code {status}): {message}")]
+    OperationError {
+        /// The HTTP status code corresponding to the status of the operation.
+        status: u16,
+        /// The error message.
+        message: String,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.
