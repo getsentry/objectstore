@@ -69,6 +69,7 @@ fn is_retryable(error: &BigTableError) -> bool {
             // Timeouts
             Code::Cancelled => true,
             Code::DeadlineExceeded => true,
+            // Token might have refreshed too late
             Code::Unauthenticated => true,
             // Unspecified, attempt to retry anyways
             Code::Aborted => true,
