@@ -234,15 +234,15 @@ fn is_retryable(error: &reqwest::Error) -> bool {
         return false;
     };
     // See https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
-    match status {
-        StatusCode::REQUEST_TIMEOUT => true,
-        StatusCode::TOO_MANY_REQUESTS => true,
-        StatusCode::INTERNAL_SERVER_ERROR => true,
-        StatusCode::BAD_GATEWAY => true,
-        StatusCode::SERVICE_UNAVAILABLE => true,
-        StatusCode::GATEWAY_TIMEOUT => true,
-        _ => false,
-    }
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 pub struct GcsBackend {
