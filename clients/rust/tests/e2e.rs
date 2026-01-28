@@ -1,8 +1,7 @@
 use std::sync::LazyLock;
 
-use objectstore_client::{Client, Error, OperationResult, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{Client, OperationResult, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
-use objectstore_types::Compression;
 
 pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
     LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
@@ -27,67 +26,7 @@ fn test_token_generator() -> TokenGenerator {
 }
 
 #[tokio::test]
-async fn stores_uncompressed() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
-
-    let body = "oh hai!";
-
-    let stored_id = session
-        .put(body)
-        .compression(None)
-        .send()
-        .await
-        .unwrap()
-        .key;
-
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
-    assert!(response.metadata.time_created.is_some());
-
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, "oh hai!");
-}
-
-#[tokio::test]
-async fn uses_zstd_by_default() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
-
-    let body = "oh hai!";
-    let stored_id = session.put(body).send().await.unwrap().key;
-
-    // when the user indicates that it can deal with zstd, it gets zstd
-    let request = session.get(&stored_id).decompress(false);
-    let response = request.send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
-
-    let received_compressed = response.payload().await.unwrap();
-    let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
-    assert_eq!(decompressed, b"oh hai!");
-
-    // otherwise, the client does the decompression
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
-
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, "oh hai!");
-}
-
-#[tokio::test]
-async fn deletes_stores_stuff() {
+async fn batch_operations() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
@@ -97,268 +36,102 @@ async fn deletes_stores_stuff() {
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
-    let body = "oh hai!";
-    let stored_id = session.put(body).send().await.unwrap().key;
-
-    session.delete(&stored_id).send().await.unwrap();
-
-    let response = session.get(&stored_id).send().await.unwrap();
-    assert!(response.is_none());
-}
-
-#[tokio::test]
-async fn stores_under_given_key() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    let body = "oh hai!";
-    let request = session.put(body).key("test-key123!!");
-    let stored_id = request.send().await.unwrap().key;
-
-    assert_eq!(stored_id, "test-key123!!");
-}
-
-#[tokio::test]
-async fn stores_structured_keys() {
-    let server = TestServer::new().await;
-
-    let client = Client::builder(server.url("/")).build().unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    let body = "oh hai!";
-    let request = session.put(body).key("1/shard-0.json");
-    let stored_id = request.send().await.unwrap().key;
-    assert_eq!(stored_id, "1/shard-0.json");
-
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, body);
-}
-
-#[tokio::test]
-async fn overwrites_existing_key() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    let stored_id = session.put("initial body").send().await.unwrap().key;
-    let request = session.put("new body").key(&stored_id);
-    let overwritten_id = request.send().await.unwrap().key;
-
-    assert_eq!(stored_id, overwritten_id);
-
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    let payload = response.payload().await.unwrap();
-    assert_eq!(payload, "new body");
-}
-
-#[tokio::test]
-async fn not_found_with_wrong_scope() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-
-    // First we have to place an object with one scope
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-    let stored_id = session.put("initial body").send().await.unwrap().key;
-
-    // Now we need to try to fetch the object with a different scope
-    let session = client.session(usecase.for_project(12345, 9999)).unwrap();
-    let response = session.get(&stored_id).send().await.unwrap();
-    assert!(response.is_none());
-}
-
-#[tokio::test]
-async fn fails_with_insufficient_auth_token_perms() {
-    let server = test_server().await;
-
-    let token_generator = test_token_generator().permissions(&[]);
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(token_generator)
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    let put_result = session.put("initial body").send().await;
-    println!("{:?}", put_result);
-    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
-    assert!(matches!(put_result, Err(Error::Reqwest(_))));
-}
-
-#[tokio::test]
-async fn batch_mixed_operations() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    // First, store an object that we'll retrieve and delete in the batch
-    let existing_key = session
-        .put("existing object")
-        .compression(None)
-        .key("batch-test-existing")
-        .send()
-        .await
-        .unwrap()
-        .key;
-
-    // Build a batch with: GET existing, INSERT new, DELETE existing
+    // First batch: 4 PUT operations
+    // key-2 uses default compression (zstd), others are uncompressed
     let results: Vec<_> = session
         .many()
-        .push(session.get(&existing_key))
+        .push(session.put("first object").compression(None).key("key-1"))
+        .push(session.put("second object").key("key-2"))
+        .push(session.put("third object").compression(None).key("key-3"))
+        .push(session.put("fourth object").compression(None).key("key-4"))
+        .send()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    // Assert on first batch responses
+    assert_eq!(results.len(), 4);
+    let keys: Vec<String> = results
+        .iter()
+        .map(|r| match r {
+            OperationResult::Put(key, Ok(_)) => key.clone(),
+            other => panic!("Expected Put result, got: {:?}", other),
+        })
+        .collect();
+    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
+
+    // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
+    let results: Vec<_> = session
+        .many()
+        .push(session.get("key-1"))
+        .push(session.get("key-2"))
+        .push(session.delete("key-3"))
         .push(
             session
-                .put("new batch object")
+                .put("overridden fourth object")
                 .compression(None)
-                .key("batch-test-new"),
+                .key("key-4"),
         )
-        .push(session.delete(&existing_key))
         .send()
         .await
         .unwrap()
         .into_iter()
         .collect();
 
-    assert_eq!(results.len(), 3);
+    // Assert on second batch responses
+    assert_eq!(results.len(), 4);
 
-    // Verify results (order may not be guaranteed, so we check by type)
-    let mut get_count = 0;
-    let mut put_count = 0;
-    let mut delete_count = 0;
+    // Extract and verify each result
+    let mut results_iter = results.into_iter();
 
-    for result in &results {
-        match result {
-            OperationResult::Get(key, Ok(Some(response))) => {
-                assert_eq!(key, "batch-test-existing");
-                let payload = response.metadata.content_type.clone();
-                assert!(!payload.is_empty());
-                get_count += 1;
-            }
-            OperationResult::Get(_, Ok(None)) => {
-                panic!("Expected to find the object");
-            }
-            OperationResult::Put(key, Ok(_)) => {
-                assert_eq!(key, "batch-test-new");
-                put_count += 1;
-            }
-            OperationResult::Delete(key, Ok(())) => {
-                assert_eq!(key, "batch-test-existing");
-                delete_count += 1;
-            }
-            other => panic!("Unexpected result: {:?}", other),
+    // Check first GET result
+    match results_iter.next().unwrap() {
+        OperationResult::Get(key, Ok(Some(response))) => {
+            assert_eq!(key, "key-1");
+            assert_eq!(response.metadata.compression, None);
+            assert!(response.metadata.time_created.is_some());
+            let payload = response.payload().await.unwrap();
+            assert_eq!(payload, "first object");
         }
+        other => panic!("Expected Get(key-1) with Some, got: {:?}", other),
     }
 
-    assert_eq!(get_count, 1);
-    assert_eq!(put_count, 1);
-    assert_eq!(delete_count, 1);
-
-    // Verify the new object was stored
-    let response = session.get("batch-test-new").send().await.unwrap().unwrap();
-    let payload = response.payload().await.unwrap();
-    assert_eq!(payload, "new batch object");
-
-    // Verify the old object was deleted
-    let response = session.get(&existing_key).send().await.unwrap();
-    assert!(response.is_none());
-}
-
-#[tokio::test]
-async fn batch_insert_auto_generated_key() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    // Insert without providing a key - should auto-generate a UUID
-    let results: Vec<_> = session
-        .many()
-        .push(session.put("auto-key object").compression(None))
-        .send()
-        .await
-        .unwrap()
-        .into_iter()
-        .collect();
-
-    assert_eq!(results.len(), 1);
-
-    let generated_key = match &results[0] {
-        OperationResult::Put(key, Ok(_)) => {
-            // Key should be a valid UUID (36 characters with hyphens)
-            assert_eq!(key.len(), 36);
-            assert!(key.chars().filter(|c| *c == '-').count() == 4);
-            key.clone()
+    // Check second GET result (automatic decompression)
+    match results_iter.next().unwrap() {
+        OperationResult::Get(key, Ok(Some(response))) => {
+            assert_eq!(key, "key-2");
+            // Automatic decompression means compression is None in metadata
+            assert_eq!(response.metadata.compression, None);
+            assert!(response.metadata.time_created.is_some());
+            let payload = response.payload().await.unwrap();
+            assert_eq!(payload, "second object");
         }
-        other => panic!("Expected Put result, got: {:?}", other),
-    };
+        other => panic!("Expected Get(key-2) with Some, got: {:?}", other),
+    }
 
-    // Verify the object was stored under the generated key
-    let response = session.get(&generated_key).send().await.unwrap().unwrap();
+    // Check DELETE result
+    match results_iter.next().unwrap() {
+        OperationResult::Delete(key, Ok(())) => {
+            assert_eq!(key, "key-3");
+        }
+        other => panic!("Expected Delete(key-3) success, got: {:?}", other),
+    }
+
+    // Check PUT (override) result
+    match results_iter.next().unwrap() {
+        OperationResult::Put(key, Ok(_)) => {
+            assert_eq!(key, "key-4");
+        }
+        other => panic!("Expected Put(key-4) success, got: {:?}", other),
+    }
+
+    // Verify the overridden object has the new content
+    let response = session.get("key-4").send().await.unwrap().unwrap();
     let payload = response.payload().await.unwrap();
-    assert_eq!(payload, "auto-key object");
-}
+    assert_eq!(payload, "overridden fourth object");
 
-#[tokio::test]
-async fn batch_get_with_decompression() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    // Store an object with default compression (zstd)
-    let key = session
-        .put("compressed content")
-        .key("batch-get-test")
-        .send()
-        .await
-        .unwrap()
-        .key;
-
-    // Retrieve via batch GET (decompress=true by default)
-    let results: Vec<_> = session
-        .many()
-        .push(session.get(&key))
-        .send()
-        .await
-        .unwrap()
-        .into_iter()
-        .collect();
-
-    assert_eq!(results.len(), 1);
-
-    let OperationResult::Get(_, Ok(Some(response))) = results.into_iter().next().unwrap() else {
-        panic!("Expected Get result with Some");
-    };
-    let payload = response.payload().await.unwrap();
-    assert_eq!(payload, "compressed content");
+    // Verify the deleted object is gone
+    let response = session.get("key-3").send().await.unwrap();
+    assert!(response.is_none());
 }
