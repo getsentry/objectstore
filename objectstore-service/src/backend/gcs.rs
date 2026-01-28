@@ -448,6 +448,7 @@ impl Backend for GcsBackend {
 
             match result {
                 Ok(resp) => {
+                    // Do not error for objects that do not exist
                     if resp.status() == StatusCode::NOT_FOUND {
                         tracing::debug!("Object not found");
                         return Ok(None);
