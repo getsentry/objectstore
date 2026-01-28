@@ -447,20 +447,34 @@ impl Backend for GcsBackend {
                 .await;
 
             match result {
-                Ok(resp) => {
-                    // Do not error for objects that do not exist
-                    if resp.status() == StatusCode::NOT_FOUND {
-                        tracing::debug!("Object not found");
-                        return Ok(None);
-                    }
-
-                    let resp = match resp.error_for_status() {
-                        Ok(r) => r,
+                // Do not error for objects that do not exist
+                Ok(resp) if resp.status() == StatusCode::NOT_FOUND => {
+                    tracing::debug!("Object not found");
+                    return Ok(None);
+                }
+                result => {
+                    let result = result.and_then(|r| r.error_for_status());
+                    match result {
+                        Ok(resp) => match resp.json().await {
+                            Ok(meta) => break meta,
+                            Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
+                                retry_count += 1;
+                                merni::counter!("gcs.get_metadata_retry": 1);
+                                tracing::debug!(retry_count, "Retrying get metadata");
+                            }
+                            Err(cause) => {
+                                merni::counter!("gcs.get_metadata_failures": 1);
+                                return Err(ServiceError::Reqwest {
+                                    context: "GCS: failed to parse object metadata response"
+                                        .to_string(),
+                                    cause,
+                                });
+                            }
+                        },
                         Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
                             retry_count += 1;
                             merni::counter!("gcs.get_metadata_retry": 1);
                             tracing::debug!(retry_count, "Retrying get metadata");
-                            continue;
                         }
                         Err(cause) => {
                             merni::counter!("gcs.get_metadata_failures": 1);
@@ -469,37 +483,7 @@ impl Backend for GcsBackend {
                                 cause,
                             });
                         }
-                    };
-
-                    match resp.json().await {
-                        Ok(meta) => break meta,
-                        Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
-                            retry_count += 1;
-                            merni::counter!("gcs.get_metadata_retry": 1);
-                            tracing::debug!(retry_count, "Retrying get metadata");
-                            continue;
-                        }
-                        Err(cause) => {
-                            merni::counter!("gcs.get_metadata_failures": 1);
-                            return Err(ServiceError::Reqwest {
-                                context: "GCS: failed to parse object metadata response"
-                                    .to_string(),
-                                cause,
-                            });
-                        }
                     }
-                }
-                Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
-                    retry_count += 1;
-                    merni::counter!("gcs.get_metadata_retry": 1);
-                    tracing::debug!(retry_count, "Retrying get metadata");
-                }
-                Err(cause) => {
-                    merni::counter!("gcs.get_metadata_failures": 1);
-                    return Err(ServiceError::Reqwest {
-                        context: "GCS: failed to send get metadata request".to_string(),
-                        cause,
-                    });
                 }
             }
         };
@@ -578,13 +562,14 @@ impl Backend for GcsBackend {
                 .await;
 
             match result {
-                Ok(resp) => {
-                    if resp.status() == StatusCode::NOT_FOUND {
-                        tracing::debug!("Object not found");
-                        return Ok(());
-                    }
-
-                    match resp.error_for_status() {
+                // Do not error for objects that do not exist
+                Ok(resp) if resp.status() == StatusCode::NOT_FOUND => {
+                    tracing::debug!("Object not found");
+                    return Ok(());
+                }
+                result => {
+                    let result = result.and_then(|r| r.error_for_status());
+                    match result {
                         Ok(_) => return Ok(()),
                         Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
                             retry_count += 1;
@@ -599,18 +584,6 @@ impl Backend for GcsBackend {
                             });
                         }
                     }
-                }
-                Err(e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(&e) => {
-                    retry_count += 1;
-                    merni::counter!("gcs.delete_retry": 1);
-                    tracing::debug!(retry_count, "Retrying delete");
-                }
-                Err(cause) => {
-                    merni::counter!("gcs.delete_failures": 1);
-                    return Err(ServiceError::Reqwest {
-                        context: "GCS: failed to send delete request".to_string(),
-                        cause,
-                    });
                 }
             }
         }
