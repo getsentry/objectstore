@@ -112,9 +112,8 @@ async fn example_batch() -> Result<()> {
 
     for result in results {
         match result {
-            OperationResult::Put(key, Ok(_)) => {}
-            OperationResult::Put(key, Err(e)) => return Err(e),
-            _ => unreachable!(),
+            // ...
+            _ => {},
         }
     }
 
