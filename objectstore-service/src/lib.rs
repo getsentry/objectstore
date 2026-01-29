@@ -31,6 +31,13 @@ enum BackendChoice {
     LongTerm,
 }
 
+/// Service response for get operations.
+pub type GetResponse = Option<(Metadata, PayloadStream)>;
+/// Service response for insert operations.
+pub type InsertResponse = ObjectId;
+/// Service response for delete operations.
+pub type DeleteResponse = ();
+
 // TODO(ja): Move into a submodule
 /// High-level asynchronous service for storing and retrieving objects.
 #[derive(Clone, Debug)]
@@ -114,7 +121,7 @@ impl StorageService {
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> ServiceResult<ObjectId> {
+    ) -> ServiceResult<InsertResponse> {
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();
@@ -219,10 +226,7 @@ impl StorageService {
     }
 
     /// Streams the contents of an object stored at the given key.
-    pub async fn get_object(
-        &self,
-        id: &ObjectId,
-    ) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+    pub async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -259,7 +263,7 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
-    pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         let start = Instant::now();
 
         if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
@@ -278,7 +282,7 @@ impl StorageService {
     }
 }
 
-fn is_tombstoned(result: &Option<(Metadata, PayloadStream)>) -> bool {
+fn is_tombstoned(result: &GetResponse) -> bool {
     matches!(
         result,
         Some((
