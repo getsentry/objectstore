@@ -60,7 +60,11 @@ struct SleepCommand {
 /// mark the server as not ready
 #[derive(Debug, FromArgs)]
 #[argh(subcommand, name = "down")]
-struct DownCommand {}
+struct DownCommand {
+    /// seconds to sleep after creating the marker file
+    #[argh(positional)]
+    sleep_seconds: Option<u64>,
+}
 
 /// Bootstrap the runtime and execute the CLI command.
 pub fn execute() -> Result<()> {
@@ -77,8 +81,11 @@ pub fn execute() -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Down(_) = args.command {
+    if let Command::Down(DownCommand { sleep_seconds }) = args.command {
         File::create(SHUTDOWN_MARKER_PATH)?;
+        if let Some(seconds) = sleep_seconds {
+            thread::sleep(Duration::from_secs(seconds));
+        }
         return Ok(());
     }
 
