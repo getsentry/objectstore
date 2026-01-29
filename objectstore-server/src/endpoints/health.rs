@@ -4,7 +4,7 @@ use axum::{Router, routing};
 
 use crate::state::ServiceState;
 
-const SHUTDOWN_MARKER_PATH: &str = "/tmp/objectstore.down";
+pub const SHUTDOWN_MARKER_PATH: &str = "/tmp/objectstore.down";
 
 pub fn router() -> Router<ServiceState> {
     Router::new()

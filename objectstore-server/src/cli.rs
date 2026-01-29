@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -6,6 +7,7 @@ use anyhow::Result;
 use argh::FromArgs;
 
 use crate::config::Config;
+use crate::endpoints::health::SHUTDOWN_MARKER_PATH;
 use crate::{healthcheck, observability, web};
 
 /// Objectstore API webserver.
@@ -26,6 +28,7 @@ enum Command {
     Healthcheck(HealthcheckCommand),
     Version(VersionCommand),
     Sleep(SleepCommand),
+    Down(DownCommand),
 }
 
 /// run the objectstore web server
@@ -54,6 +57,11 @@ struct SleepCommand {
     seconds: u64,
 }
 
+/// mark the server as not ready
+#[derive(Debug, FromArgs)]
+#[argh(subcommand, name = "down")]
+struct DownCommand {}
+
 /// Bootstrap the runtime and execute the CLI command.
 pub fn execute() -> Result<()> {
     let args: Args = argh::from_env();
@@ -66,6 +74,11 @@ pub fn execute() -> Result<()> {
 
     if let Command::Sleep(SleepCommand { seconds }) = args.command {
         thread::sleep(Duration::from_secs(seconds));
+        return Ok(());
+    }
+
+    if let Command::Down(_) = args.command {
+        File::create(SHUTDOWN_MARKER_PATH)?;
         return Ok(());
     }
 
@@ -95,7 +108,9 @@ pub fn execute() -> Result<()> {
         match args.command {
             Command::Run(RunCommand {}) => web::server(config).await,
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
-            Command::Version(VersionCommand {}) | Command::Sleep(SleepCommand { .. }) => {
+            Command::Version(VersionCommand {})
+            | Command::Sleep(SleepCommand { .. })
+            | Command::Down(DownCommand { .. }) => {
                 unreachable!()
             }
         }
