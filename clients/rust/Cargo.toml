@@ -32,7 +32,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 
 [features]
-default = ["hickory-dns", "native-tls"]
+default = ["native-tls", "hickory-dns"]
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 hickory-dns = ["reqwest/hickory-dns"]
