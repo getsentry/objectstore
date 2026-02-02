@@ -26,7 +26,7 @@ pub enum BatchError {
     Metadata(#[from] objectstore_types::Error),
 
     /// Invalid object key.
-    #[error("invalid key: {0}")]
+    #[error("invalid object key: {0}")]
     InvalidKey(#[from] objectstore_types::key::InvalidKeyError),
 
     /// Size or cardinality limit exceeded.

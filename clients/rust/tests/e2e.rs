@@ -121,7 +121,6 @@ async fn stores_under_given_key() {
     let request = session.put(body).key("test-key123!!");
     let stored_id = request.send().await.unwrap().key;
 
-    // Server returns the human-readable key
     assert_eq!(stored_id, "test-key123!!");
 }
 
@@ -134,14 +133,11 @@ async fn stores_structured_keys() {
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
-    let raw_key = "1/shard-0.json";
-    let request = session.put(body).key(raw_key);
+    let request = session.put(body).key("1/shard-0.json");
     let stored_id = request.send().await.unwrap().key;
-    // Server returns the human-readable key
     assert_eq!(stored_id, "1/shard-0.json");
 
-    // Use the returned key for GET (client will encode it)
-    let response = session.get(raw_key).send().await.unwrap().unwrap();
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
     let received = response.payload().await.unwrap();
     assert_eq!(received, body);
 }
