@@ -234,13 +234,6 @@ class Session:
         return headers
 
     def _make_url(self, encoded_key: str | None, full: bool = False) -> str:
-        """
-        Build a URL for an object operation.
-
-        Args:
-            encoded_key: The already percent-encoded key, or None for POST requests.
-            full: If True, return the full URL including scheme and host.
-        """
         key_segment = encoded_key or ""
         relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key_segment}"
         path = self._base_path.rstrip("/") + relative_path
@@ -300,10 +293,9 @@ class Session:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
-        # Encode the key if provided
-        encoded_key: str | None = None
-        if key and key != "":
-            encoded_key = encode_key(key)
+        if key == "":
+            key = None
+        encoded_key = encode_key(key) if key else None
 
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name

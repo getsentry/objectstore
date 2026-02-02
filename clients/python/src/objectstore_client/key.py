@@ -6,22 +6,16 @@ according to RFC 3986 and the objectstore specification.
 
 from __future__ import annotations
 
-import re
-import string
+from urllib.parse import quote, unquote
 
 # Maximum length of an object key in ASCII characters (including percent encoding).
 MAX_KEY_LENGTH = 128
 
 # RFC 3986 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~"
-UNRESERVED_CHARS = frozenset(string.ascii_letters + string.digits + "-._~")
-
-# RFC 3986 reserved characters (gen-delims / sub-delims)
-# gen-delims: ":" / "/" / "?" / "#" / "[" / "]" / "@"
-# sub-delims: "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
-RESERVED_CHARS = frozenset(":/?#[]@!$&'()*+,;=")
-
-# Pattern for matching percent-encoded sequences
-PERCENT_PATTERN = re.compile(r"%([0-9A-Fa-f]{2})")
+# These are the only characters that don't need percent-encoding.
+UNRESERVED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
 
 
 class InvalidKeyError(Exception):
@@ -35,7 +29,7 @@ def encode_key(raw: str) -> str:
     Encode a raw (unencoded) key string for use in API requests.
 
     This is intended for client-side use where users provide human-readable keys.
-    Reserved characters will be automatically percent-encoded.
+    Reserved characters will be automatically percent-encoded using urllib.parse.quote.
 
     Args:
         raw: The raw key string to encode.
@@ -58,26 +52,15 @@ def encode_key(raw: str) -> str:
     if not raw:
         raise InvalidKeyError("key must not be empty")
 
-    encoded_parts = []
+    # Check for non-ASCII characters (our spec requires ASCII only)
     for c in raw:
-        # Check ASCII
         if ord(c) > 127:
             raise InvalidKeyError(f"key contains non-ASCII character '{c}'")
 
-        if c in UNRESERVED_CHARS:
-            encoded_parts.append(c)
-        elif c == "%":
-            # Percent sign itself needs to be encoded
-            encoded_parts.append("%25")
-        elif c in RESERVED_CHARS or not c.isprintable():
-            # Encode reserved chars and non-printable ASCII
-            encoded_parts.append(f"%{ord(c):02X}")
-        else:
-            # Other printable ASCII that's not reserved or unreserved
-            # These should also be encoded for safety
-            encoded_parts.append(f"%{ord(c):02X}")
-
-    encoded = "".join(encoded_parts)
+    # Use urllib.parse.quote with safe='' to encode all reserved characters.
+    # By default, quote() leaves unreserved chars (letters, digits, -._~) unencoded,
+    # which matches RFC 3986.
+    encoded = quote(raw, safe="")
 
     if len(encoded) > MAX_KEY_LENGTH:
         raise InvalidKeyError(
@@ -128,51 +111,33 @@ def validate_encoded_key(encoded: str) -> str:
             f"(got {len(encoded)})"
         )
 
-    normalized_parts = []
+    # Validate: check for literal reserved characters and non-ASCII
     i = 0
     while i < len(encoded):
         c = encoded[i]
 
-        # Check ASCII
         if ord(c) > 127:
             raise InvalidKeyError(f"key contains non-ASCII character '{c}'")
 
         if c == "%":
-            # Parse percent-encoded sequence
+            # Validate percent-encoded sequence
             if i + 2 >= len(encoded):
                 raise InvalidKeyError("key contains invalid percent encoding")
 
             hex_chars = encoded[i + 1 : i + 3]
-            if not all(c in "0123456789ABCDEFabcdef" for c in hex_chars):
+            if not all(h in "0123456789ABCDEFabcdef" for h in hex_chars):
                 raise InvalidKeyError("key contains invalid percent encoding")
 
-            byte_val = int(hex_chars, 16)
-            decoded_char = chr(byte_val)
-
-            if decoded_char in UNRESERVED_CHARS:
-                # Decode unreserved characters
-                normalized_parts.append(decoded_char)
-            else:
-                # Keep reserved/other characters encoded, with uppercase hex
-                normalized_parts.append(f"%{hex_chars.upper()}")
-
             i += 3
-        elif c in RESERVED_CHARS:
-            # Literal reserved character is not allowed
+        elif c not in UNRESERVED_CHARS:
+            # Literal reserved/special character is not allowed
             raise InvalidKeyError(
                 f"key contains invalid character '{c}' (must be percent-encoded)"
             )
-        elif c in UNRESERVED_CHARS:
-            normalized_parts.append(c)
-            i += 1
-        elif not c.isprintable() or c == " ":
-            # Non-printable characters and spaces must be encoded
-            raise InvalidKeyError(
-                f"key contains invalid character '{c!r}' (must be percent-encoded)"
-            )
         else:
-            # Other ASCII characters - allow them through
-            normalized_parts.append(c)
             i += 1
 
-    return "".join(normalized_parts)
+    # Normalize: decode to raw string, then re-encode.
+    # This normalizes %41 -> A (unreserved decoded) and %2f -> %2F (uppercase hex).
+    raw = unquote(encoded)
+    return quote(raw, safe="")
