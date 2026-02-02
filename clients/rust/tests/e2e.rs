@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
 use objectstore_types::Compression;
+use reqwest::StatusCode;
 
 pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
     LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
@@ -199,6 +200,8 @@ async fn fails_with_insufficient_auth_token_perms() {
 
     let put_result = session.put("initial body").send().await;
     println!("{:?}", put_result);
-    // TODO: When server errors cause appropriate status codes to be returned, ensure this is 403
-    assert!(matches!(put_result, Err(Error::Reqwest(_))));
+    match put_result {
+        Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
+        _ => panic!("Expected error"),
+    }
 }
