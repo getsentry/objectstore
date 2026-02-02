@@ -6,6 +6,7 @@ from objectstore_client.client import (
     Session,
     Usecase,
 )
+from objectstore_client.key import InvalidKeyError
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -21,6 +22,7 @@ __all__ = [
     "Session",
     "GetResponse",
     "RequestError",
+    "InvalidKeyError",
     "Compression",
     "ExpirationPolicy",
     "Metadata",

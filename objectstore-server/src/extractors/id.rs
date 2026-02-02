@@ -4,7 +4,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::id::{InvalidKeyError, ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
@@ -14,6 +14,7 @@ use crate::state::ServiceState;
 #[derive(Debug)]
 pub enum ObjectRejection {
     Path(PathRejection),
+    InvalidKey(InvalidKeyError),
     Killswitched,
     RateLimited,
 }
@@ -22,6 +23,11 @@ impl IntoResponse for ObjectRejection {
     fn into_response(self) -> Response {
         match self {
             ObjectRejection::Path(rejection) => rejection.into_response(),
+            ObjectRejection::InvalidKey(err) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid object key: {err}"),
+            )
+                .into_response(),
             ObjectRejection::Killswitched => (
                 axum::http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
@@ -42,6 +48,12 @@ impl From<PathRejection> for ObjectRejection {
     }
 }
 
+impl From<InvalidKeyError> for ObjectRejection {
+    fn from(err: InvalidKeyError) -> Self {
+        ObjectRejection::InvalidKey(err)
+    }
+}
+
 impl FromRequestParts<ServiceState> for Xt<ObjectId> {
     type Rejection = ObjectRejection;
 
@@ -50,10 +62,13 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
         let Path(params) = Path::<ObjectParams>::from_request_parts(parts, state).await?;
-        let id = ObjectId::from_parts(params.usecase, params.scopes, params.key);
+        // The key from the URL path has been URL-decoded by the framework,
+        // so we treat it as a raw key and encode reserved characters.
+        let key = ObjectKey::from_raw(&params.key)?;
+        let id = ObjectId::from_parts(params.usecase, params.scopes, key);
 
         populate_sentry_context(id.context());
-        sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
+        sentry::configure_scope(|s| s.set_extra("key", id.key().as_str().into()));
 
         if state.config.killswitches.matches(id.context()) {
             tracing::debug!("Request rejected due to killswitches");

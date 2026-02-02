@@ -21,7 +21,7 @@ use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
 use crate::backend::common::BoxedBackend;
-use crate::id::{ObjectContext, ObjectId};
+use crate::id::{ObjectContext, ObjectId, ObjectKey};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -118,7 +118,7 @@ impl StorageService {
     pub async fn insert_object(
         &self,
         context: ObjectContext,
-        key: Option<String>,
+        key: Option<ObjectKey>,
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> ServiceResult<InsertResponse> {
@@ -353,17 +353,17 @@ mod tests {
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
-        let key = service
+        let id = service
             .insert_object(
                 make_context(),
-                Some("testing".into()),
+                Some(ObjectKey::from_raw("testing").unwrap()),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -377,17 +377,17 @@ mod tests {
         };
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
-        let key = service
+        let id = service
             .insert_object(
                 make_context(),
-                Some("testing".into()),
+                Some(ObjectKey::from_raw("testing").unwrap()),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");

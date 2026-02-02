@@ -11,6 +11,8 @@ use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
 
+pub use objectstore_types::key::{InvalidKeyError, ObjectKey};
+
 /// Defines where an object, or batch of objects, belongs within the object store.
 ///
 /// This is part of the full object identifier for single objects, see [`ObjectId`].
@@ -76,17 +78,14 @@ pub struct ObjectId {
     pub key: ObjectKey,
 }
 
-/// A key that uniquely identifies an object within its usecase and scopes.
-pub type ObjectKey = String;
-
 impl ObjectId {
     /// Creates a new `ObjectId` with the given `context` and `key`.
-    pub fn new(context: ObjectContext, key: String) -> Self {
-        Self::optional(context, Some(key))
+    pub fn new(context: ObjectContext, key: ObjectKey) -> Self {
+        Self { context, key }
     }
 
     /// Creates a new `ObjectId` from all of its parts.
-    pub fn from_parts(usecase: String, scopes: Scopes, key: String) -> Self {
+    pub fn from_parts(usecase: String, scopes: Scopes, key: ObjectKey) -> Self {
         Self::new(ObjectContext { usecase, scopes }, key)
     }
 
@@ -94,24 +93,27 @@ impl ObjectId {
     ///
     /// This can be used when creating an object with a server-generated key.
     pub fn random(context: ObjectContext) -> Self {
-        Self::optional(context, None)
+        // UUIDs only contain alphanumeric chars and hyphens, so this is always valid
+        let key = ObjectKey::from_raw(&uuid::Uuid::new_v4().to_string())
+            .expect("UUID is always a valid key");
+        Self { context, key }
     }
 
     /// Creates a new `ObjectId`, generating a key if none is provided.
     ///
     /// This creates a unique key like [`ObjectId::random`] if no `key` is provided, or otherwise
     /// uses the provided `key`.
-    pub fn optional(context: ObjectContext, key: Option<String>) -> Self {
-        Self {
-            context,
-            key: key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    pub fn optional(context: ObjectContext, key: Option<ObjectKey>) -> Self {
+        match key {
+            Some(key) => Self::new(context, key),
+            None => Self::random(context),
         }
     }
 
     /// Returns the key of the object.
     ///
     /// See [`key`](field@ObjectId::key) for more information.
-    pub fn key(&self) -> &str {
+    pub fn key(&self) -> &ObjectKey {
         &self.key
     }
 
@@ -183,11 +185,11 @@ mod tests {
                     Scope::create("project", "1337").unwrap(),
                 ]),
             },
-            key: "foo/bar".to_string(),
+            key: ObjectKey::from_raw("foo-bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
-        assert_eq!(path, "testing/org.12345/project.1337/objects/foo/bar");
+        assert_eq!(path, "testing/org.12345/project.1337/objects/foo-bar");
     }
 
     #[test]
@@ -197,10 +199,39 @@ mod tests {
                 usecase: "testing".to_string(),
                 scopes: Scopes::empty(),
             },
-            key: "foo/bar".to_string(),
+            key: ObjectKey::from_raw("foo-bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
-        assert_eq!(path, "testing/objects/foo/bar");
+        assert_eq!(path, "testing/objects/foo-bar");
+    }
+
+    #[test]
+    fn test_storage_path_with_encoded_slash() {
+        // When a key contains a slash, it gets percent-encoded
+        let object_id = ObjectId {
+            context: ObjectContext {
+                usecase: "testing".to_string(),
+                scopes: Scopes::empty(),
+            },
+            key: ObjectKey::from_raw("foo/bar").unwrap(),
+        };
+
+        let path = object_id.as_storage_path().to_string();
+        // The encoded key "foo%2Fbar" is used in the path
+        assert_eq!(path, "testing/objects/foo%2Fbar");
+    }
+
+    #[test]
+    fn test_random_key() {
+        let context = ObjectContext {
+            usecase: "testing".to_string(),
+            scopes: Scopes::empty(),
+        };
+        let object_id = ObjectId::random(context);
+
+        // Random keys are UUIDs, which are valid
+        assert!(!object_id.key().as_str().is_empty());
+        assert!(object_id.key().as_str().contains('-')); // UUIDs have hyphens
     }
 }

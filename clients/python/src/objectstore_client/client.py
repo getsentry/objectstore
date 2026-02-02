@@ -12,6 +12,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client.auth import TokenGenerator
+from objectstore_client.key import encode_key
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -232,8 +233,16 @@ class Session:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    def _make_url(self, key: str | None, full: bool = False) -> str:
-        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
+    def _make_url(self, encoded_key: str | None, full: bool = False) -> str:
+        """
+        Build a URL for an object operation.
+
+        Args:
+            encoded_key: The already percent-encoded key, or None for POST requests.
+            full: If True, return the full URL including scheme and host.
+        """
+        key_segment = encoded_key or ""
+        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key_segment}"
         path = self._base_path.rstrip("/") + relative_path
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
@@ -254,6 +263,9 @@ class Session:
         If no `key` is provided, one will be automatically generated and returned
         from this function.
 
+        The key will be validated and encoded according to RFC 3986. Reserved characters
+        (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+
         The client will select the configured `default_compression` if none is given
         explicitly.
         This can be overridden by explicitly giving a `compression` argument.
@@ -262,6 +274,10 @@ class Session:
 
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
+
+        Raises:
+            InvalidKeyError: If the key is empty, too long, or contains
+                non-ASCII characters.
         """
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
@@ -284,15 +300,17 @@ class Session:
             for k, v in metadata.items():
                 headers[f"{HEADER_META_PREFIX}{k}"] = v
 
-        if key == "":
-            key = None
+        # Encode the key if provided
+        encoded_key: str | None = None
+        if key and key != "":
+            encoded_key = encode_key(key)
 
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
             response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_url(key),
+                "POST" if not encoded_key else "PUT",
+                self._make_url(encoded_key),
                 body=body,
                 headers=headers,
                 preload_content=True,
@@ -313,9 +331,17 @@ class Session:
         This fetches the blob with the given `key`, returning an `IO` stream that
         can be read.
 
+        The key will be validated and encoded according to RFC 3986. Reserved characters
+        (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+
         By default, content that was uploaded compressed will be automatically
         decompressed, unless `decompress=True` is passed.
+
+        Raises:
+            InvalidKeyError: If the key is empty, too long, or contains
+                non-ASCII characters.
         """
+        encoded_key = encode_key(key)
 
         headers = self._make_headers()
         with measure_storage_operation(
@@ -323,7 +349,7 @@ class Session:
         ):
             response = self._pool.request(
                 "GET",
-                self._make_url(key),
+                self._make_url(encoded_key),
                 preload_content=False,
                 decode_content=False,
                 headers=headers,
@@ -349,16 +375,32 @@ class Session:
         """
         Generates a GET url to the object with the given `key`.
 
+        The key will be validated and encoded according to RFC 3986. Reserved characters
+        (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+
         This can then be used by downstream services to fetch the given object.
         NOTE however that the service does not strictly follow HTTP semantics,
         in particular in relation to `Accept-Encoding`.
+
+        Raises:
+            InvalidKeyError: If the key is empty, too long, or contains
+                non-ASCII characters.
         """
-        return self._make_url(key, full=True)
+        encoded_key = encode_key(key)
+        return self._make_url(encoded_key, full=True)
 
     def delete(self, key: str) -> None:
         """
         Deletes the blob with the given `key`.
+
+        The key will be validated and encoded according to RFC 3986. Reserved characters
+        (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+
+        Raises:
+            InvalidKeyError: If the key is empty, too long, or contains
+                non-ASCII characters.
         """
+        encoded_key = encode_key(key)
 
         headers = self._make_headers()
         with measure_storage_operation(
@@ -366,7 +408,7 @@ class Session:
         ):
             response = self._pool.request(
                 "DELETE",
-                self._make_url(key),
+                self._make_url(encoded_key),
                 headers=headers,
             )
             raise_for_status(response)

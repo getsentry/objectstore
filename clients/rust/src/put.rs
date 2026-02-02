@@ -6,6 +6,7 @@ use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::Metadata;
+use objectstore_types::key::ObjectKey;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::io::AsyncRead;
@@ -74,17 +75,28 @@ impl Session {
 pub struct PutBuilder {
     session: Session,
     metadata: Metadata,
-    key: Option<String>,
+    key: Option<crate::Result<ObjectKey>>,
     body: PutBody,
 }
 
 impl PutBuilder {
     /// Sets an explicit object key.
     ///
+    /// The key will be validated and encoded according to RFC 3986. Reserved characters
+    /// (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+    ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
     /// server will automatically assign a random key, which is then returned from this request.
+    ///
+    /// Note: Key validation is deferred to the `send()` call. If the key is invalid,
+    /// `send()` will return an error.
     pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.key = Some(key.into()).filter(|k| !k.is_empty());
+        let key_str = key.into();
+        if key_str.is_empty() {
+            self.key = None;
+        } else {
+            self.key = Some(ObjectKey::from_raw(&key_str).map_err(Into::into));
+        }
         self
     }
 
@@ -137,15 +149,24 @@ impl PutBuilder {
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key is invalid (empty, too long, or contains non-ASCII characters)
+    /// - The request fails to send
+    /// - The server returns an error response
     pub async fn send(self) -> crate::Result<PutResponse> {
-        let method = match self.key {
-            Some(_) => reqwest::Method::PUT,
-            None => reqwest::Method::POST,
+        // Resolve the key, returning early if validation failed
+        let key = match self.key {
+            Some(result) => Some(result?),
+            None => None,
         };
 
-        let mut builder = self
-            .session
-            .request(method, self.key.as_deref().unwrap_or_default())?;
+        let mut builder = match &key {
+            Some(k) => self.session.request(reqwest::Method::PUT, k)?,
+            None => self.session.request_collection(reqwest::Method::POST)?,
+        };
 
         let body = match (self.metadata.compression, self.body) {
             (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {

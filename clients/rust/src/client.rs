@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use objectstore_types::key::ObjectKey;
 use objectstore_types::{Compression, ExpirationPolicy, scope};
 use url::Url;
 
@@ -388,22 +389,36 @@ pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 impl Session {
     /// Generates a GET url to the object with the given `key`.
     ///
+    /// The key is validated and encoded according to RFC 3986. Reserved characters
+    /// (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+    ///
     /// This can then be used by downstream services to fetch the given object.
     /// NOTE however that the service does not strictly follow HTTP semantics,
     /// in particular in relation to `Accept-Encoding`.
-    pub fn object_url(&self, object_key: &str) -> Url {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key is invalid (e.g., empty, too long, or contains non-ASCII).
+    pub fn object_url(&self, object_key: &str) -> crate::Result<Url> {
+        let key = ObjectKey::from_raw(object_key)?;
+        Ok(self.object_url_encoded(&key))
+    }
+
+    /// Generates a GET url to the object with the given already-encoded key.
+    fn object_url_encoded(&self, key: &ObjectKey) -> Url {
         let mut url = self.client.service_url.clone();
 
-        // `path_segments_mut` can only error if the url is cannot-be-a-base,
-        // and we check that in `ClientBuilder::new`, therefore this will never panic.
-        let mut segments = url.path_segments_mut().unwrap();
-        segments
-            .push("v1")
-            .push("objects")
-            .push(&self.scope.usecase.name)
-            .push(&self.scope.scopes.as_api_path().to_string())
-            .extend(object_key.split("/"));
-        drop(segments);
+        // Build the path manually since the key is already percent-encoded
+        // and we don't want the URL library to double-encode it.
+        let current_path = url.path().trim_end_matches('/');
+        let new_path = format!(
+            "{}/v1/objects/{}/{}/{}",
+            current_path,
+            self.scope.usecase().name,
+            self.scope.scopes().as_api_path(),
+            key.as_str()
+        );
+        url.set_path(&new_path);
 
         url
     }
@@ -411,10 +426,34 @@ impl Session {
     pub(crate) fn request(
         &self,
         method: reqwest::Method,
-        object_key: &str,
+        key: &ObjectKey,
     ) -> crate::Result<reqwest::RequestBuilder> {
-        let url = self.object_url(object_key);
+        let url = self.object_url_encoded(key);
+        self.request_with_url(method, url)
+    }
 
+    /// Creates a request for the collection endpoint (without a key).
+    /// Used for POST requests that create objects with server-generated keys.
+    pub(crate) fn request_collection(
+        &self,
+        method: reqwest::Method,
+    ) -> crate::Result<reqwest::RequestBuilder> {
+        let mut url = self.client.service_url.clone();
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .push("objects")
+            .push(&self.scope.usecase().name)
+            .push(&self.scope.scopes().as_api_path().to_string());
+        drop(segments);
+        self.request_with_url(method, url)
+    }
+
+    fn request_with_url(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> crate::Result<reqwest::RequestBuilder> {
         let mut builder = self.client.reqwest.request(method, url);
 
         if let Some(token_generator) = &self.client.token_generator {
@@ -439,7 +478,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_object_url() {
+    fn test_object_url_simple() {
         let client = Client::new("http://127.0.0.1:8888/").unwrap();
         let usecase = Usecase::new("testing");
         let scope = usecase
@@ -448,8 +487,23 @@ mod tests {
         let session = client.session(scope).unwrap();
 
         assert_eq!(
-            session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo/bar"
+            session.object_url("my-object").unwrap().to_string(),
+            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/my-object"
+        )
+    }
+
+    #[test]
+    fn test_object_url_encodes_slash() {
+        let client = Client::new("http://127.0.0.1:8888/").unwrap();
+        let usecase = Usecase::new("testing");
+        let scope = usecase.for_project(12345, 1337);
+        let session = client.session(scope).unwrap();
+
+        // The slash in the key should be encoded as %2F
+        let url = session.object_url("foo/bar").unwrap().to_string();
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337/foo%2Fbar"
         )
     }
 
@@ -461,8 +515,19 @@ mod tests {
         let session = client.session(scope).unwrap();
 
         assert_eq!(
-            session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/foo/bar"
+            session.object_url("my-object").unwrap().to_string(),
+            "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/my-object"
         )
+    }
+
+    #[test]
+    fn test_object_url_invalid_key() {
+        let client = Client::new("http://127.0.0.1:8888/").unwrap();
+        let usecase = Usecase::new("testing");
+        let scope = usecase.for_project(12345, 1337);
+        let session = client.session(scope).unwrap();
+
+        // Empty key should fail
+        assert!(session.object_url("").is_err());
     }
 }

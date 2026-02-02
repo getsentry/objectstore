@@ -4,6 +4,7 @@ use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::Metadata;
+use objectstore_types::key::ObjectKey;
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -46,21 +47,36 @@ impl fmt::Debug for GetResponse {
 
 impl Session {
     /// Retrieves the object with the given `key`.
+    ///
+    /// The key will be validated and encoded according to RFC 3986. Reserved characters
+    /// (like `/`, `?`, `#`, etc.) will be percent-encoded automatically.
+    ///
+    /// Note: Key validation is deferred to the `send()` call. If the key is invalid,
+    /// `send()` will return an error.
     pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
             session: self.clone(),
-            key: key.to_owned(),
+            key: ObjectKey::from_raw(key).map_err(Into::into),
             decompress: true,
         }
     }
 }
 
 /// A [`get`](Session::get) request builder.
-#[derive(Debug)]
 pub struct GetBuilder {
     session: Session,
-    key: String,
+    key: crate::Result<ObjectKey>,
     decompress: bool,
+}
+
+impl fmt::Debug for GetBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GetBuilder")
+            .field("session", &self.session)
+            .field("key", &self.key.as_ref().map(|k| k.as_str()))
+            .field("decompress", &self.decompress)
+            .finish()
+    }
 }
 
 impl GetBuilder {
@@ -74,10 +90,18 @@ impl GetBuilder {
     }
 
     /// Sends the get request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key is invalid (empty, too long, or contains non-ASCII characters)
+    /// - The request fails to send
+    /// - The server returns an error response (other than 404)
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
+        let key = self.key?;
         let response = self
             .session
-            .request(reqwest::Method::GET, &self.key)?
+            .request(reqwest::Method::GET, &key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {

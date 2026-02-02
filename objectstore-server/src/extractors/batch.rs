@@ -25,6 +25,10 @@ pub enum BatchError {
     #[error("metadata error: {0}")]
     Metadata(#[from] objectstore_types::Error),
 
+    /// Invalid object key.
+    #[error("invalid key: {0}")]
+    InvalidKey(#[from] objectstore_types::key::InvalidKeyError),
+
     /// Size or cardinality limit exceeded.
     #[error("batch limit exceeded: {0}")]
     LimitExceeded(String),
@@ -72,15 +76,15 @@ impl Operation {
             .to_lowercase();
 
         let key = match field.headers().get(HEADER_BATCH_OPERATION_KEY) {
-            Some(key) => Some(
-                key.to_str()
-                    .map_err(|_| {
-                        BatchError::BadRequest(format!(
-                            "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
-                        ))
-                    })?
-                    .to_owned(),
-            ),
+            Some(key) => {
+                let key_str = key.to_str().map_err(|_| {
+                    BatchError::BadRequest(format!(
+                        "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
+                    ))
+                })?;
+                // Treat header values as raw keys - reserved characters will be encoded
+                Some(ObjectKey::from_raw(key_str)?)
+            }
             None => None,
         };
 
@@ -221,19 +225,19 @@ mod tests {
         let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
-        assert_eq!(get_op.key, "test0");
+        assert_eq!(get_op.key.as_str(), "test0");
 
         let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
+        assert_eq!(insert_op1.key.as_ref().unwrap().as_str(), "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
         let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
+        assert_eq!(insert_op2.key.as_ref().unwrap().as_str(), "test2");
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
@@ -241,7 +245,7 @@ mod tests {
         let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
             panic!("expected delete operation");
         };
-        assert_eq!(delete_op.key, "test3");
+        assert_eq!(delete_op.key.as_str(), "test3");
     }
 
     #[tokio::test]

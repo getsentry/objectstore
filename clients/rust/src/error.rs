@@ -16,6 +16,9 @@ pub enum Error {
     /// Error when scope validation fails.
     #[error("invalid scope: {0}")]
     InvalidScope(#[from] objectstore_types::scope::InvalidScopeError),
+    /// Error when object key validation fails.
+    #[error("invalid key: {0}")]
+    InvalidKey(#[from] objectstore_types::key::InvalidKeyError),
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
