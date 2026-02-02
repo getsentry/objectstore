@@ -234,8 +234,9 @@ class Session:
         return headers
 
     def _make_url(self, encoded_key: str | None, full: bool = False) -> str:
-        key_segment = encoded_key or ""
-        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key_segment}"
+        relative_path = (
+            f"/v1/objects/{self._usecase.name}/{self._scope}/{encoded_key or ''}"
+        )
         path = self._base_path.rstrip("/") + relative_path
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
