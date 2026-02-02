@@ -3,7 +3,7 @@
 //! This module provides the [`ObjectKey`] type for representing validated object keys
 //! according to RFC 3986 and the objectstore specification.
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::ops::Deref;
 use std::str::FromStr;
 
@@ -215,6 +215,7 @@ impl ObjectKey {
     pub fn into_inner(self) -> String {
         self.inner
     }
+
 }
 
 /// Percent-encodes a single character and appends it to the output.
@@ -225,7 +226,21 @@ fn percent_encode_char(c: char, output: &mut String) {
 
 impl fmt::Display for ObjectKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.inner)
+        // Display the human-readable (decoded) form
+        let mut chars = self.inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                // We know the encoding is valid since we validated on construction
+                let hex1 = chars.next().expect("valid percent encoding");
+                let hex2 = chars.next().expect("valid percent encoding");
+                let byte = u8::from_str_radix(&format!("{hex1}{hex2}"), 16)
+                    .expect("valid hex digits");
+                f.write_char(byte as char)?;
+            } else {
+                f.write_char(c)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -520,7 +535,8 @@ mod tests {
     #[test]
     fn test_display() {
         let key = ObjectKey::from_raw("path/to/object").unwrap();
-        assert_eq!(format!("{key}"), "path%2Fto%2Fobject");
+        // Display returns the human-readable (decoded) form
+        assert_eq!(format!("{key}"), "path/to/object");
     }
 
     #[test]

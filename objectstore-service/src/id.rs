@@ -207,8 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_path_with_encoded_slash() {
-        // When a key contains a slash, it gets percent-encoded
+    fn test_storage_path_with_slash() {
+        // Slashes in keys create subdirectories in storage paths
         let object_id = ObjectId {
             context: ObjectContext {
                 usecase: "testing".to_string(),
@@ -218,8 +218,7 @@ mod tests {
         };
 
         let path = object_id.as_storage_path().to_string();
-        // The encoded key "foo%2Fbar" is used in the path
-        assert_eq!(path, "testing/objects/foo%2Fbar");
+        assert_eq!(path, "testing/objects/foo/bar");
     }
 
     #[test]
