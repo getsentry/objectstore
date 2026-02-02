@@ -288,6 +288,15 @@ impl<'de> Deserialize<'de> for ObjectKey {
     }
 }
 
+impl From<&ObjectKey> for http::HeaderValue {
+    fn from(key: &ObjectKey) -> Self {
+        // ObjectKey is guaranteed to be ASCII, so this conversion is infallible.
+        // We use the encoded form for header values.
+        http::HeaderValue::from_str(key.as_str())
+            .expect("ObjectKey is always valid ASCII")
+    }
+}
+
 /// An error indicating that an object key is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidKeyError {
