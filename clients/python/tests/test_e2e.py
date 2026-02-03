@@ -194,7 +194,6 @@ def test_full_cycle_structured_key(server_url: str) -> None:
     object_key = session.put(b"test data", key="1/shard-0.json")
     assert object_key == "1/shard-0.json"
 
-    # Use the returned key for GET (client will encode it)
     retrieved = session.get(object_key)
     assert retrieved.payload.read() == b"test data"
 
