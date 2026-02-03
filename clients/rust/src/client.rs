@@ -478,7 +478,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_object_url_simple() {
+    fn test_object_url() {
         let client = Client::new("http://127.0.0.1:8888/").unwrap();
         let usecase = Usecase::new("testing");
         let scope = usecase
@@ -487,23 +487,8 @@ mod tests {
         let session = client.session(scope).unwrap();
 
         assert_eq!(
-            session.object_url("my-object").unwrap().to_string(),
-            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/my-object"
-        )
-    }
-
-    #[test]
-    fn test_object_url_encodes_slash() {
-        let client = Client::new("http://127.0.0.1:8888/").unwrap();
-        let usecase = Usecase::new("testing");
-        let scope = usecase.for_project(12345, 1337);
-        let session = client.session(scope).unwrap();
-
-        // The slash in the key should be encoded as %2F
-        let url = session.object_url("foo/bar").unwrap().to_string();
-        assert_eq!(
-            url,
-            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337/foo%2Fbar"
+            session.object_url("foo/my-object").unwrap().to_string(),
+            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo%2Fmy-object"
         )
     }
 
