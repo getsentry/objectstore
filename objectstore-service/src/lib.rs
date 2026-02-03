@@ -356,7 +356,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some(ObjectKey::from_raw("testing").unwrap()),
+                Some(ObjectKey::new("testing").unwrap()),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
@@ -380,7 +380,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some(ObjectKey::from_raw("testing").unwrap()),
+                Some(ObjectKey::new("testing").unwrap()),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )

@@ -4,7 +4,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::id::{InvalidKeyError, ObjectContext, ObjectId, ObjectKey};
+use objectstore_service::id::{InvalidObjectKeyError, ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
@@ -14,7 +14,7 @@ use crate::state::ServiceState;
 #[derive(Debug)]
 pub enum ObjectRejection {
     Path(PathRejection),
-    InvalidKey(InvalidKeyError),
+    InvalidKey(InvalidObjectKeyError),
     Killswitched,
     RateLimited,
 }
@@ -48,8 +48,8 @@ impl From<PathRejection> for ObjectRejection {
     }
 }
 
-impl From<InvalidKeyError> for ObjectRejection {
-    fn from(err: InvalidKeyError) -> Self {
+impl From<InvalidObjectKeyError> for ObjectRejection {
+    fn from(err: InvalidObjectKeyError) -> Self {
         ObjectRejection::InvalidKey(err)
     }
 }
@@ -64,7 +64,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         let Path(params) = Path::<ObjectParams>::from_request_parts(parts, state).await?;
         // The key from the URL path has been URL-decoded by the framework,
         // so we treat it as a raw key and encode reserved characters.
-        let key = ObjectKey::from_raw(&params.key)?;
+        let key = ObjectKey::new(&params.key)?;
         let id = ObjectId::from_parts(params.usecase, params.scopes, key);
 
         populate_sentry_context(id.context());

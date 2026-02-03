@@ -95,7 +95,7 @@ impl PutBuilder {
         if key_str.is_empty() {
             self.key = None;
         } else {
-            self.key = Some(ObjectKey::from_raw(&key_str).map_err(Into::into));
+            self.key = Some(ObjectKey::new(&key_str).map_err(Into::into));
         }
         self
     }

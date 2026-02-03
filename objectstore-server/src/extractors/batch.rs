@@ -27,7 +27,7 @@ pub enum BatchError {
 
     /// Invalid object key.
     #[error("invalid object key: {0}")]
-    InvalidKey(#[from] objectstore_types::key::InvalidKeyError),
+    InvalidKey(#[from] objectstore_types::key::ObjectKeyError),
 
     /// Size or cardinality limit exceeded.
     #[error("batch limit exceeded: {0}")]
@@ -83,7 +83,7 @@ impl Operation {
                     ))
                 })?;
                 // Treat header values as raw keys - reserved characters will be encoded
-                Some(ObjectKey::from_raw(key_str)?)
+                Some(ObjectKey::new(key_str)?)
             }
             None => None,
         };

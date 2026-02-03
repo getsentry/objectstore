@@ -56,7 +56,7 @@ impl Session {
     pub fn get(&self, key: &str) -> GetBuilder {
         GetBuilder {
             session: self.clone(),
-            key: ObjectKey::from_raw(key).map_err(Into::into),
+            key: ObjectKey::new(key).map_err(Into::into),
             decompress: true,
         }
     }

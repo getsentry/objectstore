@@ -16,7 +16,7 @@ impl Session {
     pub fn delete(&self, key: &str) -> DeleteBuilder {
         DeleteBuilder {
             session: self.clone(),
-            key: ObjectKey::from_raw(key).map_err(Into::into),
+            key: ObjectKey::new(key).map_err(Into::into),
         }
     }
 }

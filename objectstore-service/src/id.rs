@@ -11,7 +11,7 @@ use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
 
-pub use objectstore_types::key::{InvalidKeyError, ObjectKey};
+pub use objectstore_types::key::{ObjectKey, ObjectKeyError};
 
 /// Defines where an object, or batch of objects, belongs within the object store.
 ///
@@ -94,7 +94,7 @@ impl ObjectId {
     /// This can be used when creating an object with a server-generated key.
     pub fn random(context: ObjectContext) -> Self {
         // UUIDs only contain alphanumeric chars and hyphens, so this is always valid
-        let key = ObjectKey::from_raw(&uuid::Uuid::new_v4().to_string())
+        let key = ObjectKey::new(&uuid::Uuid::new_v4().to_string())
             .expect("UUID is always a valid key");
         Self { context, key }
     }
@@ -185,7 +185,7 @@ mod tests {
                     Scope::create("project", "1337").unwrap(),
                 ]),
             },
-            key: ObjectKey::from_raw("foo-bar").unwrap(),
+            key: ObjectKey::new("foo-bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
@@ -199,7 +199,7 @@ mod tests {
                 usecase: "testing".to_string(),
                 scopes: Scopes::empty(),
             },
-            key: ObjectKey::from_raw("foo-bar").unwrap(),
+            key: ObjectKey::new("foo-bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
@@ -214,7 +214,7 @@ mod tests {
                 usecase: "testing".to_string(),
                 scopes: Scopes::empty(),
             },
-            key: ObjectKey::from_raw("foo/bar").unwrap(),
+            key: ObjectKey::new("foo/bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();

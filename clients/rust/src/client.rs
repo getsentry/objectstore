@@ -400,7 +400,7 @@ impl Session {
     ///
     /// Returns an error if the key is invalid (e.g., empty, too long, or contains non-ASCII).
     pub fn object_url(&self, object_key: &str) -> crate::Result<Url> {
-        let key = ObjectKey::from_raw(object_key)?;
+        let key = ObjectKey::new(object_key)?;
         Ok(self.object_url_encoded(&key))
     }
 
