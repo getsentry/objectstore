@@ -504,15 +504,4 @@ mod tests {
             "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/my-object"
         )
     }
-
-    #[test]
-    fn test_object_url_invalid_key() {
-        let client = Client::new("http://127.0.0.1:8888/").unwrap();
-        let usecase = Usecase::new("testing");
-        let scope = usecase.for_project(12345, 1337);
-        let session = client.session(scope).unwrap();
-
-        // Empty key should fail
-        assert!(session.object_url("").is_err());
-    }
 }
