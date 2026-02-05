@@ -62,6 +62,7 @@ struct DeleteResponse {
 #[derive(Debug)]
 struct ErrorResponse {
     pub key: Option<ObjectKey>,
+    pub kind: Option<&'static str>,
     pub error: ApiError,
 }
 
@@ -81,18 +82,24 @@ async fn batch(
 ) -> Response {
     let responses: BoxStream<OperationResponse> = async_stream::stream! {
         while let Some(operation) = requests.0.next().await {
-            let (operation, key) = match operation {
+            let (operation, key, kind) = match operation {
                 Ok(op) => {
                     let key = op.key().clone();
-                    (Ok(op), Some(key))
+                    let kind = match &op {
+                        Operation::Get(_) => "get",
+                        Operation::Insert(_) => "insert",
+                        Operation::Delete(_) => "delete",
+                    };
+                    (Ok(op), Some(key), Some(kind))
                 }
-                Err(e) => (Err(e), None),
+                Err(e) => (Err(e), None, None),
             };
 
             if !state.rate_limiter.check(&context) {
                 tracing::debug!("Batch operation rejected due to rate limits");
                 yield OperationResponse::Error(ErrorResponse {
                     key,
+                    kind,
                     error: BatchError::RateLimited.into(),
                 });
                 continue;
@@ -148,6 +155,7 @@ async fn batch(
                 },
                 Err(error) => OperationResponse::Error(ErrorResponse {
                     key,
+                    kind,
                     error: error.into(),
                 }),
             };
@@ -167,6 +175,14 @@ fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
         encoded
             .parse()
             .expect("base64 encoded string is always a valid header value"),
+    );
+}
+
+fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
+    headers.insert(
+        HEADER_BATCH_OPERATION_KIND,
+        kind.parse()
+            .expect("operation kind is always a valid header value"),
     );
 }
 
@@ -289,8 +305,8 @@ impl From<OperationResponse> for Part {
                 ),
                 Err(error) => create_error_part(Some(&key), Some("delete"), &error),
             },
-            OperationResponse::Error(ErrorResponse { key, error }) => {
-                create_error_part(key.as_ref(), None, &error)
+            OperationResponse::Error(ErrorResponse { key, kind, error }) => {
+                create_error_part(key.as_ref(), kind, &error)
             }
         }
     }

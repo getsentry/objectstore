@@ -5,7 +5,7 @@ description = "Client SDK for Objectstore, the Sentry object storage platform"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../../LICENSE.md"
-version = "0.0.15"
+version = "0.0.16"
 edition = "2024"
 rust-version = "1.89"
 publish = true
@@ -20,7 +20,7 @@ infer = { version = "0.19.0", default-features = false }
 jsonwebtoken = { workspace = true }
 multer = "3.1.0"
 objectstore-types = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart"] }
 sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -36,5 +36,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 
 [features]
-default = ["hickory-dns"]
+default = ["native-tls", "hickory-dns"]
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
 hickory-dns = ["reqwest/hickory-dns"]
