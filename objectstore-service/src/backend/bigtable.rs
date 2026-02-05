@@ -9,10 +9,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 
-use crate::PayloadStream;
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::id::ObjectId;
-use crate::{ServiceError, ServiceResult};
+use crate::{PayloadStream, ServiceError, ServiceResult};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -223,7 +222,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<PutResponse> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -237,7 +236,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
@@ -270,7 +269,7 @@ impl Backend for BigTableBackend {
                     }
                     retry_count += 1;
                     merni::counter!("bigtable.read_retry": 1);
-                    tracing::debug!(retry_count = retry_count, "Retrying read");
+                    tracing::warn!(retry_count = retry_count, "Retrying read");
                 }
             }
         };
@@ -334,7 +333,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();

@@ -4,11 +4,15 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::id::ObjectKey;
 use objectstore_types::Metadata;
 use thiserror::Error;
+
+use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
 
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
@@ -28,6 +32,20 @@ pub enum BatchError {
     /// Size or cardinality limit exceeded.
     #[error("batch limit exceeded: {0}")]
     LimitExceeded(String),
+
+    /// Operation rejected due to rate limiting.
+    #[error("rate limited")]
+    RateLimited,
+
+    /// Errors encountered when serializing batch response parts.
+    #[error("response part serialization error: {context}")]
+    ResponseSerialization {
+        /// Context describing what was being serialized.
+        context: String,
+        /// The underlying error.
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 #[derive(Debug)]
@@ -37,7 +55,7 @@ pub struct GetOperation {
 
 #[derive(Debug)]
 pub struct InsertOperation {
-    pub key: Option<ObjectKey>,
+    pub key: ObjectKey,
     pub metadata: Metadata,
     pub payload: Bytes,
 }
@@ -71,26 +89,31 @@ impl Operation {
             })?
             .to_lowercase();
 
-        let key = match field.headers().get(HEADER_BATCH_OPERATION_KEY) {
-            Some(key) => Some(
-                key.to_str()
-                    .map_err(|_| {
-                        BatchError::BadRequest(format!(
-                            "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
-                        ))
-                    })?
-                    .to_owned(),
-            ),
-            None => None,
-        };
+        let key_header = field
+            .headers()
+            .get(HEADER_BATCH_OPERATION_KEY)
+            .ok_or_else(|| {
+                BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KEY} header"))
+            })?
+            .to_str()
+            .map_err(|_| {
+                BatchError::BadRequest(format!(
+                    "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
+                ))
+            })?;
+        let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
+            BatchError::BadRequest(format!(
+                "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
+            ))
+        })?;
+        let key = String::from_utf8(key_bytes).map_err(|_| {
+            BatchError::BadRequest(format!(
+                "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
+            ))
+        })?;
 
         let operation = match kind.as_str() {
-            "get" => {
-                let key = key.ok_or_else(|| {
-                    BatchError::BadRequest("missing object key for get operation".to_string())
-                })?;
-                Operation::Get(GetOperation { key })
-            }
+            "get" => Operation::Get(GetOperation { key }),
             "insert" => {
                 let metadata = Metadata::from_headers(field.headers(), "")?;
                 let payload = field.bytes().await?;
@@ -105,12 +128,7 @@ impl Operation {
                     payload,
                 })
             }
-            "delete" => {
-                let key = key.ok_or_else(|| {
-                    BatchError::BadRequest("missing object key for delete operation".to_string())
-                })?;
-                Operation::Delete(DeleteOperation { key })
-            }
+            "delete" => Operation::Delete(DeleteOperation { key }),
             _ => {
                 return Err(BatchError::BadRequest(format!(
                     "invalid operation kind: {kind}"
@@ -119,25 +137,28 @@ impl Operation {
         };
         Ok(operation)
     }
-}
 
-pub struct BatchRequest {
-    pub operations: BoxStream<'static, Result<Operation, BatchError>>,
-}
-
-impl Debug for BatchRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchRequest").finish()
+    pub fn key(&self) -> &ObjectKey {
+        match self {
+            Operation::Get(op) => &op.key,
+            Operation::Insert(op) => &op.key,
+            Operation::Delete(op) => &op.key,
+        }
     }
 }
 
-pub const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
-pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
+pub struct BatchOperationStream(pub BoxStream<'static, Result<Operation, BatchError>>);
+
+impl Debug for BatchOperationStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchOperationStream").finish()
+    }
+}
 
 const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_OPERATIONS: usize = 1000;
 
-impl<S> FromRequest<S> for BatchRequest
+impl<S> FromRequest<S> for BatchOperationStream
 where
     S: Send + Sync,
 {
@@ -146,7 +167,7 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let mut multipart = Multipart::from_request(request, state).await?;
 
-        let operations = async_stream::try_stream! {
+        let requests = async_stream::try_stream! {
             let mut count = 0;
             while let Some(field) = multipart.next_field().await? {
                 if count >= MAX_OPERATIONS {
@@ -160,7 +181,7 @@ where
         }
         .boxed();
 
-        Ok(Self { operations })
+        Ok(Self(requests))
     }
 }
 
@@ -181,29 +202,33 @@ mod tests {
         let expiration = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
         let body = format!(
             "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test0\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key0}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: get\r\n\
              \r\n\
              \r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test1\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key1}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              Content-Type: application/octet-stream\r\n\
              \r\n\
              {insert1}\r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test2\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key2}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              {HEADER_EXPIRATION}: {expiration}\r\n\
              Content-Type: text/plain\r\n\
              \r\n\
              {insert2}\r\n\
              --boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test3\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key3}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
              \r\n\
              \r\n\
              --boundary--\r\n",
+            key0 = BASE64_STANDARD.encode("test0"),
+            key1 = BASE64_STANDARD.encode("test1"),
+            key2 = BASE64_STANDARD.encode("test2"),
+            key3 = BASE64_STANDARD.encode("test3"),
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
         );
@@ -213,9 +238,11 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
 
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let operations: Vec<_> = batch_request.0.collect().await;
         assert_eq!(operations.len(), 4);
 
         let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
@@ -226,14 +253,14 @@ mod tests {
         let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op1.key.as_ref().unwrap(), "test1");
+        assert_eq!(insert_op1.key, "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
         let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op2.key.as_ref().unwrap(), "test2");
+        assert_eq!(insert_op2.key, "test2");
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
@@ -248,9 +275,10 @@ mod tests {
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
         for i in 0..(MAX_OPERATIONS + 1) {
+            let key = BASE64_STANDARD.encode(format!("test{i}"));
             body.push_str(&format!(
                 "--boundary\r\n\
-                 {HEADER_BATCH_OPERATION_KEY}: test{i}\r\n\
+                 {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
                  {HEADER_BATCH_OPERATION_KIND}: get\r\n\
                  \r\n\
                  \r\n"
@@ -263,8 +291,10 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
         matches!(
@@ -276,9 +306,10 @@ mod tests {
     #[tokio::test]
     async fn test_operation_body_size_limit_enforced() {
         let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let key = BASE64_STANDARD.encode("test");
         let body = format!(
             "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: test\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              Content-Type: application/octet-stream\r\n\
              \r\n\
@@ -291,8 +322,10 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let batch_request = BatchRequest::from_request(request, &()).await.unwrap();
-        let operations: Vec<_> = batch_request.operations.collect().await;
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), 1);
         assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));

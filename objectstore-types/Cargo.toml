@@ -5,7 +5,7 @@ description = "Shared types for the Objectstore client and server"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../LICENSE.md"
-version = "0.0.15"
+version = "0.0.16"
 edition = "2024"
 publish = true
 

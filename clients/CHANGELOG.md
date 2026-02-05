@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.16
+
+### New Features ✨
+
+- (server) Move to structured ApiError by @lcian in [#263](https://github.com/getsentry/objectstore/pull/263)
+
+### Bug Fixes 🐛
+
+- (rust-client) Re-export objectstore_types::Permission as part of API by @matt-codecov in [#256](https://github.com/getsentry/objectstore/pull/256)
+
+### Internal Changes 🔧
+
+- (rust-client) Bump reqwest to 0.13.1 by @lcian in [#282](https://github.com/getsentry/objectstore/pull/282)
+- Use internal PyPI exclusively by @lcian in [#272](https://github.com/getsentry/objectstore/pull/272)
+
+### Other
+
+- test(rust-client): Improve assertion by @lcian in [#280](https://github.com/getsentry/objectstore/pull/280)
+
 ## 0.0.15
 
 ### New Features ✨

@@ -1,5 +1,7 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{PayloadStream, StorageService};
+use objectstore_service::{
+    DeleteResponse, GetResponse, InsertResponse, PayloadStream, StorageService,
+};
 use objectstore_types::{Metadata, Permission};
 
 use crate::auth::AuthContext;
@@ -56,7 +58,7 @@ impl AuthAwareService {
         key: Option<String>,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ApiResult<ObjectId> {
+    ) -> ApiResult<InsertResponse> {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
         Ok(self
             .service
@@ -65,13 +67,13 @@ impl AuthAwareService {
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
-    pub async fn get_object(&self, id: &ObjectId) -> ApiResult<Option<(Metadata, PayloadStream)>> {
+    pub async fn get_object(&self, id: &ObjectId) -> ApiResult<GetResponse> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
         Ok(self.service.get_object(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
-    pub async fn delete_object(&self, id: &ObjectId) -> ApiResult<()> {
+    pub async fn delete_object(&self, id: &ObjectId) -> ApiResult<DeleteResponse> {
         self.assert_authorized(Permission::ObjectDelete, id.context())?;
         Ok(self.service.delete_object(id).await?)
     }

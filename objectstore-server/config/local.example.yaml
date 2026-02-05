@@ -1,5 +1,5 @@
 # Use a port different from devservices
-http_addr: 0.0.0.0:18888
+http_addr: 0.0.0.0:8888
 
 long_term_storage:
   type: filesystem

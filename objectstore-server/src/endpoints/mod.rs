@@ -8,7 +8,7 @@ use crate::state::ServiceState;
 
 mod batch;
 pub mod common;
-mod health;
+pub mod health;
 mod objects;
 
 pub fn routes() -> Router<ServiceState> {
