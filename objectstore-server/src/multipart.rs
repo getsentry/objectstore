@@ -11,6 +11,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
+use http::HeaderValue;
 use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
 /// A part in a Multipart response.
@@ -23,20 +24,20 @@ pub struct Part {
 impl Part {
     /// Creates a new Multipart part with the given content type, body, and headers.
     /// The name is hardcoded to "part".
-    pub fn new(
-        content_type: &str,
-        body: Bytes,
-        mut headers: HeaderMap,
-    ) -> Result<Self, http::header::InvalidHeaderValue> {
-        let disposition = "form-data; name=part";
-        headers.insert(CONTENT_DISPOSITION, disposition.parse()?);
-        headers.insert(CONTENT_TYPE, content_type.parse()?);
-        Ok(Part { headers, body })
+    pub fn new(body: Bytes, mut headers: HeaderMap, content_type: Option<HeaderValue>) -> Self {
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static("form-data; name=part"),
+        );
+        if let Some(content_type) = content_type {
+            headers.insert(CONTENT_TYPE, content_type);
+        }
+        Self { headers, body }
     }
 }
 
 pub trait IntoMultipartResponse {
-    fn into_response(self, boundary: u128) -> Response;
+    fn into_multipart_response(self, boundary: u128) -> Response;
 }
 
 impl<S, T> IntoMultipartResponse for S
@@ -44,7 +45,7 @@ where
     S: Stream<Item = T> + Send + 'static,
     T: Into<Part> + Send,
 {
-    fn into_response(self, boundary: u128) -> Response {
+    fn into_multipart_response(self, boundary: u128) -> Response {
         let boundary_str = format!("os-boundary-{:032x}", boundary);
         let boundary = {
             let mut bytes = BytesMut::with_capacity(boundary_str.len() + 4);
@@ -59,9 +60,7 @@ where
             CONTENT_TYPE,
             format!("multipart/form-data; boundary=\"{}\"", &boundary_str)
                 .parse()
-                .expect(
-                    "valid header value, as we always define it as \"os-boundary-X\" where X are hex digits",
-                ),
+                .expect("valid header value, as we just defined it as \"os-boundary-X\" where X are hex digits"),
         );
 
         let body: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
@@ -122,20 +121,18 @@ mod tests {
         extra_headers.insert("X-File-Id", "12345".parse().unwrap());
         let parts = vec![
             Part::new(
-                "application/json",
                 Bytes::from(r#"{"key":"value"}"#),
                 HeaderMap::new(),
-            )
-            .unwrap(),
+                Some(HeaderValue::from_static("application/json")),
+            ),
             Part::new(
-                "application/octet-stream",
                 Bytes::from(vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
                 extra_headers,
-            )
-            .unwrap(),
+                Some(HeaderValue::from_static("application/octet-stream")),
+            ),
         ];
         let boundary: u128 = 0xdeadbeef;
-        let response = futures::stream::iter(parts).into_response(boundary);
+        let response = futures::stream::iter(parts).into_multipart_response(boundary);
 
         let boundary = format!("os-boundary-{:032x}", boundary);
         let content_type_str = format!("multipart/form-data; boundary=\"{}\"", boundary);

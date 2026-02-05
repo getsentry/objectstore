@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 argh = "0.1.13"
 async-stream = "0.3.6"
 axum = { version = "0.8.4", features = ["multipart"] }
+base64 = "0.22"
 axum-extra = "0.10.1"
 bytes = { workspace = true }
 console = "0.16.1"
