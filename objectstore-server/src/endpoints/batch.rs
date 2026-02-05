@@ -178,14 +178,6 @@ fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
     );
 }
 
-fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
-    headers.insert(
-        HEADER_BATCH_OPERATION_KIND,
-        kind.parse()
-            .expect("operation kind is always a valid header value"),
-    );
-}
-
 fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
     let status_str = format!(
         "{} {}",
