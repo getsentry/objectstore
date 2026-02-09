@@ -6,7 +6,7 @@ This file contains project-specific guidance for Claude Code when working on the
 
 ### Standard Test Command
 
-Always use the full workspace test command to ensure all packages and features are tested:
+When running tests, use the full workspace test command to ensure all packages and features are tested:
 
 ```bash
 cargo test --workspace --all-features
@@ -48,7 +48,7 @@ cargo test -p objectstore-server --all-features
 
 ## Linting
 
-Always run linting checks before committing code. Use the same commands as CI:
+Before committing, run these linting checks (same commands as CI):
 
 ### Rust Linting
 
@@ -91,9 +91,7 @@ This performs a comprehensive review of your changes for bugs, security vulnerab
 
 ### 2. Check Code Complexity
 
-Review the code you added or modified. If the implementation is complex:
-- Suggest the user run `/code-simplifier` to improve clarity and maintainability
-- The `code-simplifier` skill (from `sentry-skills`) refines code while preserving functionality
+Review the code you added or modified. If the implementation is complex, ask the user whether to run `/code-simplifier` to improve clarity and maintainability. The `code-simplifier` skill (from `sentry-skills`) refines code while preserving functionality.
 
 ### 3. Create the PR
 
