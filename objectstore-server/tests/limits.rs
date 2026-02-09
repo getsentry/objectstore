@@ -17,6 +17,8 @@ async fn test_killswitches() -> Result<()> {
         killswitches: Killswitches(vec![Killswitch {
             usecase: Some("blocked".to_string()),
             scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
+            service: Some("test-*".to_string()),
+            service_matcher: Default::default(),
         }]),
         auth: AuthZ {
             enforce: false,
@@ -31,6 +33,7 @@ async fn test_killswitches() -> Result<()> {
     // Object-level
     let response = client
         .get(server.url("/v1/objects/blocked/org=42;project=4711/foo"))
+        .header("x-downstream-service", "test-service")
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
@@ -38,6 +41,7 @@ async fn test_killswitches() -> Result<()> {
     // Collection-level
     let response = client
         .post(server.url("/v1/objects/blocked/org=42;project=4711/"))
+        .header("x-downstream-service", "test-service")
         .body("test data")
         .send()
         .await?;
@@ -46,6 +50,7 @@ async fn test_killswitches() -> Result<()> {
     // Sanity check: Allowed access on non-existing object
     let response = client
         .get(server.url("/v1/objects/allowed/org=43;project=4711/foo"))
+        .header("x-downstream-service", "test-service")
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
