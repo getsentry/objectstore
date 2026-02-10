@@ -11,7 +11,7 @@ dependencies = [
     "urllib3>=2.2.2",
     "zstandard>=0.18.0",
     "filetype>=1.2.0",
-    "PyJWT[crypto]>=2.10.1",
+    "PyJWT[crypto]==2.4.0",
 ]
 
 [build-system]

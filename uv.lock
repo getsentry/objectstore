@@ -293,7 +293,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "filetype", specifier = ">=1.2.0" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
+    { name = "pyjwt", extras = ["crypto"], specifier = "==2.4.0" },
     { name = "sentry-sdk", specifier = ">=2.42.1" },
     { name = "urllib3", specifier = ">=2.2.2" },
     { name = "zstandard", specifier = ">=0.18.0" },
@@ -367,10 +367,10 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.10.1"
+version = "2.4.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/PyJWT-2.10.1-py3-none-any.whl", hash = "sha256:dcdd193e30abefd5debf142f9adfcdd2b58004e644f25406ffaebd50bd98dacb" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/PyJWT-2.4.0-py3-none-any.whl", hash = "sha256:72d1d253f32dbd4f5c88eaf1fdc62f3a19f676ccbadb9dbc5d07e951b2b26daf" },
 ]
 
 [package.optional-dependencies]
