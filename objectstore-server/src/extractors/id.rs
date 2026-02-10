@@ -9,6 +9,7 @@ use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
+use crate::extractors::downstream_service::DownstreamService;
 use crate::state::ServiceState;
 
 #[derive(Debug)]
@@ -55,7 +56,15 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         populate_sentry_context(id.context());
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
 
-        if state.config.killswitches.matches(id.context()) {
+        let service = DownstreamService::from_request_parts(parts, state)
+            .await
+            .unwrap();
+
+        if state
+            .config
+            .killswitches
+            .matches(id.context(), service.as_str())
+        {
             tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }
@@ -122,7 +131,15 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 
         populate_sentry_context(&context);
 
-        if state.config.killswitches.matches(&context) {
+        let service = DownstreamService::from_request_parts(parts, state)
+            .await
+            .unwrap();
+
+        if state
+            .config
+            .killswitches
+            .matches(&context, service.as_str())
+        {
             tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }

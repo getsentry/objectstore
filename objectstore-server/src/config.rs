@@ -1149,12 +1149,14 @@ mod tests {
                   - usecase: broken_usecase
                   - scopes:
                       org: "42"
+                  - service: "test-*"
                   - scopes:
                       org: "42"
                       project: "4711"
                   - usecase: attachments
                     scopes:
                       org: "42"
+                    service: "test-*"
                 "#,
             )
             .unwrap();
@@ -1164,10 +1166,20 @@ mod tests {
                 Killswitch {
                     usecase: Some("broken_usecase".into()),
                     scopes: BTreeMap::new(),
+                    service: None,
+                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: None,
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
+                    service: None,
+                    service_matcher: std::sync::OnceLock::new(),
+                },
+                Killswitch {
+                    usecase: None,
+                    scopes: BTreeMap::new(),
+                    service: Some("test-*".into()),
+                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: None,
@@ -1175,10 +1187,14 @@ mod tests {
                         ("org".into(), "42".into()),
                         ("project".into(), "4711".into()),
                     ]),
+                    service: None,
+                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: Some("attachments".into()),
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
+                    service: Some("test-*".into()),
+                    service_matcher: std::sync::OnceLock::new(),
                 },
             ];
 
