@@ -266,8 +266,13 @@ impl StorageService {
     pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         let start = Instant::now();
 
+        let mut backend_choice = "high-volume";
+        let mut backend_type = self.0.high_volume_backend.name();
+
         if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
             if metadata.is_redirect_tombstone == Some(true) {
+                backend_choice = "long-term";
+                backend_type = self.0.long_term_backend.name();
                 self.0.long_term_backend.delete_object(id).await?;
             }
             self.0.high_volume_backend.delete_object(id).await?;
@@ -275,7 +280,9 @@ impl StorageService {
 
         merni::distribution!(
             "delete.latency"@s: start.elapsed(),
-            "usecase" => id.usecase()
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
         );
 
         Ok(())
