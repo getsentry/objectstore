@@ -210,6 +210,61 @@ impl BigTableBackend {
         ];
         self.mutate(path, mutations, action).await
     }
+
+    /// Reads only the payload column (`p`) for the given row key.
+    async fn read_payload(&self, path: &[u8]) -> ServiceResult<Option<Vec<u8>>> {
+        let rows = v2::RowSet {
+            row_keys: vec![path.to_owned()],
+            row_ranges: vec![],
+        };
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(rows),
+            filter: Some(v2::RowFilter {
+                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                    b"^p$".to_vec(),
+                )),
+            }),
+            rows_limit: 1,
+            ..Default::default()
+        };
+
+        let mut client = self.bigtable.client();
+
+        let mut retry_count = 0;
+        let response = loop {
+            let response = client.read_rows(request.clone()).await;
+
+            match response {
+                Ok(res) => break res,
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.read_failures": 1);
+                        return Err(ServiceError::Generic {
+                            context: "Bigtable: failed to read payload for TTI bump".to_string(),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.read_retry": 1);
+                    tracing::warn!(retry_count = retry_count, "Retrying payload read");
+                }
+            }
+        };
+
+        let Some((_read_path, cells)) = response.into_iter().next() else {
+            return Ok(None);
+        };
+
+        for cell in cells {
+            if cell.qualifier.as_slice() == self::COLUMN_PAYLOAD {
+                return Ok(Some(cell.value));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[async_trait::async_trait]
@@ -339,14 +394,11 @@ impl Backend for BigTableBackend {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
-            row_keys: vec![path],
+            row_keys: vec![path.clone()],
             row_ranges: vec![],
         };
 
         // Only read the metadata column — skip the (potentially large) payload.
-        // TODO: TTI bump is skipped here because it requires rewriting the full
-        // row (including payload). A future optimization could use a separate
-        // column or read the full row only when TTI is configured.
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(rows),
@@ -394,12 +446,11 @@ impl Backend for BigTableBackend {
         for cell in cells {
             if cell.qualifier.as_slice() == self::COLUMN_METADATA {
                 expire_at = micros_to_time(cell.timestamp_micros);
-                metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                    ServiceError::Serde {
+                metadata =
+                    serde_json::from_slice(&cell.value).map_err(|cause| ServiceError::Serde {
                         context: "failed to deserialize metadata".to_string(),
                         cause,
-                    }
-                })?;
+                    })?;
             }
         }
 
@@ -411,6 +462,14 @@ impl Backend for BigTableBackend {
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
             tracing::debug!("Object found but past expiry");
             return Ok(None);
+        }
+
+        // Conditional TTI bump: read the payload only when a bump is actually needed.
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
+            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
+            && let Some(payload) = self.read_payload(&path).await?
+        {
+            let _ = self.put_row(path, &metadata, payload, "tti-bump").await;
         }
 
         Ok(Some(metadata))
@@ -784,6 +843,74 @@ mod tests {
 
         let meta = backend.get_metadata(&id).await?.unwrap();
         assert_eq!(meta.is_redirect_tombstone, Some(true));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_bumps_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        // Manually rewrite the row with a timestamp that will trigger a bump.
+        // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
+        // Set the expiry to just under the threshold but still in the future
+        // (so it doesn't get filtered as expired).
+        let path = id.as_storage_path().to_string().into_bytes();
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_micros = old_deadline
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            * 1000;
+
+        let mutations = [
+            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                timestamp_micros: old_micros,
+                value: b"hello, world".to_vec(),
+            }),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_METADATA.to_owned(),
+                timestamp_micros: old_micros,
+                value: serde_json::to_vec(&metadata).unwrap(),
+            }),
+        ];
+        backend
+            .mutate(path.clone(), mutations, "test-setup")
+            .await?;
+
+        // First get_metadata sees the old timestamp and triggers a TTI bump.
+        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+
+        // Second get_metadata sees the bumped timestamp.
+        let post_meta = backend.get_metadata(&id).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
+        );
+
+        // Verify the payload is still intact after the bump.
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = read_to_vec(stream).await?;
+        assert_eq!(&payload, b"hello, world");
 
         Ok(())
     }

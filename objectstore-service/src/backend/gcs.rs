@@ -10,7 +10,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
+use crate::backend::common::{
+    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -309,10 +311,7 @@ impl GcsBackend {
 
     /// Fetches the GCS object metadata (without the payload), bumps TTI if
     /// needed, and returns the parsed [`Metadata`].
-    async fn fetch_gcs_metadata(
-        &self,
-        object_url: &Url,
-    ) -> ServiceResult<Option<Metadata>> {
+    async fn fetch_gcs_metadata(&self, object_url: &Url) -> ServiceResult<Option<Metadata>> {
         let metadata_response = self
             .request(Method::GET, object_url.clone())
             .await?
