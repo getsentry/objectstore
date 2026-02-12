@@ -27,7 +27,7 @@ impl FromRequest<ServiceState> for MeteredBody {
             .into_data_stream()
             .map_err(io::Error::other)
             .boxed();
-        let stream = state.wrap_stream(stream);
+        let stream = state.wrap_ingress_stream(stream);
         Ok(Self(stream))
     }
 }

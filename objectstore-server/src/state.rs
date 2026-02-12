@@ -51,6 +51,7 @@ impl Services {
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
+        rate_limiter.start();
 
         Ok(Arc::new(Self {
             config,
@@ -60,9 +61,14 @@ impl Services {
         }))
     }
 
-    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
-        MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
+    /// Wraps a [`PayloadStream`] with ingress (upload) bandwidth metering for rate limiting.
+    pub fn wrap_ingress_stream(&self, stream: PayloadStream) -> PayloadStream {
+        MeteredPayloadStream::ingress(stream, self.rate_limiter.ingress_accumulator()).boxed()
+    }
+
+    /// Wraps a [`PayloadStream`] with egress (download) bandwidth metering for rate limiting.
+    pub fn wrap_egress_stream(&self, stream: PayloadStream) -> PayloadStream {
+        MeteredPayloadStream::egress(stream, self.rate_limiter.egress_accumulator()).boxed()
     }
 }
 

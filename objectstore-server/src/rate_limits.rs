@@ -120,6 +120,11 @@ impl RateLimiter {
         }
     }
 
+    /// Starts background tasks for rate limiting (e.g. the bandwidth EWMA estimator).
+    pub fn start(&self) {
+        self.bandwidth.start();
+    }
+
     /// Checks if the given context is within the rate limits.
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
@@ -127,59 +132,86 @@ impl RateLimiter {
         self.throughput.check(context) && self.bandwidth.check()
     }
 
-    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
-    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.bandwidth.accumulator)
+    /// Returns a reference to the shared ingress bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn ingress_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.ingress_accumulator)
+    }
+
+    /// Returns a reference to the shared egress bytes accumulator, used for bandwidth-based rate-limiting.
+    pub fn egress_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.egress_accumulator)
     }
 }
 
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
-    /// Accumulator that's incremented every time an operation that uses bandwidth is executed.
-    accumulator: Arc<AtomicU64>,
-    /// An estimate of the bandwidth that's currently being utilized in bytes per second.
-    estimate: Arc<AtomicU64>,
+    /// Accumulator incremented for ingress (upload) bandwidth.
+    ingress_accumulator: Arc<AtomicU64>,
+    /// Accumulator incremented for egress (download) bandwidth.
+    egress_accumulator: Arc<AtomicU64>,
+    /// An estimate of ingress bandwidth in bytes per second.
+    ingress_estimate: Arc<AtomicU64>,
+    /// An estimate of egress bandwidth in bytes per second.
+    egress_estimate: Arc<AtomicU64>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
-        let accumulator = Arc::new(AtomicU64::new(0));
-        let estimate = Arc::new(AtomicU64::new(0));
-
-        let accumulator_clone = Arc::clone(&accumulator);
-        let estimate_clone = Arc::clone(&estimate);
-        tokio::task::spawn(async move {
-            Self::estimator(accumulator_clone, estimate_clone).await;
-        });
-
         Self {
             config,
-            accumulator,
-            estimate,
+            ingress_accumulator: Arc::new(AtomicU64::new(0)),
+            egress_accumulator: Arc::new(AtomicU64::new(0)),
+            ingress_estimate: Arc::new(AtomicU64::new(0)),
+            egress_estimate: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Spawns the background EWMA estimator task.
+    fn start(&self) {
+        let ingress_acc = Arc::clone(&self.ingress_accumulator);
+        let egress_acc = Arc::clone(&self.egress_accumulator);
+        let ingress_est = Arc::clone(&self.ingress_estimate);
+        let egress_est = Arc::clone(&self.egress_estimate);
+        tokio::task::spawn(async move {
+            Self::estimator(ingress_acc, egress_acc, ingress_est, egress_est).await;
+        });
     }
 
     /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
     ///
-    /// The calculation is based on the increments of `self.accumulator` happened in the last `TICK`.
-    /// The estimate is stored in `self.estimate`, which can be queried for bandwidth-based rate-limiting.
-    async fn estimator(accumulator: Arc<AtomicU64>, estimate: Arc<AtomicU64>) {
+    /// Computes independent EWMAs for ingress and egress, emitting separate metrics for each.
+    async fn estimator(
+        ingress_accumulator: Arc<AtomicU64>,
+        egress_accumulator: Arc<AtomicU64>,
+        ingress_estimate: Arc<AtomicU64>,
+        egress_estimate: Arc<AtomicU64>,
+    ) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
         const ALPHA: f64 = 0.2; // EWMA alpha parameter: 20% weight to new sample, 80% to previous average
 
         let mut interval = tokio::time::interval(TICK);
         let to_bps = 1.0 / TICK.as_secs_f64(); // Conversion factor from bytes to bps
-        let mut ewma: f64 = 0.0;
+        let mut ingress_ewma: f64 = 0.0;
+        let mut egress_ewma: f64 = 0.0;
         loop {
             interval.tick().await;
-            let current = accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
-            let bps = (current as f64) * to_bps;
-            ewma = ALPHA * bps + (1.0 - ALPHA) * ewma;
 
-            let ewma_int = ewma.floor() as u64;
-            estimate.store(ewma_int, std::sync::atomic::Ordering::Relaxed);
-            merni::gauge!("server.bandwidth.ewma"@b: ewma_int);
+            let ingress_bytes =
+                ingress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let ingress_bps = (ingress_bytes as f64) * to_bps;
+            ingress_ewma = ALPHA * ingress_bps + (1.0 - ALPHA) * ingress_ewma;
+            let ingress_ewma_int = ingress_ewma.floor() as u64;
+            ingress_estimate.store(ingress_ewma_int, std::sync::atomic::Ordering::Relaxed);
+            merni::gauge!("server.bandwidth.ingress.ewma"@b: ingress_ewma_int);
+
+            let egress_bytes =
+                egress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let egress_bps = (egress_bytes as f64) * to_bps;
+            egress_ewma = ALPHA * egress_bps + (1.0 - ALPHA) * egress_ewma;
+            let egress_ewma_int = egress_ewma.floor() as u64;
+            egress_estimate.store(egress_ewma_int, std::sync::atomic::Ordering::Relaxed);
+            merni::gauge!("server.bandwidth.egress.ewma"@b: egress_ewma_int);
         }
     }
 
@@ -187,7 +219,13 @@ impl BandwidthRateLimiter {
         let Some(bps) = self.config.global_bps else {
             return true;
         };
-        self.estimate.load(std::sync::atomic::Ordering::Relaxed) <= bps
+        let ingress = self
+            .ingress_estimate
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let egress = self
+            .egress_estimate
+            .load(std::sync::atomic::Ordering::Relaxed);
+        ingress.saturating_add(egress) <= bps
     }
 }
 
@@ -356,22 +394,41 @@ impl TokenBucket {
 ///
 /// This behaves exactly as a `PayloadStream`, except that every time an item is polled,
 /// the accumulator is incremented by the size of the returned `Bytes` chunk.
-pub(crate) struct MeteredPayloadStream {
-    inner: PayloadStream,
-    accumulator: Arc<AtomicU64>,
+///
+/// The `Ingress` variant tracks upload bandwidth; `Egress` tracks download bandwidth.
+pub(crate) enum MeteredPayloadStream {
+    Ingress {
+        inner: PayloadStream,
+        accumulator: Arc<AtomicU64>,
+    },
+    Egress {
+        inner: PayloadStream,
+        accumulator: Arc<AtomicU64>,
+    },
 }
 
 impl MeteredPayloadStream {
-    pub fn from(inner: PayloadStream, accumulator: Arc<AtomicU64>) -> Self {
-        Self { inner, accumulator }
+    pub fn ingress(inner: PayloadStream, accumulator: Arc<AtomicU64>) -> Self {
+        Self::Ingress { inner, accumulator }
+    }
+
+    pub fn egress(inner: PayloadStream, accumulator: Arc<AtomicU64>) -> Self {
+        Self::Egress { inner, accumulator }
     }
 }
 
 impl std::fmt::Debug for MeteredPayloadStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeteredPayloadStream")
-            .field("accumulator", &self.accumulator)
-            .finish()
+        match self {
+            Self::Ingress { accumulator, .. } => f
+                .debug_struct("MeteredPayloadStream::Ingress")
+                .field("accumulator", accumulator)
+                .finish(),
+            Self::Egress { accumulator, .. } => f
+                .debug_struct("MeteredPayloadStream::Egress")
+                .field("accumulator", accumulator)
+                .finish(),
+        }
     }
 }
 
@@ -380,10 +437,14 @@ impl Stream for MeteredPayloadStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let res = this.inner.as_mut().poll_next(cx);
+        let (inner, accumulator) = match this {
+            Self::Ingress { inner, accumulator } | Self::Egress { inner, accumulator } => {
+                (inner, accumulator)
+            }
+        };
+        let res = inner.as_mut().poll_next(cx);
         if let Poll::Ready(Some(Ok(ref bytes))) = res {
-            this.accumulator
-                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            accumulator.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         res
     }

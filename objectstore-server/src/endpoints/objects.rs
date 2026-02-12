@@ -63,7 +63,7 @@ async fn object_get(
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let stream = state.wrap_stream(stream);
+    let stream = state.wrap_egress_stream(stream);
 
     let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
     Ok((headers, Body::from_stream(stream)).into_response())
