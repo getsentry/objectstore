@@ -62,12 +62,12 @@ impl Services {
     }
 
     /// Wraps a [`PayloadStream`] with ingress (upload) bandwidth metering for rate limiting.
-    pub fn wrap_ingress_stream(&self, stream: PayloadStream) -> PayloadStream {
+    pub fn meter_ingress_stream(&self, stream: PayloadStream) -> PayloadStream {
         MeteredPayloadStream::ingress(stream, self.rate_limiter.ingress_accumulator()).boxed()
     }
 
     /// Wraps a [`PayloadStream`] with egress (download) bandwidth metering for rate limiting.
-    pub fn wrap_egress_stream(&self, stream: PayloadStream) -> PayloadStream {
+    pub fn meter_egress_stream(&self, stream: PayloadStream) -> PayloadStream {
         MeteredPayloadStream::egress(stream, self.rate_limiter.egress_accumulator()).boxed()
     }
 }

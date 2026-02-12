@@ -114,7 +114,7 @@ async fn batch(
 
                         let result = match result {
                             Ok(Some((metadata, stream))) => {
-                                let metered_stream = state.wrap_egress_stream(stream);
+                                let metered_stream = state.meter_egress_stream(stream);
                                 match metered_stream.try_collect::<BytesMut>().await {
                                     Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
                                     Err(e) => Err(ApiError::Service(e.into())),
