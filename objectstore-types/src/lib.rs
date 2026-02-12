@@ -472,5 +472,4 @@ mod tests {
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.origin, metadata.origin);
     }
-
 }

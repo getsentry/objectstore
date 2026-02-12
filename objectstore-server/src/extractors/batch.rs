@@ -265,10 +265,7 @@ mod tests {
         assert_eq!(insert_op2.key, "test2");
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
-        assert_eq!(
-            insert_op2.metadata.origin.as_deref(),
-            Some("203.0.113.42")
-        );
+        assert_eq!(insert_op2.metadata.origin.as_deref(), Some("203.0.113.42"));
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
         let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {

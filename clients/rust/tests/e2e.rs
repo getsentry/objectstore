@@ -206,10 +206,7 @@ async fn stores_with_origin() {
         .key;
 
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(
-        response.metadata.origin.as_deref(),
-        Some("203.0.113.42")
-    );
+    assert_eq!(response.metadata.origin.as_deref(), Some("203.0.113.42"));
 }
 
 #[tokio::test]
