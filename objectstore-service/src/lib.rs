@@ -297,17 +297,19 @@ impl StorageService {
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
-        use crate::backend::common::DeleteDetectResult;
+        use crate::backend::common::TombstoneCheckResponse;
 
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
         let mut backend_type = self.0.high_volume_backend.name();
 
-        let result = self.0.high_volume_backend.delete_and_detect(id).await?;
-        if result == DeleteDetectResult::NoPayload {
-            // Tombstone or non-existent in high-volume: speculatively delete
-            // from long-term. Deleting a non-existent key returns Ok.
+        let result = self
+            .0
+            .high_volume_backend
+            .delete_and_check_tombstone(id)
+            .await?;
+        if result == TombstoneCheckResponse::Tombstone {
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
             self.0.long_term_backend.delete_object(id).await?;
@@ -375,6 +377,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::common::Backend as _;
 
     fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
@@ -433,5 +436,56 @@ mod tests {
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_redirect_and_delete() {
+        let high_volume = StorageConfig::BigTable {
+            endpoint: Some("localhost:8086"),
+            project_id: "testing",
+            instance_name: "objectstore",
+            table_name: "objectstore",
+            connections: None,
+        };
+        let long_term = StorageConfig::Gcs {
+            endpoint: Some("http://localhost:8087"),
+            bucket: "test-bucket",
+        };
+        let service = StorageService::new(high_volume, long_term).await.unwrap();
+
+        // A separate GCS backend to directly inspect the long-term storage.
+        let gcs_backend =
+            backend::gcs::GcsBackend::new(Some("http://localhost:8087"), "test-bucket")
+                .await
+                .unwrap();
+
+        // Insert a >1 MiB object with a key.  This forces the long-term path:
+        // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
+        let payload = vec![0xAB; 2 * 1024 * 1024]; // 2 MiB
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("delete-cleanup-test".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: the object is readable through the service (follows the tombstone).
+        let (_, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), payload.len());
+
+        // Delete through the service layer.
+        service.delete_object(&id).await.unwrap();
+
+        // The tombstone in BigTable should be gone, so the service returns None.
+        let after_delete = service.get_object(&id).await.unwrap();
+        assert!(after_delete.is_none(), "tombstone not deleted");
+
+        // The real object in GCS must also be gone — no orphan.
+        let orphan = gcs_backend.get_object(&id).await.unwrap();
+        assert!(orphan.is_none(), "object leaked");
     }
 }

@@ -10,7 +10,7 @@ use tokio::runtime::Handle;
 use tonic::Code;
 
 use crate::backend::common::{
-    Backend, DeleteDetectResult, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse, TombstoneCheckResponse,
 };
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
@@ -343,15 +343,12 @@ impl Backend for BigTableBackend {
             row_ranges: vec![],
         };
 
+        // Read the full row (no column filter) so we have the payload
+        // available for TTI bumps, which rewrite the entire row.
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(rows),
             rows_limit: 1,
-            filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-                    b"^m$".to_vec(),
-                )),
-            }),
             ..Default::default()
         };
 
@@ -384,18 +381,25 @@ impl Backend for BigTableBackend {
             return Ok(None);
         };
 
+        let mut value = Vec::new();
         let mut metadata = Metadata::default();
         let mut expire_at = None;
 
         for cell in cells {
-            if cell.qualifier.as_slice() == COLUMN_METADATA {
-                metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                    ServiceError::Serde {
-                        context: "failed to deserialize metadata".to_string(),
-                        cause,
-                    }
-                })?;
-                expire_at = micros_to_time(cell.timestamp_micros);
+            match cell.qualifier.as_ref() {
+                self::COLUMN_PAYLOAD => {
+                    value = cell.value;
+                    expire_at = micros_to_time(cell.timestamp_micros);
+                }
+                self::COLUMN_METADATA => {
+                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
+                        ServiceError::Serde {
+                            context: "failed to deserialize metadata".to_string(),
+                            cause,
+                        }
+                    })?;
+                }
+                _ => {}
             }
         }
 
@@ -409,8 +413,13 @@ impl Backend for BigTableBackend {
             return Ok(None);
         }
 
-        // Skip TTI bump for metadata-only reads — a HEAD request or tombstone
-        // check should not extend idle time.
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
+            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
+        {
+            let _ = self
+                .put_row(path.clone(), &metadata, value, "tti-bump")
+                .await;
+        }
 
         Ok(Some(metadata))
     }
@@ -429,7 +438,10 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_and_detect(&self, id: &ObjectId) -> ServiceResult<DeleteDetectResult> {
+    async fn delete_and_check_tombstone(
+        &self,
+        id: &ObjectId,
+    ) -> ServiceResult<TombstoneCheckResponse> {
         tracing::debug!("Delete-and-detect from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -439,13 +451,30 @@ impl Backend for BigTableBackend {
             )),
         };
 
+        // Detect tombstones by checking the metadata column for the
+        // `is_redirect_tombstone` marker.  We cannot use payload-column
+        // presence because `put_row` always writes a `p` cell — even for
+        // tombstones (with empty bytes).
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
             predicate_filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-                    b"^p$".to_vec(),
-                )),
+                filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                    filters: vec![
+                        v2::RowFilter {
+                            filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                                b"^m$".to_vec(),
+                            )),
+                        },
+                        v2::RowFilter {
+                            filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                                // RE2 full-match: .* anchors required since the
+                                // regex must match the entire cell value.
+                                b".*\"is_redirect_tombstone\":true.*".to_vec(),
+                            )),
+                        },
+                    ],
+                })),
             }),
             true_mutations: vec![delete_mutation.clone()],
             false_mutations: vec![delete_mutation],
@@ -461,22 +490,25 @@ impl Backend for BigTableBackend {
             match response {
                 Ok(res) => {
                     return if res.predicate_matched {
-                        Ok(DeleteDetectResult::HadPayload)
+                        Ok(TombstoneCheckResponse::Tombstone)
                     } else {
-                        Ok(DeleteDetectResult::NoPayload)
+                        Ok(TombstoneCheckResponse::Object)
                     };
                 }
                 Err(e) => {
                     if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.mutate_failures": 1, "action" => "delete_and_detect");
+                        merni::counter!("bigtable.mutate_failures": 1, "action" => "delete_and_check_tombstone");
                         return Err(ServiceError::Generic {
-                            context: "Bigtable: failed check_and_mutate_row performing a `delete_and_detect`".to_string(),
+                            context: "Bigtable: failed check_and_mutate_row performing a `delete_and_check_tombstone`".to_string(),
                             cause: Some(Box::new(e)),
                         });
                     }
                     retry_count += 1;
-                    merni::counter!("bigtable.mutate_retry": 1, "action" => "delete_and_detect");
-                    tracing::debug!(retry_count = retry_count, "Retrying delete_and_detect");
+                    merni::counter!("bigtable.mutate_retry": 1, "action" => "delete_and_check_tombstone");
+                    tracing::debug!(
+                        retry_count = retry_count,
+                        "Retrying delete_and_check_tombstone"
+                    );
                 }
             }
         }
@@ -756,9 +788,7 @@ mod tests {
         };
 
         // Write a tombstone (no real payload, just metadata)
-        backend
-            .put_object(&id, &metadata, make_stream(b""))
-            .await?;
+        backend.put_object(&id, &metadata, make_stream(b"")).await?;
 
         let meta = backend.get_metadata(&id).await?.unwrap();
         assert_eq!(meta.is_redirect_tombstone, Some(true));
@@ -767,7 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_and_detect_real_object() -> Result<()> {
+    async fn test_delete_and_check_tombstone_real_object() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -777,10 +807,9 @@ mod tests {
             .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let result = backend.delete_and_detect(&id).await?;
-        assert_eq!(result, DeleteDetectResult::HadPayload);
+        let result = backend.delete_and_check_tombstone(&id).await?;
+        assert_eq!(result, TombstoneCheckResponse::Object);
 
-        // Verify it's gone
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
 
@@ -788,7 +817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_and_detect_tombstone() -> Result<()> {
+    async fn test_delete_and_check_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -797,21 +826,11 @@ mod tests {
             ..Default::default()
         };
 
-        // Tombstones still have a payload column (empty bytes), so
-        // CheckAndMutateRow will match the payload column.
-        backend
-            .put_object(&id, &metadata, make_stream(b""))
-            .await?;
+        backend.put_object(&id, &metadata, make_stream(b"")).await?;
 
-        let result = backend.delete_and_detect(&id).await?;
-        // The put_row always writes a payload column, even for tombstones.
-        // For the service layer, the key distinction is tombstone vs not-found.
-        assert!(
-            result == DeleteDetectResult::HadPayload
-                || result == DeleteDetectResult::NoPayload
-        );
+        let result = backend.delete_and_check_tombstone(&id).await?;
+        assert_eq!(result, TombstoneCheckResponse::Tombstone);
 
-        // Verify it's gone
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
 
@@ -819,12 +838,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_and_detect_nonexistent() -> Result<()> {
+    async fn test_delete_and_check_tombstone_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let result = backend.delete_and_detect(&id).await?;
-        assert_eq!(result, DeleteDetectResult::NoPayload);
+        let result = backend.delete_and_check_tombstone(&id).await?;
+        assert_eq!(result, TombstoneCheckResponse::Object);
 
         Ok(())
     }

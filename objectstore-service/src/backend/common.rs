@@ -19,13 +19,13 @@ pub(super) type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub(super) type DeleteResponse = ();
 
-/// Result of a delete operation that also detects whether the row had a payload.
+/// Response from [`Backend::delete_and_check_tombstone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeleteDetectResult {
-    /// Row had a payload column — real object in this backend.
-    HadPayload,
-    /// Row had no payload column — tombstone or non-existent.
-    NoPayload,
+pub(crate) enum TombstoneCheckResponse {
+    /// The deleted entity was a redirect tombstone.
+    Tombstone,
+    /// The deleted entity was a regular object or non-existent.
+    Object,
 }
 
 /// A type-erased [`Backend`] instance.
@@ -49,26 +49,27 @@ pub trait Backend: Debug + Send + Sync + 'static {
 
     /// Retrieves only the metadata for an object, without the payload.
     async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
-        Ok(self.get_object(id).await?.map(|(metadata, _stream)| metadata))
+        Ok(self
+            .get_object(id)
+            .await?
+            .map(|(metadata, _stream)| metadata))
     }
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse>;
 
-    /// Deletes the object and reports whether it had a payload column.
-    async fn delete_and_detect(&self, id: &ObjectId) -> ServiceResult<DeleteDetectResult> {
+    /// Deletes the object and reports whether it was a redirect tombstone.
+    async fn delete_and_check_tombstone(
+        &self,
+        id: &ObjectId,
+    ) -> ServiceResult<TombstoneCheckResponse> {
         let metadata = self.get_metadata(id).await?;
-        match metadata {
-            Some(m) if m.is_redirect_tombstone == Some(true) => {
-                self.delete_object(id).await?;
-                Ok(DeleteDetectResult::NoPayload)
-            }
-            Some(_) => {
-                self.delete_object(id).await?;
-                Ok(DeleteDetectResult::HadPayload)
-            }
-            None => Ok(DeleteDetectResult::NoPayload),
-        }
+        let result = match metadata {
+            Some(m) if m.is_redirect_tombstone == Some(true) => TombstoneCheckResponse::Tombstone,
+            _ => TombstoneCheckResponse::Object,
+        };
+        self.delete_object(id).await?;
+        Ok(result)
     }
 }
 
