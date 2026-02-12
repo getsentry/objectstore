@@ -60,8 +60,7 @@ impl Services {
         }))
     }
 
-    /// Utility to convert a [`PayloadStream`] into a [`MeteredPayloadStream`] for bandwidth rate
-    /// limits and metrics.
+    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
     pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
         MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
     }

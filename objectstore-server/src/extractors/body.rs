@@ -8,8 +8,7 @@ use objectstore_service::PayloadStream;
 
 use crate::state::ServiceState;
 
-/// An extractor that converts the request body into a
-/// [`crate::rate_limits::MeteredPayloadStream`].
+/// An extractor that converts the request body into a metered [`PayloadStream`].
 pub struct MeteredBody(pub PayloadStream);
 
 impl std::fmt::Debug for MeteredBody {
