@@ -100,7 +100,8 @@ impl ThroughputRule {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct BandwidthLimits {
-    /// The overall maximum bandwidth (in bytes per second) per service instance.
+    /// The maximum bandwidth (in bytes per second) per service instance, applied independently
+    /// to ingress and egress.
     ///
     /// Defaults to `None`, meaning no global bandwidth limit is enforced.
     pub global_bps: Option<u64>,
@@ -225,7 +226,7 @@ impl BandwidthRateLimiter {
         let egress = self
             .egress_estimate
             .load(std::sync::atomic::Ordering::Relaxed);
-        ingress.saturating_add(egress) <= bps
+        ingress <= bps && egress <= bps
     }
 }
 
