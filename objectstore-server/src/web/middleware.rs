@@ -60,14 +60,21 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 /// A middleware that logs web request timings as metrics.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
+///
+/// Health check endpoints (`/health` and `/ready`) are excluded from metrics as they are
+/// operational checks for orchestration.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
-    let guard = EmitMetricsGuard::new(route, request.method());
+
+    let should_emit = !matches!(route, "/health" | "/ready");
+    let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method()));
 
     let response = next.run(request).await;
 
-    guard.finish(response.status());
+    if let Some(guard) = guard {
+        guard.finish(response.status());
+    }
     response
 }
 
