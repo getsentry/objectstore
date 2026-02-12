@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -20,7 +21,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
-/// How often to retry failed `mutate` operations
+/// How often to retry failed requests.
 const REQUEST_RETRY_COUNT: usize = 2;
 
 /// Column that stores the raw payload (compressed).
@@ -182,6 +183,32 @@ impl BigTableBackend {
         })
     }
 
+    /// Retries a BigTable RPC on transient errors.
+    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> ServiceResult<T>
+    where
+        F: Future<Output = Result<T, BigTableError>> + Send,
+    {
+        let mut retry_count = 0usize;
+
+        loop {
+            match f().await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.failures": 1, "action" => action);
+                        return Err(ServiceError::Generic {
+                            context: format!("Bigtable: `{action}` failed"),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.retries": 1, "action" => action);
+                    tracing::warn!(retry_count, action, "Retrying request");
+                }
+            }
+        }
+    }
+
     /// Reads a single row by key, returning parsed row data.
     ///
     /// Returns `None` if the row is absent or has expired.
@@ -202,28 +229,11 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        let response = loop {
-            let response = client.read_rows(request.clone()).await;
-
-            match response {
-                Ok(res) => break res,
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.read_failures": 1, "action" => action);
-                        return Err(ServiceError::Generic {
-                            context: format!("Bigtable: failed to read row for `{action}`"),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.read_retry": 1, "action" => action);
-                    tracing::warn!(retry_count, action, "Retrying read");
-                }
-            }
-        };
+        let response = self
+            .with_retry(action, || async {
+                self.bigtable.client().read_rows(request.clone()).await
+            })
+            .await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((_, cells)) = response.into_iter().next() else {
@@ -259,67 +269,13 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let mut client = self.bigtable.client();
+        let response = self
+            .with_retry(action, || async {
+                self.bigtable.client().mutate_row(request.clone()).await
+            })
+            .await?;
 
-        let mut retry_count = 0;
-        loop {
-            let response = client
-                .mutate_row(request.clone())
-                .await
-                .map(|res| res.into_inner());
-
-            match response {
-                Ok(res) => return Ok(res),
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.mutate_failures": 1, "action" => action);
-                        return Err(ServiceError::Generic {
-                            context: format!(
-                                "Bigtable: failed mutating row performing a `{action}`"
-                            ),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.mutate_retry": 1, "action" => action);
-                    tracing::debug!(retry_count = retry_count, action, "Retrying mutate");
-                }
-            }
-        }
-    }
-
-    /// Atomically checks a predicate and applies mutations, with retries.
-    ///
-    /// Returns `true` if the predicate matched.
-    async fn check_and_mutate(
-        &self,
-        request: v2::CheckAndMutateRowRequest,
-        action: &str,
-    ) -> ServiceResult<bool> {
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        loop {
-            let response = client.check_and_mutate_row(request.clone()).await;
-
-            match response {
-                Ok(res) => return Ok(res.predicate_matched),
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.mutate_failures": 1, "action" => action);
-                        return Err(ServiceError::Generic {
-                            context: format!(
-                                "Bigtable: failed check_and_mutate_row for `{action}`"
-                            ),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.mutate_retry": 1, "action" => action);
-                    tracing::debug!(retry_count, action, "Retrying check_and_mutate");
-                }
-            }
-        }
+        Ok(response.into_inner())
     }
 
     async fn put_row(
@@ -485,8 +441,15 @@ impl Backend for BigTableBackend {
         };
 
         let is_tombstone = self
-            .check_and_mutate(request, "delete_and_check_tombstone")
-            .await?;
+            .with_retry("delete_and_check_tombstone", || async {
+                self.bigtable
+                    .client()
+                    .check_and_mutate_row(request.clone())
+                    .await
+            })
+            .await?
+            .predicate_matched;
+
         if is_tombstone {
             Ok(TombstoneCheckResponse::Tombstone)
         } else {
