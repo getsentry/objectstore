@@ -1,13 +1,15 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use objectstore_service::{StorageConfig, StorageService};
+use futures_util::StreamExt;
+use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
-use crate::rate_limits::RateLimiter;
+use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
 
 /// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
@@ -57,6 +59,12 @@ impl Services {
             key_directory,
             rate_limiter,
         }))
+    }
+
+    /// Utility to convert a [`PayloadStream`] into a [`MeteredPayloadStream`] for bandwidth rate
+    /// limits and metrics.
+    pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
+        MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
     }
 }
 
