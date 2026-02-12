@@ -2,7 +2,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError};
+use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::{ExpirationPolicy, Metadata};
@@ -83,6 +83,63 @@ fn is_retryable(error: &BigTableError) -> bool {
     }
 }
 
+/// Creates a row filter that matches a single column by exact qualifier.
+fn column_filter(column: &[u8]) -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+            [b"^", column, b"$"].concat(),
+        )),
+    }
+}
+
+/// Parsed data from a BigTable row's cells.
+struct RowData {
+    metadata: Metadata,
+    payload: Vec<u8>,
+}
+
+impl RowData {
+    fn from_cells(cells: Vec<RowCell>) -> ServiceResult<Self> {
+        let mut metadata = Metadata::default();
+        let mut expire_at = None;
+        let mut payload = Vec::new();
+
+        for cell in cells {
+            match cell.qualifier.as_slice() {
+                COLUMN_PAYLOAD => {
+                    payload = cell.value;
+                    expire_at = micros_to_time(cell.timestamp_micros);
+                }
+                COLUMN_METADATA => {
+                    expire_at = micros_to_time(cell.timestamp_micros);
+                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
+                        ServiceError::Serde {
+                            context: "failed to deserialize metadata".to_string(),
+                            cause,
+                        }
+                    })?;
+                }
+                _ => {}
+            }
+        }
+
+        metadata.time_expires = expire_at;
+        Ok(Self { metadata, payload })
+    }
+
+    fn expires_before(&self, time: SystemTime) -> bool {
+        self.metadata.time_expires.is_some_and(|ts| ts < time)
+    }
+
+    /// Returns `true` if this object's TTI deadline should be bumped.
+    fn needs_tti_bump(&self) -> bool {
+        matches!(
+            self.metadata.expiration_policy,
+            ExpirationPolicy::TimeToIdle(tti) if self.expires_before(SystemTime::now() + tti - TTI_DEBOUNCE)
+        )
+    }
+}
+
 impl BigTableBackend {
     pub async fn new(
         endpoint: Option<&str>,
@@ -101,7 +158,7 @@ impl BigTableBackend {
             )?
         } else {
             let token_provider = gcp_auth::provider().await?;
-            // TODO on connections: Idle connections are automatically closed in “a few minutes”.
+            // TODO on connections: Idle connections are automatically closed in "a few minutes".
             // We need to make sure that on longer idle periods the channels are re-opened.
             let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
 
@@ -123,6 +180,63 @@ impl BigTableBackend {
             table_path: client.get_full_table_name(table_name),
             table_name: table_name.to_owned(),
         })
+    }
+
+    /// Reads a single row by key, returning parsed row data.
+    ///
+    /// Returns `None` if the row is absent or has expired.
+    async fn read_row(
+        &self,
+        path: &[u8],
+        filter: Option<v2::RowFilter>,
+        action: &str,
+    ) -> ServiceResult<Option<RowData>> {
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(v2::RowSet {
+                row_keys: vec![path.to_owned()],
+                row_ranges: vec![],
+            }),
+            filter,
+            rows_limit: 1,
+            ..Default::default()
+        };
+
+        let mut client = self.bigtable.client();
+
+        let mut retry_count = 0;
+        let response = loop {
+            let response = client.read_rows(request.clone()).await;
+
+            match response {
+                Ok(res) => break res,
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.read_failures": 1, "action" => action);
+                        return Err(ServiceError::Generic {
+                            context: format!("Bigtable: failed to read row for `{action}`"),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.read_retry": 1, "action" => action);
+                    tracing::warn!(retry_count, action, "Retrying read");
+                }
+            }
+        };
+        debug_assert!(response.len() <= 1, "Expected at most one row");
+
+        let Some((_, cells)) = response.into_iter().next() else {
+            tracing::debug!("Object not found");
+            return Ok(None);
+        };
+
+        let row = RowData::from_cells(cells)?;
+        if row.metadata.expiration_policy.is_timeout() && row.expires_before(SystemTime::now()) {
+            return Ok(None);
+        }
+
+        Ok(Some(row))
     }
 
     async fn mutate<I>(
@@ -174,6 +288,40 @@ impl BigTableBackend {
         }
     }
 
+    /// Atomically checks a predicate and applies mutations, with retries.
+    ///
+    /// Returns `true` if the predicate matched.
+    async fn check_and_mutate(
+        &self,
+        request: v2::CheckAndMutateRowRequest,
+        action: &str,
+    ) -> ServiceResult<bool> {
+        let mut client = self.bigtable.client();
+
+        let mut retry_count = 0;
+        loop {
+            let response = client.check_and_mutate_row(request.clone()).await;
+
+            match response {
+                Ok(res) => return Ok(res.predicate_matched),
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.mutate_failures": 1, "action" => action);
+                        return Err(ServiceError::Generic {
+                            context: format!(
+                                "Bigtable: failed check_and_mutate_row for `{action}`"
+                            ),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.mutate_retry": 1, "action" => action);
+                    tracing::debug!(retry_count, action, "Retrying check_and_mutate");
+                }
+            }
+        }
+    }
+
     async fn put_row(
         &self,
         path: Vec<u8>,
@@ -181,12 +329,11 @@ impl BigTableBackend {
         payload: Vec<u8>,
         action: &str,
     ) -> ServiceResult<v2::MutateRowResponse> {
-        // TODO: Inject the access time from the request.
-        let access_time = SystemTime::now();
+        let now = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, access_time)?),
-            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, access_time)?),
+            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
+            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
         };
 
         let mutations = [
@@ -209,61 +356,6 @@ impl BigTableBackend {
             }),
         ];
         self.mutate(path, mutations, action).await
-    }
-
-    /// Reads only the payload column (`p`) for the given row key.
-    async fn read_payload(&self, path: &[u8]) -> ServiceResult<Option<Vec<u8>>> {
-        let rows = v2::RowSet {
-            row_keys: vec![path.to_owned()],
-            row_ranges: vec![],
-        };
-
-        let request = v2::ReadRowsRequest {
-            table_name: self.table_path.clone(),
-            rows: Some(rows),
-            filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-                    b"^p$".to_vec(),
-                )),
-            }),
-            rows_limit: 1,
-            ..Default::default()
-        };
-
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        let response = loop {
-            let response = client.read_rows(request.clone()).await;
-
-            match response {
-                Ok(res) => break res,
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.read_failures": 1);
-                        return Err(ServiceError::Generic {
-                            context: "Bigtable: failed to read payload for TTI bump".to_string(),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.read_retry": 1);
-                    tracing::warn!(retry_count = retry_count, "Retrying payload read");
-                }
-            }
-        };
-
-        let Some((_read_path, cells)) = response.into_iter().next() else {
-            return Ok(None);
-        };
-
-        for cell in cells {
-            if cell.qualifier.as_slice() == self::COLUMN_PAYLOAD {
-                return Ok(Some(cell.value));
-            }
-        }
-
-        Ok(None)
     }
 }
 
@@ -296,183 +388,47 @@ impl Backend for BigTableBackend {
     async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
-        let rows = v2::RowSet {
-            row_keys: vec![path.clone()],
-            row_ranges: vec![],
-        };
 
-        let request = v2::ReadRowsRequest {
-            table_name: self.table_path.clone(),
-            rows: Some(rows),
-            rows_limit: 1,
-            ..Default::default()
-        };
-
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        let response = loop {
-            let response = client.read_rows(request.clone()).await;
-
-            match response {
-                Ok(res) => break res,
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.read_failures": 1);
-                        return Err(ServiceError::Generic {
-                            context: "Bigtable: failed to read rows".to_string(),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.read_retry": 1);
-                    tracing::warn!(retry_count = retry_count, "Retrying read");
-                }
-            }
-        };
-        debug_assert!(response.len() <= 1, "Expected at most one row");
-
-        let Some((read_path, cells)) = response.into_iter().next() else {
-            tracing::debug!("Object not found");
+        let Some(row) = self.read_row(&path, None, "get").await? else {
             return Ok(None);
         };
 
-        debug_assert!(read_path == path, "Row key mismatch");
-        let mut value = Vec::new();
-        let mut metadata = Metadata::default();
-        let mut expire_at = None;
-
-        for cell in cells {
-            match cell.qualifier.as_ref() {
-                self::COLUMN_PAYLOAD => {
-                    value = cell.value;
-                    expire_at = micros_to_time(cell.timestamp_micros);
-                    // TODO: Log if the timestamp is invalid.
-                }
-                self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                        ServiceError::Serde {
-                            context: "failed to deserialize metadata".to_string(),
-                            cause,
-                        }
-                    })?;
-                }
-                _ => {
-                    // TODO: Log unknown column
-                }
-            }
-        }
-
-        // TODO: Inject the access time from the request.
-        let access_time = SystemTime::now();
-        metadata.size = Some(value.len());
-        metadata.time_expires = expire_at;
-
-        // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
-            tracing::debug!("Object found but past expiry");
-            return Ok(None);
-        }
-
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
-            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
-        {
-            // TODO: Only bump if the difference in deadlines meets a minimum threshold
+        if row.needs_tti_bump() {
             // TODO: Schedule into background persistently so this doesn't get lost on restarts
-            // `put_row` will internally log an error, so no need to duplicate that here
             let _ = self
-                .put_row(path.clone(), &metadata, value.clone(), "tti-bump")
+                .put_row(path, &row.metadata, row.payload.clone(), "tti-bump")
                 .await;
         }
 
-        let stream = stream::once(async { Ok(value.into()) }).boxed();
-        Ok(Some((metadata, stream)))
+        let stream = stream::once(async { Ok(row.payload.into()) }).boxed();
+        Ok(Some((row.metadata, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
-        let rows = v2::RowSet {
-            row_keys: vec![path.clone()],
-            row_ranges: vec![],
-        };
 
         // Only read the metadata column — skip the (potentially large) payload.
-        let request = v2::ReadRowsRequest {
-            table_name: self.table_path.clone(),
-            rows: Some(rows),
-            filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-                    b"^m$".to_vec(),
-                )),
-            }),
-            rows_limit: 1,
-            ..Default::default()
-        };
-
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        let response = loop {
-            let response = client.read_rows(request.clone()).await;
-
-            match response {
-                Ok(res) => break res,
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.read_failures": 1);
-                        return Err(ServiceError::Generic {
-                            context: "Bigtable: failed to read rows for metadata".to_string(),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.read_retry": 1);
-                    tracing::warn!(retry_count = retry_count, "Retrying metadata read");
-                }
-            }
-        };
-        debug_assert!(response.len() <= 1, "Expected at most one row");
-
-        let Some((_read_path, cells)) = response.into_iter().next() else {
-            tracing::debug!("Object not found");
+        let Some(row) = self
+            .read_row(&path, Some(column_filter(COLUMN_METADATA)), "get_metadata")
+            .await?
+        else {
             return Ok(None);
         };
-
-        let mut metadata = Metadata::default();
-        let mut expire_at = None;
-
-        for cell in cells {
-            if cell.qualifier.as_slice() == self::COLUMN_METADATA {
-                expire_at = micros_to_time(cell.timestamp_micros);
-                metadata =
-                    serde_json::from_slice(&cell.value).map_err(|cause| ServiceError::Serde {
-                        context: "failed to deserialize metadata".to_string(),
-                        cause,
-                    })?;
-            }
-        }
-
-        // TODO: Inject the access time from the request.
-        let access_time = SystemTime::now();
-        metadata.time_expires = expire_at;
-
-        // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
-            tracing::debug!("Object found but past expiry");
-            return Ok(None);
-        }
 
         // Conditional TTI bump: read the payload only when a bump is actually needed.
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
-            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
-            && let Some(payload) = self.read_payload(&path).await?
+        if row.needs_tti_bump()
+            && let Some(payload_row) = self
+                .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
+                .await?
         {
-            let _ = self.put_row(path, &metadata, payload, "tti-bump").await;
+            let _ = self
+                .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
+                .await;
         }
 
-        Ok(Some(metadata))
+        Ok(Some(row.metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -512,11 +468,7 @@ impl Backend for BigTableBackend {
             predicate_filter: Some(v2::RowFilter {
                 filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
                     filters: vec![
-                        v2::RowFilter {
-                            filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-                                b"^m$".to_vec(),
-                            )),
-                        },
+                        column_filter(COLUMN_METADATA),
                         v2::RowFilter {
                             filter: Some(v2::row_filter::Filter::ValueRegexFilter(
                                 // RE2 full-match: .* anchors required since the
@@ -532,36 +484,13 @@ impl Backend for BigTableBackend {
             ..Default::default()
         };
 
-        let mut client = self.bigtable.client();
-
-        let mut retry_count = 0;
-        loop {
-            let response = client.check_and_mutate_row(request.clone()).await;
-
-            match response {
-                Ok(res) => {
-                    return if res.predicate_matched {
-                        Ok(TombstoneCheckResponse::Tombstone)
-                    } else {
-                        Ok(TombstoneCheckResponse::Object)
-                    };
-                }
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.mutate_failures": 1, "action" => "delete_and_check_tombstone");
-                        return Err(ServiceError::Generic {
-                            context: "Bigtable: failed check_and_mutate_row performing a `delete_and_check_tombstone`".to_string(),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    merni::counter!("bigtable.mutate_retry": 1, "action" => "delete_and_check_tombstone");
-                    tracing::debug!(
-                        retry_count = retry_count,
-                        "Retrying delete_and_check_tombstone"
-                    );
-                }
-            }
+        let is_tombstone = self
+            .check_and_mutate(request, "delete_and_check_tombstone")
+            .await?;
+        if is_tombstone {
+            Ok(TombstoneCheckResponse::Tombstone)
+        } else {
+            Ok(TombstoneCheckResponse::Object)
         }
     }
 }
