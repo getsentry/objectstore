@@ -155,6 +155,23 @@ def test_full_cycle(server_url: str) -> None:
     assert exc_info.value.status == 404
 
 
+def test_full_cycle_with_origin(server_url: str) -> None:
+    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(b"test data", origin="203.0.113.42")
+    assert object_key is not None
+
+    retrieved = session.get(object_key)
+    assert retrieved.payload.read() == b"test data"
+    assert retrieved.metadata.origin == "203.0.113.42"
+
+
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(server_url, token_generator=TestTokenGenerator.get())
     test_usecase = Usecase(

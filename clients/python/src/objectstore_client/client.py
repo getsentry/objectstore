@@ -15,6 +15,7 @@ from objectstore_client.auth import TokenGenerator
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
+    HEADER_ORIGIN,
     Compression,
     ExpirationPolicy,
     Metadata,
@@ -247,6 +248,7 @@ class Session:
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -279,6 +281,9 @@ class Session:
         expiration_policy = expiration_policy or self._usecase._expiration_policy
         if expiration_policy:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+
+        if origin:
+            headers[HEADER_ORIGIN] = origin
 
         if metadata:
             for k, v in metadata.items():

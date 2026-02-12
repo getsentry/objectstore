@@ -117,6 +117,28 @@ impl PutBuilder {
         self
     }
 
+    /// Sets the origin of the object, typically the IP address of the original source.
+    ///
+    /// This is an optional but encouraged field that tracks where the payload was
+    /// originally obtained from. For example, the IP address of the Sentry SDK or CLI
+    /// that uploaded the data.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) {
+    /// session.put("data")
+    ///     .origin("203.0.113.42")
+    ///     .send()
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    pub fn origin(mut self, origin: impl Into<String>) -> Self {
+        self.metadata.origin = Some(origin.into());
+        self
+    }
+
     /// This sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.

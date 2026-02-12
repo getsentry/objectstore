@@ -143,6 +143,7 @@ mod tests {
             time_created: Some(SystemTime::now()),
             time_expires: None,
             compression: Some(Compression::Zstd),
+            origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,
         };

@@ -28,6 +28,8 @@ pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
 /// The custom HTTP header that contains the object expiration time.
 pub const HEADER_TIME_EXPIRES: &str = "x-sn-time-expires";
+/// The custom HTTP header that contains the origin of the object.
+pub const HEADER_ORIGIN: &str = "x-sn-origin";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -249,6 +251,13 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
+    /// The origin of the object, typically the IP address of the original source.
+    ///
+    /// This is an optional but encouraged field that tracks where the payload was
+    /// originally obtained from (e.g., the IP of a Sentry SDK or CLI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+
     /// Size of the data in bytes, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
@@ -304,6 +313,9 @@ impl Metadata {
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_expires = Some(time);
                         }
+                        HEADER_ORIGIN => {
+                            metadata.origin = Some(value.to_str()?.to_owned());
+                        }
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
@@ -329,6 +341,7 @@ impl Metadata {
             is_redirect_tombstone,
             content_type,
             compression,
+            origin,
             expiration_policy,
             time_created,
             time_expires,
@@ -368,6 +381,10 @@ impl Metadata {
             let timestamp = format_rfc3339_micros(*time);
             headers.append(name, timestamp.to_string().parse()?);
         }
+        if let Some(origin) = origin {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_ORIGIN}"))?;
+            headers.append(name, origin.parse()?);
+        }
 
         // customer-provided metadata
         for (key, value) in custom {
@@ -395,8 +412,64 @@ impl Default for Metadata {
             time_expires: None,
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
+            origin: None,
             size: None,
             custom: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_headers_with_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        headers.insert(HEADER_ORIGIN, "203.0.113.42".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.origin.as_deref(), Some("203.0.113.42"));
+        assert_eq!(metadata.content_type, "text/plain");
+    }
+
+    #[test]
+    fn from_headers_without_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert!(metadata.origin.is_none());
+    }
+
+    #[test]
+    fn to_headers_with_origin() {
+        let metadata = Metadata {
+            origin: Some("203.0.113.42".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("", false).unwrap();
+        assert_eq!(headers.get(HEADER_ORIGIN).unwrap(), "203.0.113.42");
+    }
+
+    #[test]
+    fn to_headers_without_origin() {
+        let metadata = Metadata::default();
+        let headers = metadata.to_headers("", false).unwrap();
+        assert!(headers.get(HEADER_ORIGIN).is_none());
+    }
+
+    #[test]
+    fn origin_header_roundtrip() {
+        let metadata = Metadata {
+            origin: Some("203.0.113.42".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("", false).unwrap();
+        let roundtripped = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(roundtripped.origin, metadata.origin);
     }
 }
