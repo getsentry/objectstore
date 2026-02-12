@@ -5,7 +5,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -227,6 +227,41 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        tracing::debug!("Reading metadata from s3_compatible backend");
+        let object_url = self.object_url(id);
+
+        let response = self
+            .request(Method::HEAD, &object_url)
+            .await?
+            .send()
+            .await
+            .map_err(|cause| ServiceError::Reqwest {
+                context: "S3: failed to send head request".to_string(),
+                cause,
+            })?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
+            return Ok(None);
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|cause| ServiceError::Reqwest {
+                context: "S3: failed to head object".to_string(),
+                cause,
+            })?;
+
+        let metadata = Metadata::from_headers(response.headers(), GCS_CUSTOM_PREFIX)?;
+
+        // Skip TTI bump for metadata-only reads — a HEAD request or tombstone
+        // check should not extend idle time.
+
+        Ok(Some(metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]

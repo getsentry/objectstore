@@ -33,6 +33,8 @@ enum BackendChoice {
 
 /// Service response for get operations.
 pub type GetResponse = Option<(Metadata, PayloadStream)>;
+/// Service response for metadata-only get operations.
+pub type MetadataResponse = Option<Metadata>;
 /// Service response for insert operations.
 pub type InsertResponse = ObjectId;
 /// Service response for delete operations.
@@ -147,8 +149,8 @@ impl StorageService {
 
         // There might currently be a tombstone at the given path from a previously stored object.
         if has_key {
-            let previously_stored_object = self.0.high_volume_backend.get_object(&id).await?;
-            if is_tombstoned(&previously_stored_object) {
+            let metadata = self.0.high_volume_backend.get_metadata(&id).await?;
+            if matches!(&metadata, Some(m) if m.is_redirect_tombstone == Some(true)) {
                 // Write the object to the other backend and keep the tombstone in place
                 backend = BackendChoice::LongTerm;
             }
@@ -232,6 +234,30 @@ impl StorageService {
         Ok(id)
     }
 
+    /// Retrieves only the metadata for an object, without downloading the payload.
+    pub async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        let start = Instant::now();
+
+        let mut backend_choice = "high-volume";
+        let mut backend_type = self.0.high_volume_backend.name();
+        let mut result = self.0.high_volume_backend.get_metadata(id).await?;
+
+        if matches!(&result, Some(m) if m.is_redirect_tombstone == Some(true)) {
+            result = self.0.long_term_backend.get_metadata(id).await?;
+            backend_choice = "long-term";
+            backend_type = self.0.long_term_backend.name();
+        }
+
+        merni::distribution!(
+            "head.latency"@s: start.elapsed(),
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
+
+        Ok(result)
+    }
+
     /// Streams the contents of an object stored at the given key.
     pub async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         let start = Instant::now();
@@ -271,18 +297,20 @@ impl StorageService {
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
+        use crate::backend::common::DeleteDetectResult;
+
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
         let mut backend_type = self.0.high_volume_backend.name();
 
-        if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
-            if metadata.is_redirect_tombstone == Some(true) {
-                backend_choice = "long-term";
-                backend_type = self.0.long_term_backend.name();
-                self.0.long_term_backend.delete_object(id).await?;
-            }
-            self.0.high_volume_backend.delete_object(id).await?;
+        let result = self.0.high_volume_backend.delete_and_detect(id).await?;
+        if result == DeleteDetectResult::NoPayload {
+            // Tombstone or non-existent in high-volume: speculatively delete
+            // from long-term. Deleting a non-existent key returns Ok.
+            backend_choice = "long-term";
+            backend_type = self.0.long_term_backend.name();
+            self.0.long_term_backend.delete_object(id).await?;
         }
 
         merni::distribution!(

@@ -8,7 +8,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -96,6 +96,33 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        tracing::debug!("Reading metadata from local_fs backend");
+        let path = self.path.join(id.as_storage_path().to_string());
+        let file = match OpenOptions::new().read(true).open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                tracing::debug!("Object not found");
+                return Ok(None);
+            }
+            err => err?,
+        };
+
+        let mut reader = BufReader::new(file);
+        let mut metadata_line = String::new();
+        reader.read_line(&mut metadata_line).await?;
+        let metadata: Metadata =
+            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
+                ServiceError::Serde {
+                    context: "failed to deserialize metadata".to_string(),
+                    cause,
+                }
+            })?;
+
+        Ok(Some(metadata))
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
@@ -157,5 +184,45 @@ mod tests {
 
         assert_eq!(read_metadata, metadata);
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn get_metadata_returns_metadata() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(tempdir.path());
+
+        let id = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("203.0.113.42".into()),
+            custom: [("foo".into(), "bar".into())].into(),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, make_stream(b"oh hai!"))
+            .await
+            .unwrap();
+
+        let read_metadata = backend.get_metadata(&id).await.unwrap().unwrap();
+        assert_eq!(read_metadata, metadata);
+    }
+
+    #[tokio::test]
+    async fn get_metadata_nonexistent() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(tempdir.path());
+
+        let id = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+
+        let result = backend.get_metadata(&id).await.unwrap();
+        assert!(result.is_none());
     }
 }

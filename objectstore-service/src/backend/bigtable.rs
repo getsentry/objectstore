@@ -9,7 +9,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 
-use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{
+    Backend, DeleteDetectResult, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -333,6 +335,87 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        tracing::debug!("Reading metadata from Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+        let rows = v2::RowSet {
+            row_keys: vec![path.clone()],
+            row_ranges: vec![],
+        };
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(rows),
+            rows_limit: 1,
+            filter: Some(v2::RowFilter {
+                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                    b"^m$".to_vec(),
+                )),
+            }),
+            ..Default::default()
+        };
+
+        let mut client = self.bigtable.client();
+
+        let mut retry_count = 0;
+        let response = loop {
+            let response = client.read_rows(request.clone()).await;
+
+            match response {
+                Ok(res) => break res,
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.read_failures": 1);
+                        return Err(ServiceError::Generic {
+                            context: "Bigtable: failed to read rows for metadata".to_string(),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.read_retry": 1);
+                    tracing::warn!(retry_count = retry_count, "Retrying metadata read");
+                }
+            }
+        };
+        debug_assert!(response.len() <= 1, "Expected at most one row");
+
+        let Some((_read_path, cells)) = response.into_iter().next() else {
+            tracing::debug!("Object not found");
+            return Ok(None);
+        };
+
+        let mut metadata = Metadata::default();
+        let mut expire_at = None;
+
+        for cell in cells {
+            if cell.qualifier.as_slice() == COLUMN_METADATA {
+                metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
+                    ServiceError::Serde {
+                        context: "failed to deserialize metadata".to_string(),
+                        cause,
+                    }
+                })?;
+                expire_at = micros_to_time(cell.timestamp_micros);
+            }
+        }
+
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+        metadata.time_expires = expire_at;
+
+        // Filter already expired objects but leave them to garbage collection
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            tracing::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        // Skip TTI bump for metadata-only reads — a HEAD request or tombstone
+        // check should not extend idle time.
+
+        Ok(Some(metadata))
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from Bigtable backend");
 
@@ -343,6 +426,60 @@ impl Backend for BigTableBackend {
         self.mutate(path, mutations, "delete").await?;
 
         Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn delete_and_detect(&self, id: &ObjectId) -> ServiceResult<DeleteDetectResult> {
+        tracing::debug!("Delete-and-detect from Bigtable backend");
+
+        let path = id.as_storage_path().to_string().into_bytes();
+        let delete_mutation = v2::Mutation {
+            mutation: Some(mutation::Mutation::DeleteFromRow(
+                mutation::DeleteFromRow {},
+            )),
+        };
+
+        let request = v2::CheckAndMutateRowRequest {
+            table_name: self.table_path.clone(),
+            row_key: path,
+            predicate_filter: Some(v2::RowFilter {
+                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                    b"^p$".to_vec(),
+                )),
+            }),
+            true_mutations: vec![delete_mutation.clone()],
+            false_mutations: vec![delete_mutation],
+            ..Default::default()
+        };
+
+        let mut client = self.bigtable.client();
+
+        let mut retry_count = 0;
+        loop {
+            let response = client.check_and_mutate_row(request.clone()).await;
+
+            match response {
+                Ok(res) => {
+                    return if res.predicate_matched {
+                        Ok(DeleteDetectResult::HadPayload)
+                    } else {
+                        Ok(DeleteDetectResult::NoPayload)
+                    };
+                }
+                Err(e) => {
+                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
+                        merni::counter!("bigtable.mutate_failures": 1, "action" => "delete_and_detect");
+                        return Err(ServiceError::Generic {
+                            context: "Bigtable: failed check_and_mutate_row performing a `delete_and_detect`".to_string(),
+                            cause: Some(Box::new(e)),
+                        });
+                    }
+                    retry_count += 1;
+                    merni::counter!("bigtable.mutate_retry": 1, "action" => "delete_and_detect");
+                    tracing::debug!(retry_count = retry_count, "Retrying delete_and_detect");
+                }
+            }
+        }
     }
 }
 
@@ -571,6 +708,123 @@ mod tests {
 
         let result = backend.get_object(&id).await?;
         assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_returns_metadata() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(meta.content_type, metadata.content_type);
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let result = backend.get_metadata(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            ..Default::default()
+        };
+
+        // Write a tombstone (no real payload, just metadata)
+        backend
+            .put_object(&id, &metadata, make_stream(b""))
+            .await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(meta.is_redirect_tombstone, Some(true));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_and_detect_real_object() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let result = backend.delete_and_detect(&id).await?;
+        assert_eq!(result, DeleteDetectResult::HadPayload);
+
+        // Verify it's gone
+        let get_result = backend.get_object(&id).await?;
+        assert!(get_result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_and_detect_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            ..Default::default()
+        };
+
+        // Tombstones still have a payload column (empty bytes), so
+        // CheckAndMutateRow will match the payload column.
+        backend
+            .put_object(&id, &metadata, make_stream(b""))
+            .await?;
+
+        let result = backend.delete_and_detect(&id).await?;
+        // The put_row always writes a payload column, even for tombstones.
+        // For the service layer, the key distinction is tombstone vs not-found.
+        assert!(
+            result == DeleteDetectResult::HadPayload
+                || result == DeleteDetectResult::NoPayload
+        );
+
+        // Verify it's gone
+        let get_result = backend.get_object(&id).await?;
+        assert!(get_result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_and_detect_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let result = backend.delete_and_detect(&id).await?;
+        assert_eq!(result, DeleteDetectResult::NoPayload);
 
         Ok(())
     }

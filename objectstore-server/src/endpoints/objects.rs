@@ -77,7 +77,7 @@ async fn object_get(
 }
 
 async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
-    let Some((metadata, _stream)) = service.get_object(&id).await? else {
+    let Some(metadata) = service.get_metadata(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
