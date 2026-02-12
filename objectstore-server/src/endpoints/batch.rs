@@ -21,7 +21,6 @@ use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchOperationStream, Operation};
 use crate::multipart::{IntoMultipartResponse, Part};
-use crate::rate_limits::MeteredPayloadStream;
 use crate::state::ServiceState;
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
@@ -115,10 +114,7 @@ async fn batch(
 
                         let result = match result {
                             Ok(Some((metadata, stream))) => {
-                                let metered_stream = MeteredPayloadStream::from(
-                                    stream,
-                                    state.rate_limiter.bytes_accumulator()
-                                );
+                                let metered_stream = state.wrap_stream(stream);
                                 match metered_stream.try_collect::<BytesMut>().await {
                                     Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
                                     Err(e) => Err(ApiError::Service(e.into())),
