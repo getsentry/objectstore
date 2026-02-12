@@ -307,12 +307,12 @@ impl GcsBackend {
         Ok(builder)
     }
 
-    /// Fetches the GCS object metadata (without the payload) and returns parsed
-    /// metadata along with expiration info needed for TTI handling.
+    /// Fetches the GCS object metadata (without the payload), bumps TTI if
+    /// needed, and returns the parsed [`Metadata`].
     async fn fetch_gcs_metadata(
         &self,
         object_url: &Url,
-    ) -> ServiceResult<Option<(Metadata, Option<SystemTime>)>> {
+    ) -> ServiceResult<Option<Metadata>> {
         let metadata_response = self
             .request(Method::GET, object_url.clone())
             .await?
@@ -357,7 +357,16 @@ impl GcsBackend {
             return Ok(None);
         }
 
-        Ok(Some((metadata, expire_at)))
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
+            let new_expire_at = SystemTime::now() + tti;
+            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
+                self.update_custom_time(object_url.clone(), new_expire_at)
+                    .await?;
+            }
+        }
+
+        Ok(Some(metadata))
     }
 
     async fn update_custom_time(
@@ -470,19 +479,9 @@ impl Backend for GcsBackend {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
-        let Some((metadata, expire_at)) = self.fetch_gcs_metadata(&object_url).await? else {
+        let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
             return Ok(None);
         };
-
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // Only bump if the difference in deadlines meets a minimum threshold
-            let new_expire_at = SystemTime::now() + tti;
-            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
-                self.update_custom_time(object_url.clone(), new_expire_at)
-                    .await?;
-            }
-        }
 
         let mut download_url = object_url;
         download_url.query_pairs_mut().append_pair("alt", "media");
@@ -513,10 +512,7 @@ impl Backend for GcsBackend {
     async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
         tracing::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
-
-        // Skip TTI bump for metadata-only reads — a HEAD request or tombstone
-        // check should not extend idle time.
-        Ok(self.fetch_gcs_metadata(&object_url).await?.map(|(m, _)| m))
+        self.fetch_gcs_metadata(&object_url).await
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]

@@ -8,7 +8,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::common::{Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
+use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -93,33 +93,6 @@ impl Backend for LocalFsBackend {
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
-    }
-
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
-        tracing::debug!("Reading metadata from local_fs backend");
-        let path = self.path.join(id.as_storage_path().to_string());
-        let file = match OpenOptions::new().read(true).open(path).await {
-            Ok(file) => file,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                tracing::debug!("Object not found");
-                return Ok(None);
-            }
-            err => err?,
-        };
-
-        let mut reader = BufReader::new(file);
-        let mut metadata_line = String::new();
-        reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata =
-            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
-                ServiceError::Serde {
-                    context: "failed to deserialize metadata".to_string(),
-                    cause,
-                }
-            })?;
-
-        Ok(Some(metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]

@@ -339,15 +339,22 @@ impl Backend for BigTableBackend {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
         let rows = v2::RowSet {
-            row_keys: vec![path.clone()],
+            row_keys: vec![path],
             row_ranges: vec![],
         };
 
-        // Read the full row (no column filter) so we have the payload
-        // available for TTI bumps, which rewrite the entire row.
+        // Only read the metadata column — skip the (potentially large) payload.
+        // TODO: TTI bump is skipped here because it requires rewriting the full
+        // row (including payload). A future optimization could use a separate
+        // column or read the full row only when TTI is configured.
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(rows),
+            filter: Some(v2::RowFilter {
+                filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+                    b"^m$".to_vec(),
+                )),
+            }),
             rows_limit: 1,
             ..Default::default()
         };
@@ -381,25 +388,18 @@ impl Backend for BigTableBackend {
             return Ok(None);
         };
 
-        let mut value = Vec::new();
         let mut metadata = Metadata::default();
         let mut expire_at = None;
 
         for cell in cells {
-            match cell.qualifier.as_ref() {
-                self::COLUMN_PAYLOAD => {
-                    value = cell.value;
-                    expire_at = micros_to_time(cell.timestamp_micros);
-                }
-                self::COLUMN_METADATA => {
-                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                        ServiceError::Serde {
-                            context: "failed to deserialize metadata".to_string(),
-                            cause,
-                        }
-                    })?;
-                }
-                _ => {}
+            if cell.qualifier.as_slice() == self::COLUMN_METADATA {
+                expire_at = micros_to_time(cell.timestamp_micros);
+                metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
+                    ServiceError::Serde {
+                        context: "failed to deserialize metadata".to_string(),
+                        cause,
+                    }
+                })?;
             }
         }
 
@@ -411,14 +411,6 @@ impl Backend for BigTableBackend {
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
             tracing::debug!("Object found but past expiry");
             return Ok(None);
-        }
-
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy
-            && expire_at.is_some_and(|ts| ts < access_time + tti - TTI_DEBOUNCE)
-        {
-            let _ = self
-                .put_row(path.clone(), &metadata, value, "tti-bump")
-                .await;
         }
 
         Ok(Some(metadata))
