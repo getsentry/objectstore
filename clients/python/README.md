@@ -74,6 +74,8 @@ object_key = session.put(
     metadata={"key": "value"},
     # Overrides the default defined at the Usecase level
     expiration_policy=TimeToIdle(datetime.timedelta(days=30)),
+    # Track where the payload was originally obtained from
+    origin="203.0.113.42",
 )
 
 # Read an object and its metadata
@@ -86,6 +88,12 @@ assert result.metadata.custom["key"] == "value"
 # Delete an object
 session.delete(object_key)
 ```
+
+### Origin tracking
+
+We encourage setting the `origin` on every upload to track where the payload was
+originally obtained from (e.g., the IP address of the Sentry SDK or CLI). This is
+optional but helps with auditing and debugging.
 
 ## Development
 

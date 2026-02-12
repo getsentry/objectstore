@@ -122,6 +122,13 @@ impl StorageService {
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> ServiceResult<InsertResponse> {
+        if metadata.origin.is_none() {
+            merni::counter!(
+                "put.origin_missing": 1,
+                "usecase" => context.usecase.as_str()
+            );
+        }
+
         let start = Instant::now();
 
         let mut first_chunk = BytesMut::new();

@@ -18,6 +18,7 @@ async fn example_basic() -> Result<()> {
         .session(&client)?;
 
     let response = session.put("Hello, world!")
+        .origin("203.0.113.42")
         .send()
         .await
         .expect("put to succeed");
@@ -86,6 +87,12 @@ async fn example() -> Result<()> {
     Ok(())
 }
 ```
+
+### Origin tracking
+
+We encourage setting the `origin` on every upload to track where the payload was
+originally obtained from (e.g., the IP address of the Sentry SDK or CLI). This is
+optional but helps with auditing and debugging.
 
 See the [API docs](https://getsentry.github.io/objectstore/rust/objectstore_client/) for more in-depth documentation.
 

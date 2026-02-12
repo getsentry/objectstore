@@ -99,6 +99,12 @@ impl GcsObject {
             );
         }
 
+        if let Some(origin) = &metadata.origin {
+            gcs_object
+                .metadata
+                .insert(GcsMetaKey::Origin, origin.clone());
+        }
+
         for (key, value) in &metadata.custom {
             gcs_object
                 .metadata
@@ -119,6 +125,8 @@ impl GcsObject {
             .map(|s| s.parse())
             .transpose()?
             .unwrap_or_default();
+
+        let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
@@ -155,6 +163,7 @@ impl GcsObject {
             content_type,
             expiration_policy,
             compression,
+            origin,
             size,
             custom,
             time_created,
@@ -168,6 +177,8 @@ impl GcsObject {
 enum GcsMetaKey {
     /// Built-in metadata key for [`Metadata::expiration_policy`].
     Expiration,
+    /// Built-in metadata key for [`Metadata::origin`].
+    Origin,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -184,6 +195,7 @@ impl std::str::FromStr for GcsMetaKey {
 
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
+            Some("origin") => GcsMetaKey::Origin,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -197,6 +209,7 @@ impl fmt::Display for GcsMetaKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
+            Self::Origin => write!(f, "{BUILTIN_META_PREFIX}origin"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -558,6 +571,7 @@ mod tests {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
+            origin: Some("203.0.113.42".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             time_created: Some(SystemTime::now()),
             time_expires: None,
@@ -574,6 +588,7 @@ mod tests {
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
+        assert_eq!(meta.origin, metadata.origin);
         assert_eq!(meta.custom, metadata.custom);
         assert!(metadata.time_created.is_some());
 

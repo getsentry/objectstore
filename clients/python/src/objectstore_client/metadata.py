@@ -12,6 +12,7 @@ Compression = Literal["zstd"] | Literal["none"]
 HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_TIME_CREATED = "x-sn-time-created"
 HEADER_TIME_EXPIRES = "x-sn-time-expires"
+HEADER_ORIGIN = "x-sn-origin"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -52,6 +53,14 @@ class Metadata:
     Use `expiration_policy` to set an expiration policy instead.
     """
 
+    origin: str | None
+    """
+    The origin of the object, typically the IP address of the original source.
+
+    This tracks where the payload was originally obtained from
+    (e.g., the IP of a Sentry SDK or CLI).
+    """
+
     custom: dict[str, str]
 
     @classmethod
@@ -61,6 +70,7 @@ class Metadata:
         expiration_policy = None
         time_created = None
         time_expires = None
+        origin = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -74,6 +84,8 @@ class Metadata:
                 time_created = datetime.fromisoformat(v)
             elif k == HEADER_TIME_EXPIRES:
                 time_expires = datetime.fromisoformat(v)
+            elif k == HEADER_ORIGIN:
+                origin = v
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -83,6 +95,7 @@ class Metadata:
             expiration_policy=expiration_policy,
             time_created=time_created,
             time_expires=time_expires,
+            origin=origin,
             custom=custom_metadata,
         )
 
