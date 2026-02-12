@@ -198,16 +198,14 @@ impl BandwidthRateLimiter {
         loop {
             interval.tick().await;
 
-            let ingress_bytes =
-                ingress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let ingress_bytes = ingress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
             let ingress_bps = (ingress_bytes as f64) * to_bps;
             ingress_ewma = ALPHA * ingress_bps + (1.0 - ALPHA) * ingress_ewma;
             let ingress_ewma_int = ingress_ewma.floor() as u64;
             ingress_estimate.store(ingress_ewma_int, std::sync::atomic::Ordering::Relaxed);
             merni::gauge!("server.bandwidth.ingress.ewma"@b: ingress_ewma_int);
 
-            let egress_bytes =
-                egress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let egress_bytes = egress_accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
             let egress_bps = (egress_bytes as f64) * to_bps;
             egress_ewma = ALPHA * egress_bps + (1.0 - ALPHA) * egress_ewma;
             let egress_ewma_int = egress_ewma.floor() as u64;
