@@ -171,3 +171,53 @@ fn populate_sentry_context(context: &ObjectContext) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::value::{CowStrDeserializer, Error as DeError};
+    use serde::de::IntoDeserializer;
+    use std::borrow::Cow;
+
+    fn deser_scopes(input: &str) -> Result<Scopes, DeError> {
+        let deserializer: CowStrDeserializer<DeError> = Cow::Borrowed(input).into_deserializer();
+        deserialize_scopes(deserializer)
+    }
+
+    #[test]
+    fn parse_single_scope() {
+        let scopes = deser_scopes("org=123").unwrap();
+        assert_eq!(scopes.get_value("org"), Some("123"));
+    }
+
+    #[test]
+    fn parse_multiple_scopes() {
+        let scopes = deser_scopes("org=123;project=456").unwrap();
+        assert_eq!(scopes.get_value("org"), Some("123"));
+        assert_eq!(scopes.get_value("project"), Some("456"));
+    }
+
+    #[test]
+    fn parse_empty_scopes() {
+        let scopes = deser_scopes("_").unwrap();
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn parse_missing_equals() {
+        let result = deser_scopes("org123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_scope_chars() {
+        let result = deser_scopes("org=hello world");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_empty_key_or_value() {
+        assert!(deser_scopes("=value").is_err());
+        assert!(deser_scopes("key=").is_err());
+    }
+}
