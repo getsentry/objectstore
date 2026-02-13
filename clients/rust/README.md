@@ -112,6 +112,40 @@ session.put("payload")
     .send().await?;
 ```
 
+### Many API
+
+The Many API allows you to enqueue multiple requests that the client can execute using Objectstore's batch endpoint, minimizing network overhead.
+
+```rust
+use objectstore_client::{Client, Usecase, OperationResult, Result};
+
+async fn example_batch() -> Result<()> {
+    let client = Client::new("http://localhost:8888/")?;
+    let session = Usecase::new("attachments")
+        .for_project(42, 1337)
+        .session(&client)?;
+
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("file1 contents").key("file1"))
+        .push(session.put("file2 contents").key("file2"))
+        .push(session.put("file3 contents").key("file3"))
+        .send()
+        .await?
+        .into_iter()
+        .collect();
+
+    for result in results {
+        match result {
+            // ...
+            _ => {},
+        }
+    }
+
+    Ok(())
+}
+```
+
 ## Configuration
 
 In production, store the [`Client`] and [`Usecase`] in a `static` and reuse them.

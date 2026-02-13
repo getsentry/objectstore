@@ -2290,10 +2290,13 @@ name = "objectstore-client"
 version = "0.0.16"
 dependencies = [
  "async-compression",
+ "async-stream",
+ "base64",
  "bytes",
  "futures-util",
  "infer",
  "jsonwebtoken",
+ "multer",
  "objectstore-test",
  "objectstore-types",
  "reqwest 0.13.1",
@@ -2303,6 +2306,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
  "zstd",
 ]
 
@@ -3135,6 +3139,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "native-tls",
  "once_cell",
  "percent-encoding",
