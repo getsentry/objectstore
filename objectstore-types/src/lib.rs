@@ -481,4 +481,227 @@ mod tests {
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.origin, metadata.origin);
     }
+
+    #[test]
+    fn from_headers_content_type_and_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.content_type, "application/json");
+        assert_eq!(metadata.compression, Some(Compression::Zstd));
+    }
+
+    #[test]
+    fn from_headers_expiration_policy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "ttl:30s".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn from_headers_timestamps() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_TIME_CREATED,
+            "2024-01-15T12:00:00.000000Z".parse().unwrap(),
+        );
+        headers.insert(
+            HEADER_TIME_EXPIRES,
+            "2024-01-16T12:00:00.000000Z".parse().unwrap(),
+        );
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert!(metadata.time_created.is_some());
+        assert!(metadata.time_expires.is_some());
+    }
+
+    #[test]
+    fn from_headers_custom_metadata_with_prefix() {
+        let mut headers = HeaderMap::new();
+        // Simulate a backend that prefixes headers, e.g. "x-goog-meta-"
+        let prefix = "x-goog-meta-";
+        let expiration_header: HeaderName =
+            format!("{prefix}{HEADER_EXPIRATION}").parse().unwrap();
+        headers.insert(expiration_header, "tti:1h".parse().unwrap());
+
+        let custom_header: HeaderName =
+            format!("{prefix}{HEADER_META_PREFIX}my-key").parse().unwrap();
+        headers.insert(custom_header, "my-value".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, prefix).unwrap();
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+        );
+        assert_eq!(metadata.custom.get("my-key").unwrap(), "my-value");
+    }
+
+    #[test]
+    fn from_headers_invalid_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "not a valid media type!".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidContentType(_)));
+    }
+
+    #[test]
+    fn from_headers_invalid_compression() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "brotli".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidCompression));
+    }
+
+    #[test]
+    fn from_headers_invalid_expiration() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "garbage".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidExpiration(_)));
+    }
+
+    #[test]
+    fn from_headers_invalid_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TIME_CREATED, "not-a-timestamp".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidCreationTime(_)));
+    }
+
+    #[test]
+    fn to_headers_all_fields() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            content_type: "text/html".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("10.0.0.1".into()),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
+            custom: BTreeMap::from([("foo".into(), "bar".into())]),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("pfx-", false).unwrap();
+        assert_eq!(
+            headers.get("content-type").unwrap(),
+            "text/html"
+        );
+        assert_eq!(
+            headers.get("content-encoding").unwrap(),
+            "zstd"
+        );
+        assert_eq!(
+            headers
+                .get(format!("pfx-{HEADER_EXPIRATION}"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "ttl:1m"
+        );
+        assert!(headers
+            .get(format!("pfx-{HEADER_TIME_CREATED}"))
+            .is_some());
+        assert!(headers
+            .get(format!("pfx-{HEADER_TIME_EXPIRES}"))
+            .is_some());
+        assert_eq!(
+            headers
+                .get(format!("pfx-{HEADER_ORIGIN}"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            headers
+                .get(format!("pfx-{HEADER_META_PREFIX}foo"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn to_headers_redirect_tombstone() {
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("", false).unwrap();
+        assert_eq!(
+            headers.get(HEADER_REDIRECT_TOMBSTONE).unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn to_headers_with_expiration_sets_custom_time() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("", true).unwrap();
+        assert!(headers.get("x-goog-custom-time").is_some());
+
+        // Without the flag, no custom-time header
+        let headers_no_exp = metadata.to_headers("", false).unwrap();
+        assert!(headers_no_exp.get("x-goog-custom-time").is_none());
+    }
+
+    #[test]
+    fn full_roundtrip_all_fields() {
+        let prefix = "x-test-";
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
+            content_type: "image/png".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("192.168.1.1".into()),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
+            custom: BTreeMap::from([
+                ("key1".into(), "value1".into()),
+                ("key2".into(), "value2".into()),
+            ]),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers(prefix, false).unwrap();
+        let roundtripped = Metadata::from_headers(&headers, prefix).unwrap();
+
+        assert_eq!(roundtripped.expiration_policy, metadata.expiration_policy);
+        assert_eq!(roundtripped.content_type, metadata.content_type);
+        assert_eq!(roundtripped.compression, metadata.compression);
+        assert_eq!(roundtripped.origin, metadata.origin);
+        assert_eq!(roundtripped.time_created, metadata.time_created);
+        assert_eq!(roundtripped.time_expires, metadata.time_expires);
+        assert_eq!(roundtripped.custom, metadata.custom);
+    }
+
+    #[test]
+    fn default_metadata() {
+        let metadata = Metadata::default();
+        assert_eq!(metadata.content_type, DEFAULT_CONTENT_TYPE);
+        assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
+        assert!(metadata.compression.is_none());
+        assert!(metadata.origin.is_none());
+        assert!(metadata.time_created.is_none());
+        assert!(metadata.time_expires.is_none());
+        assert!(metadata.is_redirect_tombstone.is_none());
+        assert!(metadata.size.is_none());
+        assert!(metadata.custom.is_empty());
+    }
 }
