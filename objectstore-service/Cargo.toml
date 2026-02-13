@@ -14,7 +14,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 bigtable_rs = "0.2.18"
 bytes = { workspace = true }
-data-encoding = "2.9.0"
 futures-util = { workspace = true }
 gcp_auth = "0.12.3"
 humantime = { workspace = true }
@@ -27,7 +26,6 @@ reqwest = { workspace = true, features = [
     "multipart",
     "json",
 ] }
-sentry = { workspace = true, features = ["anyhow"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

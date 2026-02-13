@@ -14,7 +14,6 @@ anyhow = { workspace = true }
 argh = "0.1.13"
 bytesize = { version = "2.0.1", features = ["serde"] }
 futures = { workspace = true }
-futures-util = { workspace = true }
 humantime-serde = { workspace = true }
 indicatif = "0.18.0"
 mimalloc = { workspace = true }
