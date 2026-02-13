@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
@@ -22,6 +23,8 @@ const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read_write"];
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+/// How many times to retry failed operations.
+const REQUEST_RETRY_COUNT: usize = 2;
 
 /// Prefix for our built-in metadata stored in GCS metadata field
 const BUILTIN_META_PREFIX: &str = "x-sn-";
@@ -237,6 +240,29 @@ impl serde::Serialize for GcsMetaKey {
     }
 }
 
+/// Returns `true` if the error is a transient reqwest failure worth retrying.
+fn is_retryable(error: &ServiceError) -> bool {
+    let ServiceError::Reqwest { cause, .. } = error else {
+        return false;
+    };
+    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
+        return true;
+    }
+    let Some(status) = cause.status() else {
+        return false;
+    };
+    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
 pub struct GcsBackend {
     client: reqwest::Client,
     endpoint: Url,
@@ -309,40 +335,64 @@ impl GcsBackend {
         Ok(builder)
     }
 
+    /// Retries a GCS request on transient errors.
+    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> ServiceResult<T>
+    where
+        F: Future<Output = ServiceResult<T>> + Send,
+    {
+        let mut retry_count = 0usize;
+        loop {
+            match f().await {
+                Ok(res) => return Ok(res),
+                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
+                    retry_count += 1;
+                    merni::counter!("gcs.retries": 1, "action" => action);
+                    tracing::debug!(
+                        retry_count,
+                        action,
+                        error = e as &dyn std::error::Error,
+                        "Retrying request"
+                    );
+                }
+                Err(e) => {
+                    merni::counter!("gcs.failures": 1, "action" => action);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// Fetches the GCS object metadata (without the payload), bumps TTI if
     /// needed, and returns the parsed [`Metadata`].
     async fn fetch_gcs_metadata(&self, object_url: &Url) -> ServiceResult<Option<Metadata>> {
-        let metadata_response = self
-            .request(Method::GET, object_url.clone())
-            .await?
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send get metadata request".to_string(),
-                cause,
-            })?;
+        let metadata_opt = self
+            .with_retry("get_metadata", || async {
+                let resp = self
+                    .request(Method::GET, object_url.clone())
+                    .await?
+                    .send()
+                    .await
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata request", e))?;
 
-        if metadata_response.status() == StatusCode::NOT_FOUND {
+                if resp.status() == StatusCode::NOT_FOUND {
+                    return Ok(None);
+                }
+
+                let metadata: GcsObject = resp
+                    .error_for_status()
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata status", e))?
+                    .json()
+                    .await
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata parse", e))?;
+
+                Ok(Some(metadata))
+            })
+            .await?;
+
+        let Some(gcs_metadata) = metadata_opt else {
             tracing::debug!("Object not found");
             return Ok(None);
-        }
-
-        let metadata_response =
-            metadata_response
-                .error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to get object metadata".to_string(),
-                    cause,
-                })?;
-
-        let gcs_metadata: GcsObject =
-            metadata_response
-                .json()
-                .await
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to parse object metadata response".to_string(),
-                    cause,
-                })?;
+        };
 
         let expire_at = gcs_metadata.custom_time;
         let metadata = gcs_metadata.into_metadata()?;
@@ -380,22 +430,17 @@ impl GcsBackend {
             custom_time: SystemTime,
         }
 
-        self.request(Method::PATCH, object_url)
-            .await?
-            .json(&CustomTimeRequest { custom_time })
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send update custom time request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to update expiration time for object with TTI".to_string(),
-                cause,
-            })?;
-
-        Ok(())
+        self.with_retry("update_custom_time", || async {
+            self.request(Method::PATCH, object_url.clone())
+                .await?
+                .json(&CustomTimeRequest { custom_time })
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map_err(|e| ServiceError::reqwest("GCS: update custom time", e))?;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -460,15 +505,8 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send multipart upload request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to upload object via multipart".to_string(),
-                cause,
-            })?;
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| ServiceError::reqwest("GCS: upload object", e))?;
 
         Ok(())
     }
@@ -484,20 +522,17 @@ impl Backend for GcsBackend {
 
         let mut download_url = object_url;
         download_url.query_pairs_mut().append_pair("alt", "media");
+
         let payload_response = self
-            .request(Method::GET, download_url)
-            .await?
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send get payload request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to get object payload".to_string(),
-                cause,
-            })?;
+            .with_retry("get_payload", || async {
+                self.request(Method::GET, download_url.clone())
+                    .await?
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| ServiceError::reqwest("GCS: get payload", e))
+            })
+            .await?;
 
         let stream = payload_response
             .bytes_stream()
@@ -517,28 +552,27 @@ impl Backend for GcsBackend {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
         tracing::debug!("Deleting from GCS backend");
-        let response = self
-            .request(Method::DELETE, self.object_url(id)?)
-            .await?
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send delete request".to_string(),
-                cause,
-            })?;
+        let object_url = self.object_url(id)?;
 
-        // Do not error for objects that do not exist
-        if response.status() != StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
-            response
-                .error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to delete object".to_string(),
-                    cause,
-                })?;
-        }
+        self.with_retry("delete", || async {
+            let resp = self
+                .request(Method::DELETE, object_url.clone())
+                .await?
+                .send()
+                .await
+                .map_err(|e| ServiceError::reqwest("GCS: delete object", e))?;
 
-        Ok(())
+            // Do not error for objects that do not exist
+            if resp.status() == StatusCode::NOT_FOUND {
+                return Ok(());
+            }
+
+            resp.error_for_status()
+                .map_err(|e| ServiceError::reqwest("GCS: delete object", e))?;
+
+            Ok(())
+        })
+        .await
     }
 }
 
