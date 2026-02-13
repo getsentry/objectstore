@@ -365,7 +365,7 @@ impl GcsBackend {
     /// Fetches the GCS object metadata (without the payload), bumps TTI if
     /// needed, and returns the parsed [`Metadata`].
     async fn fetch_gcs_metadata(&self, object_url: &Url) -> ServiceResult<Option<Metadata>> {
-        let gcs_metadata: GcsObject = match self
+        let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
                     .request(Method::GET, object_url.clone())
@@ -378,7 +378,7 @@ impl GcsBackend {
                     return Ok(None);
                 }
 
-                let metadata = resp
+                let metadata: GcsObject = resp
                     .error_for_status()
                     .map_err(|e| ServiceError::reqwest("GCS: get metadata status", e))?
                     .json()
@@ -387,13 +387,11 @@ impl GcsBackend {
 
                 Ok(Some(metadata))
             })
-            .await?
-        {
-            Some(meta) => meta,
-            None => {
-                tracing::debug!("Object not found");
-                return Ok(None);
-            }
+            .await?;
+
+        let Some(gcs_metadata) = metadata_opt else {
+            tracing::debug!("Object not found");
+            return Ok(None);
         };
 
         let expire_at = gcs_metadata.custom_time;
