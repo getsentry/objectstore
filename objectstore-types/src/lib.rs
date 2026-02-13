@@ -714,4 +714,57 @@ mod tests {
         assert!(metadata.size.is_none());
         assert!(metadata.custom.is_empty());
     }
+
+    #[test]
+    fn expiration_display_roundtrip() {
+        let cases = [
+            ExpirationPolicy::Manual,
+            ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
+            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+        ];
+
+        for policy in cases {
+            let displayed = policy.to_string();
+            let parsed: ExpirationPolicy = displayed.parse().unwrap();
+            assert_eq!(parsed, policy);
+        }
+    }
+
+    #[test]
+    fn expiration_parse_invalid() {
+        assert!(ExpirationPolicy::from_str("garbage").is_err());
+        assert!(ExpirationPolicy::from_str("ttl:").is_err());
+        assert!(ExpirationPolicy::from_str("").is_err());
+    }
+
+    #[test]
+    fn expiration_policy_helpers() {
+        assert_eq!(ExpirationPolicy::Manual.expires_in(), None);
+        assert!(ExpirationPolicy::Manual.is_manual());
+        assert!(!ExpirationPolicy::Manual.is_timeout());
+
+        let ttl = ExpirationPolicy::TimeToLive(Duration::from_secs(60));
+        assert_eq!(ttl.expires_in(), Some(Duration::from_secs(60)));
+        assert!(ttl.is_timeout());
+        assert!(!ttl.is_manual());
+
+        let tti = ExpirationPolicy::TimeToIdle(Duration::from_secs(120));
+        assert_eq!(tti.expires_in(), Some(Duration::from_secs(120)));
+        assert!(tti.is_timeout());
+        assert!(!tti.is_manual());
+    }
+
+    #[test]
+    fn compression_display_roundtrip() {
+        let displayed = Compression::Zstd.to_string();
+        assert_eq!(displayed, "zstd");
+        let parsed: Compression = displayed.parse().unwrap();
+        assert_eq!(parsed, Compression::Zstd);
+    }
+
+    #[test]
+    fn compression_parse_invalid() {
+        assert!(Compression::from_str("gzip").is_err());
+        assert!(Compression::from_str("").is_err());
+    }
 }
