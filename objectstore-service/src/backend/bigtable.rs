@@ -11,7 +11,7 @@ use tokio::runtime::Handle;
 use tonic::Code;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse, TombstoneCheckResponse,
+    Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
@@ -356,8 +356,11 @@ impl Backend for BigTableBackend {
                 .await;
         }
 
+        let mut metadata = row.metadata;
+        metadata.size = Some(row.payload.len());
+
         let stream = stream::once(async { Ok(row.payload.into()) }).boxed();
-        Ok(Some((row.metadata, stream)))
+        Ok(Some((metadata, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -366,6 +369,7 @@ impl Backend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
 
         // Only read the metadata column — skip the (potentially large) payload.
+        // NB: `metadata.size` will not be populated since the payload is not fetched.
         let Some(row) = self
             .read_row(&path, Some(column_filter(COLUMN_METADATA)), "get_metadata")
             .await?
@@ -374,14 +378,16 @@ impl Backend for BigTableBackend {
         };
 
         // Conditional TTI bump: read the payload only when a bump is actually needed.
-        if row.needs_tti_bump()
-            && let Some(payload_row) = self
+        if row.needs_tti_bump() {
+            // Best-effort — failures here should not fail the metadata read.
+            if let Ok(Some(payload_row)) = self
                 .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                .await?
-        {
-            let _ = self
-                .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
-                .await;
+                .await
+            {
+                let _ = self
+                    .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
+                    .await;
+            }
         }
 
         Ok(Some(row.metadata))
@@ -401,11 +407,8 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_and_check_tombstone(
-        &self,
-        id: &ObjectId,
-    ) -> ServiceResult<TombstoneCheckResponse> {
-        tracing::debug!("Delete-and-detect from Bigtable backend");
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> ServiceResult<DeleteOutcome> {
+        tracing::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         let delete_mutation = v2::Mutation {
@@ -427,21 +430,21 @@ impl Backend for BigTableBackend {
                         column_filter(COLUMN_METADATA),
                         v2::RowFilter {
                             filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                                // RE2 full-match: .* anchors required since the
-                                // regex must match the entire cell value.
-                                b".*\"is_redirect_tombstone\":true.*".to_vec(),
+                                // RE2 full-match anchored to the JSON start. The field ordering of
+                                // Metadata ensures `is_redirect_tombstone` is serialized first.
+                                b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
                             )),
                         },
                     ],
                 })),
             }),
-            true_mutations: vec![delete_mutation.clone()],
-            false_mutations: vec![delete_mutation],
+            true_mutations: vec![], // Tombstone matched → leave intact (no mutations).
+            false_mutations: vec![delete_mutation], // Not a tombstone → delete the row.
             ..Default::default()
         };
 
         let is_tombstone = self
-            .with_retry("delete_and_check_tombstone", || async {
+            .with_retry("delete_non_tombstone", || async {
                 self.bigtable
                     .client()
                     .check_and_mutate_row(request.clone())
@@ -451,9 +454,9 @@ impl Backend for BigTableBackend {
             .predicate_matched;
 
         if is_tombstone {
-            Ok(TombstoneCheckResponse::Tombstone)
+            Ok(DeleteOutcome::Tombstone)
         } else {
-            Ok(TombstoneCheckResponse::Object)
+            Ok(DeleteOutcome::Deleted)
         }
     }
 }
@@ -808,7 +811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_and_check_tombstone_real_object() -> Result<()> {
+    async fn test_delete_non_tombstone_real_object() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -818,8 +821,8 @@ mod tests {
             .put_object(&id, &metadata, make_stream(b"hello, world"))
             .await?;
 
-        let result = backend.delete_and_check_tombstone(&id).await?;
-        assert_eq!(result, TombstoneCheckResponse::Object);
+        let result = backend.delete_non_tombstone(&id).await?;
+        assert_eq!(result, DeleteOutcome::Deleted);
 
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
@@ -828,7 +831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_and_check_tombstone_tombstone() -> Result<()> {
+    async fn test_delete_non_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -839,22 +842,26 @@ mod tests {
 
         backend.put_object(&id, &metadata, make_stream(b"")).await?;
 
-        let result = backend.delete_and_check_tombstone(&id).await?;
-        assert_eq!(result, TombstoneCheckResponse::Tombstone);
+        let result = backend.delete_non_tombstone(&id).await?;
+        assert_eq!(result, DeleteOutcome::Tombstone);
 
-        let get_result = backend.get_object(&id).await?;
-        assert!(get_result.is_none());
+        // Tombstone should still exist — delete_non_tombstone leaves it intact.
+        let get_result = backend.get_metadata(&id).await?;
+        assert!(
+            get_result.is_some(),
+            "tombstone should still exist after delete_non_tombstone"
+        );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_delete_and_check_tombstone_nonexistent() -> Result<()> {
+    async fn test_delete_non_tombstone_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let result = backend.delete_and_check_tombstone(&id).await?;
-        assert_eq!(result, TombstoneCheckResponse::Object);
+        let result = backend.delete_non_tombstone(&id).await?;
+        assert_eq!(result, DeleteOutcome::Deleted);
 
         Ok(())
     }

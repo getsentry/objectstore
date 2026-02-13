@@ -358,7 +358,7 @@ impl GcsBackend {
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            let new_expire_at = SystemTime::now() + tti;
+            let new_expire_at = access_time + tti;
             if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
                 self.update_custom_time(object_url.clone(), new_expire_at)
                     .await?;

@@ -19,13 +19,13 @@ pub(super) type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub(super) type DeleteResponse = ();
 
-/// Response from [`Backend::delete_and_check_tombstone`].
+/// Response from [`Backend::delete_non_tombstone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TombstoneCheckResponse {
-    /// The deleted entity was a redirect tombstone.
+pub(crate) enum DeleteOutcome {
+    /// The entity was a redirect tombstone; it was left intact.
     Tombstone,
-    /// The deleted entity was a regular object or non-existent.
-    Object,
+    /// The entity was a regular object (now deleted) or non-existent.
+    Deleted,
 }
 
 /// A type-erased [`Backend`] instance.
@@ -58,18 +58,19 @@ pub trait Backend: Debug + Send + Sync + 'static {
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse>;
 
-    /// Deletes the object and reports whether it was a redirect tombstone.
-    async fn delete_and_check_tombstone(
-        &self,
-        id: &ObjectId,
-    ) -> ServiceResult<TombstoneCheckResponse> {
+    /// Deletes the object only if it is NOT a redirect tombstone.
+    ///
+    /// Returns [`DeleteOutcome::Tombstone`] (leaving the row intact) when
+    /// the object is a redirect tombstone, or [`DeleteOutcome::Deleted`]
+    /// (after deleting it) for regular objects and non-existent rows.
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> ServiceResult<DeleteOutcome> {
         let metadata = self.get_metadata(id).await?;
-        let result = match metadata {
-            Some(m) if m.is_redirect_tombstone == Some(true) => TombstoneCheckResponse::Tombstone,
-            _ => TombstoneCheckResponse::Object,
-        };
-        self.delete_object(id).await?;
-        Ok(result)
+        if metadata.is_some_and(|m| m.is_tombstone()) {
+            Ok(DeleteOutcome::Tombstone)
+        } else {
+            self.delete_object(id).await?;
+            Ok(DeleteOutcome::Deleted)
+        }
     }
 }
 

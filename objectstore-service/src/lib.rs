@@ -20,7 +20,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
-use crate::backend::common::BoxedBackend;
+use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -150,7 +150,7 @@ impl StorageService {
         // There might currently be a tombstone at the given path from a previously stored object.
         if has_key {
             let metadata = self.0.high_volume_backend.get_metadata(&id).await?;
-            if matches!(&metadata, Some(m) if m.is_redirect_tombstone == Some(true)) {
+            if metadata.is_some_and(|m| m.is_tombstone()) {
                 // Write the object to the other backend and keep the tombstone in place
                 backend = BackendChoice::LongTerm;
             }
@@ -242,7 +242,7 @@ impl StorageService {
         let mut backend_type = self.0.high_volume_backend.name();
         let mut result = self.0.high_volume_backend.get_metadata(id).await?;
 
-        if matches!(&result, Some(m) if m.is_redirect_tombstone == Some(true)) {
+        if result.as_ref().is_some_and(|m| m.is_tombstone()) {
             result = self.0.long_term_backend.get_metadata(id).await?;
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
@@ -266,7 +266,7 @@ impl StorageService {
         let mut backend_type = self.0.high_volume_backend.name();
         let mut result = self.0.high_volume_backend.get_object(id).await?;
 
-        if is_tombstoned(&result) {
+        if result.is_tombstone() {
             result = self.0.long_term_backend.get_object(id).await?;
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
@@ -297,22 +297,20 @@ impl StorageService {
 
     /// Deletes an object stored at the given key, if it exists.
     pub async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
-        use crate::backend::common::TombstoneCheckResponse;
-
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
         let mut backend_type = self.0.high_volume_backend.name();
 
-        let result = self
-            .0
-            .high_volume_backend
-            .delete_and_check_tombstone(id)
-            .await?;
-        if result == TombstoneCheckResponse::Tombstone {
+        let outcome = self.0.high_volume_backend.delete_non_tombstone(id).await?;
+        if outcome == DeleteOutcome::Tombstone {
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
+            // Delete the long-term object first, then clean up the tombstone.
+            // This ordering ensures that if the long-term delete fails, the
+            // tombstone remains and the data is still reachable (not orphaned).
             self.0.long_term_backend.delete_object(id).await?;
+            self.0.high_volume_backend.delete_object(id).await?;
         }
 
         merni::distribution!(
@@ -326,17 +324,14 @@ impl StorageService {
     }
 }
 
-fn is_tombstoned(result: &GetResponse) -> bool {
-    matches!(
-        result,
-        Some((
-            Metadata {
-                is_redirect_tombstone: Some(true),
-                ..
-            },
-            _
-        ))
-    )
+trait GetResponseExt {
+    fn is_tombstone(&self) -> bool;
+}
+
+impl GetResponseExt for GetResponse {
+    fn is_tombstone(&self) -> bool {
+        self.as_ref().is_some_and(|(m, _)| m.is_tombstone())
+    }
 }
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
