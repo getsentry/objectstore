@@ -129,7 +129,8 @@ where
             })?;
 
         let headers = response.headers();
-        let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        metadata.size = response.content_length().map(|len| len as usize);
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {

@@ -124,7 +124,10 @@ impl RowData {
             }
         }
 
+        // Both columns carry the same timestamp (set by `put_row`), so it
+        // doesn't matter which cell writes `expire_at` last.
         metadata.time_expires = expire_at;
+
         Ok(Self { metadata, payload })
     }
 
@@ -509,10 +512,25 @@ mod tests {
 
     use super::*;
 
-    // NB: Not run any of these tests, you need to have a BigTable emulator running. This is done
+    // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done
     // automatically in CI.
     //
     // Refer to the readme for how to set up the emulator.
+
+    #[test]
+    fn tombstone_json_field_ordering() {
+        // The `delete_non_tombstone` regex predicate assumes
+        // `is_redirect_tombstone` is serialized as the first JSON field.
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(
+            json.starts_with(r#"{"is_redirect_tombstone":true"#),
+            "is_redirect_tombstone must be the first JSON field, got: {json}"
+        );
+    }
 
     async fn create_test_backend() -> Result<BigTableBackend> {
         BigTableBackend::new(
