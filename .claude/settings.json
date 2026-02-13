@@ -37,12 +37,13 @@
 
       "Bash(rustc --version:*)",
       "Bash(cargo --version:*)",
-      "Bash(cargo tree:*)",
-      "Bash(cargo metadata:*)",
-      "Bash(cargo test:*)",
+      "Bash(cargo check:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo doc:*)",
       "Bash(cargo fmt:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo tree:*)",
 
       "Bash(python --version:*)",
       "Bash(python3 --version:*)",
