@@ -933,7 +933,9 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
-    use crate::rate_limits::{BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule};
+    use crate::rate_limits::{
+        BandwidthLimits, BandwidthRule, RateLimits, ThroughputLimits, ThroughputRule,
+    };
 
     use super::*;
 
@@ -1226,6 +1228,18 @@ mod tests {
                           - ["org", "456"]
                           - ["project", "789"]
                         pct: 10
+                  bandwidth:
+                    global_bps: 10000000
+                    usecase_pct: 40
+                    scope_pct: 20
+                    rules:
+                      - usecase: "heavy"
+                        scopes:
+                          - ["org", "99"]
+                        bps: 5000000
+                      - scopes:
+                          - ["org", "100"]
+                        pct: 15
                 "#,
             )
             .unwrap();
@@ -1255,7 +1269,25 @@ mod tests {
                         },
                     ],
                 },
-                bandwidth: BandwidthLimits::default(),
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(10_000_000),
+                    usecase_pct: Some(40),
+                    scope_pct: Some(20),
+                    rules: vec![
+                        BandwidthRule {
+                            usecase: Some("heavy".to_string()),
+                            scopes: vec![("org".to_string(), "99".to_string())],
+                            bps: Some(5_000_000),
+                            pct: None,
+                        },
+                        BandwidthRule {
+                            usecase: None,
+                            scopes: vec![("org".to_string(), "100".to_string())],
+                            bps: None,
+                            pct: Some(15),
+                        },
+                    ],
+                },
             };
 
             let config = Config::load(Some(tempfile.path())).unwrap();

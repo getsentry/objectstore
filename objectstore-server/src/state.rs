@@ -6,6 +6,8 @@ use futures_util::StreamExt;
 use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
+use objectstore_service::id::ObjectContext;
+
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
@@ -60,9 +62,18 @@ impl Services {
         }))
     }
 
-    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
-        MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
+    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting,
+    /// tracking both global and per-key bandwidth for the given context.
+    pub fn wrap_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
+        let (global_acc, buckets) = self.rate_limiter.bandwidth_context(context);
+        MeteredPayloadStream::new(stream, global_acc, buckets).boxed()
+    }
+
+    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting,
+    /// tracking only global bandwidth (no per-key tracking).
+    pub fn wrap_stream_global_only(&self, stream: PayloadStream) -> PayloadStream {
+        MeteredPayloadStream::global_only(stream, self.rate_limiter.global_bandwidth_accumulator())
+            .boxed()
     }
 }
 

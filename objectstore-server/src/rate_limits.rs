@@ -78,23 +78,41 @@ pub struct ThroughputRule {
     pub pct: Option<u8>,
 }
 
+/// Checks if a rule with the given usecase and scopes matches the given context.
+///
+/// Shared by [`ThroughputRule`] and [`BandwidthRule`].
+fn rule_matches(
+    usecase: Option<&str>,
+    scopes: &[(String, String)],
+    context: &ObjectContext,
+) -> bool {
+    if let Some(rule_usecase) = usecase
+        && rule_usecase != context.usecase
+    {
+        return false;
+    }
+
+    for (scope_name, scope_value) in scopes {
+        match context.scopes.get_value(scope_name) {
+            Some(value) if value == scope_value => (),
+            _ => return false,
+        }
+    }
+
+    true
+}
+
 impl ThroughputRule {
     /// Returns `true` if this rule matches the given context.
     pub fn matches(&self, context: &ObjectContext) -> bool {
-        if let Some(ref rule_usecase) = self.usecase
-            && rule_usecase != &context.usecase
-        {
-            return false;
-        }
+        rule_matches(self.usecase.as_deref(), &self.scopes, context)
+    }
+}
 
-        for (scope_name, scope_value) in &self.scopes {
-            match context.scopes.get_value(scope_name) {
-                Some(value) if value == scope_value => (),
-                _ => return false,
-            }
-        }
-
-        true
+impl BandwidthRule {
+    /// Returns `true` if this rule matches the given context.
+    pub fn matches(&self, context: &ObjectContext) -> bool {
+        rule_matches(self.usecase.as_deref(), &self.scopes, context)
     }
 }
 
@@ -104,6 +122,45 @@ pub struct BandwidthLimits {
     ///
     /// Defaults to `None`, meaning no global bandwidth limit is enforced.
     pub global_bps: Option<u64>,
+
+    /// The maximum percentage of the global bandwidth limit that can be used by any usecase.
+    ///
+    /// Value from `0` to `100`. Defaults to `None`, meaning no per-usecase limit is enforced.
+    pub usecase_pct: Option<u8>,
+
+    /// The maximum percentage of the global bandwidth limit that can be used by any scope.
+    ///
+    /// Value from `0` to `100`. Defaults to `None`, meaning no per-scope limit is enforced.
+    pub scope_pct: Option<u8>,
+
+    /// Overrides for specific usecases and scopes.
+    pub rules: Vec<BandwidthRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct BandwidthRule {
+    /// Optional usecase to match.
+    ///
+    /// If `None`, matches any usecase.
+    pub usecase: Option<String>,
+
+    /// Scopes to match.
+    ///
+    /// If empty, matches any scopes. Additional scopes in the context are ignored, so a rule
+    /// matches if all of the specified scopes are present in the request with matching values.
+    pub scopes: Vec<(String, String)>,
+
+    /// The bandwidth limit to apply when this rule matches, in bytes per second.
+    ///
+    /// If both a bps and pct are specified, the more restrictive limit applies.
+    /// Should be greater than `0`. To block traffic entirely, use killswitches instead.
+    pub bps: Option<u64>,
+
+    /// The percentage of the global bandwidth limit to apply when this rule matches.
+    ///
+    /// If both a bps and pct are specified, the more restrictive limit applies.
+    /// Should be greater than `0`. To block traffic entirely, use killswitches instead.
+    pub pct: Option<u8>,
 }
 
 #[derive(Debug)]
@@ -124,46 +181,132 @@ impl RateLimiter {
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
     pub fn check(&self, context: &ObjectContext) -> bool {
-        self.throughput.check(context) && self.bandwidth.check()
+        self.throughput.check(context) && self.bandwidth.check(context)
     }
 
-    /// Returns a reference to the shared bytes accumulator, used for bandwidth-based rate-limiting.
-    pub fn bytes_accumulator(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.bandwidth.accumulator)
+    /// Returns the global bandwidth accumulator and all per-key bandwidth buckets
+    /// matching the given context.
+    pub(crate) fn bandwidth_context(
+        &self,
+        context: &ObjectContext,
+    ) -> (Arc<AtomicU64>, Vec<Arc<BandwidthBucket>>) {
+        self.bandwidth.accumulators_for_context(context)
+    }
+
+    /// Returns only the global bandwidth accumulator, for cases where no context is available.
+    pub(crate) fn global_bandwidth_accumulator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bandwidth.global_accumulator)
+    }
+}
+
+/// Per-key bandwidth tracker using lazy EWMA.
+///
+/// The accumulator is incremented lock-free by `MeteredPayloadStream`. The EWMA state is updated
+/// lazily when `estimated_bps()` is called (at admission time), avoiding background iteration.
+pub(crate) struct BandwidthBucket {
+    accumulator: AtomicU64,
+    state: Mutex<BandwidthBucketState>,
+}
+
+struct BandwidthBucketState {
+    ewma: f64,
+    last_update: Instant,
+}
+
+impl BandwidthBucket {
+    fn new() -> Self {
+        Self {
+            accumulator: AtomicU64::new(0),
+            state: Mutex::new(BandwidthBucketState {
+                ewma: 0.0,
+                last_update: Instant::now(),
+            }),
+        }
+    }
+
+    /// Lock-free byte accumulation, called from `MeteredPayloadStream::poll_next`.
+    pub(crate) fn add_bytes(&self, n: u64) {
+        self.accumulator
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Computes the current estimated bandwidth using a variable-interval EWMA.
+    ///
+    /// This is called at admission time. It swaps the accumulator to 0 and updates the EWMA
+    /// based on the elapsed time since the last call. When dt = 50ms this is mathematically
+    /// equivalent to the fixed-interval EWMA (alpha = 0.2).
+    fn estimated_bps(&self) -> u64 {
+        let bytes = self.accumulator.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+
+        let now = Instant::now();
+        let dt = now.duration_since(state.last_update).as_secs_f64();
+        state.last_update = now;
+
+        if dt <= 0.0 {
+            return state.ewma.floor() as u64;
+        }
+
+        // Variable-interval EWMA: alpha = 1 - 0.8^(dt / 0.05)
+        // At dt=50ms this gives alpha=0.2, matching the fixed-interval estimator.
+        let alpha = 1.0 - 0.8_f64.powf(dt / 0.05);
+        let bps = (bytes as f64) / dt;
+        state.ewma = alpha * bps + (1.0 - alpha) * state.ewma;
+
+        state.ewma.floor() as u64
+    }
+}
+
+impl std::fmt::Debug for BandwidthBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BandwidthBucket")
+            .field(
+                "accumulator",
+                &self
+                    .accumulator
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
     }
 }
 
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
-    /// Accumulator that's incremented every time an operation that uses bandwidth is executed.
-    accumulator: Arc<AtomicU64>,
-    /// An estimate of the bandwidth that's currently being utilized in bytes per second.
-    estimate: Arc<AtomicU64>,
+    // Global: existing background EWMA (unchanged)
+    global_accumulator: Arc<AtomicU64>,
+    global_estimate: Arc<AtomicU64>,
+    // Per-key: lazy EWMA (no background task)
+    usecases: papaya::HashMap<String, Arc<BandwidthBucket>>,
+    scopes: papaya::HashMap<Scopes, Arc<BandwidthBucket>>,
+    rules: papaya::HashMap<usize, Arc<BandwidthBucket>>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
-        let accumulator = Arc::new(AtomicU64::new(0));
-        let estimate = Arc::new(AtomicU64::new(0));
+        let global_accumulator = Arc::new(AtomicU64::new(0));
+        let global_estimate = Arc::new(AtomicU64::new(0));
 
-        let accumulator_clone = Arc::clone(&accumulator);
-        let estimate_clone = Arc::clone(&estimate);
+        let accumulator_clone = Arc::clone(&global_accumulator);
+        let estimate_clone = Arc::clone(&global_estimate);
         tokio::task::spawn(async move {
             Self::estimator(accumulator_clone, estimate_clone).await;
         });
 
         Self {
             config,
-            accumulator,
-            estimate,
+            global_accumulator,
+            global_estimate,
+            usecases: papaya::HashMap::new(),
+            scopes: papaya::HashMap::new(),
+            rules: papaya::HashMap::new(),
         }
     }
 
-    /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
+    /// Estimates the current global bandwidth utilization using an exponentially weighted moving average.
     ///
-    /// The calculation is based on the increments of `self.accumulator` happened in the last `TICK`.
-    /// The estimate is stored in `self.estimate`, which can be queried for bandwidth-based rate-limiting.
+    /// The calculation is based on the increments of `self.global_accumulator` happened in the last `TICK`.
+    /// The estimate is stored in `self.global_estimate`, which can be queried for bandwidth-based rate-limiting.
     async fn estimator(accumulator: Arc<AtomicU64>, estimate: Arc<AtomicU64>) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
         const ALPHA: f64 = 0.2; // EWMA alpha parameter: 20% weight to new sample, 80% to previous average
@@ -183,11 +326,121 @@ impl BandwidthRateLimiter {
         }
     }
 
-    fn check(&self) -> bool {
-        let Some(bps) = self.config.global_bps else {
-            return true;
-        };
-        self.estimate.load(std::sync::atomic::Ordering::Relaxed) <= bps
+    fn check(&self, context: &ObjectContext) -> bool {
+        // Global check
+        if let Some(bps) = self.config.global_bps
+            && self
+                .global_estimate
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > bps
+        {
+            return false;
+        }
+
+        // Usecase check
+        if let Some(usecase_bps) = self.usecase_bps() {
+            let guard = self.usecases.pin();
+            let bucket = guard.get_or_insert_with(context.usecase.clone(), || {
+                Arc::new(BandwidthBucket::new())
+            });
+            if bucket.estimated_bps() > usecase_bps {
+                return false;
+            }
+        }
+
+        // Scope check
+        if let Some(scope_bps) = self.scope_bps() {
+            let guard = self.scopes.pin();
+            let bucket = guard
+                .get_or_insert_with(context.scopes.clone(), || Arc::new(BandwidthBucket::new()));
+            if bucket.estimated_bps() > scope_bps {
+                return false;
+            }
+        }
+
+        // Rule checks
+        for (idx, rule) in self.config.rules.iter().enumerate() {
+            if !rule.matches(context) {
+                continue;
+            }
+            let Some(rule_bps) = self.rule_bps(rule) else {
+                continue;
+            };
+            let guard = self.rules.pin();
+            let bucket = guard.get_or_insert_with(idx, || Arc::new(BandwidthBucket::new()));
+            if bucket.estimated_bps() > rule_bps {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Returns the global accumulator and all per-key buckets matching the given context.
+    fn accumulators_for_context(
+        &self,
+        context: &ObjectContext,
+    ) -> (Arc<AtomicU64>, Vec<Arc<BandwidthBucket>>) {
+        let mut buckets = Vec::new();
+
+        if self.usecase_bps().is_some() {
+            let guard = self.usecases.pin();
+            let bucket = guard.get_or_insert_with(context.usecase.clone(), || {
+                Arc::new(BandwidthBucket::new())
+            });
+            buckets.push(Arc::clone(bucket));
+        }
+
+        if self.scope_bps().is_some() {
+            let guard = self.scopes.pin();
+            let bucket = guard
+                .get_or_insert_with(context.scopes.clone(), || Arc::new(BandwidthBucket::new()));
+            buckets.push(Arc::clone(bucket));
+        }
+
+        for (idx, rule) in self.config.rules.iter().enumerate() {
+            if !rule.matches(context) {
+                continue;
+            }
+            if self.rule_bps(rule).is_none() {
+                continue;
+            }
+            let guard = self.rules.pin();
+            let bucket = guard.get_or_insert_with(idx, || Arc::new(BandwidthBucket::new()));
+            buckets.push(Arc::clone(bucket));
+        }
+
+        (Arc::clone(&self.global_accumulator), buckets)
+    }
+
+    /// Returns the effective BPS for per-usecase limiting, if configured.
+    fn usecase_bps(&self) -> Option<u64> {
+        let global_bps = self.config.global_bps?;
+        let pct = self.config.usecase_pct?;
+        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+    }
+
+    /// Returns the effective BPS for per-scope limiting, if configured.
+    fn scope_bps(&self) -> Option<u64> {
+        let global_bps = self.config.global_bps?;
+        let pct = self.config.scope_pct?;
+        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+    }
+
+    /// Returns the effective BPS for a rule, if it has a valid limit.
+    fn rule_bps(&self, rule: &BandwidthRule) -> Option<u64> {
+        let pct_limit = rule.pct.and_then(|p| {
+            self.config
+                .global_bps
+                .map(|g| ((g as f64) * (p as f64 / 100.0)) as u64)
+        });
+
+        match (rule.bps, pct_limit) {
+            (Some(r), Some(p)) => Some(r.min(p)),
+            (Some(r), None) => Some(r),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        }
     }
 }
 
@@ -355,22 +608,41 @@ impl TokenBucket {
 /// A wrapper around a `PayloadStream` that measures bandwidth usage.
 ///
 /// This behaves exactly as a `PayloadStream`, except that every time an item is polled,
-/// the accumulator is incremented by the size of the returned `Bytes` chunk.
+/// the global accumulator and all per-key buckets are incremented by the size of the
+/// returned `Bytes` chunk.
 pub(crate) struct MeteredPayloadStream {
     inner: PayloadStream,
-    accumulator: Arc<AtomicU64>,
+    global_accumulator: Arc<AtomicU64>,
+    buckets: Vec<Arc<BandwidthBucket>>,
 }
 
 impl MeteredPayloadStream {
-    pub fn from(inner: PayloadStream, accumulator: Arc<AtomicU64>) -> Self {
-        Self { inner, accumulator }
+    pub fn new(
+        inner: PayloadStream,
+        global_accumulator: Arc<AtomicU64>,
+        buckets: Vec<Arc<BandwidthBucket>>,
+    ) -> Self {
+        Self {
+            inner,
+            global_accumulator,
+            buckets,
+        }
+    }
+
+    pub fn global_only(inner: PayloadStream, global_accumulator: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            global_accumulator,
+            buckets: Vec::new(),
+        }
     }
 }
 
 impl std::fmt::Debug for MeteredPayloadStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MeteredPayloadStream")
-            .field("accumulator", &self.accumulator)
+            .field("global_accumulator", &self.global_accumulator)
+            .field("buckets", &self.buckets.len())
             .finish()
     }
 }
@@ -382,8 +654,12 @@ impl Stream for MeteredPayloadStream {
         let this = self.get_mut();
         let res = this.inner.as_mut().poll_next(cx);
         if let Poll::Ready(Some(Ok(ref bytes))) = res {
-            this.accumulator
-                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            let n = bytes.len() as u64;
+            this.global_accumulator
+                .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            for bucket in &this.buckets {
+                bucket.add_bytes(n);
+            }
         }
         res
     }
