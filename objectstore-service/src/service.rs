@@ -634,6 +634,212 @@ mod tests {
         );
     }
 
+    // --- Size-based routing tests ---
+
+    #[tokio::test]
+    async fn small_object_goes_to_high_volume() {
+        let (service, hv_dir, lt_dir) = make_localfs_service();
+        let payload = vec![0u8; 100]; // 100 bytes, well under 1 MiB
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("small".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Object should be in high-volume
+        let hv_backend = crate::backend::local_fs::LocalFsBackend::new(hv_dir.path());
+        let result = hv_backend.get_object(&id).await.unwrap();
+        assert!(result.is_some(), "small object not in high-volume backend");
+
+        // Object should NOT be in long-term
+        let lt_backend = crate::backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        let result = lt_backend.get_object(&id).await.unwrap();
+        assert!(result.is_none(), "small object leaked to long-term backend");
+    }
+
+    #[tokio::test]
+    async fn large_object_goes_to_long_term_with_tombstone() {
+        let (service, hv_dir, lt_dir) = make_localfs_service();
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("large".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Real payload should be in long-term
+        let lt_backend = crate::backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        let (lt_meta, stream) = lt_backend.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), payload.len());
+        assert!(!lt_meta.is_tombstone());
+
+        // A redirect tombstone should exist in high-volume
+        let hv_backend = crate::backend::local_fs::LocalFsBackend::new(hv_dir.path());
+        let (hv_meta, _) = hv_backend.get_object(&id).await.unwrap().unwrap();
+        assert!(hv_meta.is_tombstone());
+    }
+
+    #[tokio::test]
+    async fn get_follows_tombstone_redirect() {
+        let (service, _hv_dir, _lt_dir) = make_localfs_service();
+        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("redirect-get".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // get_object through service should transparently follow the tombstone
+        let (metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), payload.len());
+        assert!(!metadata.is_tombstone());
+    }
+
+    #[tokio::test]
+    async fn get_metadata_follows_tombstone_redirect() {
+        let (service, _hv_dir, _lt_dir) = make_localfs_service();
+        let payload = vec![0xEFu8; 2 * 1024 * 1024]; // 2 MiB
+
+        let metadata_in = Metadata {
+            content_type: "image/png".into(),
+            ..Default::default()
+        };
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("redirect-head".into()),
+                &metadata_in,
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // get_metadata through service should follow tombstone
+        let metadata = service.get_metadata(&id).await.unwrap().unwrap();
+        assert!(!metadata.is_tombstone());
+        assert_eq!(metadata.content_type, "image/png");
+    }
+
+    #[tokio::test]
+    async fn delete_cleans_up_both_backends() {
+        let (service, hv_dir, lt_dir) = make_localfs_service();
+        let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("delete-both".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        service.delete_object(&id).await.unwrap();
+
+        // Both backends should be empty
+        let hv_backend = crate::backend::local_fs::LocalFsBackend::new(hv_dir.path());
+        assert!(hv_backend.get_object(&id).await.unwrap().is_none());
+
+        let lt_backend = crate::backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        assert!(lt_backend.get_object(&id).await.unwrap().is_none());
+    }
+
+    // --- Tombstone preservation on failed long-term delete ---
+
+    /// A backend wrapper that delegates everything except `delete_object`, which always fails.
+    #[derive(Debug)]
+    struct FailingDeleteBackend(crate::backend::local_fs::LocalFsBackend);
+
+    #[async_trait::async_trait]
+    impl crate::backend::common::Backend for FailingDeleteBackend {
+        fn name(&self) -> &'static str {
+            "failing-delete"
+        }
+
+        async fn put_object(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: PayloadStream,
+        ) -> Result<()> {
+            self.0.put_object(id, metadata, stream).await
+        }
+
+        async fn get_object(
+            &self,
+            id: &ObjectId,
+        ) -> Result<Option<(Metadata, PayloadStream)>> {
+            self.0.get_object(id).await
+        }
+
+        async fn delete_object(&self, _id: &ObjectId) -> Result<()> {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "simulated long-term delete failure",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn tombstone_preserved_when_long_term_delete_fails() {
+        let hv_dir = tempfile::tempdir().unwrap();
+        let lt_dir = tempfile::tempdir().unwrap();
+        let hv: BoxedBackend =
+            Box::new(crate::backend::local_fs::LocalFsBackend::new(hv_dir.path()));
+        let lt: BoxedBackend =
+            Box::new(FailingDeleteBackend(crate::backend::local_fs::LocalFsBackend::new(
+                lt_dir.path(),
+            )));
+        let service = StorageService::from_backends(hv, lt);
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("fail-delete".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Delete should fail because long-term backend refuses deletes
+        let result = service.delete_object(&id).await;
+        assert!(result.is_err());
+
+        // The tombstone in high-volume must still be present
+        let hv_backend = crate::backend::local_fs::LocalFsBackend::new(hv_dir.path());
+        let (hv_meta, _) = hv_backend.get_object(&id).await.unwrap().unwrap();
+        assert!(
+            hv_meta.is_tombstone(),
+            "tombstone was removed despite long-term delete failure"
+        );
+
+        // The object should still be reachable through the service
+        let (metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), payload.len());
+        assert!(!metadata.is_tombstone());
+    }
+
     #[tokio::test]
     async fn test_tombstone_redirect_and_delete() {
         let high_volume = StorageConfig::BigTable {
