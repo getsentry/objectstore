@@ -14,8 +14,8 @@ use crate::state::ServiceState;
 /// This extractor reads the [`ObjectContext`] from request extensions (inserted by
 /// [`Xt<ObjectId>`](super::Xt) or [`Xt<ObjectContext>`](super::Xt)) to set up per-key
 /// bandwidth tracking. Since this extractor implements [`FromRequest`] (consuming the body),
-/// axum guarantees it always runs after [`FromRequestParts`] extractors, so the context
-/// will always be available when a handler also extracts an object ID or context.
+/// it always runs after [`FromRequestParts`] extractors, so the context will always be available
+/// when a handler also extracts an object ID or context.
 pub struct MeteredBody(pub PayloadStream);
 
 impl std::fmt::Debug for MeteredBody {
