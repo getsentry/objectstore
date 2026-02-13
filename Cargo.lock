@@ -377,13 +377,11 @@ dependencies = [
  "axum",
  "axum-core",
  "bytes",
- "fastrand",
  "futures-util",
  "http 1.3.1",
  "http-body",
  "http-body-util",
  "mime",
- "multer",
  "pin-project-lite",
  "rustversion",
  "serde_core",
@@ -2342,17 +2340,14 @@ dependencies = [
  "sentry",
  "serde",
  "serde_json",
- "serde_with",
  "stresstest",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
- "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2363,7 +2358,6 @@ dependencies = [
  "async-trait",
  "bigtable_rs",
  "bytes",
- "data-encoding",
  "futures-util",
  "gcp_auth",
  "humantime",
@@ -2371,7 +2365,6 @@ dependencies = [
  "merni",
  "objectstore-types",
  "reqwest 0.12.24",
- "sentry",
  "serde",
  "serde_json",
  "tempfile",
@@ -2388,7 +2381,6 @@ dependencies = [
 name = "objectstore-test"
 version = "0.1.0"
 dependencies = [
- "jsonwebtoken",
  "objectstore-server",
  "objectstore-types",
  "tempfile",
@@ -3482,7 +3474,6 @@ dependencies = [
  "native-tls",
  "reqwest 0.12.24",
  "sentry-actix",
- "sentry-anyhow",
  "sentry-backtrace",
  "sentry-contexts",
  "sentry-core",
@@ -3505,17 +3496,6 @@ dependencies = [
  "actix-web",
  "bytes",
  "futures-util",
- "sentry-core",
-]
-
-[[package]]
-name = "sentry-anyhow"
-version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd12302213b0f449a065a68164e30dc02f5a4bc84843c2c5939b2c46b1513e8"
-dependencies = [
- "anyhow",
- "sentry-backtrace",
  "sentry-core",
 ]
 
@@ -3894,7 +3874,6 @@ dependencies = [
  "argh",
  "bytesize",
  "futures",
- "futures-util",
  "humantime-serde",
  "indicatif",
  "mimalloc",
