@@ -20,7 +20,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use objectstore_types::Metadata;
 
-use crate::backend::common::BoxedBackend;
+use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -33,6 +33,8 @@ enum BackendChoice {
 
 /// Service response for get operations.
 pub type GetResponse = Option<(Metadata, PayloadStream)>;
+/// Service response for metadata-only get operations.
+pub type MetadataResponse = Option<Metadata>;
 /// Service response for insert operations.
 pub type InsertResponse = ObjectId;
 /// Service response for delete operations.
@@ -147,8 +149,8 @@ impl StorageService {
 
         // There might currently be a tombstone at the given path from a previously stored object.
         if has_key {
-            let previously_stored_object = self.0.high_volume_backend.get_object(&id).await?;
-            if is_tombstoned(&previously_stored_object) {
+            let metadata = self.0.high_volume_backend.get_metadata(&id).await?;
+            if metadata.is_some_and(|m| m.is_tombstone()) {
                 // Write the object to the other backend and keep the tombstone in place
                 backend = BackendChoice::LongTerm;
             }
@@ -232,6 +234,30 @@ impl StorageService {
         Ok(id)
     }
 
+    /// Retrieves only the metadata for an object, without downloading the payload.
+    pub async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        let start = Instant::now();
+
+        let mut backend_choice = "high-volume";
+        let mut backend_type = self.0.high_volume_backend.name();
+        let mut result = self.0.high_volume_backend.get_metadata(id).await?;
+
+        if result.as_ref().is_some_and(|m| m.is_tombstone()) {
+            result = self.0.long_term_backend.get_metadata(id).await?;
+            backend_choice = "long-term";
+            backend_type = self.0.long_term_backend.name();
+        }
+
+        merni::distribution!(
+            "head.latency"@s: start.elapsed(),
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
+
+        Ok(result)
+    }
+
     /// Streams the contents of an object stored at the given key.
     pub async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         let start = Instant::now();
@@ -240,7 +266,7 @@ impl StorageService {
         let mut backend_type = self.0.high_volume_backend.name();
         let mut result = self.0.high_volume_backend.get_object(id).await?;
 
-        if is_tombstoned(&result) {
+        if result.is_tombstone() {
             result = self.0.long_term_backend.get_object(id).await?;
             backend_choice = "long-term";
             backend_type = self.0.long_term_backend.name();
@@ -276,12 +302,14 @@ impl StorageService {
         let mut backend_choice = "high-volume";
         let mut backend_type = self.0.high_volume_backend.name();
 
-        if let Some((metadata, _stream)) = self.0.high_volume_backend.get_object(id).await? {
-            if metadata.is_redirect_tombstone == Some(true) {
-                backend_choice = "long-term";
-                backend_type = self.0.long_term_backend.name();
-                self.0.long_term_backend.delete_object(id).await?;
-            }
+        let outcome = self.0.high_volume_backend.delete_non_tombstone(id).await?;
+        if outcome == DeleteOutcome::Tombstone {
+            backend_choice = "long-term";
+            backend_type = self.0.long_term_backend.name();
+            // Delete the long-term object first, then clean up the tombstone.
+            // This ordering ensures that if the long-term delete fails, the
+            // tombstone remains and the data is still reachable (not orphaned).
+            self.0.long_term_backend.delete_object(id).await?;
             self.0.high_volume_backend.delete_object(id).await?;
         }
 
@@ -296,17 +324,14 @@ impl StorageService {
     }
 }
 
-fn is_tombstoned(result: &GetResponse) -> bool {
-    matches!(
-        result,
-        Some((
-            Metadata {
-                is_redirect_tombstone: Some(true),
-                ..
-            },
-            _
-        ))
-    )
+trait GetResponseExt {
+    fn is_tombstone(&self) -> bool;
+}
+
+impl GetResponseExt for GetResponse {
+    fn is_tombstone(&self) -> bool {
+        self.as_ref().is_some_and(|(m, _)| m.is_tombstone())
+    }
 }
 
 async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
@@ -347,6 +372,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::common::Backend as _;
 
     fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
@@ -405,5 +431,56 @@ mod tests {
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_redirect_and_delete() {
+        let high_volume = StorageConfig::BigTable {
+            endpoint: Some("localhost:8086"),
+            project_id: "testing",
+            instance_name: "objectstore",
+            table_name: "objectstore",
+            connections: None,
+        };
+        let long_term = StorageConfig::Gcs {
+            endpoint: Some("http://localhost:8087"),
+            bucket: "test-bucket",
+        };
+        let service = StorageService::new(high_volume, long_term).await.unwrap();
+
+        // A separate GCS backend to directly inspect the long-term storage.
+        let gcs_backend =
+            backend::gcs::GcsBackend::new(Some("http://localhost:8087"), "test-bucket")
+                .await
+                .unwrap();
+
+        // Insert a >1 MiB object with a key.  This forces the long-term path:
+        // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
+        let payload = vec![0xAB; 2 * 1024 * 1024]; // 2 MiB
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("delete-cleanup-test".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: the object is readable through the service (follows the tombstone).
+        let (_, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), payload.len());
+
+        // Delete through the service layer.
+        service.delete_object(&id).await.unwrap();
+
+        // The tombstone in BigTable should be gone, so the service returns None.
+        let after_delete = service.get_object(&id).await.unwrap();
+        assert!(after_delete.is_none(), "tombstone not deleted");
+
+        // The real object in GCS must also be gone — no orphan.
+        let orphan = gcs_backend.get_object(&id).await.unwrap();
+        assert!(orphan.is_none(), "object leaked");
     }
 }

@@ -10,7 +10,9 @@ use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{
+    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -307,6 +309,65 @@ impl GcsBackend {
         Ok(builder)
     }
 
+    /// Fetches the GCS object metadata (without the payload), bumps TTI if
+    /// needed, and returns the parsed [`Metadata`].
+    async fn fetch_gcs_metadata(&self, object_url: &Url) -> ServiceResult<Option<Metadata>> {
+        let metadata_response = self
+            .request(Method::GET, object_url.clone())
+            .await?
+            .send()
+            .await
+            .map_err(|cause| ServiceError::Reqwest {
+                context: "GCS: failed to send get metadata request".to_string(),
+                cause,
+            })?;
+
+        if metadata_response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
+            return Ok(None);
+        }
+
+        let metadata_response =
+            metadata_response
+                .error_for_status()
+                .map_err(|cause| ServiceError::Reqwest {
+                    context: "GCS: failed to get object metadata".to_string(),
+                    cause,
+                })?;
+
+        let gcs_metadata: GcsObject =
+            metadata_response
+                .json()
+                .await
+                .map_err(|cause| ServiceError::Reqwest {
+                    context: "GCS: failed to parse object metadata response".to_string(),
+                    cause,
+                })?;
+
+        let expire_at = gcs_metadata.custom_time;
+        let metadata = gcs_metadata.into_metadata()?;
+
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
+        // Filter already expired objects but leave them to garbage collection
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            tracing::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
+            let new_expire_at = access_time + tti;
+            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
+                self.update_custom_time(object_url.clone(), new_expire_at)
+                    .await?;
+            }
+        }
+
+        Ok(Some(metadata))
+    }
+
     async fn update_custom_time(
         &self,
         object_url: Url,
@@ -416,60 +477,10 @@ impl Backend for GcsBackend {
     async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
-        let metadata_response = self
-            .request(Method::GET, object_url.clone())
-            .await?
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send get metadata request".to_string(),
-                cause,
-            })?;
 
-        if metadata_response.status() == StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
+        let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
             return Ok(None);
-        }
-
-        let metadata_response =
-            metadata_response
-                .error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to get object metadata".to_string(),
-                    cause,
-                })?;
-
-        let gcs_metadata: GcsObject =
-            metadata_response
-                .json()
-                .await
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to parse object metadata response".to_string(),
-                    cause,
-                })?;
-
-        // TODO: Store custom_time directly in metadata.
-        let expire_at = gcs_metadata.custom_time;
-        let metadata = gcs_metadata.into_metadata()?;
-
-        // TODO: Inject the access time from the request.
-        let access_time = SystemTime::now();
-
-        // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
-            tracing::debug!("Object found but past expiry");
-            return Ok(None);
-        }
-
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // Only bump if the difference in deadlines meets a minimum threshold
-            let new_expire_at = SystemTime::now() + tti;
-            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
-                self.update_custom_time(object_url.clone(), new_expire_at)
-                    .await?;
-            }
-        }
+        };
 
         let mut download_url = object_url;
         download_url.query_pairs_mut().append_pair("alt", "media");
@@ -494,6 +505,13 @@ impl Backend for GcsBackend {
             .boxed();
 
         Ok(Some((metadata, stream)))
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        tracing::debug!("Reading metadata from GCS backend");
+        let object_url = self.object_url(id)?;
+        self.fetch_gcs_metadata(&object_url).await
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -709,6 +727,41 @@ mod tests {
             .await?;
 
         let result = backend.get_object(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_returns_metadata() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            origin: Some("203.0.113.42".into()),
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(meta.content_type, metadata.content_type);
+        assert_eq!(meta.origin, metadata.origin);
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let result = backend.get_metadata(&id).await?;
         assert!(result.is_none());
 
         Ok(())

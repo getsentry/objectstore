@@ -5,7 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{
+    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+};
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceError, ServiceResult};
 
@@ -94,6 +96,61 @@ where
         Ok(builder)
     }
 
+    /// Fetches object metadata using the given HTTP method (GET or HEAD),
+    /// bumps TTI if needed, and returns the parsed metadata along with the
+    /// response (so `get_object` can read the body from a GET).
+    async fn request_object(
+        &self,
+        method: Method,
+        id: &ObjectId,
+    ) -> ServiceResult<Option<(Metadata, reqwest::Response)>> {
+        let object_url = self.object_url(id);
+
+        let response = self
+            .request(method, &object_url)
+            .await?
+            .send()
+            .await
+            .map_err(|cause| ServiceError::Reqwest {
+                context: "S3: failed to send request".to_string(),
+                cause,
+            })?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Object not found");
+            return Ok(None);
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|cause| ServiceError::Reqwest {
+                context: "S3: failed to get object".to_string(),
+                cause,
+            })?;
+
+        let headers = response.headers();
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        metadata.size = response.content_length().map(|len| len as usize);
+
+        // TODO: Schedule into background persistently so this doesn't get lost on restarts
+        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
+            // TODO: Inject the access time from the request.
+            let access_time = SystemTime::now();
+
+            let expire_at = headers
+                .get(GCS_CUSTOM_TIME)
+                .and_then(|s| s.to_str().ok())
+                .and_then(|s| humantime::parse_rfc3339(s).ok())
+                .unwrap_or(access_time);
+
+            if expire_at < access_time + tti - TTI_DEBOUNCE {
+                self.update_metadata(id, &metadata).await?;
+            }
+        }
+
+        Ok(Some((metadata, response)))
+    }
+
     /// Issues a request to update the metadata for the given object.
     async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> ServiceResult<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
@@ -179,54 +236,20 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
         tracing::debug!("Reading from s3_compatible backend");
-        let object_url = self.object_url(id);
 
-        let response = self
-            .request(Method::GET, &object_url)
-            .await?
-            .send()
-            .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "S3: failed to send get request".to_string(),
-                cause,
-            })?;
-        if response.status() == StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
+        let Some((metadata, response)) = self.request_object(Method::GET, id).await? else {
             return Ok(None);
-        }
-
-        let response = response
-            .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "S3: failed to get object".to_string(),
-                cause,
-            })?;
-
-        let headers = response.headers();
-        // TODO: Populate size in metadata
-        let metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
-
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // TODO: Inject the access time from the request.
-            let access_time = SystemTime::now();
-
-            let expire_at = headers
-                .get(GCS_CUSTOM_TIME)
-                .and_then(|s| s.to_str().ok())
-                .and_then(|s| humantime::parse_rfc3339(s).ok())
-                .unwrap_or(access_time);
-
-            if expire_at < access_time + tti - TTI_DEBOUNCE {
-                // This serializes a new custom-time internally.
-                self.update_metadata(id, &metadata).await?;
-            }
-        }
-
-        // TODO: the object *GET* should probably also contain the expiration time?
+        };
 
         let stream = response.bytes_stream().map_err(io::Error::other);
         Ok(Some((metadata, stream.boxed())))
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        tracing::debug!("Reading metadata from s3_compatible backend");
+        let response = self.request_object(Method::HEAD, id).await?;
+        Ok(response.map(|(metadata, _)| metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]

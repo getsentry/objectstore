@@ -158,4 +158,44 @@ mod tests {
         assert_eq!(read_metadata, metadata);
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
+
+    #[tokio::test]
+    async fn get_metadata_returns_metadata() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(tempdir.path());
+
+        let id = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("203.0.113.42".into()),
+            custom: [("foo".into(), "bar".into())].into(),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, make_stream(b"oh hai!"))
+            .await
+            .unwrap();
+
+        let read_metadata = backend.get_metadata(&id).await.unwrap().unwrap();
+        assert_eq!(read_metadata, metadata);
+    }
+
+    #[tokio::test]
+    async fn get_metadata_nonexistent() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(tempdir.path());
+
+        let id = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+
+        let result = backend.get_metadata(&id).await.unwrap();
+        assert!(result.is_none());
+    }
 }

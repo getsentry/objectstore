@@ -223,6 +223,10 @@ pub struct Metadata {
     /// is rather found on the other backend.
     /// In practice this means that the tombstone is stored on the "HighVolume" backend,
     /// to avoid unnecessarily slow "not found" requests on the "LongTerm" backend.
+    ///
+    /// **Important:** This field must remain the first field in the struct.
+    /// The BigTable backend uses a regex predicate on the serialized JSON that
+    /// assumes `is_redirect_tombstone` appears at the start of the object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_redirect_tombstone: Option<bool>,
 
@@ -393,6 +397,11 @@ impl Metadata {
         }
 
         Ok(headers)
+    }
+
+    /// Returns `true` if this metadata represents a redirect tombstone.
+    pub fn is_tombstone(&self) -> bool {
+        self.is_redirect_tombstone == Some(true)
     }
 }
 
