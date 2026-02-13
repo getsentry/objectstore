@@ -1,6 +1,6 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{
-    DeleteResponse, GetResponse, InsertResponse, PayloadStream, StorageService,
+    DeleteResponse, GetResponse, InsertResponse, MetadataResponse, PayloadStream, StorageService,
 };
 use objectstore_types::{Metadata, Permission};
 
@@ -64,6 +64,12 @@ impl AuthAwareService {
             .service
             .insert_object(context, key, metadata, stream)
             .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::get_metadata`].
+    pub async fn get_metadata(&self, id: &ObjectId) -> ApiResult<MetadataResponse> {
+        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        Ok(self.service.get_metadata(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].

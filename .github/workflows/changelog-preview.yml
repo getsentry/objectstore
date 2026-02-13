@@ -13,3 +13,5 @@ jobs:
   changelog-preview:
     uses: getsentry/craft/.github/workflows/changelog-preview.yml@v2
     secrets: inherit
+    with:
+      working-directory: ./clients

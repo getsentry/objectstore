@@ -50,5 +50,15 @@ pub enum ServiceError {
     },
 }
 
+impl ServiceError {
+    /// Creates a [`ServiceError::Reqwest`] from a reqwest error with context.
+    pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
+        Self::Reqwest {
+            context: context.into(),
+            cause,
+        }
+    }
+}
+
 /// Result type for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;

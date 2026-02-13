@@ -4,88 +4,115 @@ The client is used to interface with the objectstore backend. It handles
 responsibilities like transparent compression, and making sure that uploads and
 downloads are done as efficiently as possible.
 
-## Usage
+## Quick Start
 
 ```python
-import datetime
+from objectstore_client import Client, Usecase
 
-import urllib3
+client = Client("http://localhost:8888")
+session = client.session(Usecase("attachments"), org=42, project=1337)
 
-from objectstore_client import (
-    Client,
-    NoOpMetricsBackend,
-    Permission,
-    TimeToIdle,
-    TimeToLive,
-    TokenGenerator,
-    Usecase,
-)
+# Upload
+key = session.put(b"Hello, world!")
 
-# Necessary when using Objectstore instances that enforce authorization checks.
-token_generator = TokenGenerator(
-    "my-key-id",
-    "<securely inject EdDSA private key>",
-    expiry_seconds=60,
-    permissions=Permission.max(),
-)
+# Download
+result = session.get(key)
+content = result.payload.read()
 
-# This should be stored in a global variable and reused, in order to reuse the connection
+# Delete
+session.delete(key)
+```
+
+## Core Concepts
+
+### Usecases and Scopes
+
+A `Usecase` represents a server-side namespace with its own configuration defaults.
+Within a Usecase, Scopes provide further isolation — typically keyed by organization
+and project IDs. A Session ties a Client to a specific Usecase + Scope for operations.
+
+Scope components form a hierarchical path, so their order matters:
+`org=42/project=1337` and `project=1337/org=42` are different scopes. We recommend
+using `org` and `project` as the first two components.
+
+```python
+# Scope with org and project (recommended first components)
+session = client.session(Usecase("attachments"), org=42, project=1337)
+
+# Additional components are appended after org/project
+session = client.session(Usecase("attachments"), org=42, project=1337, app_slug="email_app")
+```
+
+### Expiration
+
+Objects can expire automatically using Time To Live (from creation) or Time To Idle
+(from last access). Defaults are set at the Usecase level and can be overridden per-upload.
+Without an expiration policy, objects use manual expiration (no auto-deletion).
+
+**We strongly recommend setting an expiration policy on every Usecase** to prevent
+unbounded storage growth. Choose `TimeToIdle` for cache-like data that should stay
+alive while actively used, or `TimeToLive` for data with a fixed retention period.
+
+```python
+from datetime import timedelta
+from objectstore_client import Usecase, TimeToIdle, TimeToLive
+
+# Set default expiration on the Usecase
+usecase = Usecase("attachments", expiration_policy=TimeToIdle(timedelta(days=30)))
+
+# Override per-upload
+session.put(b"payload", expiration_policy=TimeToLive(timedelta(hours=1)))
+```
+
+### Origin Tracking
+
+We encourage setting the `origin` on every upload to track where the payload was
+originally obtained from (e.g., the IP address of the Sentry SDK or CLI). This is
+optional but helps with auditing and debugging.
+
+```python
+session.put(b"payload", origin="203.0.113.42")
+```
+
+### Compression
+
+Uploads are compressed with Zstd by default. Downloads are transparently decompressed.
+You can override compression per-upload for pre-compressed or uncompressible data.
+
+```python
+session.put(already_compressed_data, compression="none")
+```
+
+### Custom Metadata
+
+Arbitrary key-value pairs can be attached to objects and retrieved on download.
+
+```python
+session.put(b"payload", metadata={"source": "upload-service"})
+```
+
+## Configuration
+
+In production, store the `Client` and `Usecase` at module level and reuse them.
+The following shows all available constructor options with their defaults:
+
+```python
+from objectstore_client import Client, Usecase
+
 client = Client(
     "http://localhost:8888",
-    # Optionally, bring your own metrics backend to record things like latency, throughput, and payload sizes
-    metrics_backend=NoOpMetricsBackend(),
-    # Optionally, enable distributed traces in Sentry
-    propagate_traces=True,
-    # Optionally, set timeout and retries
-    timeout_ms=500, # 500ms timeout for requests
-    retries=3,      # Number of connection retries
-    # For further customization, provide additional kwargs for urllib3.HTTPConnectionPool
-    connection_kwargs={"maxsize": 10},
-    # Optionally, provide a token generator for Objectstore instances with authorization enforced
-    token_generator=token_generator,
+    propagate_traces=False,  # default
+    retries=3,               # default: 3 connect retries, no read retries
+    timeout_ms=None,         # default: no read timeout (connect: 100ms)
+    connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)
+    # metrics_backend=...,   # default: no-op
+    # token_generator=...,   # for authorized Objectstore instances
 )
 
-# This could also be stored in a global/shared variable, as you will deal with a fixed number of usecases with statically defined defaults
-my_usecase = Usecase(
-    "my-usecase",
-    # Optionally, define defaults for all operations within this Usecase
-    expiration_policy=TimeToLive(datetime.timedelta(days=1)),
-)
-
-# Start a Session, tied to your Usecase and a Scope.
-# A Scope is a (possibly nested) namespace within Objectstore that provides isolation within a Usecase.
-# The Scope is given as a sequence of key-value pairs through kwargs.
-# Note that order matters!
-# The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
-# You're encouraged to use the organization and project ID as the first components of the scope, as follows:
-session = client.session(
-    my_usecase, org=42, project=1337, app_slug="email_app"
-)
-
-# The following operations will raise an exception on failure
-
-# Write an object and metadata
-object_key = session.put(
-    b"Hello, world!",
-    # You can pass in your own key for the object to decide where to store the file.
-    # Otherwise, Objectstore will pick a key and return it.
-    # A put request to an existing key overwrites the contents and metadata.
-    # key="hello",
-    metadata={"key": "value"},
-    # Overrides the default defined at the Usecase level
-    expiration_policy=TimeToIdle(datetime.timedelta(days=30)),
-)
-
-# Read an object and its metadata
-result = session.get(object_key)
-
-content = result.payload.read()
-assert content == b"Hello, world!"
-assert result.metadata.custom["key"] == "value"
-
-# Delete an object
-session.delete(object_key)
+attachments = Usecase("attachments")
 ```
+
+See the docstrings on `Client`, `Usecase`, and `Session` for full parameter documentation.
 
 ## Development
 

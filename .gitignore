@@ -1,14 +1,18 @@
 /data
-/**/target
 recipe.json
 profile.json.gz
-.envrc.private
 
+# Local config
+.envrc.private
 **/config/*.yaml
 !**/config/*example.yaml
 
-# vim swap files
+# Dev tools
 .*.sw*
+.claude/settings.local.json
+.claude/plans
 
+# Build artifacts
+/**/target
 **/__pycache__
 /dist

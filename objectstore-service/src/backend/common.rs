@@ -14,8 +14,19 @@ pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERS
 pub(super) type PutResponse = ();
 /// Backend response for get operations.
 pub(super) type GetResponse = Option<(Metadata, PayloadStream)>;
+/// Backend response for metadata-only get operations.
+pub(super) type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub(super) type DeleteResponse = ();
+
+/// Response from [`Backend::delete_non_tombstone`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteOutcome {
+    /// The entity was a redirect tombstone; it was left intact.
+    Tombstone,
+    /// The entity was a regular object (now deleted) or non-existent.
+    Deleted,
+}
 
 /// A type-erased [`Backend`] instance.
 pub type BoxedBackend = Box<dyn Backend>;
@@ -36,8 +47,31 @@ pub trait Backend: Debug + Send + Sync + 'static {
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
     async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse>;
 
+    /// Retrieves only the metadata for an object, without the payload.
+    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+        Ok(self
+            .get_object(id)
+            .await?
+            .map(|(metadata, _stream)| metadata))
+    }
+
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse>;
+
+    /// Deletes the object only if it is NOT a redirect tombstone.
+    ///
+    /// Returns [`DeleteOutcome::Tombstone`] (leaving the row intact) when
+    /// the object is a redirect tombstone, or [`DeleteOutcome::Deleted`]
+    /// (after deleting it) for regular objects and non-existent rows.
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> ServiceResult<DeleteOutcome> {
+        let metadata = self.get_metadata(id).await?;
+        if metadata.is_some_and(|m| m.is_tombstone()) {
+            Ok(DeleteOutcome::Tombstone)
+        } else {
+            self.delete_object(id).await?;
+            Ok(DeleteOutcome::Deleted)
+        }
+    }
 }
 
 /// Creates a reqwest client with required defaults.

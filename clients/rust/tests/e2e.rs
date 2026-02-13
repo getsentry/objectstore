@@ -186,6 +186,53 @@ async fn not_found_with_wrong_scope() {
 }
 
 #[tokio::test]
+async fn stores_with_origin() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let stored_id = session
+        .put("hello with origin")
+        .compression(None)
+        .origin("203.0.113.42")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.origin.as_deref(), Some("203.0.113.42"));
+}
+
+#[tokio::test]
+async fn stores_without_origin() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let stored_id = session
+        .put("hello without origin")
+        .compression(None)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert!(response.metadata.origin.is_none());
+}
+
+#[tokio::test]
 async fn fails_with_insufficient_auth_token_perms() {
     let server = test_server().await;
 

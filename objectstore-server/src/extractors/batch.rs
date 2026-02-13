@@ -193,7 +193,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, header::CONTENT_TYPE};
     use futures::StreamExt;
-    use objectstore_types::{ExpirationPolicy, HEADER_EXPIRATION};
+    use objectstore_types::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
 
     #[tokio::test]
     async fn test_valid_request_works() {
@@ -216,6 +216,7 @@ mod tests {
              {HEADER_BATCH_OPERATION_KEY}: {key2}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
              {HEADER_EXPIRATION}: {expiration}\r\n\
+             {HEADER_ORIGIN}: 203.0.113.42\r\n\
              Content-Type: text/plain\r\n\
              \r\n\
              {insert2}\r\n\
@@ -255,6 +256,7 @@ mod tests {
         };
         assert_eq!(insert_op1.key, "test1");
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
+        assert_eq!(insert_op1.metadata.origin, None);
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
         let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
@@ -263,6 +265,7 @@ mod tests {
         assert_eq!(insert_op2.key, "test2");
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
+        assert_eq!(insert_op2.metadata.origin.as_deref(), Some("203.0.113.42"));
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 
         let Operation::Delete(delete_op) = &operations[3].as_ref().unwrap() else {
