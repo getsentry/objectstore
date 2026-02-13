@@ -315,4 +315,43 @@ mod tests {
         let api_path = empty_scopes.as_api_path().to_string();
         assert_eq!(api_path, EMPTY_SCOPES);
     }
+
+    #[test]
+    fn test_push_and_get() {
+        let mut scopes = Scopes::empty();
+        scopes.push("org", "123").unwrap();
+        scopes.push("project", "456").unwrap();
+
+        assert_eq!(scopes.get("org").unwrap().value(), "123");
+        assert_eq!(scopes.get("project").unwrap().value(), "456");
+        assert!(scopes.get("missing").is_none());
+    }
+
+    #[test]
+    fn test_get_value() {
+        let mut scopes = Scopes::empty();
+        scopes.push("org", "123").unwrap();
+
+        assert_eq!(scopes.get_value("org"), Some("123"));
+        assert_eq!(scopes.get_value("missing"), None);
+    }
+
+    #[test]
+    fn test_push_validates() {
+        let mut scopes = Scopes::empty();
+        assert!(scopes.push("", "value").is_err());
+        assert!(scopes.push("key", "").is_err());
+        assert!(scopes.push("key/bad", "value").is_err());
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let empty = Scopes::empty();
+        assert!(empty.is_empty());
+
+        let mut non_empty = Scopes::empty();
+        non_empty.push("org", "1").unwrap();
+        assert!(!non_empty.is_empty());
+    }
 }
