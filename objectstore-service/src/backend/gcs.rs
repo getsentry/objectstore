@@ -240,11 +240,15 @@ impl serde::Serialize for GcsMetaKey {
     }
 }
 
-fn is_retryable(error: &reqwest::Error) -> bool {
-    if error.is_timeout() || error.is_connect() || error.is_request() {
+/// Returns `true` if the error is a transient reqwest failure worth retrying.
+fn is_retryable(error: &ServiceError) -> bool {
+    let ServiceError::Reqwest { cause, .. } = error else {
+        return false;
+    };
+    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
         return true;
     }
-    let Some(status) = error.status() else {
+    let Some(status) = cause.status() else {
         return false;
     };
     // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
@@ -340,15 +344,13 @@ impl GcsBackend {
         loop {
             match f().await {
                 Ok(res) => return Ok(res),
-                Err(ServiceError::Reqwest { cause, .. })
-                    if retry_count < REQUEST_RETRY_COUNT && is_retryable(&cause) =>
-                {
+                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
                     merni::counter!("gcs.retries": 1, "action" => action);
-                    tracing::warn!(
+                    tracing::debug!(
                         retry_count,
                         action,
-                        error = &cause as &dyn std::error::Error,
+                        error = e as &dyn std::error::Error,
                         "Retrying request"
                     );
                 }
@@ -370,26 +372,20 @@ impl GcsBackend {
                     .await?
                     .send()
                     .await
-                    .map_err(|cause| ServiceError::Reqwest {
-                        context: "GCS: failed to send get metadata request".to_string(),
-                        cause,
-                    })?;
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata request", e))?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     return Ok(None);
                 }
 
-                let resp = resp.error_for_status().map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to get object metadata".to_string(),
-                    cause,
-                })?;
+                let metadata = resp
+                    .error_for_status()
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata status", e))?
+                    .json()
+                    .await
+                    .map_err(|e| ServiceError::reqwest("GCS: get metadata parse", e))?;
 
-                let meta = resp.json().await.map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to parse object metadata response".to_string(),
-                    cause,
-                })?;
-
-                Ok(Some(meta))
+                Ok(Some(metadata))
             })
             .await?
         {
@@ -442,16 +438,8 @@ impl GcsBackend {
                 .json(&CustomTimeRequest { custom_time })
                 .send()
                 .await
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to send update custom time request".to_string(),
-                    cause,
-                })?
-                .error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to update expiration time for object with TTI"
-                        .to_string(),
-                    cause,
-                })?;
+                .and_then(|r| r.error_for_status())
+                .map_err(|e| ServiceError::reqwest("GCS: update custom time", e))?;
             Ok(())
         })
         .await
@@ -519,15 +507,8 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to send multipart upload request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
-                context: "GCS: failed to upload object via multipart".to_string(),
-                cause,
-            })?;
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| ServiceError::reqwest("GCS: upload object", e))?;
 
         Ok(())
     }
@@ -550,15 +531,8 @@ impl Backend for GcsBackend {
                     .await?
                     .send()
                     .await
-                    .map_err(|cause| ServiceError::Reqwest {
-                        context: "GCS: failed to send get payload request".to_string(),
-                        cause,
-                    })?
-                    .error_for_status()
-                    .map_err(|cause| ServiceError::Reqwest {
-                        context: "GCS: failed to get object payload".to_string(),
-                        cause,
-                    })
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| ServiceError::reqwest("GCS: get payload", e))
             })
             .await?;
 
@@ -588,10 +562,7 @@ impl Backend for GcsBackend {
                 .await?
                 .send()
                 .await
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to send delete request".to_string(),
-                    cause,
-                })?;
+                .map_err(|e| ServiceError::reqwest("GCS: delete object", e))?;
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
@@ -599,10 +570,7 @@ impl Backend for GcsBackend {
             }
 
             resp.error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
-                    context: "GCS: failed to delete object".to_string(),
-                    cause,
-                })?;
+                .map_err(|e| ServiceError::reqwest("GCS: delete object", e))?;
 
             Ok(())
         })
