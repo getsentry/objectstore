@@ -1,21 +1,18 @@
 use std::convert::Infallible;
 use std::io;
 
-use axum::body::Body;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, FromRequestParts, Path, Request};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::PayloadStream;
+use objectstore_service::id::ObjectContext;
 
+use super::id::ContextParams;
 use crate::state::ServiceState;
 
 /// An extractor that converts the request body into a metered [`PayloadStream`].
 ///
-/// This extractor reads the [`ObjectContext`](objectstore_service::id::ObjectContext) from request
-/// extensions (inserted by the [`Xt<ObjectContext>`](super::Xt) or [`Xt<ObjectId>`](super::Xt)
-/// extractors) to attribute bandwidth to the correct per-usecase and per-scope accumulators.
-///
-/// If no context is found in extensions (e.g. the handler doesn't use an `Xt` extractor),
-/// only the global bandwidth accumulator is used.
+/// Extracts the [`ObjectContext`] from the request path to attribute bandwidth to the correct
+/// per-usecase and per-scope accumulators in addition to the global accumulator.
 pub struct MeteredBody(pub PayloadStream);
 
 impl std::fmt::Debug for MeteredBody {
@@ -28,14 +25,19 @@ impl FromRequest<ServiceState> for MeteredBody {
     type Rejection = Infallible;
 
     async fn from_request(request: Request, state: &ServiceState) -> Result<Self, Self::Rejection> {
-        let context = request.extensions().get().cloned();
-        let stream = Body::from_request(request, state)
+        let (mut parts, body) = request.into_parts();
+        let Path(params) =
+            <Path<ContextParams> as FromRequestParts<ServiceState>>::from_request_parts(
+                &mut parts, state,
+            )
             .await
-            .expect("Body extraction is infallible")
-            .into_data_stream()
-            .map_err(io::Error::other)
-            .boxed();
-        let stream = state.meter_stream(stream, context.as_ref());
+            .expect("MeteredBody must be used on routes with {usecase} and {scopes} path params");
+        let context = ObjectContext {
+            usecase: params.usecase,
+            scopes: params.scopes,
+        };
+        let stream = body.into_data_stream().map_err(io::Error::other).boxed();
+        let stream = state.meter_stream(stream, &context);
         Ok(Self(stream))
     }
 }

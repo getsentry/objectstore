@@ -74,7 +74,6 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::RateLimited);
         }
 
-        parts.extensions.insert(id.context().clone());
         Ok(Xt(id))
     }
 }
@@ -94,7 +93,7 @@ struct ObjectParams {
 ///
 /// The string representation is a semicolon-separated list of `key=value` pairs, following the
 /// Matrix URIs proposal. An empty scopes string (`"_"`) represents no scopes.
-fn deserialize_scopes<'de, D>(deserializer: D) -> Result<Scopes, D::Error>
+pub(super) fn deserialize_scopes<'de, D>(deserializer: D) -> Result<Scopes, D::Error>
 where
     D: de::Deserializer<'de>,
 {
@@ -150,19 +149,19 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::RateLimited);
         }
 
-        parts.extensions.insert(context.clone());
         Ok(Xt(context))
     }
 }
 
-/// Path parameters used for collection-level endpoints without a key.
+/// Path parameters for extracting an [`ObjectContext`] from a request path.
 ///
-/// This is meant to be used with the axum `Path` extractor.
+/// Works on both collection-level (`/objects/{usecase}/{scopes}`) and object-level
+/// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
-struct ContextParams {
-    usecase: String,
+pub(super) struct ContextParams {
+    pub usecase: String,
     #[serde(deserialize_with = "deserialize_scopes")]
-    scopes: Scopes,
+    pub scopes: Scopes,
 }
 
 fn populate_sentry_context(context: &ObjectContext) {
