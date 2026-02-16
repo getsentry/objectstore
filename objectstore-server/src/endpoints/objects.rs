@@ -13,8 +13,7 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::ApiResult;
-use crate::extractors::Xt;
-use crate::extractors::body::MeteredBody;
+use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
