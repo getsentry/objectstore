@@ -102,12 +102,14 @@ impl StorageService {
     ) -> anyhow::Result<Self> {
         let high_volume_backend = create_backend(high_volume_config).await?;
         let long_term_backend = create_backend(long_term_config).await?;
+        Ok(Self::from_backends(high_volume_backend, long_term_backend))
+    }
 
-        let inner = StorageServiceInner {
+    fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
+        Self(Arc::new(StorageServiceInner {
             high_volume_backend,
             long_term_backend,
-        };
-        Ok(Self(Arc::new(inner)))
+        }))
     }
 
     /// Creates or overwrites an object.
@@ -428,6 +430,151 @@ mod tests {
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    fn make_localfs_service() -> (StorageService, tempfile::TempDir, tempfile::TempDir) {
+        let hv_dir = tempfile::tempdir().unwrap();
+        let lt_dir = tempfile::tempdir().unwrap();
+        let hv = Box::new(backend::local_fs::LocalFsBackend::new(hv_dir.path()));
+        let lt = Box::new(backend::local_fs::LocalFsBackend::new(lt_dir.path()));
+        (StorageService::from_backends(hv, lt), hv_dir, lt_dir)
+    }
+
+    // --- Tombstone inconsistency tests ---
+
+    /// A backend where put_object always fails, but reads/deletes work normally.
+    #[derive(Debug)]
+    struct FailingPutBackend(backend::local_fs::LocalFsBackend);
+
+    #[async_trait::async_trait]
+    impl backend::common::Backend for FailingPutBackend {
+        fn name(&self) -> &'static str {
+            "failing-put"
+        }
+
+        async fn put_object(
+            &self,
+            _id: &ObjectId,
+            _metadata: &Metadata,
+            _stream: PayloadStream,
+        ) -> ServiceResult<()> {
+            Err(ServiceError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "simulated tombstone write failure",
+            )))
+        }
+
+        async fn get_object(
+            &self,
+            id: &ObjectId,
+        ) -> ServiceResult<Option<(Metadata, PayloadStream)>> {
+            self.0.get_object(id).await
+        }
+
+        async fn delete_object(&self, id: &ObjectId) -> ServiceResult<()> {
+            self.0.delete_object(id).await
+        }
+    }
+
+    /// If the tombstone write to the high-volume backend fails after the long-term
+    /// write succeeds, the long-term object must be cleaned up so we never leave
+    /// an unreachable orphan in long-term storage.
+    #[tokio::test]
+    async fn no_orphan_when_tombstone_write_fails() {
+        let lt_dir = tempfile::tempdir().unwrap();
+        let lt_backend_for_inspection = backend::local_fs::LocalFsBackend::new(lt_dir.path());
+
+        // High-volume backend always fails on put (simulating BigTable being down).
+        // This means the tombstone write will fail after the long-term write succeeds.
+        let hv: BoxedBackend = Box::new(FailingPutBackend(backend::local_fs::LocalFsBackend::new(
+            tempfile::tempdir().unwrap().path(),
+        )));
+        let lt: BoxedBackend = Box::new(backend::local_fs::LocalFsBackend::new(lt_dir.path()));
+        let service = StorageService::from_backends(hv, lt);
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
+        let result = service
+            .insert_object(
+                make_context(),
+                Some("orphan-test".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await;
+
+        // The insert should fail (tombstone write failed)
+        assert!(result.is_err());
+
+        // The long-term object must have been cleaned up — no orphan
+        let id = ObjectId::from_parts(
+            "testing".into(),
+            Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+            "orphan-test".into(),
+        );
+        let orphan = lt_backend_for_inspection.get_object(&id).await.unwrap();
+        assert!(
+            orphan.is_none(),
+            "long-term object was not cleaned up after tombstone write failure"
+        );
+    }
+
+    /// If a tombstone exists in high-volume but the corresponding object is
+    /// missing from long-term storage (e.g. due to a race condition or partial
+    /// cleanup), reads should gracefully return None rather than error.
+    #[tokio::test]
+    async fn orphan_tombstone_returns_none_on_get() {
+        let (service, _hv_dir, lt_dir) = make_localfs_service();
+        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("orphan-tombstone".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Manually delete the long-term object, leaving an orphan tombstone
+        let lt_backend = backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        lt_backend.delete_object(&id).await.unwrap();
+
+        // get_object should gracefully return None, not error
+        let result = service.get_object(&id).await.unwrap();
+        assert!(
+            result.is_none(),
+            "orphan tombstone should resolve to None, not return the tombstone"
+        );
+    }
+
+    /// Same as above but for get_metadata — an orphan tombstone should return
+    /// None rather than exposing the tombstone metadata to callers.
+    #[tokio::test]
+    async fn orphan_tombstone_returns_none_on_get_metadata() {
+        let (service, _hv_dir, lt_dir) = make_localfs_service();
+        let payload = vec![0xEFu8; 2 * 1024 * 1024]; // 2 MiB
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("orphan-tombstone-meta".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap();
+
+        // Manually delete the long-term object
+        let lt_backend = backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        lt_backend.delete_object(&id).await.unwrap();
+
+        // get_metadata should gracefully return None
+        let result = service.get_metadata(&id).await.unwrap();
+        assert!(
+            result.is_none(),
+            "orphan tombstone metadata should resolve to None"
+        );
     }
 
     #[tokio::test]
