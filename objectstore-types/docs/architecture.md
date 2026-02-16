@@ -7,7 +7,7 @@ and how objects expire.
 
 ## Metadata
 
-[`Metadata`] is the per-object metadata structure carried alongside every
+[`Metadata`](metadata::Metadata) is the per-object metadata structure carried alongside every
 object. It travels through the entire system: clients set it via HTTP headers,
 the server parses and validates it, the service passes it to backends, and
 backends persist it.
@@ -17,7 +17,7 @@ backends persist it.
 | Field                  | Type                        | Description                                    |
 |------------------------|-----------------------------|------------------------------------------------|
 | `is_redirect_tombstone`| `Option<bool>`              | Internal: marks redirect tombstones (see below) |
-| `expiration_policy`    | [`ExpirationPolicy`]        | Automatic cleanup policy                       |
+| `expiration_policy`    | [`ExpirationPolicy`](metadata::ExpirationPolicy) | Automatic cleanup policy                       |
 | `time_created`         | `Option<SystemTime>`        | Set by the server on each write                |
 | `time_expires`         | `Option<SystemTime>`        | Resolved expiration timestamp                  |
 | `content_type`         | `Cow<'static, str>`         | IANA media type (default: `application/octet-stream`) |
@@ -28,8 +28,8 @@ backends persist it.
 
 ### HTTP Header Mapping
 
-Metadata is transmitted as HTTP headers. The shared [`Metadata::from_headers`]
-and [`Metadata::to_headers`] methods handle the public API fields. Standard HTTP
+Metadata is transmitted as HTTP headers. The shared [`Metadata::from_headers`](metadata::Metadata::from_headers)
+and [`Metadata::to_headers`](metadata::Metadata::to_headers) methods handle the public API fields. Standard HTTP
 headers are used where applicable; objectstore-specific fields use the `x-sn-*`
 prefix:
 
@@ -55,7 +55,7 @@ on top, so `x-sn-expiration` becomes `x-goog-meta-x-sn-expiration` in GCS.
 
 ### Redirect Tombstones
 
-The [`is_redirect_tombstone`](Metadata::is_redirect_tombstone) field is an
+The [`is_redirect_tombstone`](metadata::Metadata::is_redirect_tombstone) field is an
 internal mechanism, not set by clients. When the service layer stores a large
 object in the long-term backend, it writes a tombstone (an empty object with
 this field set to `true`) in the high-volume backend. Reads check this field to
@@ -107,7 +107,7 @@ Scopes have two display formats:
 
 ## Expiration Policies
 
-[`ExpirationPolicy`] controls automatic object cleanup:
+[`ExpirationPolicy`](metadata::ExpirationPolicy) controls automatic object cleanup:
 
 | Variant        | Format       | Behavior                                      |
 |----------------|--------------|-----------------------------------------------|
@@ -124,13 +124,13 @@ without an explicit policy are deserialized as `Manual`.
 
 ## Compression
 
-[`Compression`] indicates the compression algorithm applied to the object
+[`Compression`](metadata::Compression) indicates the compression algorithm applied to the object
 payload. Currently only `Zstd` (Zstandard) is supported. Compression is
 reflected in the `Content-Encoding` HTTP header.
 
 ## Permissions
 
-[`Permission`] defines the three operation types that can be authorized:
+[`Permission`](auth::Permission) defines the three operation types that can be authorized:
 
 | Variant        | Serialized as     | Grants                  |
 |----------------|-------------------|-------------------------|
