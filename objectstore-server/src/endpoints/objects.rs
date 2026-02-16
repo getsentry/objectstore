@@ -8,7 +8,7 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
@@ -65,7 +65,7 @@ async fn object_get(
     };
     let stream = state.wrap_stream(stream);
 
-    let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
+    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
@@ -74,7 +74,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
+    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
 }

@@ -1,11 +1,14 @@
 local utils = import '../libs/utils.libsonnet';
 local gocdtasks = import 'github.com/getsentry/gocd-jsonnet/libs/gocd-tasks.libsonnet';
 
+local monitor_id_all = '238383701';
+local monitor_id_canary = '238589039';
+
 // NOTE: Sync with objectstore-k8s in getsentry/ops.
 local region_has_canary(region) =
   region == 'de' || region == 'us';
 
-local soak_job(region, time_mins) =
+local soak_job(region, time_mins, monitor_ids) =
   {
     timeout: 60 * time_mins + 30,  // soak time + buffer
     elastic_profile_id: 'objectstore',
@@ -20,6 +23,7 @@ local soak_job(region, time_mins) =
       DRY_RUN: 'false',
       SKIP_CANARY_CHECKS: 'false',
       PAUSE_MESSAGE: 'Pausing pipeline due to canary failure.',
+      DATADOG_MONITOR_IDS: monitor_ids,
     },
     tasks: [
       gocdtasks.script(importstr '../bash/wait.sh'),
@@ -60,7 +64,7 @@ local deploy_canary(region) =
                 gocdtasks.script(importstr '../bash/deploy.sh'),
               ],
             },
-            soak: soak_job(region, 1),
+            soak: soak_job(region, 1, monitor_id_canary),
           },
         },
       },
@@ -74,7 +78,7 @@ local soak_time(region) =
       {
         'soak-time': {
           jobs: {
-            soak: soak_job(region, 1),
+            soak: soak_job(region, 1, monitor_id_all),
           },
         },
       },

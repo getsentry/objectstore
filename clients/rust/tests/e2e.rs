@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use objectstore_client::{Client, Error, OperationResult, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
-use objectstore_types::Compression;
+use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 
 pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =

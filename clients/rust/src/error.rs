@@ -12,7 +12,7 @@ pub enum Error {
     Utf8(#[from] std::string::FromUtf8Error),
     /// Errors handling metadata, such as serializing it to/from HTTP headers.
     #[error(transparent)]
-    Metadata(#[from] objectstore_types::Error),
+    Metadata(#[from] objectstore_types::metadata::Error),
     /// Error when scope validation fails.
     #[error("invalid scope: {0}")]
     InvalidScope(#[from] objectstore_types::scope::InvalidScopeError),

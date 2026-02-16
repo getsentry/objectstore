@@ -3,11 +3,11 @@ use std::{fmt, io};
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::Compression;
+pub use objectstore_types::metadata::Compression;
 
 use crate::{ClientStream, ObjectKey, Session};
 

@@ -11,7 +11,7 @@ mod many;
 mod put;
 pub mod utils;
 
-pub use objectstore_types::{Compression, ExpirationPolicy};
+pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 /// A key that uniquely identifies an object within its usecase and scopes.
 pub type ObjectKey = String;

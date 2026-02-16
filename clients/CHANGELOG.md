@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.17
+
+### New Features ✨
+
+- (types) Add origin as built-in metadata field by @jan-auer in [#292](https://github.com/getsentry/objectstore/pull/292)
+
+### Documentation 📚
+
+- (clients) Restructure Rust and Python client READMEs by @jan-auer in [#294](https://github.com/getsentry/objectstore/pull/294)
+- Add crate-level architecture documentation by @jan-auer in [#304](https://github.com/getsentry/objectstore/pull/304)
+
+### Internal Changes 🔧
+
+#### Types
+
+- Extract modules and distribute docs by @jan-auer in [#307](https://github.com/getsentry/objectstore/pull/307)
+- Move tombstone + custom-time out of Metadata header methods by @jan-auer in [#303](https://github.com/getsentry/objectstore/pull/303)
+
 ## 0.0.16
 
 ### New Features ✨

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use objectstore_types::{Compression, ExpirationPolicy, scope};
 use reqwest::RequestBuilder;
+use objectstore_types::metadata::{Compression, ExpirationPolicy};
+use objectstore_types::scope;
 use url::Url;
 
 use crate::auth::TokenGenerator;
@@ -313,7 +314,7 @@ pub(crate) struct ClientInner {
 /// ```no_run
 /// use std::time::Duration;
 /// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
-/// use objectstore_types::Permission;
+/// use objectstore_types::auth::Permission;
 ///
 /// # async fn example() -> objectstore_client::Result<()> {
 /// let token_generator = TokenGenerator::new(SecretKey {

@@ -75,6 +75,21 @@ uv run ruff check
 uv run mypy .
 ```
 
+## Keeping Documentation Up to Date
+
+After making changes, check whether the architecture docs need updating. The service and server crates have a `docs/architecture.md` embedded as crate-level rustdoc via `include_str!`; the types crate has its docs inlined in `lib.rs` and module files:
+
+- `objectstore-service/docs/architecture.md` — two-tier backend system, redirect tombstones, backend trait, object identification, streaming
+- `objectstore-server/docs/architecture.md` — endpoints, request flow, auth, config, rate limiting, killswitches
+- `objectstore-types/src/lib.rs` + module docs — metadata fields and header mapping, scope system, expiration policies, compression, permissions
+
+Update these docs when:
+- **Always**: architectural changes, new backends, changes to request flow, auth, or tombstone behavior
+- **Usually**: new endpoints, new config fields, new middleware, changes to rate limiting or killswitch behavior
+- **Check**: changes to defaults, thresholds, header names, validation rules, or anything else that is stated as a fact in the docs
+
+When in doubt, grep the `docs/` directories for terms related to your change. Stale docs are worse than no docs.
+
 ## Creating Pull Requests
 
 Before creating a PR, follow this workflow to ensure code quality:

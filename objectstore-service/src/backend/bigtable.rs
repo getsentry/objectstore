@@ -6,7 +6,7 @@ use anyhow::Result;
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
-use objectstore_types::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 

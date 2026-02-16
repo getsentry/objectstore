@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
@@ -239,7 +239,7 @@ impl From<OperationResponse> for Part {
         match value {
             OperationResponse::Get(GetResponse { key, result }) => match result {
                 Ok(Some((metadata, bytes))) => {
-                    let mut metadata_headers = match metadata.to_headers("", false) {
+                    let mut metadata_headers = match metadata.to_headers("") {
                         Ok(headers) => headers,
                         Err(err) => {
                             let err = BatchError::ResponseSerialization {

@@ -1,6 +1,6 @@
 # Objectstore Client
 
-The client is used to interface with the Objectstore backend. It handles
+The client is used to interface with the [Objectstore](https://getsentry.github.io/objectstore/) backend. It handles
 responsibilities like transparent compression, and making sure that uploads and
 downloads are done as efficiently as possible.
 

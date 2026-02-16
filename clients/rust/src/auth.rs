@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ScopeInner;
 
-pub use objectstore_types::Permission;
+pub use objectstore_types::auth::Permission;
 
 const DEFAULT_EXPIRY_SECONDS: u64 = 60;
 const DEFAULT_PERMISSIONS: [Permission; 3] = [
