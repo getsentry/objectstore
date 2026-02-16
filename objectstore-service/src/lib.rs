@@ -482,18 +482,14 @@ mod tests {
     #[tokio::test]
     async fn no_orphan_when_tombstone_write_fails() {
         let lt_dir = tempfile::tempdir().unwrap();
-        let lt_backend_for_inspection =
-            backend::local_fs::LocalFsBackend::new(lt_dir.path());
+        let lt_backend_for_inspection = backend::local_fs::LocalFsBackend::new(lt_dir.path());
 
         // High-volume backend always fails on put (simulating BigTable being down).
         // This means the tombstone write will fail after the long-term write succeeds.
-        let hv: BoxedBackend = Box::new(FailingPutBackend(
-            backend::local_fs::LocalFsBackend::new(
-                tempfile::tempdir().unwrap().path(),
-            ),
-        ));
-        let lt: BoxedBackend =
-            Box::new(backend::local_fs::LocalFsBackend::new(lt_dir.path()));
+        let hv: BoxedBackend = Box::new(FailingPutBackend(backend::local_fs::LocalFsBackend::new(
+            tempfile::tempdir().unwrap().path(),
+        )));
+        let lt: BoxedBackend = Box::new(backend::local_fs::LocalFsBackend::new(lt_dir.path()));
         let service = StorageService::from_backends(hv, lt);
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
