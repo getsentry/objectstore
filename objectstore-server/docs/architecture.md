@@ -136,7 +136,7 @@ Each granularity maintains its own EWMA estimator. The `MeteredPayloadStream`
 increments all applicable accumulators (global + per-usecase + per-scope) for
 every chunk polled. For non-streamed payloads (e.g., batch INSERT where the
 size is known upfront), bytes are recorded directly via
-[`record_bandwidth`](ServiceState::record_bandwidth).
+[`record_bandwidth`](state::Services::record_bandwidth).
 
 Rate-limited requests receive HTTP 429.
 
