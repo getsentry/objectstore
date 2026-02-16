@@ -42,7 +42,7 @@ found" lookups. To avoid this, the service writes a **redirect tombstone** in
 the high-volume backend alongside the real object in the long-term backend.
 
 A redirect tombstone is an empty object with
-[`is_redirect_tombstone: true`](objectstore_types::Metadata::is_redirect_tombstone)
+[`is_redirect_tombstone: true`](objectstore_types::metadata::Metadata::is_redirect_tombstone)
 in its metadata. It acts as a signpost: "the real data lives in the other
 backend."
 
