@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
-use objectstore_server::rate_limits::{BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule};
+use objectstore_server::rate_limits::{
+    BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
+};
 use objectstore_test::server::TestServer;
 
 #[tokio::test]

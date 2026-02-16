@@ -332,15 +332,17 @@ impl BandwidthRateLimiter {
 
         if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();
-            let estimator =
-                guard.get_or_insert_with(context.usecase.clone(), || Arc::new(BandwidthEstimator::new()));
+            let estimator = guard.get_or_insert_with(context.usecase.clone(), || {
+                Arc::new(BandwidthEstimator::new())
+            });
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
         if self.scope_bps().is_some() {
             let guard = self.scopes.pin();
-            let estimator =
-                guard.get_or_insert_with(context.scopes.clone(), || Arc::new(BandwidthEstimator::new()));
+            let estimator = guard.get_or_insert_with(context.scopes.clone(), || {
+                Arc::new(BandwidthEstimator::new())
+            });
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
@@ -534,7 +536,10 @@ pub(crate) struct MeteredPayloadStream {
 
 impl MeteredPayloadStream {
     pub fn new(inner: PayloadStream, accumulators: Vec<Arc<AtomicU64>>) -> Self {
-        Self { inner, accumulators }
+        Self {
+            inner,
+            accumulators,
+        }
     }
 }
 
