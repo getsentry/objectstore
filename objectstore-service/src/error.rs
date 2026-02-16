@@ -32,7 +32,7 @@ pub enum ServiceError {
 
     /// Errors related to de/serialization and parsing of object metadata.
     #[error("metadata error: {0}")]
-    Metadata(#[from] objectstore_types::Error),
+    Metadata(#[from] objectstore_types::metadata::Error),
 
     /// Errors encountered when attempting to authenticate with GCP.
     #[error("GCP authentication error: {0}")]

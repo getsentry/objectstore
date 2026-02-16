@@ -5,13 +5,13 @@ use std::{borrow::Cow, collections::BTreeMap};
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::{Compression, ExpirationPolicy};
+pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::{ClientStream, Session};
 
@@ -187,7 +187,7 @@ impl PutBuilder {
             // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
         };
 
-        builder = builder.headers(self.metadata.to_headers("", false)?);
+        builder = builder.headers(self.metadata.to_headers("")?);
 
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status()?.json().await?)
