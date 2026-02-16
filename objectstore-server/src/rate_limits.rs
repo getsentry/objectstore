@@ -137,10 +137,11 @@ impl RateLimiter {
         self.throughput.check(context) && self.bandwidth.check(context)
     }
 
-    /// Returns all bandwidth accumulators (global + per-usecase + per-scope) for the given context.
+    /// Returns all bandwidth accumulators for the given context.
     ///
-    /// Creates entries in the per-usecase/per-scope maps if they don't exist yet.
-    pub fn bytes_accumulators(&self, context: &ObjectContext) -> Vec<Arc<AtomicU64>> {
+    /// When `context` is provided, returns global + per-usecase + per-scope accumulators (creating
+    /// entries in the maps if needed). When `None`, returns only the global accumulator.
+    pub fn bytes_accumulators(&self, context: Option<&ObjectContext>) -> Vec<Arc<AtomicU64>> {
         self.bandwidth.accumulators(context)
     }
 
@@ -149,7 +150,7 @@ impl RateLimiter {
     /// This is used for cases where bytes are known upfront (e.g. batch INSERT) rather than
     /// streamed through a `MeteredPayloadStream`.
     pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
-        for acc in self.bandwidth.accumulators(context) {
+        for acc in self.bandwidth.accumulators(Some(context)) {
             acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -326,11 +327,16 @@ impl BandwidthRateLimiter {
         true
     }
 
-    /// Returns all accumulators (global + per-usecase + per-scope) for the given context.
+    /// Returns all accumulators for the given context.
     ///
-    /// Creates entries in the per-usecase/per-scope maps if they don't exist yet.
-    fn accumulators(&self, context: &ObjectContext) -> Vec<Arc<AtomicU64>> {
+    /// When `context` is provided, returns global + per-usecase + per-scope accumulators (creating
+    /// entries in the maps if needed). When `None`, returns only the global accumulator.
+    fn accumulators(&self, context: Option<&ObjectContext>) -> Vec<Arc<AtomicU64>> {
         let mut accs = vec![Arc::clone(&self.global.accumulator)];
+
+        let Some(context) = context else {
+            return accs;
+        };
 
         if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();

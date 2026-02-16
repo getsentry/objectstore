@@ -63,7 +63,14 @@ impl Services {
     }
 
     /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn meter_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
+    ///
+    /// When `context` is provided, bytes are attributed to per-usecase and per-scope accumulators
+    /// in addition to the global accumulator. When `None`, only the global accumulator is used.
+    pub fn meter_stream(
+        &self,
+        stream: PayloadStream,
+        context: Option<&ObjectContext>,
+    ) -> PayloadStream {
         MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context)).boxed()
     }
 

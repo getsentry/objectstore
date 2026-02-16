@@ -74,6 +74,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::RateLimited);
         }
 
+        parts.extensions.insert(id.context().clone());
         Ok(Xt(id))
     }
 }
@@ -149,6 +150,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::RateLimited);
         }
 
+        parts.extensions.insert(context.clone());
         Ok(Xt(context))
     }
 }
