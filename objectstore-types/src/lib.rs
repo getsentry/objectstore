@@ -15,9 +15,7 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use http::header::{self, HeaderMap, HeaderName};
-use humantime::{
-    format_duration, format_rfc3339_micros, format_rfc3339_seconds, parse_duration, parse_rfc3339,
-};
+use humantime::{format_duration, format_rfc3339_micros, parse_duration, parse_rfc3339};
 use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
@@ -272,9 +270,11 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// Extracts metadata from the given [`HeaderMap`].
+    /// Extracts public API metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
+    /// Internal fields like `is_redirect_tombstone` are not parsed; backends handle those
+    /// separately.
     pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
@@ -301,11 +301,6 @@ impl Metadata {
                             let expiration_policy = value.to_str()?;
                             metadata.expiration_policy =
                                 ExpirationPolicy::from_str(expiration_policy)?;
-                        }
-                        HEADER_REDIRECT_TOMBSTONE => {
-                            if value.to_str()? == "true" {
-                                metadata.is_redirect_tombstone = Some(true);
-                            }
                         }
                         HEADER_TIME_CREATED => {
                             let timestamp = value.to_str()?;
@@ -335,14 +330,14 @@ impl Metadata {
         Ok(metadata)
     }
 
-    /// Turns the metadata into a [`HeaderMap`].
+    /// Turns the metadata into a [`HeaderMap`] for the public API.
     ///
     /// It will prefix any non-standard headers with the given `prefix`.
-    /// If the `with_expiration` parameter is set, it will additionally resolve the expiration policy
-    /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
-    pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> Result<HeaderMap, Error> {
+    /// Internal fields like `is_redirect_tombstone` and GCS-specific headers are not
+    /// emitted; backends handle those separately.
+    pub fn to_headers(&self, prefix: &str) -> Result<HeaderMap, Error> {
         let Self {
-            is_redirect_tombstone,
+            is_redirect_tombstone: _,
             content_type,
             compression,
             origin,
@@ -362,18 +357,9 @@ impl Metadata {
         }
 
         // Objectstore first-class metadata
-        if matches!(is_redirect_tombstone, Some(true)) {
-            let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
-            headers.append(name, "true".parse()?);
-        }
         if *expiration_policy != ExpirationPolicy::Manual {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
             headers.append(name, expiration_policy.to_string().parse()?);
-            if with_expiration {
-                let expires_in = expiration_policy.expires_in().unwrap_or_default();
-                let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
-                headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
-            }
         }
         if let Some(time) = time_created {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_CREATED}"))?;
@@ -459,14 +445,14 @@ mod tests {
             ..Default::default()
         };
 
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         assert_eq!(headers.get(HEADER_ORIGIN).unwrap(), "203.0.113.42");
     }
 
     #[test]
     fn to_headers_without_origin() {
         let metadata = Metadata::default();
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         assert!(headers.get(HEADER_ORIGIN).is_none());
     }
 
@@ -477,7 +463,7 @@ mod tests {
             ..Default::default()
         };
 
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.origin, metadata.origin);
     }
@@ -593,7 +579,7 @@ mod tests {
             custom: BTreeMap::from([("foo".into(), "bar".into())]),
         };
 
-        let headers = metadata.to_headers("pfx-", false).unwrap();
+        let headers = metadata.to_headers("pfx-").unwrap();
         let map: BTreeMap<_, _> = headers
             .iter()
             .map(|(k, v)| (k.as_str(), v.to_str().unwrap()))
@@ -610,32 +596,6 @@ mod tests {
             "pfx-x-snme-foo": "bar",
         }
         "#);
-    }
-
-    #[test]
-    fn to_headers_redirect_tombstone() {
-        let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
-            ..Default::default()
-        };
-
-        let headers = metadata.to_headers("", false).unwrap();
-        assert_eq!(headers.get(HEADER_REDIRECT_TOMBSTONE).unwrap(), "true");
-    }
-
-    #[test]
-    fn to_headers_with_expiration_sets_custom_time() {
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
-            ..Default::default()
-        };
-
-        let headers = metadata.to_headers("", true).unwrap();
-        assert!(headers.get("x-goog-custom-time").is_some());
-
-        // Without the flag, no custom-time header
-        let headers_no_exp = metadata.to_headers("", false).unwrap();
-        assert!(headers_no_exp.get("x-goog-custom-time").is_none());
     }
 
     #[test]
@@ -656,7 +616,7 @@ mod tests {
             ]),
         };
 
-        let headers = metadata.to_headers(prefix, false).unwrap();
+        let headers = metadata.to_headers(prefix).unwrap();
         let roundtripped = Metadata::from_headers(&headers, prefix).unwrap();
 
         assert_eq!(roundtripped.expiration_policy, metadata.expiration_policy);
@@ -676,27 +636,14 @@ mod tests {
     }
 
     #[test]
-    fn from_headers_redirect_tombstone_parsed() {
-        // Redirect tombstone is internal backend metadata. It is parsed from headers
-        // because backends (e.g. S3-compatible) roundtrip it through HTTP headers.
-        // The server layer is responsible for stripping it on client requests.
+    fn from_headers_ignores_redirect_tombstone() {
+        // Redirect tombstone is internal backend metadata, not parsed by from_headers.
+        // Backends handle it separately.
         let mut headers = HeaderMap::new();
         let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
             .parse()
             .unwrap();
         headers.insert(name, "true".parse().unwrap());
-
-        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
-        assert_eq!(metadata.is_redirect_tombstone, Some(true));
-    }
-
-    #[test]
-    fn from_headers_redirect_tombstone_non_true_ignored() {
-        let mut headers = HeaderMap::new();
-        let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
-            .parse()
-            .unwrap();
-        headers.insert(name, "false".parse().unwrap());
 
         let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
         assert!(metadata.is_redirect_tombstone.is_none());
@@ -749,7 +696,7 @@ mod tests {
             ..Default::default()
         };
 
-        let headers = metadata.to_headers("x-goog-meta-", false).unwrap();
+        let headers = metadata.to_headers("x-goog-meta-").unwrap();
         let has_size_header = headers.keys().any(|k| k.as_str().contains("size"));
         assert!(!has_size_header);
     }
