@@ -124,7 +124,13 @@ Limits can be set at multiple granularities:
 Bandwidth limiting uses an **exponentially weighted moving average** (EWMA) to
 estimate current throughput. Payload streams are wrapped in a
 `MeteredPayloadStream` that reports bytes consumed. When the estimated bandwidth
-exceeds the configured bytes-per-second limit, new requests are rejected.
+exceeds the configured limit, new requests are rejected.
+
+Like throughput, bandwidth limits can be set at multiple granularities:
+
+- **Global**: a maximum bytes-per-second across all traffic (`global_bps`)
+- **Per-usecase**: a percentage of the global limit for each usecase
+- **Per-scope**: a percentage of the global limit for each scope value
 
 Rate-limited requests receive HTTP 429.
 
