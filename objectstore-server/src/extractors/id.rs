@@ -93,7 +93,7 @@ struct ObjectParams {
 ///
 /// The string representation is a semicolon-separated list of `key=value` pairs, following the
 /// Matrix URIs proposal. An empty scopes string (`"_"`) represents no scopes.
-pub(super) fn deserialize_scopes<'de, D>(deserializer: D) -> Result<Scopes, D::Error>
+fn deserialize_scopes<'de, D>(deserializer: D) -> Result<Scopes, D::Error>
 where
     D: de::Deserializer<'de>,
 {
