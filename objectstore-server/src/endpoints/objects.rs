@@ -49,7 +49,7 @@ async fn objects_post(
     metadata.time_created = Some(SystemTime::now());
 
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let stream = state.wrap_stream(stream, &context);
+    let stream = state.meter_stream(stream, &context);
 
     let response_id = service
         .insert_object(context, None, &metadata, stream)
@@ -69,7 +69,7 @@ async fn object_get(
     let Some((metadata, stream)) = service.get_object(&id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let stream = state.wrap_stream(stream, id.context());
+    let stream = state.meter_stream(stream, id.context());
 
     let headers = metadata.to_headers("", false).map_err(ServiceError::from)?;
     Ok((headers, Body::from_stream(stream)).into_response())
@@ -97,7 +97,7 @@ async fn object_put(
 
     let ObjectId { context, key } = id;
     let stream = body.into_data_stream().map_err(io::Error::other).boxed();
-    let stream = state.wrap_stream(stream, &context);
+    let stream = state.meter_stream(stream, &context);
 
     let response_id = service
         .insert_object(context, Some(key), &metadata, stream)

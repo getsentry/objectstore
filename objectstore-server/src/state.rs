@@ -63,7 +63,7 @@ impl Services {
     }
 
     /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn wrap_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
+    pub fn meter_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
         MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context)).boxed()
     }
 
