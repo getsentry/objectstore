@@ -11,9 +11,7 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use http::header::{self, HeaderMap, HeaderName};
-use humantime::{
-    format_duration, format_rfc3339_micros, format_rfc3339_seconds, parse_duration, parse_rfc3339,
-};
+use humantime::{format_duration, format_rfc3339_micros, parse_duration, parse_rfc3339};
 use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
@@ -268,9 +266,11 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// Extracts metadata from the given [`HeaderMap`].
+    /// Extracts public API metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
+    /// Internal fields like `is_redirect_tombstone` are not parsed; backends handle those
+    /// separately.
     pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
@@ -297,11 +297,6 @@ impl Metadata {
                             let expiration_policy = value.to_str()?;
                             metadata.expiration_policy =
                                 ExpirationPolicy::from_str(expiration_policy)?;
-                        }
-                        HEADER_REDIRECT_TOMBSTONE => {
-                            if value.to_str()? == "true" {
-                                metadata.is_redirect_tombstone = Some(true);
-                            }
                         }
                         HEADER_TIME_CREATED => {
                             let timestamp = value.to_str()?;
@@ -331,14 +326,14 @@ impl Metadata {
         Ok(metadata)
     }
 
-    /// Turns the metadata into a [`HeaderMap`].
+    /// Turns the metadata into a [`HeaderMap`] for the public API.
     ///
     /// It will prefix any non-standard headers with the given `prefix`.
-    /// If the `with_expiration` parameter is set, it will additionally resolve the expiration policy
-    /// into a specific RFC3339 datetime, and set that as the `Custom-Time` header.
-    pub fn to_headers(&self, prefix: &str, with_expiration: bool) -> Result<HeaderMap, Error> {
+    /// Internal fields like `is_redirect_tombstone` and GCS-specific headers are not
+    /// emitted; backends handle those separately.
+    pub fn to_headers(&self, prefix: &str) -> Result<HeaderMap, Error> {
         let Self {
-            is_redirect_tombstone,
+            is_redirect_tombstone: _,
             content_type,
             compression,
             origin,
@@ -358,18 +353,9 @@ impl Metadata {
         }
 
         // Objectstore first-class metadata
-        if matches!(is_redirect_tombstone, Some(true)) {
-            let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
-            headers.append(name, "true".parse()?);
-        }
         if *expiration_policy != ExpirationPolicy::Manual {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_EXPIRATION}"))?;
             headers.append(name, expiration_policy.to_string().parse()?);
-            if with_expiration {
-                let expires_in = expiration_policy.expires_in().unwrap_or_default();
-                let expires_at = format_rfc3339_seconds(SystemTime::now() + expires_in);
-                headers.append("x-goog-custom-time", expires_at.to_string().parse()?);
-            }
         }
         if let Some(time) = time_created {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_CREATED}"))?;
@@ -455,14 +441,14 @@ mod tests {
             ..Default::default()
         };
 
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         assert_eq!(headers.get(HEADER_ORIGIN).unwrap(), "203.0.113.42");
     }
 
     #[test]
     fn to_headers_without_origin() {
         let metadata = Metadata::default();
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         assert!(headers.get(HEADER_ORIGIN).is_none());
     }
 
@@ -473,8 +459,255 @@ mod tests {
             ..Default::default()
         };
 
-        let headers = metadata.to_headers("", false).unwrap();
+        let headers = metadata.to_headers("").unwrap();
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.origin, metadata.origin);
+    }
+
+    #[test]
+    fn from_headers_content_type_and_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.content_type, "application/json");
+        assert_eq!(metadata.compression, Some(Compression::Zstd));
+    }
+
+    #[test]
+    fn from_headers_expiration_policy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "ttl:30s".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn from_headers_timestamps() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_TIME_CREATED,
+            "2024-01-15T12:00:00.000000Z".parse().unwrap(),
+        );
+        headers.insert(
+            HEADER_TIME_EXPIRES,
+            "2024-01-16T12:00:00.000000Z".parse().unwrap(),
+        );
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert!(metadata.time_created.is_some());
+        assert!(metadata.time_expires.is_some());
+    }
+
+    #[test]
+    fn from_headers_custom_metadata_with_prefix() {
+        let mut headers = HeaderMap::new();
+        // Simulate a backend that prefixes headers, e.g. "x-goog-meta-"
+        let prefix = "x-goog-meta-";
+        let expiration_header: HeaderName = format!("{prefix}{HEADER_EXPIRATION}").parse().unwrap();
+        headers.insert(expiration_header, "tti:1h".parse().unwrap());
+
+        let custom_header: HeaderName = format!("{prefix}{HEADER_META_PREFIX}my-key")
+            .parse()
+            .unwrap();
+        headers.insert(custom_header, "my-value".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, prefix).unwrap();
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+        );
+        assert_eq!(metadata.custom.get("my-key").unwrap(), "my-value");
+    }
+
+    #[test]
+    fn from_headers_invalid_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "not a valid media type!".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidContentType(_)));
+    }
+
+    #[test]
+    fn from_headers_invalid_compression() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "brotli".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidCompression));
+    }
+
+    #[test]
+    fn from_headers_invalid_expiration() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "garbage".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidExpiration(_)));
+    }
+
+    #[test]
+    fn from_headers_invalid_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TIME_CREATED, "not-a-timestamp".parse().unwrap());
+
+        let err = Metadata::from_headers(&headers, "").unwrap_err();
+        assert!(matches!(err, Error::InvalidCreationTime(_)));
+    }
+
+    #[test]
+    fn to_headers_all_fields() {
+        let metadata = Metadata {
+            is_redirect_tombstone: None,
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
+            content_type: "text/html".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("10.0.0.1".into()),
+            size: None,
+            custom: BTreeMap::from([("foo".into(), "bar".into())]),
+        };
+
+        let headers = metadata.to_headers("pfx-").unwrap();
+        let map: BTreeMap<_, _> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.to_str().unwrap()))
+            .collect();
+
+        insta::assert_debug_snapshot!(map, @r#"
+        {
+            "content-encoding": "zstd",
+            "content-type": "text/html",
+            "pfx-x-sn-expiration": "ttl:1m",
+            "pfx-x-sn-origin": "10.0.0.1",
+            "pfx-x-sn-time-created": "2023-11-14T22:13:20.000000Z",
+            "pfx-x-sn-time-expires": "2023-11-14T22:14:20.000000Z",
+            "pfx-x-snme-foo": "bar",
+        }
+        "#);
+    }
+
+    #[test]
+    fn full_roundtrip_all_fields() {
+        let prefix = "x-test-";
+        let metadata = Metadata {
+            is_redirect_tombstone: None,
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
+            content_type: "image/png".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("192.168.1.1".into()),
+            size: None,
+            custom: BTreeMap::from([
+                ("key1".into(), "value1".into()),
+                ("key2".into(), "value2".into()),
+            ]),
+        };
+
+        let headers = metadata.to_headers(prefix).unwrap();
+        let roundtripped = Metadata::from_headers(&headers, prefix).unwrap();
+
+        assert_eq!(roundtripped.expiration_policy, metadata.expiration_policy);
+        assert_eq!(roundtripped.content_type, metadata.content_type);
+        assert_eq!(roundtripped.compression, metadata.compression);
+        assert_eq!(roundtripped.origin, metadata.origin);
+        assert_eq!(roundtripped.time_created, metadata.time_created);
+        assert_eq!(roundtripped.time_expires, metadata.time_expires);
+        assert_eq!(roundtripped.custom, metadata.custom);
+    }
+
+    #[test]
+    fn from_headers_empty() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
+        assert_eq!(metadata, Metadata::default());
+    }
+
+    #[test]
+    fn from_headers_ignores_redirect_tombstone() {
+        // Redirect tombstone is internal backend metadata, not parsed by from_headers.
+        // Backends handle it separately.
+        let mut headers = HeaderMap::new();
+        let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
+            .parse()
+            .unwrap();
+        headers.insert(name, "true".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
+        assert!(metadata.is_redirect_tombstone.is_none());
+    }
+
+    #[test]
+    fn from_headers_invalid_time_expires() {
+        let mut headers = HeaderMap::new();
+        let name: HeaderName = format!("x-goog-meta-{HEADER_TIME_EXPIRES}")
+            .parse()
+            .unwrap();
+        headers.insert(name, "not-a-timestamp".parse().unwrap());
+
+        // NOTE: This produces InvalidCreationTime even for time_expires because
+        // both fields share the same humantime::TimestampError #[from] conversion.
+        assert!(Metadata::from_headers(&headers, "x-goog-meta-").is_err());
+    }
+
+    #[test]
+    fn serde_roundtrip_default() {
+        let metadata = Metadata::default();
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: Metadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, metadata);
+    }
+
+    #[test]
+    fn serde_roundtrip_all_fields() {
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
+            content_type: "application/json".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("10.0.0.1".into()),
+            size: Some(1024),
+            custom: BTreeMap::from([("key".into(), "value".into())]),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: Metadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, metadata);
+    }
+
+    #[test]
+    fn size_not_included_in_headers() {
+        let metadata = Metadata {
+            size: Some(42),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("x-goog-meta-").unwrap();
+        let has_size_header = headers.keys().any(|k| k.as_str().contains("size"));
+        assert!(!has_size_header);
+    }
+
+    #[test]
+    fn default_metadata() {
+        let metadata = Metadata::default();
+        assert_eq!(metadata.content_type, DEFAULT_CONTENT_TYPE);
+        assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
+        assert!(metadata.compression.is_none());
+        assert!(metadata.origin.is_none());
+        assert!(metadata.time_created.is_none());
+        assert!(metadata.time_expires.is_none());
+        assert!(metadata.is_redirect_tombstone.is_none());
+        assert!(metadata.size.is_none());
+        assert!(metadata.custom.is_empty());
     }
 }

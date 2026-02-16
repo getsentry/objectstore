@@ -2,7 +2,8 @@ use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::{ExpirationPolicy, Metadata};
+use objectstore_types::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, Metadata};
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::backend::common::{
@@ -74,6 +75,26 @@ impl<T> S3CompatibleBackend<T> {
     }
 }
 
+/// Wraps [`Metadata::to_headers`] with GCS-specific concerns (tombstone + custom-time).
+fn metadata_to_gcs_headers(
+    metadata: &Metadata,
+    prefix: &str,
+) -> Result<HeaderMap, objectstore_types::Error> {
+    let mut headers = metadata.to_headers(prefix)?;
+    // Tombstone is internal metadata not handled by to_headers
+    if metadata.is_tombstone() {
+        let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
+        headers.append(name, "true".parse()?);
+    }
+    // GCS custom-time for lifecycle expiration
+    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
+        let expires_at =
+            humantime::format_rfc3339_seconds(std::time::SystemTime::now() + expires_in);
+        headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
+    }
+    Ok(headers)
+}
+
 impl<T> S3CompatibleBackend<T>
 where
     T: TokenProvider,
@@ -132,6 +153,14 @@ where
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
         metadata.size = response.content_length().map(|len| len as usize);
 
+        // Tombstone is internal metadata not parsed by from_headers
+        let tombstone_header = format!("{GCS_CUSTOM_PREFIX}{HEADER_REDIRECT_TOMBSTONE}");
+        let is_tombstone =
+            headers.get(tombstone_header).and_then(|v| v.to_str().ok()) == Some("true");
+        if is_tombstone {
+            metadata.is_redirect_tombstone = Some(true);
+        }
+
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // TODO: Inject the access time from the request.
@@ -162,7 +191,7 @@ where
                 format!("/{}/{}", self.bucket, id.as_storage_path()),
             )
             .header("x-goog-metadata-directive", "REPLACE")
-            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
+            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
             .map_err(|cause| ServiceError::Reqwest {
@@ -216,7 +245,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
-            .headers(metadata.to_headers(GCS_CUSTOM_PREFIX, true)?)
+            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .body(Body::wrap_stream(stream))
             .send()
             .await

@@ -241,7 +241,7 @@ impl From<OperationResponse> for Part {
         match value {
             OperationResponse::Get(GetResponse { key, result }) => match result {
                 Ok(Some((metadata, bytes))) => {
-                    let mut metadata_headers = match metadata.to_headers("", false) {
+                    let mut metadata_headers = match metadata.to_headers("") {
                         Ok(headers) => headers,
                         Err(err) => {
                             let err = BatchError::ResponseSerialization {

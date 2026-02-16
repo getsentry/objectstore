@@ -89,6 +89,8 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
+            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
+
             ApiError::Service(_) => {
                 tracing::error!(error = self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
