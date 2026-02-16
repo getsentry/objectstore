@@ -1226,6 +1226,8 @@ mod tests {
                           - ["org", "456"]
                           - ["project", "789"]
                         pct: 10
+                  bandwidth:
+                    global_bps: 1048576
                 "#,
             )
             .unwrap();
@@ -1255,7 +1257,9 @@ mod tests {
                         },
                     ],
                 },
-                bandwidth: BandwidthLimits::default(),
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(1_048_576),
+                },
             };
 
             let config = Config::load(Some(tempfile.path())).unwrap();

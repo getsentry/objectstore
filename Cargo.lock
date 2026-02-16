@@ -2329,6 +2329,7 @@ dependencies = [
  "mimalloc",
  "nix",
  "num_cpus",
+ "objectstore-client",
  "objectstore-service",
  "objectstore-test",
  "objectstore-types",

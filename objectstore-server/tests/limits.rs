@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
-use objectstore_server::rate_limits::{RateLimits, ThroughputLimits, ThroughputRule};
+use objectstore_server::rate_limits::{BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule};
 use objectstore_test::server::TestServer;
 
 #[tokio::test]
@@ -272,6 +272,75 @@ async fn test_throughput_rule() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_global_bps_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(500),
+            },
+            ..Default::default()
+        },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = objectstore_client::Client::new(server.url("/")).unwrap();
+    let usecase = objectstore_client::Usecase::new("test");
+    let session = client.session(usecase.for_organization(1)).unwrap();
+
+    // Upload a 4KB payload to push the EWMA above the 500 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 500 bps limit.
+    let payload = bytes::Bytes::from(vec![0xABu8; 4096]);
+    session
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("first upload should succeed before EWMA catches up");
+
+    // Wait a few EWMA ticks (50ms each) so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request should be rejected with 429
+    let result = session
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await;
+    let err = result.expect_err("expected 429 rate limit");
+    match &err {
+        objectstore_client::Error::Reqwest(e) => {
+            assert_eq!(
+                e.status(),
+                Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
+                "expected 429, got: {err:?}"
+            );
+        }
+        _ => panic!("expected reqwest error, got: {err:?}"),
+    }
+
+    // Wait long enough for the EWMA to decay below the limit.
+    // With alpha=0.2, EWMA decays as 0.8^n per tick. Peak ~16384 needs ~16 ticks (800ms)
+    // to drop below 500. Use 2s for CI reliability.
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request should succeed again
+    session
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("expected request to succeed after EWMA decay");
 
     Ok(())
 }
