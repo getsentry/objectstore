@@ -1,7 +1,8 @@
-//! The storage server component.
+//! Binary entry point for the objectstore server.
 //!
-//! This builds on top of the [`objectstore_service`], and exposes the underlying storage layer as
-//! an `HTTP` layer which can serve files directly to *external clients* and our SDK.
+//! This is a thin wrapper that configures the global allocator and delegates to the CLI defined in
+//! [`objectstore_server::cli`]. See the [`objectstore_server`] crate for architecture
+//! documentation, configuration reference, and endpoint details.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
