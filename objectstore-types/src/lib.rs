@@ -594,44 +594,22 @@ mod tests {
         };
 
         let headers = metadata.to_headers("pfx-", false).unwrap();
-        assert_eq!(
-            headers.get("content-type").unwrap(),
-            "text/html"
-        );
-        assert_eq!(
-            headers.get("content-encoding").unwrap(),
-            "zstd"
-        );
-        assert_eq!(
-            headers
-                .get(format!("pfx-{HEADER_EXPIRATION}"))
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "ttl:1m"
-        );
-        assert!(headers
-            .get(format!("pfx-{HEADER_TIME_CREATED}"))
-            .is_some());
-        assert!(headers
-            .get(format!("pfx-{HEADER_TIME_EXPIRES}"))
-            .is_some());
-        assert_eq!(
-            headers
-                .get(format!("pfx-{HEADER_ORIGIN}"))
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "10.0.0.1"
-        );
-        assert_eq!(
-            headers
-                .get(format!("pfx-{HEADER_META_PREFIX}foo"))
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "bar"
-        );
+        let map: BTreeMap<_, _> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.to_str().unwrap()))
+            .collect();
+
+        insta::assert_debug_snapshot!(map, @r#"
+        {
+            "content-encoding": "zstd",
+            "content-type": "text/html",
+            "pfx-x-sn-expiration": "ttl:1m",
+            "pfx-x-sn-origin": "10.0.0.1",
+            "pfx-x-sn-time-created": "2023-11-14T22:13:20.000000Z",
+            "pfx-x-sn-time-expires": "2023-11-14T22:14:20.000000Z",
+            "pfx-x-snme-foo": "bar",
+        }
+        "#);
     }
 
     #[test]
