@@ -57,7 +57,7 @@ impl ConcurrencyLimiter {
     /// ```
     pub fn try_acquire(&self) -> ServiceResult<ConcurrencyGuard<'_>> {
         let permit = self.semaphore.try_acquire().map_err(|_| {
-            tracing::error!(
+            tracing::debug!(
                 backend = self.backend_name,
                 max_concurrency = self.max_concurrency,
                 "Backend at capacity, rejecting request"
