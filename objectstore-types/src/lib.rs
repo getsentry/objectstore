@@ -582,14 +582,15 @@ mod tests {
     #[test]
     fn to_headers_all_fields() {
         let metadata = Metadata {
+            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
             content_type: "text/html".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
-            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
+            size: None,
             custom: BTreeMap::from([("foo".into(), "bar".into())]),
-            ..Default::default()
         };
 
         let headers = metadata.to_headers("pfx-", false).unwrap();
@@ -666,17 +667,18 @@ mod tests {
     fn full_roundtrip_all_fields() {
         let prefix = "x-test-";
         let metadata = Metadata {
+            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
             content_type: "image/png".into(),
             compression: Some(Compression::Zstd),
             origin: Some("192.168.1.1".into()),
-            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
+            size: None,
             custom: BTreeMap::from([
                 ("key1".into(), "value1".into()),
                 ("key2".into(), "value2".into()),
             ]),
-            ..Default::default()
         };
 
         let headers = metadata.to_headers(prefix, false).unwrap();
