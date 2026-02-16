@@ -1,7 +1,6 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{
-    DeleteResponse, GetResponse, InsertResponse, MetadataResponse, PayloadStream, StorageService,
-};
+use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 
