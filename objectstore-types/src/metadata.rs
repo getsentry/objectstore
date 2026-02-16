@@ -1,4 +1,33 @@
 //! Per-object metadata types and HTTP header serialization.
+//!
+//! This module defines [`Metadata`], the per-object metadata structure that
+//! accompanies every stored object, along with [`ExpirationPolicy`] and
+//! [`Compression`].
+//!
+//! # Serialization
+//!
+//! Metadata has two serialization formats:
+//!
+//! - **HTTP headers** — used by the public API. [`Metadata::from_headers`] and
+//!   [`Metadata::to_headers`] handle this conversion for public fields only.
+//!   Internal fields like [`Metadata::is_redirect_tombstone`] are handled by
+//!   backends directly.
+//! - **JSON** — used internally by backends for storage. JSON serialization
+//!   includes additional internal fields (e.g. `is_redirect_tombstone`) that
+//!   are skipped in the header representation.
+//!
+//! # HTTP header prefixes
+//!
+//! Headers use three prefix conventions:
+//!
+//! - Standard HTTP headers where applicable (`Content-Type`, `Content-Encoding`)
+//! - `x-sn-*` for objectstore-specific fields (e.g. `x-sn-expiration`)
+//! - `x-snme-` for custom user metadata (e.g. `x-snme-build_id`)
+//!
+//! Backends that store metadata as object metadata (like GCS) layer their own
+//! prefix on top, so `x-sn-expiration` becomes `x-goog-meta-x-sn-expiration`.
+//! The [`Metadata::from_headers`] and [`Metadata::to_headers`] methods accept
+//! a `prefix` parameter for this purpose.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -62,11 +91,23 @@ impl From<http::header::ToStrError> for Error {
     }
 }
 
-/// The per-object expiration policy
+/// The per-object expiration policy.
 ///
-/// We support automatic time-to-live and time-to-idle policies.
-/// Setting this to `Manual` means that the object has no automatic policy, and will not be
-/// garbage-collected automatically. It essentially lives forever until manually deleted.
+/// Controls automatic object cleanup. The policy is set by the client at upload
+/// time via the [`x-sn-expiration`](HEADER_EXPIRATION) header and persisted with
+/// the object.
+///
+/// | Variant      | Wire format | Behavior                                     |
+/// |--------------|-------------|----------------------------------------------|
+/// | `Manual`     | `manual`    | No automatic expiration (default)            |
+/// | `TimeToLive` | `ttl:30s`   | Expires after a fixed duration from creation |
+/// | `TimeToIdle` | `tti:1h`    | Expires after a duration of no access        |
+///
+/// Durations use [humantime](https://docs.rs/humantime) format (e.g. `30s`,
+/// `5m`, `1h`, `7d`).
+///
+/// **Important:** `Manual` is the default and must remain so — persisted objects
+/// without an explicit policy are deserialized as `Manual`.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpirationPolicy {
     /// Manual expiration, meaning no automatic cleanup.
@@ -132,7 +173,10 @@ impl FromStr for ExpirationPolicy {
     }
 }
 
-/// The compression algorithm of an object to upload.
+/// The compression algorithm applied to an object's payload.
+///
+/// Transmitted via the standard `Content-Encoding` HTTP header. Currently only
+/// Zstandard (`zstd`) is supported.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
@@ -173,19 +217,20 @@ impl FromStr for Compression {
     }
 }
 
-/// Per-object Metadata.
+/// Per-object metadata.
 ///
-/// This includes special metadata like the expiration policy and compression used,
-/// as well as arbitrary user-provided metadata.
+/// Includes first-class fields (expiration, compression, timestamps, etc.) and
+/// arbitrary user-provided key-value metadata. See the [module-level
+/// documentation](self) for the HTTP header mapping conventions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Metadata {
-    /// The object/metadata denotes a "redirect key".
+    /// Internal redirect tombstone marker (header: `x-sn-redirect-tombstone`).
     ///
-    /// This means that this particular object is just a tombstone, and the real thing
-    /// is rather found on the other backend.
-    /// In practice this means that the tombstone is stored on the "HighVolume" backend,
-    /// to avoid unnecessarily slow "not found" requests on the "LongTerm" backend.
+    /// When `Some(true)`, this object is a tombstone stored on the high-volume
+    /// backend indicating that the real payload lives on the long-term backend.
+    /// This field is **not** included in [`from_headers`](Metadata::from_headers)
+    /// or [`to_headers`](Metadata::to_headers) — backends handle it directly.
     ///
     /// **Important:** This field must remain the first field in the struct.
     /// The BigTable backend uses a regex predicate on the serialized JSON that
@@ -193,43 +238,54 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_redirect_tombstone: Option<bool>,
 
-    /// The expiration policy of the object.
+    /// The expiration policy of the object (header: `x-sn-expiration`).
+    ///
+    /// Skipped during serialization when set to [`ExpirationPolicy::Manual`].
     #[serde(skip_serializing_if = "ExpirationPolicy::is_manual")]
     pub expiration_policy: ExpirationPolicy,
 
-    /// The creation/last replacement time of the object, if known.
+    /// The creation/last replacement time of the object (header: `x-sn-time-created`).
     ///
-    /// This is set by the server every time an object is put, i.e. when objects are first created
-    /// and when existing objects are overwritten.
+    /// Set by the server every time an object is put, i.e. when objects are first
+    /// created and when existing objects are overwritten.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_created: Option<SystemTime>,
 
-    /// The expiration time of the object, if any, in accordance with its expiration policy.
+    /// The resolved expiration timestamp (header: `x-sn-time-expires`).
     ///
-    /// When using a Time To Idle expiration policy, this value will reflect the expiration
-    /// timestamp present prior to the current access to the object.
+    /// Derived from the [`expiration_policy`](Self::expiration_policy). When using
+    /// a time-to-idle policy, this reflects the expiration timestamp present
+    /// *prior to* the current access to the object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_expires: Option<SystemTime>,
 
-    /// The content type of the object, if known.
+    /// IANA media type of the object (header: `Content-Type`).
+    ///
+    /// Defaults to [`DEFAULT_CONTENT_TYPE`] (`application/octet-stream`).
     pub content_type: Cow<'static, str>,
 
-    /// The compression algorithm used for this object, if any.
+    /// The compression algorithm used for this object (header: `Content-Encoding`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<Compression>,
 
-    /// The origin of the object, typically the IP address of the original source.
+    /// The origin of the object (header: `x-sn-origin`).
     ///
-    /// This is an optional but encouraged field that tracks where the payload was
-    /// originally obtained from (e.g., the IP of a Sentry SDK or CLI).
+    /// Typically the IP address of the original source. This is an optional but
+    /// encouraged field that tracks where the payload was originally obtained
+    /// from (e.g. the IP of a Sentry SDK or CLI).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 
     /// Size of the data in bytes, if known.
+    ///
+    /// Not transmitted via HTTP headers; set by backends when the object is
+    /// stored or retrieved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
-    /// Some arbitrary user-provided metadata.
+    /// Arbitrary user-provided key-value metadata (header prefix: `x-snme-`).
+    ///
+    /// Each entry is transmitted as `x-snme-{key}: {value}`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 }

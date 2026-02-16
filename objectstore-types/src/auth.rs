@@ -1,4 +1,7 @@
 //! Authentication and authorization types.
+//!
+//! Permissions are carried in JWT tokens and checked by the server's
+//! authorization layer before each operation.
 
 use std::collections::HashSet;
 
@@ -7,15 +10,15 @@ use serde::{Deserialize, Serialize};
 /// Permissions that control whether different operations are authorized.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub enum Permission {
-    /// The permission required to read objects from objectstore.
+    /// Read / download objects (serialized as `"object.read"`).
     #[serde(rename = "object.read")]
     ObjectRead,
 
-    /// The permission required to write/overwrite objects in objectstore.
+    /// Create / overwrite objects (serialized as `"object.write"`).
     #[serde(rename = "object.write")]
     ObjectWrite,
 
-    /// The permission required to delete objects from objectstore.
+    /// Delete objects (serialized as `"object.delete"`).
     #[serde(rename = "object.delete")]
     ObjectDelete,
 }
