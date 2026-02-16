@@ -44,6 +44,7 @@ async fn objects_post(
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
+    metadata.is_redirect_tombstone = None;
 
     let response_id = service
         .insert_object(context, None, &metadata, body)
@@ -87,6 +88,7 @@ async fn object_put(
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
+    metadata.is_redirect_tombstone = None;
 
     let ObjectId { context, key } = id;
     let response_id = service
