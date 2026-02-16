@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
-use objectstore_types::Permission;
+use objectstore_types::auth::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;

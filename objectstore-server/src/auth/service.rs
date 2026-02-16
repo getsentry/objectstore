@@ -2,7 +2,8 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::{
     DeleteResponse, GetResponse, InsertResponse, MetadataResponse, PayloadStream, StorageService,
 };
-use objectstore_types::{Metadata, Permission};
+use objectstore_types::auth::Permission;
+use objectstore_types::metadata::Metadata;
 
 use crate::auth::AuthContext;
 use crate::endpoints::common::ApiResult;

@@ -77,11 +77,11 @@ uv run mypy .
 
 ## Keeping Documentation Up to Date
 
-After making changes, check whether the architecture docs need updating. Each main crate has a `docs/architecture.md` that is embedded as crate-level rustdoc via `include_str!`:
+After making changes, check whether the architecture docs need updating. The service and server crates have a `docs/architecture.md` embedded as crate-level rustdoc via `include_str!`; the types crate has its docs inlined in `lib.rs` and module files:
 
 - `objectstore-service/docs/architecture.md` — two-tier backend system, redirect tombstones, backend trait, object identification, streaming
 - `objectstore-server/docs/architecture.md` — endpoints, request flow, auth, config, rate limiting, killswitches
-- `objectstore-types/docs/architecture.md` — metadata fields and header mapping, scope system, expiration policies, compression, permissions
+- `objectstore-types/src/lib.rs` + module docs — metadata fields and header mapping, scope system, expiration policies, compression, permissions
 
 Update these docs when:
 - **Always**: architectural changes, new backends, changes to request flow, auth, or tombstone behavior

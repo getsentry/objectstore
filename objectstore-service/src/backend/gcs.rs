@@ -7,7 +7,7 @@ use std::{fmt, io};
 
 use anyhow::{Context, Result};
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 

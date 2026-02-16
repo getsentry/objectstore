@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use jsonwebtoken::DecodingKey;
-use objectstore_types::Permission;
+use objectstore_types::auth::Permission;
 
 use crate::config::{AuthZ, AuthZVerificationKey};
 

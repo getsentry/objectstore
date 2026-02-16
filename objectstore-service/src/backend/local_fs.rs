@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::pin;
 
 use futures_util::StreamExt;
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -115,7 +115,7 @@ mod tests {
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
-    use objectstore_types::{Compression, ExpirationPolicy};
+    use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
     use crate::id::ObjectContext;
     use objectstore_types::scope::{Scope, Scopes};

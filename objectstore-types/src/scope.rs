@@ -1,9 +1,46 @@
-//! Definitions for object scops.
+//! Hierarchical namespace for object organization and authorization.
 //!
-//! This module contains types to define and manage the hierarchical organization of objects:
+//! This module defines [`Scope`] (a single key-value pair like
+//! `organization=17`) and [`Scopes`] (an ordered collection of scopes).
 //!
-//!  - [`Scope`] is a single key-value pair representing one level of hierarchy
-//!  - [`Scopes`] is an ordered collection of [`Scope`]s
+//! # Allowed characters
+//!
+//! Scope keys and values must be non-empty and may only contain:
+//!
+//! ```text
+//! A-Z a-z 0-9 _ - ( ) $ ! + '
+//! ```
+//!
+//! Characters used as delimiters are forbidden: `.` (storage path separator),
+//! `/` (path separator), `=` and `;` (API path encoding).
+//!
+//! # Ordering
+//!
+//! Order matters — `organization=17;project=42` and `project=42;organization=17`
+//! identify different object namespaces because they produce different storage
+//! paths.
+//!
+//! # Purpose
+//!
+//! Scopes serve several roles:
+//!
+//! 1. **Organization** — they define a hierarchical folder-like structure
+//!    within a usecase. The storage path directly reflects the scope hierarchy
+//!    (e.g. `org.17/project.42/objects/{key}`).
+//! 2. **Authorization** — JWT tokens include scope claims that are matched
+//!    against the request's scopes. A token scoped to `organization=17` can
+//!    only access objects under that organization.
+//! 3. **Compartmentalization** — scopes isolate impact through rate limits and
+//!    killswitches, guaranteeing quality of service between tenants.
+//!
+//! # Display formats
+//!
+//! Scopes have two display formats:
+//!
+//! - **Storage path** ([`Scopes::as_storage_path`]): `org.17/project.42` —
+//!   used by backends to construct storage keys.
+//! - **API path** ([`Scopes::as_api_path`]): `org=17;project=42` — used in
+//!   HTTP URL paths (matrix URI syntax). Empty scopes render as `_`.
 
 use std::fmt;
 
@@ -19,7 +56,8 @@ pub const EMPTY_SCOPES: &str = "_";
 
 /// A single scope value of an object.
 ///
-/// Scopes are used in a hierarchy in object IDs.
+/// See the [module-level documentation](self) for allowed characters, ordering,
+/// and the roles scopes play.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Scope {
     /// Identifies the scope.
@@ -28,7 +66,7 @@ pub struct Scope {
     pub name: String,
     /// The value of the scope.
     ///
-    /// This can be the identifier of a
+    /// This can be the identifier of a database entity or a unique value.
     pub value: String,
 }
 
@@ -95,7 +133,8 @@ pub enum InvalidScopeError {
 
 /// An ordered set of resource scopes.
 ///
-/// Scopes are used to create hierarchical identifiers for objects.
+/// See the [module-level documentation](self) for allowed characters, ordering,
+/// and the roles scopes play.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Scopes {
     scopes: Vec<Scope>,
