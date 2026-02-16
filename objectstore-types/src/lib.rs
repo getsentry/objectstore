@@ -1,8 +1,4 @@
-//! This is a collection of types shared among various objectstore crates.
-//!
-//! It primarily includes metadata-related structures being used by both the client and server/service
-//! components.
-
+#![doc = include_str!("../docs/architecture.md")]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
