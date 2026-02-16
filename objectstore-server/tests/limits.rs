@@ -282,6 +282,7 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(500),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -336,6 +337,171 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
 
     // After decay, the request should succeed again
     session
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("expected request to succeed after EWMA decay");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(100_000),
+                usecase_pct: Some(1), // = 1000 bps per usecase
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = objectstore_client::Client::new(server.url("/")).unwrap();
+    let usecase_test = objectstore_client::Usecase::new("test");
+    let session_test = client
+        .session(usecase_test.for_organization(1))
+        .unwrap();
+
+    // Upload a 4KB payload to push the per-usecase EWMA above the 1000 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 1000 bps per-usecase limit but below the 100000 bps global limit.
+    let payload = bytes::Bytes::from(vec![0xABu8; 4096]);
+    session_test
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("first upload should succeed before EWMA catches up");
+
+    // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request to the same usecase should be rejected with 429
+    let result = session_test
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await;
+    let err = result.expect_err("expected 429 rate limit for same usecase");
+    match &err {
+        objectstore_client::Error::Reqwest(e) => {
+            assert_eq!(
+                e.status(),
+                Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
+                "expected 429, got: {err:?}"
+            );
+        }
+        _ => panic!("expected reqwest error, got: {err:?}"),
+    }
+
+    // A different usecase should succeed (separate EWMA bucket)
+    let usecase_other = objectstore_client::Usecase::new("other");
+    let session_other = client
+        .session(usecase_other.for_organization(1))
+        .unwrap();
+    session_other
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("different usecase should succeed");
+
+    // Wait for the EWMA to decay below the limit
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request to the original usecase should succeed again
+    session_test
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("expected request to succeed after EWMA decay");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_scope_pct_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(100_000),
+                scope_pct: Some(1), // = 1000 bps per scope
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = objectstore_client::Client::new(server.url("/")).unwrap();
+    let usecase = objectstore_client::Usecase::new("test");
+    let session_org1 = client
+        .session(usecase.for_organization(1))
+        .unwrap();
+
+    // Upload a 4KB payload to push the per-scope EWMA above the 1000 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 1000 bps per-scope limit but below the 100000 bps global limit.
+    let payload = bytes::Bytes::from(vec![0xABu8; 4096]);
+    session_org1
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("first upload should succeed before EWMA catches up");
+
+    // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request to the same scope should be rejected with 429
+    let result = session_org1
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await;
+    let err = result.expect_err("expected 429 rate limit for same scope");
+    match &err {
+        objectstore_client::Error::Reqwest(e) => {
+            assert_eq!(
+                e.status(),
+                Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
+                "expected 429, got: {err:?}"
+            );
+        }
+        _ => panic!("expected reqwest error, got: {err:?}"),
+    }
+
+    // A different scope should succeed (separate EWMA bucket)
+    let session_org2 = client
+        .session(usecase.for_organization(2))
+        .unwrap();
+    session_org2
+        .put(payload.clone())
+        .compression(None)
+        .send()
+        .await
+        .expect("different scope should succeed");
+
+    // Wait for the EWMA to decay below the limit
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request to the original scope should succeed again
+    session_org1
         .put(payload.clone())
         .compression(None)
         .send()

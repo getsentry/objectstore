@@ -114,7 +114,7 @@ async fn batch(
 
                         let result = match result {
                             Ok(Some((metadata, stream))) => {
-                                let metered_stream = state.wrap_stream(stream);
+                                let metered_stream = state.wrap_stream(stream, &context);
                                 match metered_stream.try_collect::<BytesMut>().await {
                                     Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
                                     Err(e) => Err(ApiError::Service(e.into())),
@@ -131,9 +131,7 @@ async fn batch(
                         let mut metadata = insert.metadata;
                         metadata.time_created = Some(SystemTime::now());
 
-                        let payload_len = insert.payload.len() as u64;
-                        state.rate_limiter.bytes_accumulator()
-                            .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
+                        state.record_bandwidth(&context, insert.payload.len() as u64);
 
                         let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
                         let result = service
