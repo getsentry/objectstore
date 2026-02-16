@@ -1,3 +1,5 @@
+//! BigTable backend for high-volume, low-latency storage of small objects.
+
 use std::fmt;
 use std::future::Future;
 use std::time::{Duration, SystemTime};

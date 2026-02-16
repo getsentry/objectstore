@@ -1,3 +1,8 @@
+//! Error types for service and backend operations.
+//!
+//! [`ServiceError`] covers I/O, serialization, HTTP, metadata, authentication,
+//! and backend-specific failures. [`ServiceResult`] is the corresponding alias.
+
 use thiserror::Error;
 
 /// Error type for service operations.

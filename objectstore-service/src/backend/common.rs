@@ -1,3 +1,5 @@
+//! Shared trait definition and types for all backends.
+
 use std::fmt::Debug;
 
 use objectstore_types::metadata::Metadata;

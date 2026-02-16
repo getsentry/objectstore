@@ -3,6 +3,9 @@
 //! This module contains [`StorageService`], the main entry point for storing and
 //! retrieving objects, along with [`StorageConfig`] for backend initialization and
 //! response type aliases for the service API.
+//!
+//! For an overview of the two-tier backend system, redirect tombstones, and
+//! consistency guarantees, see the [crate-level documentation](crate).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,16 +28,47 @@ enum BackendChoice {
     LongTerm,
 }
 
-/// Service response for get operations.
+/// Service response for [`StorageService::get_object`].
 pub type GetResponse = Option<(Metadata, PayloadStream)>;
-/// Service response for metadata-only get operations.
+/// Service response for [`StorageService::get_metadata`].
 pub type MetadataResponse = Option<Metadata>;
-/// Service response for insert operations.
+/// Service response for [`StorageService::insert_object`].
 pub type InsertResponse = ObjectId;
-/// Service response for delete operations.
+/// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
 
 /// High-level asynchronous service for storing and retrieving objects.
+///
+/// # Redirect Tombstones
+///
+/// Because the [`ObjectId`] is backend-independent, reads must be able to find
+/// an object without knowing which backend stores it. A naive approach would
+/// check the long-term backend on every read miss in the high-volume backend —
+/// but that is slow and expensive.
+///
+/// Instead, when an object is stored in the long-term backend, the service
+/// writes a **redirect tombstone** in the high-volume backend. A redirect
+/// tombstone is an empty object with
+/// [`is_redirect_tombstone: true`](objectstore_types::metadata::Metadata::is_redirect_tombstone)
+/// in its metadata. It acts as a signpost: "the real data lives in the other
+/// backend."
+///
+/// # Consistency Without Locks
+///
+/// The tombstone system maintains consistency through operation ordering rather
+/// than distributed locks. The invariant is: a redirect tombstone is always the
+/// **last thing written** and the **last thing removed**.
+///
+/// - On **write**, the real object is persisted before the tombstone. If the
+///   tombstone write fails, the real object is rolled back.
+/// - On **delete**, the real object is removed before the tombstone. If the
+///   long-term delete fails, the tombstone remains and the data stays reachable.
+///
+/// This ensures that at every intermediate step, either the data is fully
+/// reachable (tombstone points to data) or fully absent — never an orphan in
+/// either direction.
+///
+/// See the individual methods for per-operation tombstone behavior.
 #[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
@@ -109,6 +143,16 @@ impl StorageService {
     ///
     /// The object is identified by the components of an [`ObjectId`]. The `context` is required,
     /// while the `key` can be assigned automatically if set to `None`.
+    ///
+    /// # Tombstone handling
+    ///
+    /// If the object has a caller-provided key and a redirect tombstone already
+    /// exists at that key, the new write is routed to the long-term backend
+    /// (regardless of payload size) so the existing tombstone remains valid.
+    ///
+    /// When writing to long-term storage, the real object is persisted first,
+    /// then the redirect tombstone. If the tombstone write fails, the real
+    /// object is rolled back to avoid an unreachable orphan.
     pub async fn insert_object(
         &self,
         context: ObjectContext,
@@ -227,6 +271,11 @@ impl StorageService {
     }
 
     /// Retrieves only the metadata for an object, without downloading the payload.
+    ///
+    /// # Tombstone handling
+    ///
+    /// Looks up the high-volume backend first. If a redirect tombstone is found,
+    /// follows it to the long-term backend and returns that metadata instead.
     pub async fn get_metadata(&self, id: &ObjectId) -> crate::ServiceResult<MetadataResponse> {
         let start = Instant::now();
 
@@ -251,6 +300,11 @@ impl StorageService {
     }
 
     /// Streams the contents of an object stored at the given key.
+    ///
+    /// # Tombstone handling
+    ///
+    /// Looks up the high-volume backend first. If a redirect tombstone is found,
+    /// follows it to the long-term backend and streams the payload from there.
     pub async fn get_object(&self, id: &ObjectId) -> crate::ServiceResult<GetResponse> {
         let start = Instant::now();
 
@@ -288,6 +342,13 @@ impl StorageService {
     }
 
     /// Deletes an object stored at the given key, if it exists.
+    ///
+    /// # Tombstone handling
+    ///
+    /// If the high-volume backend contains a redirect tombstone (rather than a
+    /// regular object), the long-term object is deleted first, then the
+    /// tombstone. This ordering ensures the data stays reachable if the
+    /// long-term delete fails.
     pub async fn delete_object(&self, id: &ObjectId) -> crate::ServiceResult<DeleteResponse> {
         let start = Instant::now();
 

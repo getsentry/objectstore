@@ -1,3 +1,5 @@
+//! S3-compatible backend with generic protocol support.
+
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 

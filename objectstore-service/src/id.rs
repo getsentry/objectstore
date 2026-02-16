@@ -6,6 +6,32 @@
 //!    key. Every object stored in the object store has a unique `ObjectId`.
 //!  - [`Scope`] and [`Scopes`] define hierarchical scopes for objects, which are part of the
 //!    `ObjectId`.
+//!
+//! ## Usecases
+//!
+//! A usecase (sometimes called a "product") is a top-level namespace like
+//! `"attachments"` or `"debug-files"`. It groups related objects and can have
+//! usecase-specific server configuration (rate limits, killswitches, etc.).
+//!
+//! ## Scopes
+//!
+//! [`Scopes`] are ordered key-value pairs that
+//! form a hierarchy within a usecase — for example,
+//! `organization=17, project=42`. They serve as both an organizational structure
+//! and an authorization boundary. See the
+//! [`objectstore-types` docs](objectstore_types) for details on scope validation
+//! and formatting.
+//!
+//! ## Storage paths
+//!
+//! An [`ObjectId`] is converted to a storage path for backends via
+//! [`ObjectId::as_storage_path`]:
+//!
+//! ```text
+//! {usecase}/{scope1_key}.{scope1_value}/{scope2_key}.{scope2_value}/objects/{key}
+//! ```
+//!
+//! For example: `attachments/org.17/project.42/objects/abc123`
 
 use std::fmt;
 

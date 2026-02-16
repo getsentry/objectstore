@@ -1,3 +1,5 @@
+//! Google Cloud Storage backend for long-term storage of large objects.
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
