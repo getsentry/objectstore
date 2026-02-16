@@ -50,6 +50,14 @@ cargo test -p objectstore-server --all-features
 
 Before committing, run these linting checks (same commands as CI):
 
+### Rust Formatting
+
+Check formatting before committing:
+
+```bash
+cargo fmt --all -- --check
+```
+
 ### Rust Linting
 
 Check for compilation errors and clippy lints:
@@ -68,9 +76,10 @@ cargo doc --workspace --all-features --no-deps --document-private-items
 
 ### Python Linting
 
-For Python code, run both linting and type checking:
+For Python code, run formatting, linting, and type checking:
 
 ```bash
+uv run ruff format --check
 uv run ruff check
 uv run mypy .
 ```
