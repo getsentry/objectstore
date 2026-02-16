@@ -546,7 +546,7 @@ impl MeteredPayloadStream {
 impl std::fmt::Debug for MeteredPayloadStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MeteredPayloadStream")
-            .field("num_accumulators", &self.accumulators.len())
+            .field("accumulators", &self.accumulators)
             .finish()
     }
 }
