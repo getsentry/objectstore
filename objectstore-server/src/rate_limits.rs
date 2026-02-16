@@ -159,12 +159,12 @@ impl RateLimiter {
 ///
 /// The accumulator is incremented as bytes flow through streams, and the estimate is updated
 /// periodically by a background task using an exponentially weighted moving average.
-struct BwEstimator {
+struct BandwidthEstimator {
     accumulator: Arc<AtomicU64>,
     estimate: Arc<AtomicU64>,
 }
 
-impl BwEstimator {
+impl BandwidthEstimator {
     fn new() -> Self {
         Self {
             accumulator: Arc::new(AtomicU64::new(0)),
@@ -173,9 +173,9 @@ impl BwEstimator {
     }
 }
 
-impl std::fmt::Debug for BwEstimator {
+impl std::fmt::Debug for BandwidthEstimator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BwEstimator")
+        f.debug_struct("BandwidthEstimator")
             .field(
                 "accumulator",
                 &self.accumulator.load(std::sync::atomic::Ordering::Relaxed),
@@ -192,16 +192,16 @@ impl std::fmt::Debug for BwEstimator {
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
     /// Global accumulator/estimator pair.
-    global: Arc<BwEstimator>,
+    global: Arc<BandwidthEstimator>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Arc<BwEstimator>>>,
-    scopes: Arc<papaya::HashMap<Scopes, Arc<BwEstimator>>>,
+    usecases: Arc<papaya::HashMap<String, Arc<BandwidthEstimator>>>,
+    scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthEstimator>>>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
-        let global = Arc::new(BwEstimator::new());
+        let global = Arc::new(BandwidthEstimator::new());
         let usecases = Arc::new(papaya::HashMap::new());
         let scopes = Arc::new(papaya::HashMap::new());
 
@@ -225,9 +225,9 @@ impl BandwidthRateLimiter {
     /// Iterates over the global estimator as well as all per-usecase and per-scope estimators
     /// on each tick, updating their EWMAs.
     async fn estimator(
-        global: Arc<BwEstimator>,
-        usecases: Arc<papaya::HashMap<String, Arc<BwEstimator>>>,
-        scopes: Arc<papaya::HashMap<Scopes, Arc<BwEstimator>>>,
+        global: Arc<BandwidthEstimator>,
+        usecases: Arc<papaya::HashMap<String, Arc<BandwidthEstimator>>>,
+        scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthEstimator>>>,
     ) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
@@ -254,7 +254,6 @@ impl BandwidthRateLimiter {
                     let ewma = usecase_ewmas.entry(key.clone()).or_insert(0.0);
                     Self::update_ewma(estimator, ewma, to_bps);
                 }
-                merni::gauge!("server.bandwidth.usecase_map_size": guard.len());
             }
 
             // Per-scope
@@ -264,13 +263,12 @@ impl BandwidthRateLimiter {
                     let ewma = scope_ewmas.entry(key.clone()).or_insert(0.0);
                     Self::update_ewma(estimator, ewma, to_bps);
                 }
-                merni::gauge!("server.bandwidth.scope_map_size": guard.len());
             }
         }
     }
 
     /// Updates a single EWMA estimator from its accumulator.
-    fn update_ewma(estimator: &BwEstimator, ewma: &mut f64, to_bps: f64) {
+    fn update_ewma(estimator: &BandwidthEstimator, ewma: &mut f64, to_bps: f64) {
         const ALPHA: f64 = 0.2;
         let current = estimator
             .accumulator
@@ -335,14 +333,14 @@ impl BandwidthRateLimiter {
         if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();
             let estimator =
-                guard.get_or_insert_with(context.usecase.clone(), || Arc::new(BwEstimator::new()));
+                guard.get_or_insert_with(context.usecase.clone(), || Arc::new(BandwidthEstimator::new()));
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
         if self.scope_bps().is_some() {
             let guard = self.scopes.pin();
             let estimator =
-                guard.get_or_insert_with(context.scopes.clone(), || Arc::new(BwEstimator::new()));
+                guard.get_or_insert_with(context.scopes.clone(), || Arc::new(BandwidthEstimator::new()));
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
