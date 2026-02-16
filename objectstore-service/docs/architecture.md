@@ -46,6 +46,21 @@ A redirect tombstone is an empty object with
 in its metadata. It acts as a signpost: "the real data lives in the other
 backend."
 
+### Consistency Without Locks
+
+The tombstone system maintains consistency through operation ordering rather
+than distributed locks. The invariant is: a redirect tombstone is always the
+**last thing written** and the **last thing removed**.
+
+- On **write**, the real object is persisted before the tombstone. If the
+  tombstone write fails, the real object is rolled back.
+- On **delete**, the real object is removed before the tombstone. If the
+  long-term delete fails, the tombstone remains and the data stays reachable.
+
+This ensures that at every intermediate step, either the data is fully
+reachable (tombstone points to data) or fully absent — never an orphan in
+either direction.
+
 ### How Each Operation Handles Tombstones
 
 **Read** ([`StorageService::get_object`], [`StorageService::get_metadata`]):
