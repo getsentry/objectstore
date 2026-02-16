@@ -28,8 +28,10 @@ backends persist it.
 
 ### HTTP Header Mapping
 
-Metadata is transmitted as HTTP headers. Standard HTTP headers are used where
-applicable; objectstore-specific fields use the `x-sn-*` prefix:
+Metadata is transmitted as HTTP headers. The shared [`Metadata::from_headers`]
+and [`Metadata::to_headers`] methods handle the public API fields. Standard HTTP
+headers are used where applicable; objectstore-specific fields use the `x-sn-*`
+prefix:
 
 | Field              | HTTP Header              |
 |--------------------|--------------------------|
@@ -39,7 +41,11 @@ applicable; objectstore-specific fields use the `x-sn-*` prefix:
 | `time_created`     | `x-sn-time-created`     |
 | `time_expires`     | `x-sn-time-expires`     |
 | `origin`           | `x-sn-origin`           |
-| `is_redirect_tombstone` | `x-sn-redirect-tombstone` |
+
+Internal fields like `is_redirect_tombstone` (`x-sn-redirect-tombstone`) are not
+included in the shared header conversion. Backends handle these directly — for
+example, the S3-compatible backend writes and reads the tombstone header itself
+alongside other backend-specific headers like `x-goog-custom-time`.
 
 Custom user metadata uses the `x-snme-` prefix — for example, a custom field
 `"build_id"` becomes the header `x-snme-build_id`.
