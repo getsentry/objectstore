@@ -18,6 +18,7 @@ use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
 use crate::backend::common::{BoxedBackend, DeleteOutcome};
+use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -146,20 +147,19 @@ impl StorageService {
     ///
     /// # Tombstone handling
     ///
-    /// If the object has a caller-provided key and a redirect tombstone already
-    /// exists at that key, the new write is routed to the long-term backend
-    /// (regardless of payload size) so the existing tombstone remains valid.
+    /// If the object has a caller-provided key and a redirect tombstone already exists
+    /// at that key, the new write is routed to the long-term backend (preserving the
+    /// existing tombstone as a redirect to the new data).
     ///
-    /// When writing to long-term storage, the real object is persisted first,
-    /// then the redirect tombstone. If the tombstone write fails, the real
-    /// object is rolled back to avoid an unreachable orphan.
+    /// For long-term writes, the real object is persisted first, then the tombstone.
+    /// If the tombstone write fails, the real object is rolled back to avoid orphans.
     pub async fn insert_object(
         &self,
         context: ObjectContext,
         key: Option<String>,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> crate::ServiceResult<InsertResponse> {
+    ) -> Result<InsertResponse> {
         if metadata.origin.is_none() {
             merni::counter!(
                 "put.origin_missing": 1,
@@ -274,9 +274,10 @@ impl StorageService {
     ///
     /// # Tombstone handling
     ///
-    /// Looks up the high-volume backend first. If a redirect tombstone is found,
-    /// follows it to the long-term backend and returns that metadata instead.
-    pub async fn get_metadata(&self, id: &ObjectId) -> crate::ServiceResult<MetadataResponse> {
+    /// Looks up the object in the high-volume backend first. If the result is a
+    /// redirect tombstone, follows the redirect and fetches metadata from the
+    /// long-term backend instead.
+    pub async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -303,9 +304,10 @@ impl StorageService {
     ///
     /// # Tombstone handling
     ///
-    /// Looks up the high-volume backend first. If a redirect tombstone is found,
-    /// follows it to the long-term backend and streams the payload from there.
-    pub async fn get_object(&self, id: &ObjectId) -> crate::ServiceResult<GetResponse> {
+    /// Looks up the object in the high-volume backend first. If the result is a
+    /// redirect tombstone, follows the redirect and fetches the object from the
+    /// long-term backend instead.
+    pub async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -345,11 +347,12 @@ impl StorageService {
     ///
     /// # Tombstone handling
     ///
-    /// If the high-volume backend contains a redirect tombstone (rather than a
-    /// regular object), the long-term object is deleted first, then the
-    /// tombstone. This ordering ensures the data stays reachable if the
-    /// long-term delete fails.
-    pub async fn delete_object(&self, id: &ObjectId) -> crate::ServiceResult<DeleteResponse> {
+    /// Attempts to delete from the high-volume backend, but skips deletion if the
+    /// entry is a redirect tombstone. When a tombstone is found, the long-term
+    /// object is deleted first, then the tombstone. This ordering ensures that if
+    /// the long-term delete fails, the tombstone remains and the data is still
+    /// reachable.
+    pub async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -426,6 +429,7 @@ mod tests {
 
     use super::*;
     use crate::backend::common::Backend as _;
+    use crate::error::Error;
 
     fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
@@ -511,21 +515,18 @@ mod tests {
             _id: &ObjectId,
             _metadata: &Metadata,
             _stream: PayloadStream,
-        ) -> crate::ServiceResult<()> {
-            Err(crate::ServiceError::Io(std::io::Error::new(
+        ) -> Result<()> {
+            Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "simulated tombstone write failure",
             )))
         }
 
-        async fn get_object(
-            &self,
-            id: &ObjectId,
-        ) -> crate::ServiceResult<Option<(Metadata, PayloadStream)>> {
+        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
             self.0.get_object(id).await
         }
 
-        async fn delete_object(&self, id: &ObjectId) -> crate::ServiceResult<()> {
+        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
             self.0.delete_object(id).await
         }
     }

@@ -10,9 +10,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::PayloadStream;
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::{PayloadStream, ServiceError, ServiceResult};
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -37,7 +38,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<PutResponse> {
+    ) -> Result<PutResponse> {
         let path = self.path.join(id.as_storage_path().to_string());
         tracing::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
@@ -51,11 +52,10 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json =
-            serde_json::to_string(metadata).map_err(|cause| ServiceError::Serde {
-                context: "failed to serialize metadata".to_string(),
-                cause,
-            })?;
+        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
+            context: "failed to serialize metadata".to_string(),
+            cause,
+        })?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
@@ -70,7 +70,7 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -86,11 +86,9 @@ impl Backend for LocalFsBackend {
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
         let metadata: Metadata =
-            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
-                ServiceError::Serde {
-                    context: "failed to deserialize metadata".to_string(),
-                    cause,
-                }
+            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
+                context: "failed to deserialize metadata".to_string(),
+                cause,
             })?;
 
         let stream = ReaderStream::new(reader);
@@ -98,7 +96,7 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let result = tokio::fs::remove_file(path).await;

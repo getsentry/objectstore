@@ -5,7 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::ServiceError;
+use objectstore_service::error::Error as ServiceError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

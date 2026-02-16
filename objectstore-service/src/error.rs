@@ -1,13 +1,13 @@
 //! Error types for service and backend operations.
 //!
-//! [`ServiceError`] covers I/O, serialization, HTTP, metadata, authentication,
-//! and backend-specific failures. [`ServiceResult`] is the corresponding alias.
+//! [`Error`] covers I/O, serialization, HTTP, metadata, authentication,
+//! and backend-specific failures. [`Result`] is the corresponding alias.
 
-use thiserror::Error;
+use thiserror::Error as ThisError;
 
 /// Error type for service operations.
-#[derive(Debug, Error)]
-pub enum ServiceError {
+#[derive(Debug, ThisError)]
+pub enum Error {
     /// IO errors related to payload streaming or file operations.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -55,8 +55,8 @@ pub enum ServiceError {
     },
 }
 
-impl ServiceError {
-    /// Creates a [`ServiceError::Reqwest`] from a reqwest error with context.
+impl Error {
+    /// Creates an [`Error::Reqwest`] from a reqwest error with context.
     pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
         Self::Reqwest {
             context: context.into(),
@@ -66,4 +66,4 @@ impl ServiceError {
 }
 
 /// Result type for service operations.
-pub type ServiceResult<T> = Result<T, ServiceError>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;

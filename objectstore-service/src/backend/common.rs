@@ -4,8 +4,9 @@ use std::fmt::Debug;
 
 use objectstore_types::metadata::Metadata;
 
+use crate::PayloadStream;
+use crate::error::Result;
 use crate::id::ObjectId;
-use crate::{PayloadStream, ServiceResult};
 
 /// User agent string used for outgoing requests.
 ///
@@ -44,13 +45,13 @@ pub trait Backend: Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<PutResponse>;
+    ) -> Result<PutResponse>;
 
     /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse>;
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse>;
 
     /// Retrieves only the metadata for an object, without the payload.
-    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         Ok(self
             .get_object(id)
             .await?
@@ -58,14 +59,14 @@ pub trait Backend: Debug + Send + Sync + 'static {
     }
 
     /// Deletes the object at the given path.
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse>;
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
     /// Returns [`DeleteOutcome::Tombstone`] (leaving the row intact) when
     /// the object is a redirect tombstone, or [`DeleteOutcome::Deleted`]
     /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> ServiceResult<DeleteOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
         let metadata = self.get_metadata(id).await?;
         if metadata.is_some_and(|m| m.is_tombstone()) {
             Ok(DeleteOutcome::Tombstone)
