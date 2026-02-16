@@ -159,6 +159,7 @@ impl RateLimiter {
 ///
 /// The accumulator is incremented as bytes flow through streams, and the estimate is updated
 /// periodically by a background task using an exponentially weighted moving average.
+#[derive(Debug)]
 struct BandwidthEstimator {
     accumulator: Arc<AtomicU64>,
     estimate: Arc<AtomicU64>,
@@ -170,21 +171,6 @@ impl BandwidthEstimator {
             accumulator: Arc::new(AtomicU64::new(0)),
             estimate: Arc::new(AtomicU64::new(0)),
         }
-    }
-}
-
-impl std::fmt::Debug for BandwidthEstimator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BandwidthEstimator")
-            .field(
-                "accumulator",
-                &self.accumulator.load(std::sync::atomic::Ordering::Relaxed),
-            )
-            .field(
-                "estimate",
-                &self.estimate.load(std::sync::atomic::Ordering::Relaxed),
-            )
-            .finish()
     }
 }
 
