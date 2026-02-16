@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 
 use crate::id::ObjectId;
 use crate::{PayloadStream, ServiceResult};

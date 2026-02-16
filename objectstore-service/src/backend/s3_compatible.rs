@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, Metadata};
+use objectstore_types::metadata::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, Metadata};
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
@@ -79,7 +79,7 @@ impl<T> S3CompatibleBackend<T> {
 fn metadata_to_gcs_headers(
     metadata: &Metadata,
     prefix: &str,
-) -> Result<HeaderMap, objectstore_types::Error> {
+) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
     // Tombstone is internal metadata not handled by to_headers
     if metadata.is_tombstone() {

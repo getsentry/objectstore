@@ -9,7 +9,7 @@ use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::id::ObjectKey;
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
@@ -27,7 +27,7 @@ pub enum BatchError {
 
     /// Errors related to de/serialization and parsing of object metadata.
     #[error("metadata error: {0}")]
-    Metadata(#[from] objectstore_types::Error),
+    Metadata(#[from] objectstore_types::metadata::Error),
 
     /// Size or cardinality limit exceeded.
     #[error("batch limit exceeded: {0}")]
@@ -193,7 +193,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, header::CONTENT_TYPE};
     use futures::StreamExt;
-    use objectstore_types::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
+    use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
 
     #[tokio::test]
     async fn test_valid_request_works() {

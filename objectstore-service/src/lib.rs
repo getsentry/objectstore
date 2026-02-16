@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::id::{ObjectContext, ObjectId};

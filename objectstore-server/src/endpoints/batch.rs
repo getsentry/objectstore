@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};

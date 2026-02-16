@@ -8,7 +8,7 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::Metadata;
+use objectstore_types::metadata::Metadata;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
