@@ -527,12 +527,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         // Simulate a backend that prefixes headers, e.g. "x-goog-meta-"
         let prefix = "x-goog-meta-";
-        let expiration_header: HeaderName =
-            format!("{prefix}{HEADER_EXPIRATION}").parse().unwrap();
+        let expiration_header: HeaderName = format!("{prefix}{HEADER_EXPIRATION}").parse().unwrap();
         headers.insert(expiration_header, "tti:1h".parse().unwrap());
 
-        let custom_header: HeaderName =
-            format!("{prefix}{HEADER_META_PREFIX}my-key").parse().unwrap();
+        let custom_header: HeaderName = format!("{prefix}{HEADER_META_PREFIX}my-key")
+            .parse()
+            .unwrap();
         headers.insert(custom_header, "my-value".parse().unwrap());
 
         let metadata = Metadata::from_headers(&headers, prefix).unwrap();
@@ -620,10 +620,7 @@ mod tests {
         };
 
         let headers = metadata.to_headers("", false).unwrap();
-        assert_eq!(
-            headers.get(HEADER_REDIRECT_TOMBSTONE).unwrap(),
-            "true"
-        );
+        assert_eq!(headers.get(HEADER_REDIRECT_TOMBSTONE).unwrap(), "true");
     }
 
     #[test]
@@ -753,9 +750,7 @@ mod tests {
         };
 
         let headers = metadata.to_headers("x-goog-meta-", false).unwrap();
-        let has_size_header = headers
-            .keys()
-            .any(|k| k.as_str().contains("size"));
+        let has_size_header = headers.keys().any(|k| k.as_str().contains("size"));
         assert!(!has_size_header);
     }
 
