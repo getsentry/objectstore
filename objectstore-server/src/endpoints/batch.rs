@@ -130,7 +130,6 @@ async fn batch(
                         let key = insert.key.clone();
                         let mut metadata = insert.metadata;
                         metadata.time_created = Some(SystemTime::now());
-                        metadata.is_redirect_tombstone = None;
 
                         let payload_len = insert.payload.len() as u64;
                         state.rate_limiter.bytes_accumulator()
@@ -242,7 +241,7 @@ impl From<OperationResponse> for Part {
         match value {
             OperationResponse::Get(GetResponse { key, result }) => match result {
                 Ok(Some((metadata, bytes))) => {
-                    let mut metadata_headers = match metadata.to_headers("", false) {
+                    let mut metadata_headers = match metadata.to_headers("") {
                         Ok(headers) => headers,
                         Err(err) => {
                             let err = BatchError::ResponseSerialization {

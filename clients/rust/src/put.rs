@@ -187,7 +187,7 @@ impl PutBuilder {
             // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
         };
 
-        builder = builder.headers(self.metadata.to_headers("", false)?);
+        builder = builder.headers(self.metadata.to_headers("")?);
 
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status()?.json().await?)
