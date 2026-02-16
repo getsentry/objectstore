@@ -130,6 +130,7 @@ async fn batch(
                         let key = insert.key.clone();
                         let mut metadata = insert.metadata;
                         metadata.time_created = Some(SystemTime::now());
+                        metadata.is_redirect_tombstone = None;
 
                         let payload_len = insert.payload.len() as u64;
                         state.rate_limiter.bytes_accumulator()

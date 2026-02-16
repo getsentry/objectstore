@@ -672,6 +672,94 @@ mod tests {
     }
 
     #[test]
+    fn from_headers_empty() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
+        assert_eq!(metadata, Metadata::default());
+    }
+
+    #[test]
+    fn from_headers_redirect_tombstone_parsed() {
+        // Redirect tombstone is internal backend metadata. It is parsed from headers
+        // because backends (e.g. S3-compatible) roundtrip it through HTTP headers.
+        // The server layer is responsible for stripping it on client requests.
+        let mut headers = HeaderMap::new();
+        let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
+            .parse()
+            .unwrap();
+        headers.insert(name, "true".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
+        assert_eq!(metadata.is_redirect_tombstone, Some(true));
+    }
+
+    #[test]
+    fn from_headers_redirect_tombstone_non_true_ignored() {
+        let mut headers = HeaderMap::new();
+        let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
+            .parse()
+            .unwrap();
+        headers.insert(name, "false".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
+        assert!(metadata.is_redirect_tombstone.is_none());
+    }
+
+    #[test]
+    fn from_headers_invalid_time_expires() {
+        let mut headers = HeaderMap::new();
+        let name: HeaderName = format!("x-goog-meta-{HEADER_TIME_EXPIRES}")
+            .parse()
+            .unwrap();
+        headers.insert(name, "not-a-timestamp".parse().unwrap());
+
+        // NOTE: This produces InvalidCreationTime even for time_expires because
+        // both fields share the same humantime::TimestampError #[from] conversion.
+        assert!(Metadata::from_headers(&headers, "x-goog-meta-").is_err());
+    }
+
+    #[test]
+    fn serde_roundtrip_default() {
+        let metadata = Metadata::default();
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: Metadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, metadata);
+    }
+
+    #[test]
+    fn serde_roundtrip_all_fields() {
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
+            content_type: "application/json".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("10.0.0.1".into()),
+            size: Some(1024),
+            custom: BTreeMap::from([("key".into(), "value".into())]),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: Metadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, metadata);
+    }
+
+    #[test]
+    fn size_not_included_in_headers() {
+        let metadata = Metadata {
+            size: Some(42),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("x-goog-meta-", false).unwrap();
+        let has_size_header = headers
+            .keys()
+            .any(|k| k.as_str().contains("size"));
+        assert!(!has_size_header);
+    }
+
+    #[test]
     fn default_metadata() {
         let metadata = Metadata::default();
         assert_eq!(metadata.content_type, DEFAULT_CONTENT_TYPE);
