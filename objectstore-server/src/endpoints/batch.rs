@@ -49,13 +49,13 @@ impl std::fmt::Debug for GetResponse {
 #[derive(Debug)]
 struct InsertResponse {
     pub key: ObjectKey,
-    pub result: ApiResult<objectstore_service::InsertResponse>,
+    pub result: ApiResult<objectstore_service::service::InsertResponse>,
 }
 
 #[derive(Debug)]
 struct DeleteResponse {
     pub key: ObjectKey,
-    pub result: ApiResult<objectstore_service::DeleteResponse>,
+    pub result: ApiResult<objectstore_service::service::DeleteResponse>,
 }
 
 #[derive(Debug)]

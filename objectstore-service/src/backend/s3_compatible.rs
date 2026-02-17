@@ -1,3 +1,5 @@
+//! S3-compatible backend with generic protocol support.
+
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
@@ -6,11 +8,12 @@ use objectstore_types::metadata::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, M
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
+use crate::PayloadStream;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::{PayloadStream, ServiceError, ServiceResult};
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -100,14 +103,14 @@ where
     T: TokenProvider,
 {
     /// Creates a request builder with the appropriate authentication.
-    async fn request(&self, method: Method, url: impl IntoUrl) -> ServiceResult<RequestBuilder> {
+    async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
             builder = builder.bearer_auth(
                 provider
                     .get_token()
                     .await
-                    .map_err(|err| ServiceError::Generic {
+                    .map_err(|err| Error::Generic {
                         context: "S3: failed to get authentication token".to_owned(),
                         cause: Some(err.into()),
                     })?
@@ -124,7 +127,7 @@ where
         &self,
         method: Method,
         id: &ObjectId,
-    ) -> ServiceResult<Option<(Metadata, reqwest::Response)>> {
+    ) -> Result<Option<(Metadata, reqwest::Response)>> {
         let object_url = self.object_url(id);
 
         let response = self
@@ -132,7 +135,7 @@ where
             .await?
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to send request".to_string(),
                 cause,
             })?;
@@ -144,7 +147,7 @@ where
 
         let response = response
             .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to get object".to_string(),
                 cause,
             })?;
@@ -181,7 +184,7 @@ where
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> ServiceResult<()> {
+    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> Result<()> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
         self.request(Method::PUT, self.object_url(id))
@@ -194,12 +197,12 @@ where
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to send TTI update request".to_string(),
                 cause,
             })?
             .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to update expiration time for object with TTI".to_string(),
                 cause,
             })?;
@@ -241,7 +244,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<PutResponse> {
+    ) -> Result<PutResponse> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
@@ -249,12 +252,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to send put request".to_string(),
                 cause,
             })?
             .error_for_status()
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to put object".to_string(),
                 cause,
             })?;
@@ -263,7 +266,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         tracing::debug!("Reading from s3_compatible backend");
 
         let Some((metadata, response)) = self.request_object(Method::GET, id).await? else {
@@ -275,21 +278,21 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         tracing::debug!("Reading metadata from s3_compatible backend");
         let response = self.request_object(Method::HEAD, id).await?;
         Ok(response.map(|(metadata, _)| metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         tracing::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
             .await?
             .send()
             .await
-            .map_err(|cause| ServiceError::Reqwest {
+            .map_err(|cause| Error::Reqwest {
                 context: "S3: failed to send delete request".to_string(),
                 cause,
             })?;
@@ -299,7 +302,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             tracing::debug!("Object not found");
             response
                 .error_for_status()
-                .map_err(|cause| ServiceError::Reqwest {
+                .map_err(|cause| Error::Reqwest {
                     context: "S3: failed to delete object".to_string(),
                     cause,
                 })?;
