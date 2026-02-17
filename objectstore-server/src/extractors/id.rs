@@ -153,14 +153,15 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
     }
 }
 
-/// Path parameters used for collection-level endpoints without a key.
+/// Path parameters for extracting an [`ObjectContext`] from a request path.
 ///
-/// This is meant to be used with the axum `Path` extractor.
+/// Works on both collection-level (`/objects/{usecase}/{scopes}`) and object-level
+/// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
-struct ContextParams {
-    usecase: String,
+pub(super) struct ContextParams {
+    pub usecase: String,
     #[serde(deserialize_with = "deserialize_scopes")]
-    scopes: Scopes,
+    pub scopes: Scopes,
 }
 
 fn populate_sentry_context(context: &ObjectContext) {

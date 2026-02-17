@@ -6,6 +6,8 @@ use futures_util::StreamExt;
 use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
+use objectstore_service::id::ObjectContext;
+
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
@@ -61,8 +63,15 @@ impl Services {
     }
 
     /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
-        MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
+    pub fn meter_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
+        MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context)).boxed()
+    }
+
+    /// Records bandwidth usage for the given context without wrapping a stream.
+    ///
+    /// Used for cases where the payload size is known upfront (e.g. batch INSERT).
+    pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
+        self.rate_limiter.record_bandwidth(context, bytes);
     }
 }
 
