@@ -207,6 +207,8 @@ impl BandwidthRateLimiter {
         let global = Arc::clone(&self.global);
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
+        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
+        // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
             Self::estimator(global, usecases, scopes).await;
         });
@@ -388,6 +390,8 @@ impl ThroughputRateLimiter {
     fn start(&self) {
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
+        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
+        // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(50));
             loop {
