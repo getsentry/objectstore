@@ -53,6 +53,7 @@ impl Services {
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
+        rate_limiter.start();
 
         Ok(Arc::new(Self {
             config,
