@@ -175,8 +175,8 @@ fn populate_sentry_context(context: &ObjectContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::de::value::{CowStrDeserializer, Error as DeError};
     use serde::de::IntoDeserializer;
+    use serde::de::value::{CowStrDeserializer, Error as DeError};
     use std::borrow::Cow;
 
     fn deser_scopes(input: &str) -> Result<Scopes, DeError> {
@@ -219,5 +219,336 @@ mod tests {
     fn parse_empty_key_or_value() {
         assert!(deser_scopes("=value").is_err());
         assert!(deser_scopes("key=").is_err());
+    }
+
+    // --- Extractor integration tests ---
+
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use objectstore_service::{StorageConfig, StorageService};
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use crate::auth::PublicKeyDirectory;
+    use crate::config::{Config, Storage};
+    use crate::killswitches::{Killswitch, Killswitches};
+    use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
+    use crate::state::{ServiceState, Services};
+
+    async fn test_state(mut config: Config) -> (ServiceState, TempDir) {
+        let tempdir = TempDir::new().unwrap();
+        config.high_volume_storage = Storage::FileSystem {
+            path: tempdir.path().join("high-volume"),
+        };
+        config.long_term_storage = Storage::FileSystem {
+            path: tempdir.path().join("long-term"),
+        };
+
+        let fs_config = StorageConfig::FileSystem {
+            path: tempdir.path(),
+        };
+        let service = StorageService::new(fs_config.clone(), fs_config)
+            .await
+            .unwrap();
+        let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
+        let rate_limiter = RateLimiter::new(config.rate_limits.clone());
+
+        let state = Arc::new(Services {
+            config,
+            service,
+            key_directory,
+            rate_limiter,
+        });
+        (state, tempdir)
+    }
+
+    async fn handle_object_id(Xt(id): Xt<ObjectId>) -> String {
+        format!(
+            "usecase={} key={} scopes_empty={}",
+            id.context().usecase,
+            id.key(),
+            id.context().scopes.is_empty(),
+        )
+    }
+
+    async fn handle_object_context(Xt(ctx): Xt<ObjectContext>) -> String {
+        format!(
+            "usecase={} scopes_empty={}",
+            ctx.usecase,
+            ctx.scopes.is_empty(),
+        )
+    }
+
+    fn test_router(state: ServiceState) -> Router {
+        Router::new()
+            .route("/objects/{usecase}/{scopes}/{*key}", get(handle_object_id))
+            .route("/objects/{usecase}/{scopes}/", post(handle_object_context))
+            .with_state(state)
+    }
+
+    async fn response_body(response: axum::http::Response<Body>) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    // Extraction tests
+
+    #[tokio::test]
+    async fn extract_object_id_parses_path() {
+        let (state, _tempdir) = test_state(Config::default()).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .uri("/objects/myusecase/org=123;project=456/my-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body(response).await;
+        assert!(body.contains("usecase=myusecase"));
+        assert!(body.contains("key=my-key"));
+        assert!(body.contains("scopes_empty=false"));
+    }
+
+    #[tokio::test]
+    async fn extract_object_id_with_empty_scopes() {
+        let (state, _tempdir) = test_state(Config::default()).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .uri("/objects/myusecase/_/my-key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body(response).await;
+        assert!(body.contains("scopes_empty=true"));
+    }
+
+    #[tokio::test]
+    async fn extract_object_context_parses_path() {
+        let (state, _tempdir) = test_state(Config::default()).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/myusecase/org=123;project=456/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body(response).await;
+        assert!(body.contains("usecase=myusecase"));
+        assert!(body.contains("scopes_empty=false"));
+    }
+
+    #[tokio::test]
+    async fn extract_object_context_with_empty_scopes() {
+        let (state, _tempdir) = test_state(Config::default()).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/myusecase/_/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body(response).await;
+        assert!(body.contains("scopes_empty=true"));
+    }
+
+    #[tokio::test]
+    async fn extract_object_id_invalid_scopes() {
+        let (state, _tempdir) = test_state(Config::default()).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .uri("/objects/myusecase/invalid-no-equals/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Killswitch tests
+
+    #[tokio::test]
+    async fn extract_object_id_killswitched() {
+        let config = Config {
+            killswitches: Killswitches(vec![Killswitch {
+                usecase: Some("blocked".into()),
+                scopes: BTreeMap::new(),
+                service: None,
+                service_matcher: Default::default(),
+            }]),
+            ..Config::default()
+        };
+        let (state, _tempdir) = test_state(config).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .uri("/objects/blocked/org=1/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let request = Request::builder()
+            .uri("/objects/allowed/org=1/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn extract_object_context_killswitched() {
+        let config = Config {
+            killswitches: Killswitches(vec![Killswitch {
+                usecase: Some("blocked".into()),
+                scopes: BTreeMap::new(),
+                service: None,
+                service_matcher: Default::default(),
+            }]),
+            ..Config::default()
+        };
+        let (state, _tempdir) = test_state(config).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/blocked/org=1/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/allowed/org=1/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn extract_object_id_killswitched_with_service() {
+        let config = Config {
+            killswitches: Killswitches(vec![Killswitch {
+                usecase: None,
+                scopes: BTreeMap::new(),
+                service: Some("test-*".into()),
+                service_matcher: Default::default(),
+            }]),
+            ..Config::default()
+        };
+        let (state, _tempdir) = test_state(config).await;
+        let app = test_router(state);
+
+        // Matching service header → 403
+        let request = Request::builder()
+            .uri("/objects/any/org=1/key")
+            .header("x-downstream-service", "test-service")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Non-matching service header → 200
+        let request = Request::builder()
+            .uri("/objects/any/org=1/key")
+            .header("x-downstream-service", "other-service")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // No service header → 200
+        let request = Request::builder()
+            .uri("/objects/any/org=1/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // Rate limiter tests
+
+    #[tokio::test]
+    async fn extract_object_id_rate_limited() {
+        let config = Config {
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(1),
+                    burst: 0,
+                    ..ThroughputLimits::default()
+                },
+                ..RateLimits::default()
+            },
+            ..Config::default()
+        };
+        let (state, _tempdir) = test_state(config).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .uri("/objects/test/org=1/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let request = Request::builder()
+            .uri("/objects/test/org=1/key")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn extract_object_context_rate_limited() {
+        let config = Config {
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(1),
+                    burst: 0,
+                    ..ThroughputLimits::default()
+                },
+                ..RateLimits::default()
+            },
+            ..Config::default()
+        };
+        let (state, _tempdir) = test_state(config).await;
+        let app = test_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/test/org=1/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/objects/test/org=1/")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
