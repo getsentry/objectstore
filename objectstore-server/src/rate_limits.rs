@@ -130,6 +130,14 @@ impl RateLimiter {
         }
     }
 
+    /// Starts background tasks for rate limit estimation and monitoring.
+    ///
+    /// Must be called from within a Tokio runtime.
+    pub fn start(&self) {
+        self.bandwidth.start();
+        self.throughput.start();
+    }
+
     /// Checks if the given context is within the rate limits.
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
@@ -187,23 +195,23 @@ struct BandwidthRateLimiter {
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
-        let global = Arc::new(BandwidthEstimator::new());
-        let usecases = Arc::new(papaya::HashMap::new());
-        let scopes = Arc::new(papaya::HashMap::new());
-
-        let global_clone = Arc::clone(&global);
-        let usecases_clone = Arc::clone(&usecases);
-        let scopes_clone = Arc::clone(&scopes);
-        tokio::task::spawn(async move {
-            Self::estimator(global_clone, usecases_clone, scopes_clone).await;
-        });
-
         Self {
             config,
-            global,
-            usecases,
-            scopes,
+            global: Arc::new(BandwidthEstimator::new()),
+            usecases: Arc::new(papaya::HashMap::new()),
+            scopes: Arc::new(papaya::HashMap::new()),
         }
+    }
+
+    fn start(&self) {
+        let global = Arc::clone(&self.global);
+        let usecases = Arc::clone(&self.usecases);
+        let scopes = Arc::clone(&self.scopes);
+        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
+        // The task is aborted when the Tokio runtime is dropped on process exit.
+        tokio::task::spawn(async move {
+            Self::estimator(global, usecases, scopes).await;
+        });
     }
 
     /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
@@ -250,6 +258,9 @@ impl BandwidthRateLimiter {
                     Self::update_ewma(estimator, ewma, to_bps);
                 }
             }
+
+            merni::gauge!("server.rate_limiter.bandwidth.scope_map_size": scopes.len());
+            merni::gauge!("server.rate_limiter.bandwidth.usecase_map_size": usecases.len());
         }
     }
 
@@ -356,8 +367,8 @@ struct ThroughputRateLimiter {
     global: Option<Mutex<TokenBucket>>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: papaya::HashMap<String, Mutex<TokenBucket>>,
-    scopes: papaya::HashMap<Scopes, Mutex<TokenBucket>>,
+    usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
+    scopes: Arc<papaya::HashMap<Scopes, Mutex<TokenBucket>>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
 }
 
@@ -370,10 +381,25 @@ impl ThroughputRateLimiter {
         Self {
             config,
             global,
-            usecases: papaya::HashMap::new(),
-            scopes: papaya::HashMap::new(),
+            usecases: Arc::new(papaya::HashMap::new()),
+            scopes: Arc::new(papaya::HashMap::new()),
             rules: papaya::HashMap::new(),
         }
+    }
+
+    fn start(&self) {
+        let usecases = Arc::clone(&self.usecases);
+        let scopes = Arc::clone(&self.scopes);
+        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
+        // The task is aborted when the Tokio runtime is dropped on process exit.
+        tokio::task::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                interval.tick().await;
+                merni::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
+                merni::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
+            }
+        });
     }
 
     fn check(&self, context: &ObjectContext) -> bool {
