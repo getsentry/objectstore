@@ -1,0 +1,43 @@
+# Warden Configuration
+# https://github.com/getsentry/warden
+
+version = 1
+
+[defaults]
+failOn = "critical"
+reportOn = "medium"
+
+# Find bugs and vulnerabilities in code changes
+[[skills]]
+name = "find-bugs"
+remote = "getsentry/skills"
+
+[[skills.triggers]]
+type = "pull_request"
+actions = ["opened", "synchronize", "reopened"]
+
+# Security review following OWASP guidelines
+[[skills]]
+name = "security-review"
+remote = "getsentry/skills"
+
+[[skills.triggers]]
+type = "pull_request"
+actions = ["opened", "synchronize", "reopened"]
+
+# Code review following Sentry engineering practices
+[[skills]]
+name = "code-review"
+remote = "getsentry/skills"
+
+[[skills.triggers]]
+type = "pull_request"
+actions = ["opened", "synchronize", "reopened"]
+
+# Simplify and refine code for clarity and maintainability
+[[skills]]
+name = "code-simplifier"
+remote = "getsentry/skills"
+
+[[skills.triggers]]
+type = "local"
