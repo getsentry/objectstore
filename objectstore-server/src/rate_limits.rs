@@ -369,7 +369,7 @@ struct ThroughputRateLimiter {
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Mutex<TokenBucket>>>,
-    rules: Arc<papaya::HashMap<usize, Mutex<TokenBucket>>>,
+    rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
 }
 
 impl ThroughputRateLimiter {
@@ -383,7 +383,7 @@ impl ThroughputRateLimiter {
             global,
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
-            rules: Arc::new(papaya::HashMap::new()),
+            rules: papaya::HashMap::new(),
         }
     }
 
