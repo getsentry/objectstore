@@ -10,6 +10,7 @@ use objectstore_service::id::ObjectContext;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
+use crate::observability::SystemMetrics;
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
 
 /// Shared reference to the objectstore [`Services`].
@@ -37,6 +38,8 @@ pub struct Services {
     pub key_directory: PublicKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
+    /// Resource usage metrics for backpressure management.
+    pub system_metrics: SystemMetrics,
 }
 
 impl Services {
@@ -54,11 +57,14 @@ impl Services {
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
+        let system_metrics = SystemMetrics::spawn();
+
         Ok(Arc::new(Self {
             config,
             service,
             key_directory,
             rate_limiter,
+            system_metrics,
         }))
     }
 
