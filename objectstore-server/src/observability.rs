@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
+use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tracing::Level;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -8,6 +11,31 @@ use crate::config::{Config, LogFormat};
 
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
+
+/// Interval for emitting the in-flight requests gauge metric.
+pub const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Default)]
+pub struct SystemMetrics {
+    pub in_flight_requests: InFlightRequestsCounter,
+}
+
+impl SystemMetrics {
+    pub fn spawn() -> SystemMetrics {
+        let in_flight_requests = InFlightRequestsCounter::default();
+
+        // `InFlightRequestsCounter` wraps its atomic counter in an `Arc`. We call `run_emitter()`
+        // on a clone because `run_emitter()` consumes the counter and we still need one.
+        tokio::spawn(in_flight_requests.clone().run_emitter(
+            IN_FLIGHT_INTERVAL,
+            |count| async move {
+                merni::gauge!("server.requests.in_flight": count);
+            },
+        ));
+
+        Self { in_flight_requests }
+    }
+}
 
 pub fn init_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     let Some(ref api_key) = config.metrics.datadog_key else {

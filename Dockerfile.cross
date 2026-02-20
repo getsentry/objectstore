@@ -16,5 +16,6 @@ ENV OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 
 WORKDIR /workspace
+RUN git config --global --add safe.directory /workspace
 ENTRYPOINT ["cargo", "build", "--release", "--target=x86_64-unknown-linux-gnu"]
 CMD ["--bin", "objectstore"]

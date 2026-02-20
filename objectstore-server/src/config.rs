@@ -750,6 +750,13 @@ pub struct AuthZ {
     pub keys: BTreeMap<String, AuthZVerificationKey>,
 }
 
+/// Configuration for backpressure management thresholds.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct BackpressureThresholds {
+    /// Maximum number of concurrent requests this node may handle.
+    pub in_flight_requests: Option<usize>,
+}
+
 /// Main configuration struct for the objectstore server.
 ///
 /// This is the top-level configuration that combines all server settings including networking,
@@ -874,6 +881,10 @@ pub struct Config {
 
     /// Definitions for rate limits to enforce on incoming requests.
     pub rate_limits: RateLimits,
+
+    /// Definitions for thresholds at which backpressure management or load shedding should kick
+    /// in.
+    pub backpressure_thresholds: BackpressureThresholds,
 }
 
 impl Default for Config {
@@ -895,6 +906,7 @@ impl Default for Config {
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),
+            backpressure_thresholds: BackpressureThresholds::default(),
         }
     }
 }
@@ -1134,6 +1146,40 @@ mod tests {
             let kid2 = config.auth.keys.get("kid2").unwrap();
             assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_backpressure_thresholds_with_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__BACKPRESSURE_THRESHOLDS__IN_FLIGHT_REQUESTS", "180");
+
+            let config = Config::load(None).unwrap();
+
+            assert_eq!(config.backpressure_thresholds.in_flight_requests, Some(180));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_backpressure_thresholds_with_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                backpressure_thresholds:
+                    in_flight_requests: 180
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            assert_eq!(config.backpressure_thresholds.in_flight_requests, Some(180));
 
             Ok(())
         });
