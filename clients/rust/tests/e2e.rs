@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{Client, Error, OperationResult, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
@@ -251,4 +251,111 @@ async fn fails_with_insufficient_auth_token_perms() {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
+}
+
+#[tokio::test]
+async fn batch_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token_generator(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // First batch: 4 PUT operations
+    // key-2 uses default compression (zstd), others are uncompressed
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("first object").compression(None).key("key-1"))
+        .push(session.put("second object").key("key-2"))
+        .push(session.put("third object").compression(None).key("key-3"))
+        .push(session.put("fourth object").compression(None).key("key-4"))
+        .send()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    assert_eq!(results.len(), 4);
+    let keys: Vec<String> = results
+        .iter()
+        .map(|r| match r {
+            OperationResult::Put(key, Ok(_)) => key.clone(),
+            other => panic!("Expected Put result, got: {:?}", other),
+        })
+        .collect();
+    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
+
+    // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
+    let results: Vec<_> = session
+        .many()
+        .push(session.get("key-1"))
+        .push(session.get("key-2"))
+        .push(session.delete("key-3"))
+        .push(
+            session
+                .put("overridden fourth object")
+                .compression(None)
+                .key("key-4"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    assert_eq!(results.len(), 4);
+
+    let mut results_iter = results.into_iter();
+
+    // First GET result
+    match results_iter.next().unwrap() {
+        OperationResult::Get(key, Ok(Some(response))) => {
+            assert_eq!(key, "key-1");
+            assert_eq!(response.metadata.compression, None);
+            assert!(response.metadata.time_created.is_some());
+            let payload = response.payload().await.unwrap();
+            assert_eq!(payload, "first object");
+        }
+        other => panic!("Expected Get(key-1) with Some, got: {:?}", other),
+    }
+
+    // Second GET result (automatic decompression)
+    match results_iter.next().unwrap() {
+        OperationResult::Get(key, Ok(Some(response))) => {
+            assert_eq!(key, "key-2");
+            assert_eq!(response.metadata.compression, None);
+            assert!(response.metadata.time_created.is_some());
+            let payload = response.payload().await.unwrap();
+            assert_eq!(payload, "second object");
+        }
+        other => panic!("Expected Get(key-2) with Some, got: {:?}", other),
+    }
+
+    // DELETE result
+    match results_iter.next().unwrap() {
+        OperationResult::Delete(key, Ok(())) => {
+            assert_eq!(key, "key-3");
+        }
+        other => panic!("Expected Delete(key-3) success, got: {:?}", other),
+    }
+
+    // PUT result (override)
+    match results_iter.next().unwrap() {
+        OperationResult::Put(key, Ok(_)) => {
+            assert_eq!(key, "key-4");
+        }
+        other => panic!("Expected Put(key-4) success, got: {:?}", other),
+    }
+
+    // Verify the overridden object has the new content
+    let response = session.get("key-4").send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "overridden fourth object");
+
+    // Verify the deleted object is gone
+    let response = session.get("key-3").send().await.unwrap();
+    assert!(response.is_none());
 }

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
+use reqwest::RequestBuilder;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
 use url::Url;
@@ -409,20 +410,28 @@ impl Session {
         url
     }
 
-    pub(crate) fn request(
-        &self,
-        method: reqwest::Method,
-        object_key: &str,
-    ) -> crate::Result<reqwest::RequestBuilder> {
-        let url = self.object_url(object_key);
+    fn batch_url(&self) -> Url {
+        let mut url = self.client.service_url.clone();
 
-        let mut builder = self.client.reqwest.request(method, url);
+        // `path_segments_mut` can only error if the url is cannot-be-a-base,
+        // and we check that in `ClientBuilder::new`, therefore this will never panic.
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .push("objects:batch")
+            .push(self.scope.usecase().name())
+            .push(&self.scope.scopes.as_api_path().to_string())
+            .push(""); // trailing slash
+        drop(segments);
 
+        url
+    }
+
+    fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
         if let Some(token_generator) = &self.client.token_generator {
             let token = token_generator.sign_for_scope(&self.scope)?;
             builder = builder.bearer_auth(token);
         }
-
         if self.client.propagate_traces {
             let trace_headers =
                 sentry_core::configure_scope(|scope| Some(scope.iter_trace_propagation_headers()));
@@ -430,8 +439,23 @@ impl Session {
                 builder = builder.header(header_name, value);
             }
         }
-
         Ok(builder)
+    }
+
+    pub(crate) fn request(
+        &self,
+        method: reqwest::Method,
+        object_key: &str,
+    ) -> crate::Result<RequestBuilder> {
+        let url = self.object_url(object_key);
+        let builder = self.client.reqwest.request(method, url);
+        self.prepare_builder(builder)
+    }
+
+    pub(crate) fn batch_request(&self) -> crate::Result<RequestBuilder> {
+        let url = self.batch_url();
+        let builder = self.client.reqwest.post(url);
+        self.prepare_builder(builder)
     }
 }
 

@@ -12,12 +12,15 @@ publish = true
 
 [dependencies]
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
+async-stream = "0.3.6"
+base64 = "0.22.1"
 bytes = { workspace = true }
 futures-util = { workspace = true }
 infer = { version = "0.19.0", default-features = false }
 jsonwebtoken = { workspace = true }
+multer = "3.1.0"
 objectstore-types = { workspace = true }
-reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart"] }
 sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -25,6 +28,7 @@ thiserror = { workspace = true }
 tokio = "1.45.0"
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
+uuid = { workspace = true }
 
 [dev-dependencies]
 objectstore-test = { workspace = true }
