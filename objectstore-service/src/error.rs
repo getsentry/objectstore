@@ -47,11 +47,12 @@ pub enum Error {
     #[error("service task failed: {0}")]
     Panic(String),
 
-    /// The caller dropped the request before the operation could deliver its result.
+    /// A spawned service task was dropped before it could deliver its result.
     ///
-    /// In an HTTP server context, this typically means the client disconnected.
-    #[error("operation cancelled")]
-    Cancelled,
+    /// This is an unexpected condition that can occur when the runtime drops the task for unknown
+    /// reasons.
+    #[error("task dropped")]
+    Dropped,
 
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.

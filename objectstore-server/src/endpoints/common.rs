@@ -90,9 +90,6 @@ impl ApiError {
             }
 
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-
-            // Note: `Cancelled` should not reach here in practice — if the
-            // caller dropped the request, no one is waiting for this response.
             ApiError::Service(_) => {
                 tracing::error!(error = self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR

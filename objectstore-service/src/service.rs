@@ -150,7 +150,7 @@ impl StorageService {
     /// Spawns a future in a separate task and awaits its result.
     ///
     /// Returns [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics) or [`Error::Cancelled`] if the task is
+    /// is captured for diagnostics) or [`Error::Dropped`] if the task is
     /// dropped before sending its result.
     async fn spawn<T, F>(&self, f: F) -> Result<T>
     where
@@ -165,7 +165,7 @@ impl StorageService {
                 .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
             let _ = tx.send(result);
         });
-        rx.await.map_err(|_| Error::Cancelled)?
+        rx.await.map_err(|_| Error::Dropped)?
     }
 
     /// Creates or overwrites an object.
