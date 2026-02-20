@@ -44,7 +44,9 @@ A request flows through several layers before reaching the storage service:
 4. **Handler**: the endpoint handler calls the
    [`AuthAwareService`](auth::AuthAwareService), which checks permissions
    before delegating to the underlying
-   [`StorageService`](objectstore_service::StorageService).
+   [`StorageService`](objectstore_service::StorageService). The service
+   enforces its own backpressure before executing the
+   operation.
 5. **Response**: metadata is mapped to HTTP headers (see
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back.
@@ -141,17 +143,13 @@ size is known upfront), bytes are recorded directly via
 
 Rate-limited requests receive HTTP 429.
 
-## Service Concurrency Limit
+### Service Backpressure
 
-The [`StorageService`](objectstore_service::StorageService) enforces a
-concurrency limit on the total number of in-flight backend operations. When the
-limit is reached, new operations are rejected immediately with HTTP 429 rather
-than queueing, preventing backend overload during traffic bursts.
-
-The limit is configured via `service.max_concurrency` (default: 500).
-A `tokio::sync::Semaphore` is acquired before spawning each operation task, and
-the permit is held until the task completes. This means the limit counts
-*running* operations, not queued ones.
+Beyond rate limiting, the [`StorageService`](objectstore_service::StorageService)
+itself enforces backpressure through a concurrency limit on in-flight backend
+operations, configured via `service.max_concurrency`. When exceeded, requests
+receive HTTP 429. See the [service architecture docs](objectstore_service) for
+details.
 
 ## Killswitches
 

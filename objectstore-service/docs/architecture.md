@@ -112,3 +112,25 @@ implementation, allowing each backend to leverage its underlying system's native
 capabilities. For example, BigTable has built-in TTL via garbage collection
 policies, and GCS supports object lifecycle management. The service does not
 perform active garbage collection.
+
+# Backpressure
+
+The service applies backpressure to protect backends from overload. Rather than
+queueing work when capacity is exhausted, the service rejects operations
+immediately so the caller can shed load or retry.
+
+## Concurrency Limit
+
+A semaphore caps the total number of in-flight backend operations across all
+callers. A permit is acquired before each operation is spawned and held until
+the task completes — including on panic — so the limit counts *running*
+operations, not queued ones. When no permits are available, the operation fails
+with [`Error::AtCapacity`](error::Error::AtCapacity).
+
+The default limit is effectively unlimited (`Semaphore::MAX_PERMITS`). Callers
+configure it via [`StorageService::with_concurrency_limit`].
+
+## Further Plans
+
+More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may
+be added here in the future.
