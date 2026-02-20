@@ -6,10 +6,8 @@ mod backend;
 pub mod error;
 pub mod id;
 pub mod service;
-
-use futures_util::stream::BoxStream;
+pub mod stream;
+mod tiered;
 
 pub use service::{StorageConfig, StorageService};
-
-/// Type alias for data streams used in service APIs.
-pub type PayloadStream = BoxStream<'static, std::io::Result<bytes::Bytes>>;
+pub use stream::PayloadStream;

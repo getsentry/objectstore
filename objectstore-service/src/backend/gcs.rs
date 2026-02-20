@@ -583,6 +583,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
+    use crate::stream::{make_stream, read_to_vec};
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
     // automatically in CI.
@@ -591,18 +592,6 @@ mod tests {
 
     async fn create_test_backend() -> Result<GcsBackend> {
         GcsBackend::new(Some("http://localhost:8087"), "test-bucket").await
-    }
-
-    fn make_stream(contents: &[u8]) -> PayloadStream {
-        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
-    }
-
-    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
-        let mut payload = Vec::new();
-        while let Some(chunk) = stream.try_next().await? {
-            payload.extend(&chunk);
-        }
-        Ok(payload)
     }
 
     fn make_id() -> ObjectId {

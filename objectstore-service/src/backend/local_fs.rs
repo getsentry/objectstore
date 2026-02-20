@@ -116,15 +116,11 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
     use objectstore_types::metadata::{Compression, ExpirationPolicy};
-
-    use crate::id::ObjectContext;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-
-    fn make_stream(contents: &[u8]) -> PayloadStream {
-        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
-    }
+    use crate::id::ObjectContext;
+    use crate::stream::make_stream;
 
     #[tokio::test]
     async fn stores_metadata() {
