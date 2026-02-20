@@ -52,8 +52,7 @@ impl Services {
         let service = StorageService::new(high_volume, long_term)
             .await?
             .with_concurrency_limit(config.service.max_concurrency);
-        let service_bg = service.clone();
-        tokio::spawn(async move { service_bg.run().await });
+        service.start();
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());

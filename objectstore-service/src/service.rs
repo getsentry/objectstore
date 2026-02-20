@@ -87,8 +87,8 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 ///
 /// # Lifecycle
 ///
-/// After construction, call [`run`](StorageService::run) (or spawn it as a
-/// background task) to start the service's background processes.
+/// After construction, call [`start`](StorageService::start) to start the
+/// service's background processes.
 ///
 /// # Redirect Tombstones
 ///
@@ -172,17 +172,19 @@ impl StorageService {
         self
     }
 
-    /// Runs background processes for the storage service.
+    /// Starts background processes for the storage service.
     ///
-    /// Currently emits the `service.concurrency.in_use` gauge once per
-    /// second. This future runs forever and should be spawned as a
-    /// background task.
-    pub async fn run(&self) {
-        self.concurrency
-            .run_emitter(|in_use| async move {
-                merni::gauge!("service.concurrency.in_use": in_use);
-            })
-            .await;
+    /// Currently spawns a task that emits the `service.concurrency.in_use`
+    /// gauge once per second.
+    pub fn start(&self) {
+        let concurrency = self.concurrency.clone();
+        tokio::spawn(async move {
+            concurrency
+                .run_emitter(|permits| async move {
+                    merni::gauge!("service.concurrency.in_use": permits);
+                })
+                .await;
+        });
     }
 
     /// Spawns a future in a separate task and awaits its result.
