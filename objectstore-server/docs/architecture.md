@@ -98,6 +98,7 @@ Key configuration sections:
   parameters
 - `auth` — key directory and enforcement toggle
 - `rate_limits` — throughput and bandwidth limits
+- `service` — storage service parameters (concurrency limit)
 - `killswitches` — traffic blocking rules
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
@@ -139,6 +140,18 @@ size is known upfront), bytes are recorded directly via
 [`record_bandwidth`](state::Services::record_bandwidth).
 
 Rate-limited requests receive HTTP 429.
+
+## Service Concurrency Limit
+
+The [`StorageService`](objectstore_service::StorageService) enforces a
+concurrency limit on the total number of in-flight backend operations. When the
+limit is reached, new operations are rejected immediately with HTTP 429 rather
+than queueing, preventing backend overload during traffic bursts.
+
+The limit is configured via `service.max_concurrency` (default: 500).
+A `tokio::sync::Semaphore` is acquired before spawning each operation task, and
+the permit is held until the task completes. This means the limit counts
+*running* operations, not queued ones.
 
 ## Killswitches
 

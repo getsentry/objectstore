@@ -116,8 +116,20 @@ pub enum StorageConfig<'a> {
 /// redirect tombstones are never left partially applied. Operations are also
 /// isolated from panics in backend code — a failure in one operation does not
 /// bring down other in-flight work. See [`Error::Panic`].
+///
+/// # Concurrency Limit
+///
+/// A semaphore caps the number of in-flight backend operations. Use
+/// [`with_concurrency_limit`](StorageService::with_concurrency_limit) to set
+/// the limit; without it, the default allows up to
+/// [`Semaphore::MAX_PERMITS`](tokio::sync::Semaphore::MAX_PERMITS) (effectively
+/// unlimited). Operations that exceed the limit are rejected immediately with
+/// [`Error::AtCapacity`].
 #[derive(Clone, Debug)]
-pub struct StorageService(Arc<TieredStorage>);
+pub struct StorageService {
+    inner: Arc<TieredStorage>,
+    concurrency: Arc<tokio::sync::Semaphore>,
+}
 
 impl StorageService {
     /// Creates a new `StorageService` with the specified configuration.
@@ -131,22 +143,50 @@ impl StorageService {
     }
 
     fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
-        Self(Arc::new(TieredStorage {
-            high_volume_backend,
-            long_term_backend,
-        }))
+        Self {
+            inner: Arc::new(TieredStorage {
+                high_volume_backend,
+                long_term_backend,
+            }),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(
+                tokio::sync::Semaphore::MAX_PERMITS,
+            )),
+        }
+    }
+
+    /// Sets the maximum number of concurrent backend operations.
+    ///
+    /// Operations beyond this limit are rejected with [`Error::AtCapacity`].
+    pub fn with_concurrency_limit(mut self, max: usize) -> Self {
+        self.concurrency = Arc::new(tokio::sync::Semaphore::new(max));
+        self
+    }
+
+    /// Tries to acquire a concurrency permit.
+    ///
+    /// Returns [`Error::AtCapacity`] when the concurrency limit is reached.
+    fn acquire_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let permit = self.concurrency.clone().try_acquire_owned().map_err(|_| {
+            merni::counter!("service.concurrency.rejected": 1);
+            Error::AtCapacity
+        })?;
+        merni::gauge!("service.concurrency.in_use": self.concurrency.available_permits());
+        Ok(permit)
     }
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics) or [`Error::Dropped`] if the task is
+    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
+    /// [`Error::Panic`] if the spawned task panics (the panic message
+    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
     /// dropped before sending its result.
     async fn spawn<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
+        let permit = self.acquire_permit()?;
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(f)
@@ -154,6 +194,7 @@ impl StorageService {
                 .await
                 .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
             let _ = tx.send(result);
+            drop(permit);
         });
         rx.await.map_err(|_| Error::Dropped)?
     }
@@ -186,7 +227,7 @@ impl StorageService {
         metadata: Metadata,
         stream: PayloadStream,
     ) -> Result<InsertResponse> {
-        let inner = Arc::clone(&self.0);
+        let inner = Arc::clone(&self.inner);
         self.spawn(async move { inner.insert_object(context, key, &metadata, stream).await })
             .await
     }
@@ -199,7 +240,7 @@ impl StorageService {
     /// redirect tombstone, follows the redirect and fetches metadata from the
     /// long-term backend instead.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
-        let inner = Arc::clone(&self.0);
+        let inner = Arc::clone(&self.inner);
         self.spawn(async move { inner.get_metadata(&id).await })
             .await
     }
@@ -212,7 +253,7 @@ impl StorageService {
     /// redirect tombstone, follows the redirect and fetches the object from the
     /// long-term backend instead.
     pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
-        let inner = Arc::clone(&self.0);
+        let inner = Arc::clone(&self.inner);
         self.spawn(async move { inner.get_object(&id).await }).await
     }
 
@@ -232,7 +273,7 @@ impl StorageService {
     /// ensures that if the long-term delete fails, the tombstone remains and
     /// the data is still reachable.
     pub async fn delete_object(&self, id: ObjectId) -> Result<DeleteResponse> {
-        let inner = Arc::clone(&self.0);
+        let inner = Arc::clone(&self.inner);
         self.spawn(async move { inner.delete_object(&id).await })
             .await
     }
@@ -596,5 +637,73 @@ mod tests {
         assert!(lt.inner.contains(&id), "long-term object missing");
         let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
         assert!(meta.is_tombstone(), "expected redirect tombstone");
+    }
+
+    // --- Concurrency limit tests ---
+
+    fn make_limited_service(limit: usize) -> (StorageService, GatedBackend, GatedBackend) {
+        let hv = GatedBackend::new("limited-hv").with_pause();
+        let lt = GatedBackend::new("limited-lt");
+        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
+            .with_concurrency_limit(limit);
+        (service, hv, lt)
+    }
+
+    #[tokio::test]
+    async fn at_capacity_rejects() {
+        let (service, hv, _lt) = make_limited_service(1);
+
+        // First insert blocks on the gated backend, holding the single permit.
+        let svc = service.clone();
+        let first = tokio::spawn(async move {
+            svc.insert_object(
+                make_context(),
+                Some("first".into()),
+                Metadata::default(),
+                make_stream(b"data"),
+            )
+            .await
+        });
+
+        // Wait for the backend to signal it has paused (permit is held).
+        hv.paused.notified().await;
+
+        // Second insert should be rejected immediately.
+        let result = service
+            .insert_object(
+                make_context(),
+                Some("second".into()),
+                Metadata::default(),
+                make_stream(b"data"),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::AtCapacity)),
+            "expected AtCapacity, got {result:?}"
+        );
+
+        // Unblock the first operation so the test can clean up.
+        hv.resume.notify_one();
+        first.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn permits_released_after_panic() {
+        let service =
+            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend))
+                .with_concurrency_limit(1);
+
+        // First operation panics — the permit must still be released.
+        let id = ObjectId::new(make_context(), "panic-permit".into());
+        let result = service.get_object(id.clone()).await;
+        assert!(matches!(result, Err(Error::Panic(_))));
+
+        // Second operation should succeed in acquiring the permit (not AtCapacity).
+        let result = service.get_object(id).await;
+        assert!(
+            !matches!(result, Err(Error::AtCapacity)),
+            "permit was not released after panic"
+        );
     }
 }
