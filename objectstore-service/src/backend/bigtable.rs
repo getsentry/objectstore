@@ -829,6 +829,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        // A freshly written object has time_expires ≈ now + 2d, which is well outside
+        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
+        let first = backend.get_metadata(&id).await?.unwrap();
+        let first_expiry = first.time_expires.unwrap();
+
+        let second = backend.get_metadata(&id).await?.unwrap();
+        let second_expiry = second.time_expires.unwrap();
+
+        assert_eq!(
+            first_expiry, second_expiry,
+            "Fresh TTI object should not have its expiry bumped"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_delete_non_tombstone_real_object() -> Result<()> {
         let backend = create_test_backend().await?;
 
