@@ -1129,57 +1129,105 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn receiver_drop_does_not_prevent_completion() {
-        let (service, hv, lt) = make_service();
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
+    /// In-memory backend with optional synchronization for `put_object`.
+    ///
+    /// When `pause` is enabled, each `put_object` call notifies `paused` and
+    /// then waits on `resume` before proceeding. After the write completes,
+    /// `on_put` is always notified regardless of the `pause` setting.
+    #[derive(Debug, Clone)]
+    struct GatedBackend {
+        inner: InMemoryBackend,
+        pause: bool,
+        paused: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        on_put: Arc<tokio::sync::Notify>,
+    }
 
-        // Spawn the insert manually so we can observe completion after dropping
-        // the receiver. We replicate the spawn pattern but call the inner method
-        // directly to control the oneshot ourselves.
-        let svc = service.clone();
-        let context = make_context();
-        let stream = make_stream(&payload);
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<InsertResponse>>();
-        tokio::spawn(async move {
-            let result = svc
-                .0
-                .insert_object(
-                    context,
-                    Some("completion-test".into()),
-                    &Metadata::default(),
-                    stream,
-                )
-                .await;
-            let _ = tx.send(result);
-        });
-
-        // Drop the receiver immediately, simulating a cancelled web handler.
-        drop(rx);
-
-        // Poll until the spawned task completes instead of using a fixed sleep.
-        let id = ObjectId::new(make_context(), "completion-test".into());
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
-            if lt.contains(&id) {
-                break;
+    impl GatedBackend {
+        fn new(name: &'static str) -> Self {
+            Self {
+                inner: InMemoryBackend::new(name),
+                pause: false,
+                paused: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+                on_put: Arc::new(tokio::sync::Notify::new()),
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        // Verify the object was fully written despite the receiver being dropped.
-        assert!(
-            lt.contains(&id),
-            "long-term object missing after receiver drop"
+        fn with_pause(mut self) -> Self {
+            self.pause = true;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::common::Backend for GatedBackend {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        async fn put_object(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: PayloadStream,
+        ) -> Result<()> {
+            if self.pause {
+                self.paused.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.put_object(id, metadata, stream).await?;
+            self.on_put.notify_one();
+            Ok(())
+        }
+
+        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+            self.inner.get_object(id).await
+        }
+
+        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+            self.inner.delete_object(id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_does_not_prevent_completion() {
+        let hv = GatedBackend::new("gated-hv");
+        let lt = GatedBackend::new("gated-lt").with_pause();
+        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
+        let request = service.insert_object(
+            make_context(),
+            Some("completion-test".into()),
+            Metadata::default(),
+            make_stream(&payload),
         );
-        // High-volume backend should have the redirect tombstone.
-        let (hv_meta, _) = hv
-            .get_stored(&id)
-            .expect("high-volume entry missing after receiver drop");
-        assert!(
-            hv_meta.is_tombstone(),
-            "tombstone missing after receiver drop"
-        );
+
+        // Start insert through the public API. select! drops the future once the
+        // backend signals it has paused, simulating a client disconnect mid-write.
+        let paused = Arc::clone(&lt.paused);
+        tokio::select! {
+            _ = request => panic!("insert should not complete while backend is paused"),
+            _ = paused.notified() => {}
+        }
+
+        // The spawned task is now blocked inside put_object, and the caller
+        // request (including the oneshot receiver) has been dropped. Unpause so
+        // the task can finish writing.
+        lt.resume.notify_one();
+
+        // Wait for the tombstone write to the high-volume backend, which is the
+        // last step of the long-term insert path.
+        let on_put = Arc::clone(&hv.on_put);
+        tokio::time::timeout(Duration::from_secs(5), on_put.notified())
+            .await
+            .expect("timed out waiting for tombstone write");
+
+        // Verify the object was fully written despite the caller being dropped.
+        let id = ObjectId::new(make_context(), "completion-test".into());
+        assert!(lt.inner.contains(&id), "long-term object missing");
+        let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
+        assert!(meta.is_tombstone(), "expected redirect tombstone");
     }
 }
