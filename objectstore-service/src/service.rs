@@ -165,7 +165,7 @@ impl StorageService {
 
     /// Sets the maximum number of concurrent backend operations.
     ///
-    /// Must be called before [`run`](Self::run). Operations beyond this
+    /// Must be called before [`start`](Self::start). Operations beyond this
     /// limit are rejected with [`Error::AtCapacity`].
     pub fn with_concurrency_limit(mut self, max: usize) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
