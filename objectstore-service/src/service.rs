@@ -703,11 +703,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(hv.contains(&id), "small object not in high-volume backend");
-        assert!(
-            !lt.contains(&id),
-            "small object leaked to long-term backend"
-        );
+        assert!(hv.contains(&id), "expected in high-volume");
+        assert!(!lt.contains(&id), "leaked to long-term");
     }
 
     #[tokio::test]
@@ -902,10 +899,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(
-            lt.is_empty(),
-            "long-term object was not cleaned up after tombstone write failure"
-        );
+        assert!(lt.is_empty(), "long-term object not cleaned up");
     }
 
     /// If a tombstone exists in high-volume but the corresponding object is
@@ -931,11 +925,11 @@ mod tests {
 
         assert!(
             service.get_object(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_object"
+            "get_object"
         );
         assert!(
             service.get_metadata(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_metadata"
+            "get_metadata"
         );
     }
 
@@ -958,8 +952,8 @@ mod tests {
 
         service.delete_object(&id).await.unwrap();
 
-        assert!(!hv.contains(&id), "tombstone not cleaned up from hv");
-        assert!(!lt.contains(&id), "object not cleaned up from lt");
+        assert!(!hv.contains(&id), "tombstone not cleaned up");
+        assert!(!lt.contains(&id), "object not cleaned up");
     }
 
     /// A backend wrapper that delegates everything except `delete_object`, which always fails.
@@ -1018,12 +1012,8 @@ mod tests {
         let result = service.delete_object(&id).await;
         assert!(result.is_err());
 
-        // The tombstone in high-volume must still be present
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(
-            hv_meta.is_tombstone(),
-            "tombstone was removed despite long-term delete failure"
-        );
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone removed");
+        assert!(hv_meta.is_tombstone());
 
         // The object should still be reachable through the service
         let (metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
@@ -1114,19 +1104,10 @@ mod tests {
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id).await;
 
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected Panic error"),
+        let Err(Error::Panic(msg)) = result else {
+            panic!("expected Panic error");
         };
-        match err {
-            Error::Panic(msg) => {
-                assert!(
-                    msg.contains("intentional panic in get_object"),
-                    "panic message should be captured, got: {msg}"
-                );
-            }
-            other => panic!("expected Panic, got: {other}"),
-        }
+        assert!(msg.contains("intentional panic in get_object"), "{msg}");
     }
 
     /// In-memory backend with optional synchronization for `put_object`.
