@@ -6,7 +6,7 @@
   <title>Objectstore &mdash; Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     *,
     *::before,
@@ -17,44 +17,44 @@
     }
 
     :root {
-      --bg-deep: #0e0618;
-      --bg-elevated: #1e1333;
-      --bg-card: rgba(255, 255, 255, 0.03);
-      --bg-card-hover: rgba(255, 255, 255, 0.06);
-      --border-subtle: rgba(255, 255, 255, 0.06);
-      --border-hover: rgba(255, 255, 255, 0.14);
-      --text-primary: #f0eaf6;
-      --text-secondary: #a89bbe;
-      --text-muted: #6b5d82;
-      --pink: #f55498;
-      --magenta: #e91e8c;
-      --coral: #ff6b6b;
-      --purple: #8b5cf6;
-      --purple-light: #a78bfa;
-      --blue: #4ea4dc;
-      --cyan: #22d3ee;
-      --gradient-hero: linear-gradient(135deg, #f55498 0%, #8b5cf6 50%, #4ea4dc 100%);
-      --gradient-card-server: linear-gradient(135deg, rgba(78, 164, 220, 0.15), rgba(34, 211, 238, 0.08));
-      --gradient-card-rust: linear-gradient(135deg, rgba(245, 84, 152, 0.15), rgba(255, 107, 107, 0.08));
-      --gradient-card-python: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(167, 139, 250, 0.08));
-    }
+      --bg: #1b1727;
+      --bg-card: #211d30;
+      --bg-card-hover: #2a2540;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(255, 255, 255, 0.16);
+      --text: rgba(255, 255, 255, 0.9);
+      --text-secondary: rgba(255, 255, 255, 0.55);
+      --text-muted: rgba(255, 255, 255, 0.3);
 
-    html {
-      scroll-behavior: smooth;
+      --purple: #a78bfa;
+      --cyan: #22d3ee;
+      --green: #22c55e;
+
+      --server-color: #22d3ee;
+      --server-bg: rgba(34, 211, 238, 0.06);
+      --server-border: rgba(34, 211, 238, 0.15);
+
+      --rust-color: #d4845a;
+      --rust-bg: rgba(212, 132, 90, 0.06);
+      --rust-border: rgba(212, 132, 90, 0.15);
+
+      --python-color: #a78bfa;
+      --python-bg: rgba(167, 139, 250, 0.06);
+      --python-border: rgba(167, 139, 250, 0.15);
     }
 
     body {
-      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background-color: var(--bg-deep);
-      color: var(--text-primary);
-      min-height: 100vh;
-      overflow-x: hidden;
+      font-family: 'Rubik', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
     }
 
-    /* ───────── Animated background layer ───────── */
-    .bg-canvas {
+    /* ─── Background effects (inspired by cli.sentry.dev) ─── */
+    .bg-gradients {
       position: fixed;
       inset: 0;
       z-index: 0;
@@ -62,302 +62,160 @@
       overflow: hidden;
     }
 
-    .bg-canvas .orb {
+    .bg-gradients::before {
+      content: '';
       position: absolute;
-      border-radius: 50%;
-      filter: blur(80px);
-      opacity: 0.4;
-      animation: orbFloat 20s ease-in-out infinite;
+      width: 800px;
+      height: 800px;
+      top: -20%;
+      left: -10%;
+      background: radial-gradient(circle, rgba(88, 28, 135, 0.23) 0%, transparent 70%);
     }
 
-    .bg-canvas .orb-1 {
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(circle, rgba(245, 84, 152, 0.3) 0%, transparent 70%);
-      top: -10%;
-      left: -5%;
-      animation-delay: 0s;
-    }
-
-    .bg-canvas .orb-2 {
-      width: 500px;
-      height: 500px;
-      background: radial-gradient(circle, rgba(139, 92, 246, 0.25) 0%, transparent 70%);
-      top: 30%;
+    .bg-gradients::after {
+      content: '';
+      position: absolute;
+      width: 700px;
+      height: 700px;
+      bottom: -10%;
       right: -10%;
-      animation-delay: -7s;
-      animation-duration: 25s;
+      background: radial-gradient(circle, rgba(30, 58, 138, 0.16) 0%, transparent 70%);
     }
 
-    .bg-canvas .orb-3 {
-      width: 400px;
-      height: 400px;
-      background: radial-gradient(circle, rgba(78, 164, 220, 0.2) 0%, transparent 70%);
-      bottom: -5%;
-      left: 30%;
-      animation-delay: -14s;
-      animation-duration: 22s;
-    }
-
-    @keyframes orbFloat {
-      0%, 100% { transform: translate(0, 0) scale(1); }
-      25% { transform: translate(40px, -30px) scale(1.05); }
-      50% { transform: translate(-20px, 20px) scale(0.95); }
-      75% { transform: translate(30px, 40px) scale(1.02); }
-    }
-
-    /* Grid overlay */
-    .bg-grid {
+    .bg-noise {
       position: fixed;
       inset: 0;
       z-index: 0;
       pointer-events: none;
-      background-image:
-        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-      background-size: 60px 60px;
-      mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
-      -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
-    }
-
-    /* ───────── Noise texture overlay ───────── */
-    .noise {
-      position: fixed;
-      inset: 0;
-      z-index: 1;
-      pointer-events: none;
-      opacity: 0.035;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      opacity: 0.03;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
       background-repeat: repeat;
       background-size: 256px 256px;
     }
 
-    /* ───────── Content wrapper ───────── */
-    .content {
+    /* ─── Object store pattern — blobs in storage cells ─── */
+    .bg-pattern {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      mask-image: radial-gradient(ellipse 100% 80% at 50% 40%, black 5%, transparent 65%);
+      -webkit-mask-image: radial-gradient(ellipse 100% 80% at 50% 40%, black 5%, transparent 65%);
+    }
+
+    /* ─── Page layout ─── */
+    .page {
       position: relative;
-      z-index: 2;
+      z-index: 1;
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
     }
 
-    /* ───────── Navigation bar ───────── */
-    nav {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 1.25rem 2.5rem;
-      position: relative;
-      z-index: 10;
-      animation: fadeSlideDown 0.6s ease-out both;
-    }
-
-    @keyframes fadeSlideDown {
-      from { opacity: 0; transform: translateY(-12px); }
+    /* ─── Animations ─── */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(12px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
-    .nav-brand {
-      display: flex;
-      align-items: center;
-      gap: 0.625rem;
-      text-decoration: none;
-      color: var(--text-primary);
-    }
-
-    .nav-logo {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      background: var(--gradient-hero);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 800;
-      font-size: 0.875rem;
-      color: white;
-      letter-spacing: -0.02em;
-    }
-
-    .nav-wordmark {
-      font-weight: 700;
-      font-size: 1.05rem;
-      letter-spacing: -0.01em;
-    }
-
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-    }
-
-    .nav-links a {
-      font-size: 0.8125rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      text-decoration: none;
-      padding: 0.5rem 0.875rem;
-      border-radius: 8px;
-      transition: color 0.2s, background 0.2s;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-    }
-
-    .nav-links a:hover {
-      color: var(--text-secondary);
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .nav-links a svg {
-      width: 15px;
-      height: 15px;
+    /* ─── Hero ─── */
+    .hero {
+      text-align: center;
+      padding: 3.25rem 2rem 1.5rem;
+      position: relative;
       flex-shrink: 0;
     }
 
-    /* ───────── Hero section ───────── */
-    .hero {
-      text-align: center;
-      padding: 3rem 2rem 2rem;
-      position: relative;
-    }
-
-    .hero-glow {
-      position: absolute;
-      top: 0;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 800px;
-      height: 500px;
-      background: radial-gradient(ellipse 100% 80%, rgba(245, 84, 152, 0.12) 0%, rgba(139, 92, 246, 0.06) 40%, transparent 70%);
-      pointer-events: none;
-    }
-
-    .hero-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--pink);
-      border: 1px solid rgba(245, 84, 152, 0.25);
-      background: rgba(245, 84, 152, 0.06);
-      border-radius: 100px;
-      padding: 0.375rem 1rem;
+    .hero-sentry-logo {
+      display: inline-block;
       margin-bottom: 1.25rem;
-      animation: fadeSlideUp 0.7s ease-out 0.1s both;
+      color: rgba(255, 255, 255, 0.12);
+      animation: fadeIn 0.5s ease 0.05s both;
     }
 
-    .hero-badge::before {
-      content: '';
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--pink);
-      box-shadow: 0 0 8px var(--pink);
-      animation: pulse 2s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.8); }
-    }
-
-    @keyframes fadeSlideUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
+    .hero-sentry-logo svg {
+      width: 64px;
+      height: auto;
     }
 
     .hero-title {
-      font-size: clamp(3rem, 7vw, 5rem);
-      font-weight: 900;
-      letter-spacing: -0.04em;
-      line-height: 0.95;
-      margin-bottom: 1rem;
-      animation: fadeSlideUp 0.7s ease-out 0.2s both;
-    }
-
-    .hero-title .gradient-text {
-      background: var(--gradient-hero);
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-size: clamp(3rem, 7vw, 5.5rem);
+      font-weight: 800;
+      letter-spacing: -0.055em;
+      line-height: 0.9;
+      margin-bottom: 1.25rem;
+      color: var(--text);
+      animation: fadeIn 0.6s ease 0.1s both;
     }
 
     .hero-subtitle {
-      font-size: clamp(1rem, 2vw, 1.1875rem);
-      font-weight: 300;
+      font-size: 1.0625rem;
+      font-weight: 400;
       color: var(--text-secondary);
       max-width: 520px;
-      margin: 0 auto 1.75rem;
-      line-height: 1.6;
-      animation: fadeSlideUp 0.7s ease-out 0.3s both;
+      margin: 0 auto;
+      line-height: 1.7;
+      animation: fadeIn 0.6s ease 0.2s both;
     }
 
-    /* ───────── Cards section ───────── */
-    .docs-section {
-      padding: 0 2rem 2rem;
-      position: relative;
+    /* ─── Docs section ─── */
+    .docs {
+      padding: 1.25rem 2rem 0;
       flex: 1;
       display: flex;
       flex-direction: column;
-      justify-content: flex-start;
+      align-items: center;
+      min-height: 0;
     }
 
-    .section-label {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
+    .docs-heading {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      text-align: center;
+      margin-bottom: 0.25rem;
+      flex-shrink: 0;
+      animation: fadeIn 0.6s ease 0.3s both;
+    }
+
+    .docs-sub {
+      font-size: 0.875rem;
+      font-weight: 400;
       color: var(--text-muted);
       text-align: center;
-      margin-bottom: 1.25rem;
-      animation: fadeSlideUp 0.7s ease-out 0.45s both;
+      margin-bottom: 1.5rem;
+      flex-shrink: 0;
+      animation: fadeIn 0.6s ease 0.35s both;
     }
 
+    /* ─── Card grid ─── */
     .cards {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 1.25rem;
+      gap: 1px;
+      width: 100%;
       max-width: 1000px;
-      margin: 0 auto;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      animation: fadeIn 0.6s ease 0.4s both;
     }
 
     .card {
-      position: relative;
       background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 16px;
-      padding: 2rem;
+      padding: 1.75rem 1.5rem;
       text-decoration: none;
       color: inherit;
-      transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-      overflow: hidden;
-      animation: fadeSlideUp 0.7s ease-out both;
+      transition: background 0.2s ease;
+      position: relative;
+      display: flex;
+      flex-direction: column;
     }
 
-    .card:nth-child(1) { animation-delay: 0.6s; }
-    .card:nth-child(2) { animation-delay: 0.7s; }
-    .card:nth-child(3) { animation-delay: 0.8s; }
-
-    .card::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: 16px;
-      opacity: 0;
-      transition: opacity 0.35s;
-    }
-
-    .card.server::before { background: var(--gradient-card-server); }
-    .card.rust::before { background: var(--gradient-card-rust); }
-    .card.python::before { background: var(--gradient-card-python); }
-
+    /* Colored top-edge glow on hover */
     .card::after {
       content: '';
       position: absolute;
@@ -366,109 +224,122 @@
       right: 0;
       height: 1px;
       opacity: 0;
-      transition: opacity 0.35s;
+      transition: opacity 0.25s ease;
     }
 
-    .card.server::after { background: linear-gradient(90deg, transparent, var(--blue), var(--cyan), transparent); }
-    .card.rust::after { background: linear-gradient(90deg, transparent, var(--pink), var(--coral), transparent); }
-    .card.python::after { background: linear-gradient(90deg, transparent, var(--purple), var(--purple-light), transparent); }
+    .card.server::after { background: linear-gradient(90deg, transparent 10%, var(--server-color), transparent 90%); }
+    .card.rust::after { background: linear-gradient(90deg, transparent 10%, var(--rust-color), transparent 90%); }
+    .card.python::after { background: linear-gradient(90deg, transparent 10%, var(--python-color), transparent 90%); }
 
     .card:hover {
-      border-color: var(--border-hover);
-      transform: translateY(-6px);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-    }
-
-    .card:hover::before {
-      opacity: 1;
+      background: var(--bg-card-hover);
     }
 
     .card:hover::after {
       opacity: 1;
     }
 
-    .card-content {
-      position: relative;
-      z-index: 1;
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 1.25rem;
     }
 
-    .card-icon-wrap {
-      width: 48px;
-      height: 48px;
-      border-radius: 12px;
+    /* ─── Icon boxes ─── */
+    .card-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
       display: flex;
       align-items: center;
       justify-content: center;
-      margin-bottom: 1.25rem;
-      position: relative;
+      transition: box-shadow 0.2s;
     }
 
-    .card.server .card-icon-wrap {
-      background: rgba(78, 164, 220, 0.12);
-      color: var(--blue);
-      box-shadow: 0 0 20px rgba(78, 164, 220, 0.1);
+    .card-icon svg {
+      width: 18px;
+      height: 18px;
     }
 
-    .card.rust .card-icon-wrap {
-      background: rgba(245, 84, 152, 0.12);
-      color: var(--pink);
-      box-shadow: 0 0 20px rgba(245, 84, 152, 0.1);
+    .card.server .card-icon {
+      background: var(--server-bg);
+      border: 1px solid var(--server-border);
+      color: var(--server-color);
     }
 
-    .card.python .card-icon-wrap {
-      background: rgba(139, 92, 246, 0.12);
-      color: var(--purple-light);
-      box-shadow: 0 0 20px rgba(139, 92, 246, 0.1);
+    .card.server:hover .card-icon {
+      box-shadow: 0 0 20px rgba(34, 211, 238, 0.08);
     }
 
-    .card-icon-wrap svg {
-      width: 22px;
-      height: 22px;
+    .card.rust .card-icon {
+      background: var(--rust-bg);
+      border: 1px solid var(--rust-border);
+      color: var(--rust-color);
+    }
+
+    .card.rust:hover .card-icon {
+      box-shadow: 0 0 20px rgba(212, 132, 90, 0.08);
+    }
+
+    .card.python .card-icon {
+      background: var(--python-bg);
+      border: 1px solid var(--python-border);
+      color: var(--python-color);
+    }
+
+    .card.python:hover .card-icon {
+      box-shadow: 0 0 20px rgba(167, 139, 250, 0.08);
+    }
+
+    .card-number {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      padding-top: 0.125rem;
     }
 
     .card-title {
-      font-size: 1.125rem;
-      font-weight: 700;
+      font-size: 1.0625rem;
+      font-weight: 600;
       letter-spacing: -0.01em;
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.375rem;
     }
 
     .card-desc {
       font-size: 0.875rem;
       color: var(--text-secondary);
       line-height: 1.6;
-      margin-bottom: 1.25rem;
+      margin-bottom: auto;
+      padding-bottom: 1.25rem;
     }
 
-    .card-meta {
+    .card-footer {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      padding-top: 0.875rem;
+      border-top: 1px solid var(--border);
     }
 
     .card-lang {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.6875rem;
+      font-size: 0.8125rem;
       font-weight: 500;
-      letter-spacing: 0.03em;
-      color: var(--text-muted);
-      background: rgba(255, 255, 255, 0.05);
-      padding: 0.25rem 0.625rem;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.04);
+      transition: color 0.2s;
     }
 
+    .card.server .card-lang { color: rgba(34, 211, 238, 0.35); }
+    .card.rust .card-lang { color: rgba(212, 132, 90, 0.35); }
+    .card.python .card-lang { color: rgba(167, 139, 250, 0.35); }
+
+    .card.server:hover .card-lang { color: var(--server-color); }
+    .card.rust:hover .card-lang { color: var(--rust-color); }
+    .card.python:hover .card-lang { color: var(--python-color); }
+
     .card-arrow {
-      width: 28px;
-      height: 28px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      display: flex;
-      align-items: center;
-      justify-content: center;
       color: var(--text-muted);
-      transition: all 0.3s;
+      transition: color 0.2s, transform 0.2s;
+      display: flex;
     }
 
     .card-arrow svg {
@@ -477,163 +348,264 @@
     }
 
     .card:hover .card-arrow {
-      background: rgba(255, 255, 255, 0.08);
-      color: var(--text-primary);
+      color: var(--text-secondary);
       transform: translateX(3px);
     }
 
-    /* ───────── Footer ───────── */
+    /* ─── Footer ─── */
     footer {
-      padding: 1.5rem 2rem;
+      padding: 1rem 2.5rem;
       text-align: center;
-      position: relative;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      animation: fadeIn 0.6s ease 0.5s both;
     }
 
-    footer::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, var(--border-subtle), transparent);
-    }
-
-    .footer-copy {
+    .footer-text {
       font-size: 0.75rem;
       color: var(--text-muted);
-      opacity: 0.6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
     }
 
-    .footer-copy a {
+    .footer-text a {
       color: var(--text-secondary);
       text-decoration: none;
+      transition: color 0.15s;
     }
 
-    .footer-copy a:hover {
-      color: var(--text-primary);
+    .footer-text a:hover {
+      color: var(--text);
     }
 
-    /* ───────── Responsive ───────── */
+    .footer-sep {
+      color: var(--text-muted);
+    }
+
+    .footer-links {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .footer-links a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .footer-links svg {
+      width: 12px;
+      height: 12px;
+      flex-shrink: 0;
+    }
+
+    /* ─── Responsive ─── */
     @media (max-width: 768px) {
-      nav {
-        padding: 1rem 1.25rem;
+      .hero {
+        padding: 3rem 1.25rem 2rem;
       }
 
-      .hero {
-        padding: 2rem 1.25rem 1.5rem;
+      .hero-title {
+        font-size: 2.75rem;
       }
 
       .cards {
         grid-template-columns: 1fr;
-        padding: 0 0.5rem;
       }
 
-      .nav-links {
-        display: none;
+      .docs {
+        padding: 2rem 1.25rem 0;
       }
-    }
 
-    @media (max-width: 480px) {
-      .hero-title {
-        font-size: 2.75rem;
+      .page {
+        height: auto;
+        min-height: 100vh;
+        overflow: auto;
+      }
+
+      body {
+        overflow: auto;
       }
     }
   </style>
 </head>
 <body>
-  <!-- Background layers -->
-  <div class="bg-canvas">
-    <div class="orb orb-1"></div>
-    <div class="orb orb-2"></div>
-    <div class="orb orb-3"></div>
-  </div>
-  <div class="bg-grid"></div>
-  <div class="noise"></div>
+  <!-- Background -->
+  <div class="bg-gradients"></div>
+  <div class="bg-noise"></div>
 
-  <!-- Content -->
-  <div class="content">
-    <nav>
-      <a href="#" class="nav-brand">
-        <div class="nav-logo">OS</div>
-        <span class="nav-wordmark">Objectstore</span>
-      </a>
-      <div class="nav-links">
-        <a href="https://github.com/getsentry/objectstore">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.866-.013-1.7-2.782.604-3.369-1.341-3.369-1.341-.454-1.155-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.337-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
-          GitHub
-        </a>
-        <a href="https://github.com/getsentry/objectstore/blob/main/README.md">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          README
-        </a>
-      </div>
-    </nav>
+  <!-- Object store pattern: blobs (circles) organized in storage cells (grid) -->
+  <svg class="bg-pattern" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+    <defs>
+      <pattern id="objstore" x="0" y="0" width="216" height="216" patternUnits="userSpaceOnUse">
+        <!-- Storage grid — 6x6 cells, 36px each -->
+        <line x1="0" y1="0" x2="216" y2="0" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="36" x2="216" y2="36" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="72" x2="216" y2="72" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="108" x2="216" y2="108" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="144" x2="216" y2="144" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="180" x2="216" y2="180" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="0" y1="0" x2="0" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="36" y1="0" x2="36" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="72" y1="0" x2="72" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="108" y1="0" x2="108" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="144" y1="0" x2="144" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+        <line x1="180" y1="0" x2="180" y2="216" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
 
+        <!-- Scattered node dots at select intersections -->
+        <circle cx="36" cy="36" r="1" fill="rgba(255,255,255,0.13)"/>
+        <circle cx="108" cy="0" r="1.25" fill="rgba(255,255,255,0.15)"/>
+        <circle cx="180" cy="72" r="1" fill="rgba(255,255,255,0.13)"/>
+        <circle cx="72" cy="108" r="1.25" fill="rgba(255,255,255,0.15)"/>
+        <circle cx="144" cy="144" r="1" fill="rgba(255,255,255,0.13)"/>
+        <circle cx="0" cy="180" r="1" fill="rgba(255,255,255,0.13)"/>
+        <circle cx="108" cy="180" r="1.25" fill="rgba(255,255,255,0.15)"/>
+        <circle cx="36" cy="144" r="1" fill="rgba(255,255,255,0.13)"/>
+
+        <!-- Row 0 -->
+        <!-- (0,0): Large outline blob -->
+        <circle cx="18" cy="18" r="13" stroke="rgba(255,255,255,0.12)" stroke-width="0.75" fill="none"/>
+        <circle cx="18" cy="18" r="4" fill="rgba(255,255,255,0.05)"/>
+        <!-- (2,0): Small filled dot -->
+        <circle cx="90" cy="18" r="3" fill="rgba(255,255,255,0.08)"/>
+        <!-- (3,0): Container rect + inner circle -->
+        <rect x="115" y="5" width="26" height="26" rx="5" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="none"/>
+        <circle cx="128" cy="18" r="6" stroke="rgba(255,255,255,0.08)" stroke-width="0.5" fill="none"/>
+        <!-- (5,0): Tiny dot -->
+        <circle cx="198" cy="18" r="1.5" fill="rgba(255,255,255,0.10)"/>
+
+        <!-- Row 1 -->
+        <!-- (1,1): Concentric rings — object with metadata -->
+        <circle cx="54" cy="54" r="13" stroke="rgba(255,255,255,0.10)" stroke-width="0.75" fill="none"/>
+        <circle cx="54" cy="54" r="7" stroke="rgba(255,255,255,0.08)" stroke-width="0.5" fill="none" stroke-dasharray="2 3"/>
+        <circle cx="54" cy="54" r="2" fill="rgba(255,255,255,0.08)"/>
+        <!-- (3,1): Filled blob -->
+        <circle cx="126" cy="54" r="4.5" fill="rgba(255,255,255,0.07)"/>
+        <!-- (4,1): Outline circle -->
+        <circle cx="162" cy="54" r="9" stroke="rgba(255,255,255,0.10)" stroke-width="0.75" fill="none"/>
+
+        <!-- Row 2 -->
+        <!-- (0,2): Rounded rect container -->
+        <rect x="6" y="78" width="24" height="24" rx="4" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="rgba(255,255,255,0.02)"/>
+        <!-- (2,2): Large outline blob -->
+        <circle cx="90" cy="90" r="11" stroke="rgba(255,255,255,0.11)" stroke-width="0.75" fill="none"/>
+        <!-- (4,2): Two small objects -->
+        <circle cx="153" cy="87" r="3.5" fill="rgba(255,255,255,0.07)"/>
+        <circle cx="168" cy="93" r="2.5" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="none"/>
+        <!-- (5,2): Dashed circle -->
+        <circle cx="198" cy="90" r="8" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="none" stroke-dasharray="3 4"/>
+
+        <!-- Row 3 -->
+        <!-- (1,3): Tiny dot -->
+        <circle cx="54" cy="126" r="2" fill="rgba(255,255,255,0.09)"/>
+        <!-- (3,3): Nested concentric — double ring -->
+        <circle cx="126" cy="126" r="11" stroke="rgba(255,255,255,0.10)" stroke-width="0.75" fill="none"/>
+        <circle cx="126" cy="126" r="5" stroke="rgba(255,255,255,0.07)" stroke-width="0.5" fill="none"/>
+        <!-- (5,3): Container rect with inner dot -->
+        <rect x="185" y="114" width="22" height="22" rx="5" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="none"/>
+        <circle cx="196" cy="125" r="3" fill="rgba(255,255,255,0.05)"/>
+
+        <!-- Row 4 -->
+        <!-- (0,4): Outline circle -->
+        <circle cx="18" cy="162" r="10" stroke="rgba(255,255,255,0.10)" stroke-width="0.75" fill="none"/>
+        <!-- (2,4): Rect with inner dot -->
+        <rect x="78" y="150" width="24" height="24" rx="4" stroke="rgba(255,255,255,0.08)" stroke-width="0.5" fill="none"/>
+        <circle cx="90" cy="162" r="2" fill="rgba(255,255,255,0.07)"/>
+        <!-- (4,4): Small filled dot -->
+        <circle cx="162" cy="162" r="3.5" fill="rgba(255,255,255,0.08)"/>
+
+        <!-- Row 5 -->
+        <!-- (1,5): Dashed circle -->
+        <circle cx="54" cy="198" r="7" stroke="rgba(255,255,255,0.09)" stroke-width="0.5" fill="none" stroke-dasharray="2 3"/>
+        <!-- (2,5): Tiny dot -->
+        <circle cx="90" cy="198" r="1.5" fill="rgba(255,255,255,0.10)"/>
+        <!-- (4,5): Large outline blob with inner fill -->
+        <circle cx="162" cy="198" r="12" stroke="rgba(255,255,255,0.11)" stroke-width="0.75" fill="none"/>
+        <circle cx="162" cy="198" r="4.5" fill="rgba(255,255,255,0.04)"/>
+        <!-- (5,5): Small filled dot -->
+        <circle cx="198" cy="198" r="2.5" fill="rgba(255,255,255,0.08)"/>
+      </pattern>
+    </defs>
+    <rect width="100%" height="100%" fill="url(#objstore)"/>
+  </svg>
+
+  <!-- Page -->
+  <div class="page">
     <!-- Hero -->
     <section class="hero">
-      <div class="hero-glow"></div>
-      <div class="hero-badge">Internal Platform</div>
-      <h1 class="hero-title">
-        <span class="gradient-text">Objectstore</span>
-      </h1>
+      <div class="hero-sentry-logo">
+        <svg viewBox="0 0 72 66" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+          <path d="M29,2.26a4.67,4.67,0,0,0-8,0L14.42,13.53A32.21,32.21,0,0,1,32.17,40.19H27.55A27.68,27.68,0,0,0,12.09,17.47L6,28a15.92,15.92,0,0,1,9.23,12.17H4.62A.76.76,0,0,1,4,39.06l2.94-5a10.74,10.74,0,0,0-3.36-1.9l-2.91,5a4.54,4.54,0,0,0,1.69,6.24A4.66,4.66,0,0,0,4.62,44H19.15a19.4,19.4,0,0,0-8-17.31l2.31-4A23.87,23.87,0,0,1,23.76,44H36.07a35.88,35.88,0,0,0-16.41-31.8l4.67-8a.77.77,0,0,1,1.05-.27c.53.29,20.29,34.77,20.66,35.17a.76.76,0,0,1-.68,1.13H40.6q.09,1.91,0,3.81h4.78A4.59,4.59,0,0,0,50,39.43a4.49,4.49,0,0,0-.62-2.28Z" transform="translate(11, 11)"/>
+        </svg>
+      </div>
+      <h1 class="hero-title">Objectstore</h1>
       <p class="hero-subtitle">
         The data storage platform for blobs, files, and unstructured data at Sentry. Fast, reliable, built in Rust.
       </p>
     </section>
 
-    <!-- API Documentation Cards -->
-    <section class="docs-section">
-      <div class="section-label">API Documentation</div>
+    <!-- API Documentation -->
+    <section class="docs">
+      <h2 class="docs-heading">API Documentation</h2>
+      <p class="docs-sub">Browse the generated reference docs for each package.</p>
 
       <div class="cards">
+        <!-- Server -->
         <a class="card server" href="rust/objectstore_server/">
-          <div class="card-content">
-            <div class="card-icon-wrap">
+          <div class="card-header">
+            <div class="card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
               </svg>
             </div>
-            <div class="card-title">Server</div>
-            <div class="card-desc">HTTP server, endpoints, request flow, authentication, and middleware.</div>
-            <div class="card-meta">
-              <span class="card-lang">Rust</span>
-              <span class="card-arrow">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
-              </span>
-            </div>
+            <div class="card-number">01</div>
+          </div>
+          <div class="card-title">Server</div>
+          <div class="card-desc">HTTP server, endpoints, request flow, authentication, and middleware.</div>
+          <div class="card-footer">
+            <span class="card-lang">Rust</span>
+            <span class="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+            </span>
           </div>
         </a>
 
+        <!-- Rust Client -->
         <a class="card rust" href="rust/objectstore_client/">
-          <div class="card-content">
-            <div class="card-icon-wrap">
+          <div class="card-header">
+            <div class="card-icon">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="m15.89125 7.8046875 -0.681875 -0.4221875c-0.0053125 -0.0625 -0.010625 -0.1228125 -0.0171875 -0.18375l0.585 -0.546875a0.2296875 0.2296875 0 0 0 -0.07625 -0.3828125l-0.75 -0.28125c-0.016875 -0.05875 -0.03375 -0.118125 -0.0521875 -0.17625l0.46875 -0.6509375a0.2296875 0.2296875 0 0 0 -0.1496875 -0.360625l-0.794375 -0.1296875c-0.028125 -0.0540625 -0.0559375 -0.1078125 -0.0853125 -0.1609375l0.33375 -0.731875a0.2296875 0.2296875 0 0 0 -0.2171875 -0.3246875l-0.806875 0.0284375q-0.0559375 -0.069375 -0.1128125 -0.1375L13.71875 2.5575a0.23 0.23 0 0 0 -0.27625 -0.27625L12.65625 2.4665625q-0.0678125 -0.0571875 -0.1375 -0.1128125l0.0284375 -0.806875a0.2296875 0.2296875 0 0 0 -0.3246875 -0.21875L11.490625 1.6634375c-0.053125 -0.029375 -0.1071875 -0.0575 -0.1609375 -0.0853125l-0.1296875 -0.794375a0.2296875 0.2296875 0 0 0 -0.360625 -0.1496875L10.1875 1.101875c-0.058125 -0.0184375 -0.1171875 -0.0353125 -0.17625 -0.0521875l-0.28125 -0.75a0.2296875 0.2296875 0 0 0 -0.3828125 -0.07625l-0.546875 0.585c-0.0609375 -0.0065625 -0.1221875 -0.011875 -0.18375 -0.0171875L8.1953125 0.10875a0.2296875 0.2296875 0 0 0 -0.390625 0L7.3825 0.790625c-0.0625 0.0053125 -0.1228125 0.010625 -0.18375 0.0171875l-0.546875 -0.585a0.2296875 0.2296875 0 0 0 -0.3828125 0.07625l-0.28125 0.75c-0.0590625 0.0171875 -0.1184375 0.03375 -0.176875 0.0525l-0.650625 -0.46875a0.2296875 0.2296875 0 0 0 -0.360625 0.1496875l-0.1296875 0.7940625c-0.0540625 0.028125 -0.1078125 0.0559375 -0.16125 0.0853125l-0.73125 -0.3321875a0.2296875 0.2296875 0 0 0 -0.3246875 0.21875l0.02875 0.8065625c-0.0465625 0.0371875 -0.09375 0.0746875 -0.138125 0.1128125L2.5575 2.28125A0.23 0.23 0 0 0 2.28125 2.5575L2.4665625 3.34375c-0.0384375 0.0453125 -0.0759375 0.0915625 -0.113125 0.1378125l-0.8065625 -0.0284375a0.231875 0.231875 0 0 0 -0.1990625 0.101875 0.2296875 0.2296875 0 0 0 -0.0178125 0.2228125l0.333125 0.7315625c-0.029375 0.053125 -0.0571875 0.1071875 -0.0853125 0.16125l-0.7940625 0.129375a0.2296875 0.2296875 0 0 0 -0.1496875 0.360625l0.46875 0.650625c-0.0184375 0.0584375 -0.0353125 0.1178125 -0.0525 0.176875l-0.75 0.28125a0.2296875 0.2296875 0 0 0 -0.07625 0.3828125l0.585 0.546875c-0.0065625 0.0609375 -0.011875 0.1221875 -0.0171875 0.18375l-0.683125 0.421875a0.2296875 0.2296875 0 0 0 0 0.390625l0.681875 0.4221875c0.0053125 0.0625 0.010625 0.1225 0.0171875 0.1834375l-0.585 0.546875a0.2296875 0.2296875 0 0 0 0.07625 0.3828125l0.75 0.28125c0.0171875 0.0590625 0.03375 0.118125 0.0525 0.1765625l-0.46875 0.6509375a0.2296875 0.2296875 0 0 0 0.1496875 0.360625l0.794375 0.1296875c0.028125 0.05375 0.0559375 0.1078125 0.0853125 0.160625l-0.3321875 0.7321875a0.2296875 0.2296875 0 0 0 0.0178125 0.2228125 0.2228125 0.2228125 0 0 0 0.1990625 0.101875l0.8071875 -0.0284375q0.0553125 0.069375 0.1125 0.1375L2.28125 13.4425a0.23 0.23 0 0 0 0.27625 0.27625l0.78625 -0.1853125q0.068125 0.0571875 0.1378125 0.1128125l-0.02875 0.806875a0.2296875 0.2296875 0 0 0 0.3246875 0.2171875l0.7321875 -0.33375c0.0528125 0.029375 0.106875 0.0571875 0.160625 0.0853125l0.1296875 0.794375a0.229375 0.229375 0 0 0 0.360625 0.149375l0.6509375 -0.46875c0.058125 0.01875 0.1175 0.0353125 0.1765625 0.0525l0.28125 0.75a0.23 0.23 0 0 0 0.3828125 0.07625l0.546875 -0.585c0.0609375 0.0065625 0.1225 0.011875 0.18375 0.0171875l0.4221875 0.681875a0.2296875 0.2296875 0 0 0 0.390625 0l0.4221875 -0.681875c0.0625 -0.0053125 0.1228125 -0.010625 0.18375 -0.0175l0.546875 0.5853125a0.23 0.23 0 0 0 0.3828125 -0.07625l0.28125 -0.75c0.0590625 -0.0171875 0.118125 -0.03375 0.1765625 -0.0525l0.650625 0.46875a0.229375 0.229375 0 0 0 0.360625 -0.149375l0.1296875 -0.794375c0.05375 -0.028125 0.1078125 -0.0559375 0.1609375 -0.0853125l0.731875 0.33375a0.2296875 0.2296875 0 0 0 0.3246875 -0.2171875l-0.0284375 -0.806875q0.069375 -0.0559375 0.1375 -0.1128125l0.7859375 0.1853125a0.23 0.23 0 0 0 0.27625 -0.27625L13.5334375 12.65625q0.0571875 -0.0678125 0.1128125 -0.1375l0.806875 0.0284375a0.2259375 0.2259375 0 0 0 0.1990625 -0.101875 0.2296875 0.2296875 0 0 0 0.018125 -0.2228125l-0.33375 -0.731875c0.029375 -0.053125 0.0571875 -0.1071875 0.0853125 -0.1609375l0.794375 -0.1296875a0.2296875 0.2296875 0 0 0 0.1496875 -0.360625l-0.46875 -0.6509375c0.0184375 -0.0584375 0.0353125 -0.1175 0.0521875 -0.1765625l0.75 -0.28125a0.2296875 0.2296875 0 0 0 0.07625 -0.3828125l-0.585 -0.546875c0.0065625 -0.0609375 0.011875 -0.1221875 0.0171875 -0.1834375l0.681875 -0.4221875a0.2296875 0.2296875 0 0 0 0 -0.390625Zm-4.71875 4.03375A0.4346875 0.4346875 0 0 0 10.65625 12.1721875l-0.23875 1.1146875a5.8596875 5.8596875 0 0 1 -4.88625 -0.023125l-0.23875 -1.114375a0.4334375 0.4334375 0 0 0 -0.514375 -0.33375l-0.9846875 0.21125a5.855625 5.855625 0 0 1 -0.508125 -0.6003125H8.071875c0.05375 0 0.0903125 -0.0090625 0.0903125 -0.0596875v-1.6934375c0 -0.0490625 -0.0365625 -0.0596875 -0.0903125 -0.0596875h-1.4009375l0.0015625 -1.0734375H8.1875c0.1378125 0 0.739375 0.04 0.9309375 0.8084375 0.0596875 0.2359375 0.1928125 1.004375 0.283125 1.25 0.0903125 0.275625 0.45625 0.826875 0.846875 0.826875H12.71875a5.853125 5.853125 0 0 1 -0.541875 0.6278125Zm0.8053125 1.0778125A0.47625 0.47625 0 1 1 11.5 12.44h0.01375a0.4759375 0.4759375 0 0 1 0.4625 0.47625Zm-7.050625 -0.02125a0.47625 0.47625 0 1 1 -0.4765625 -0.4765625h0.0140625a0.4765625 0.4765625 0 0 1 0.4609375 0.4765625Zm-2.753125 -5.5778125 1.0259375 -0.45625a0.43375 0.43375 0 0 0 0.220625 -0.5728125L3.2090625 5.8125h0.83v3.7415625h-1.675a5.8640625 5.8640625 0 0 1 -0.19 -2.236875Zm-0.351875 -1.126875a0.47625 0.47625 0 0 1 0.4759375 -0.4765625H2.3125a0.47625 0.47625 0 1 1 -0.4896875 0.47625Zm4.84875 0.7653125 0.0015625 -1.10375h1.976875c0.1025 0 0.7209375 0.1178125 0.7209375 0.581875 0 0.3840625 -0.4746875 0.521875 -0.865 0.521875ZM12.46875 9.5846875c-0.30625 0.0353125 -0.6446875 -0.12875 -0.6875 -0.3153125 -0.180625 -1.0153125 -0.4809375 -1.23125 -0.9553125 -1.60625 0.589375 -0.3734375 1.201875 -0.92625 1.201875 -1.664375 0 -0.7975 -0.5465625 -1.2996875 -0.91875 -1.54625 -0.52375 -0.34375 -1.1025 -0.4134375 -1.2584375 -0.4134375h-6.215625a5.8590625 5.8590625 0 0 1 3.2778125 -1.8496875l0.7334375 0.76875a0.431875 0.431875 0 0 0 0.6125 0.01375l0.820625 -0.78125a5.8596875 5.8596875 0 0 1 4.0115625 2.8571875l-0.5625 1.2678125a0.4375 0.4375 0 0 0 0.2215625 0.5728125l1.0809375 0.4790625a5.8475 5.8475 0 0 1 0.0125 1.016875h-0.6025c-0.0596875 0 -0.0840625 0.0396875 -0.0840625 0.0978125v0.275625C13.15625 9.40625 12.7909375 9.549375 12.46875 9.5846875ZM7.5 1.8815625A0.47625 0.47625 0 0 1 7.9753125 1.40625h0.0140625A0.47625 0.47625 0 1 1 7.5 1.8815625ZM13.65125 6.6875a0.47625 0.47625 0 1 1 0 -0.9525h0.01375a0.47625 0.47625 0 0 1 -0.01375 0.9525Z"/></svg>
             </div>
-            <div class="card-title">Rust Client</div>
-            <div class="card-desc">Rust client library for interacting with the objectstore API.</div>
-            <div class="card-meta">
-              <span class="card-lang">Rust</span>
-              <span class="card-arrow">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
-              </span>
-            </div>
+            <div class="card-number">02</div>
+          </div>
+          <div class="card-title">Rust Client</div>
+          <div class="card-desc">Rust client library for interacting with the objectstore API.</div>
+          <div class="card-footer">
+            <span class="card-lang">Rust</span>
+            <span class="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+            </span>
           </div>
         </a>
 
+        <!-- Python Client -->
         <a class="card python" href="python/">
-          <div class="card-content">
-            <div class="card-icon-wrap">
+          <div class="card-header">
+            <div class="card-icon">
               <svg viewBox="0 0 16 16" fill="currentColor"><path d="M15.552517857142856 6.057342857142857c-0.26949285714285715 -1.0814607142857142 -0.780475 -1.8969357142857142 -1.8689357142857141 -1.8969357142857142h-1.4034535714285714v1.658942857142857c0 1.2879571428571428 -1.0919607142857142 2.3729214285714284 -2.3379178571428567 2.3729214285714284H6.204335714285714c-1.0219642857142857 0 -1.8689357142857141 0.8749678571428571 -1.8689357142857141 1.9004357142857142v3.5628749999999996c0 1.014967857142857 0.8819714285714285 1.6099464285714284 1.8689357142857141 1.9004357142857142 1.1829607142857144 0.3464892857142857 2.3204214285714286 0.4094857142857143 3.737875 0 0.9414678571428571 -0.2729892857142857 1.8689357142857141 -0.8224714285714285 1.8689357142857141 -1.9004357142857142v-1.42445H8.076771428571428v-0.47598214285714285h5.606810714285714c1.0884607142857143 0 1.49095 -0.7594749999999999 1.8689357142857141 -1.8969357142857142 0.39198571428571427 -1.1724607142857142 0.37448571428571426 -2.2994214285714283 0 -3.8008714285714285ZM10.1767 13.179599999999999c0.3884892857142857 0 0.7034785714285713 0.3184892857142857 0.7034785714285713 0.710475 0 0.3954857142857143 -0.3149892857142857 0.7139749999999999 -0.7034785714285713 0.7139749999999999 -0.38498571428571426 0 -0.703475 -0.32198571428571426 -0.703475 -0.7139749999999999 0.0035 -0.3954857142857143 0.3184892857142857 -0.710475 0.703475 -0.710475ZM6.032842857142857 7.723285714285714H9.770714285714284c1.0394642857142857 0 1.8689357142857141 -0.8574714285714286 1.8689357142857141 -1.9004357142857142V2.256475c0 -1.014967857142857 -0.8539714285714286 -1.7744392857142857 -1.8689357142857141 -1.945935714285714 -1.2529571428571427 -0.20649285714285712 -2.6144107142857145 -0.19599285714285714 -3.7378714285714283 0.0035 -1.5819464285714284 0.27998928571428566 -1.8689357142857141 0.8644714285714286 -1.8689357142857141 1.945935714285714v1.42445h3.741371428571428v0.47598214285714285H2.760453571428571c-1.0884607142857143 0 -2.040428571428571 0.6544785714285714 -2.3379178571428567 1.8969357142857142 -0.3429892857142857 1.4244535714285715 -0.3569892857142857 2.3134214285714285 0 3.8008714285714285 0.2659892857142857 1.1059607142857142 0.899467857142857 1.8969357142857142 1.9879321428571428 1.8969357142857142h1.2844535714285714v-1.7079428571428572c0 -1.2354571428571426 1.0674642857142855 -2.3239214285714285 2.3379214285714283 -2.3239214285714285Zm-0.23449285714285714 -4.990828571428572c-0.3884857142857142 0 -0.703475 -0.3184892857142857 -0.703475 -0.710475 0.0035 -0.3954857142857143 0.3149892857142857 -0.7139749999999999 0.703475 -0.7139749999999999 0.38498571428571426 0 0.703475 0.32198571428571426 0.703475 0.7139749999999999s-0.3149892857142857 0.710475 -0.703475 0.710475Z"/></svg>
             </div>
-            <div class="card-title">Python Client</div>
-            <div class="card-desc">Python client library with async support for the objectstore API.</div>
-            <div class="card-meta">
-              <span class="card-lang">Python</span>
-              <span class="card-arrow">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
-              </span>
-            </div>
+            <div class="card-number">03</div>
+          </div>
+          <div class="card-title">Python Client</div>
+          <div class="card-desc">Python client library with async support for the objectstore API.</div>
+          <div class="card-footer">
+            <span class="card-lang">Python</span>
+            <span class="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+            </span>
           </div>
         </a>
       </div>
@@ -641,8 +613,19 @@
 
     <!-- Footer -->
     <footer>
-      <div class="footer-copy">
-        Built at <a href="https://sentry.io">Sentry</a> &middot; <a href="https://github.com/getsentry/objectstore/blob/main/LICENSE.md">FSL-1.1-Apache-2.0</a>
+      <div class="footer-text">
+        Built at <a href="https://sentry.io">Sentry</a>
+        <span class="footer-sep">&middot;</span>
+        <a href="https://github.com/getsentry/objectstore/blob/main/LICENSE.md">FSL-1.1-Apache-2.0</a>
+        <span class="footer-sep">&middot;</span>
+        <span class="footer-links">
+          <a href="https://github.com/getsentry/objectstore">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.866-.013-1.7-2.782.604-3.369-1.341-3.369-1.341-.454-1.155-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.337-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
+            GitHub
+          </a>
+          <span class="footer-sep">&middot;</span>
+          <a href="https://github.com/getsentry/objectstore/blob/main/README.md">README</a>
+        </span>
       </div>
     </footer>
   </div>
