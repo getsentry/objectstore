@@ -71,6 +71,12 @@ pub enum StorageConfig<'a> {
     },
 }
 
+/// Default concurrency limit for [`StorageService`].
+///
+/// This value is used when no explicit limit is set via
+/// [`StorageService::with_concurrency_limit`].
+pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
+
 /// Asynchronous storage service with a two-tier backend system.
 ///
 /// `StorageService` is the main entry point for storing and retrieving objects.
@@ -121,14 +127,14 @@ pub enum StorageConfig<'a> {
 ///
 /// A semaphore caps the number of in-flight backend operations. Use
 /// [`with_concurrency_limit`](StorageService::with_concurrency_limit) to set
-/// the limit; without it, the default allows up to
-/// [`Semaphore::MAX_PERMITS`](tokio::sync::Semaphore::MAX_PERMITS) (effectively
-/// unlimited). Operations that exceed the limit are rejected immediately with
+/// the limit; without it, the default is [`DEFAULT_CONCURRENCY_LIMIT`].
+/// Operations that exceed the limit are rejected immediately with
 /// [`Error::AtCapacity`].
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<TieredStorage>,
     concurrency: Arc<tokio::sync::Semaphore>,
+    max_concurrency: usize,
 }
 
 impl StorageService {
@@ -143,14 +149,14 @@ impl StorageService {
     }
 
     fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
+        let max_concurrency = DEFAULT_CONCURRENCY_LIMIT;
         Self {
             inner: Arc::new(TieredStorage {
                 high_volume_backend,
                 long_term_backend,
             }),
-            concurrency: Arc::new(tokio::sync::Semaphore::new(
-                tokio::sync::Semaphore::MAX_PERMITS,
-            )),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
+            max_concurrency,
         }
     }
 
@@ -159,6 +165,7 @@ impl StorageService {
     /// Operations beyond this limit are rejected with [`Error::AtCapacity`].
     pub fn with_concurrency_limit(mut self, max: usize) -> Self {
         self.concurrency = Arc::new(tokio::sync::Semaphore::new(max));
+        self.max_concurrency = max;
         self
     }
 
@@ -170,7 +177,7 @@ impl StorageService {
             merni::counter!("service.concurrency.rejected": 1);
             Error::AtCapacity
         })?;
-        merni::gauge!("service.concurrency.in_use": self.concurrency.available_permits());
+        merni::gauge!("service.concurrency.in_use": self.max_concurrency - self.concurrency.available_permits());
         Ok(permit)
     }
 

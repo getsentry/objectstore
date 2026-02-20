@@ -900,14 +900,14 @@ pub struct Service {
     ///
     /// # Default
     ///
-    /// `500`
+    /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
     pub max_concurrency: usize,
 }
 
 impl Default for Service {
     fn default() -> Self {
         Self {
-            max_concurrency: 500,
+            max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
         }
     }
 }
