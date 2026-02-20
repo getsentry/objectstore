@@ -821,9 +821,7 @@ mod tests {
         // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
-        backend
-            .update_custom_time(object_url, old_deadline)
-            .await?;
+        backend.update_custom_time(object_url, old_deadline).await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
