@@ -45,9 +45,7 @@ async fn objects_post(
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
 
-    let response_id = service
-        .insert_object(context, None, &metadata, body)
-        .await?;
+    let response_id = service.insert_object(context, None, metadata, body).await?;
     let response = Json(InsertObjectResponse {
         key: response_id.key().to_string(),
     });
@@ -60,17 +58,18 @@ async fn object_get(
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
 ) -> ApiResult<Response> {
-    let Some((metadata, stream)) = service.get_object(&id).await? else {
+    let context = id.context().clone();
+    let Some((metadata, stream)) = service.get_object(id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let stream = state.meter_stream(stream, id.context());
+    let stream = state.meter_stream(stream, &context);
 
     let headers = metadata.to_headers("").map_err(ServiceError::from)?;
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
 async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
-    let Some(metadata) = service.get_metadata(&id).await? else {
+    let Some(metadata) = service.get_metadata(id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -90,7 +89,7 @@ async fn object_put(
 
     let ObjectId { context, key } = id;
     let response_id = service
-        .insert_object(context, Some(key), &metadata, body)
+        .insert_object(context, Some(key), metadata, body)
         .await?;
 
     let response = Json(InsertObjectResponse {
@@ -104,6 +103,6 @@ async fn object_delete(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
 ) -> ApiResult<impl IntoResponse> {
-    service.delete_object(&id).await?;
+    service.delete_object(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

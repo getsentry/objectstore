@@ -46,6 +46,11 @@ single request. This is intentional:
 The service orchestrates mature, battle-tested backends and keeps its own
 footprint minimal.
 
+Each storage operation runs to completion even if the caller is cancelled (e.g.,
+due to a client disconnect). This ensures that multi-step operations such as
+writing redirect tombstones are never left partially applied. Operations are also
+panic-isolated — a failure in one request does not bring down the service.
+
 # Two-Tier Backend System
 
 Every [`StorageService`] is initialized with two backends: a **high-volume**

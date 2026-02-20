@@ -109,7 +109,7 @@ async fn batch(
                     Operation::Get(get) => {
                         let key = get.key.clone();
                         let result = service
-                            .get_object(&ObjectId::new(context.clone(), get.key))
+                            .get_object(ObjectId::new(context.clone(), get.key))
                             .await;
 
                         let result = match result {
@@ -135,14 +135,14 @@ async fn batch(
 
                         let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
                         let result = service
-                            .insert_object(context.clone(), Some(insert.key), &metadata, stream)
+                            .insert_object(context.clone(), Some(insert.key), metadata, stream)
                             .await;
                         OperationResponse::Insert(InsertResponse { key, result })
                     }
                     Operation::Delete(delete) => {
                         let key = delete.key.clone();
                         let result = service
-                            .delete_object(&ObjectId::new(context.clone(), delete.key))
+                            .delete_object(ObjectId::new(context.clone(), delete.key))
                             .await;
                         OperationResponse::Delete(DeleteResponse { key, result })
                     }

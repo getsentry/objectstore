@@ -28,7 +28,7 @@ pub struct Services {
     pub config: Config,
     /// Raw handle to the underlying storage service that does not enforce authorization checks.
     ///
-    /// Consider using [`crate::auth::AuthAwareService`].
+    /// Consider using [`crate::auth::AuthAwareService`] for auth-checked access.
     pub service: StorageService,
     /// Directory for EdDSA public keys.
     ///

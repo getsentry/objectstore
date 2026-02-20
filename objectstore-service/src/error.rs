@@ -43,6 +43,17 @@ pub enum Error {
     #[error("GCP authentication error: {0}")]
     GcpAuth(#[from] gcp_auth::Error),
 
+    /// A spawned service task panicked.
+    #[error("service task failed: {0}")]
+    Panic(String),
+
+    /// A spawned service task was dropped before it could deliver its result.
+    ///
+    /// This is an unexpected condition that can occur when the runtime drops the task for unknown
+    /// reasons.
+    #[error("task dropped")]
+    Dropped,
+
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.
     #[error("storage backend error: {context}")]
