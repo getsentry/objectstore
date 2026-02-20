@@ -19,7 +19,7 @@ use objectstore_types::metadata::Metadata;
 use crate::PayloadStream;
 use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::error::Result;
-use crate::id::{ObjectContext, ObjectId};
+use crate::id::{ObjectContext, ObjectId, ObjectKey};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -156,7 +156,7 @@ impl StorageService {
     pub async fn insert_object(
         &self,
         context: ObjectContext,
-        key: Option<String>,
+        key: Option<ObjectKey>,
         metadata: &Metadata,
         mut stream: PayloadStream,
     ) -> Result<InsertResponse> {
@@ -433,6 +433,7 @@ mod tests {
     use crate::backend::common::Backend as _;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
+    use crate::id::ObjectKey;
 
     fn make_stream(contents: &[u8]) -> PayloadStream {
         tokio_stream::once(Ok(contents.to_vec().into())).boxed()
@@ -465,7 +466,7 @@ mod tests {
         let key = service
             .insert_object(
                 make_context(),
-                Some("testing".into()),
+                Some(ObjectKey::from_encoded_unchecked("testing")),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
@@ -489,7 +490,7 @@ mod tests {
         let key = service
             .insert_object(
                 make_context(),
-                Some("testing".into()),
+                Some(ObjectKey::from_encoded_unchecked("testing")),
                 &Default::default(),
                 make_stream(b"oh hai!"),
             )
@@ -507,7 +508,10 @@ mod tests {
     #[tokio::test]
     async fn get_nonexistent_returns_none() {
         let (service, _hv, _lt) = make_service();
-        let id = ObjectId::new(make_context(), "does-not-exist".into());
+        let id = ObjectId::new(
+            make_context(),
+            ObjectKey::from_encoded_unchecked("does-not-exist"),
+        );
 
         assert!(service.get_object(&id).await.unwrap().is_none());
         assert!(service.get_metadata(&id).await.unwrap().is_none());
@@ -516,7 +520,10 @@ mod tests {
     #[tokio::test]
     async fn delete_nonexistent_succeeds() {
         let (service, _hv, _lt) = make_service();
-        let id = ObjectId::new(make_context(), "does-not-exist".into());
+        let id = ObjectId::new(
+            make_context(),
+            ObjectKey::from_encoded_unchecked("does-not-exist"),
+        );
 
         service.delete_object(&id).await.unwrap();
     }
@@ -535,7 +542,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
+        assert!(uuid::Uuid::parse_str(id.key().encoded()).is_ok());
 
         let (_, stream) = service.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
@@ -552,7 +559,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("small".into()),
+                Some(ObjectKey::from_encoded_unchecked("small")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -574,7 +581,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("large".into()),
+                Some(ObjectKey::from_encoded_unchecked("large")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -600,7 +607,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("reinsert-key".into()),
+                Some(ObjectKey::from_encoded_unchecked("reinsert-key")),
                 &Default::default(),
                 make_stream(&large_payload),
             )
@@ -616,7 +623,7 @@ mod tests {
         service
             .insert_object(
                 make_context(),
-                Some("reinsert-key".into()),
+                Some(ObjectKey::from_encoded_unchecked("reinsert-key")),
                 &Default::default(),
                 make_stream(&small_payload),
             )
@@ -648,7 +655,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("expiry-test".into()),
+                Some(ObjectKey::from_encoded_unchecked("expiry-test")),
                 &metadata_in,
                 make_stream(&payload),
             )
@@ -683,7 +690,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("redirect-read".into()),
+                Some(ObjectKey::from_encoded_unchecked("redirect-read")),
                 &metadata_in,
                 make_stream(&payload),
             )
@@ -748,7 +755,7 @@ mod tests {
         let result = service
             .insert_object(
                 make_context(),
-                Some("orphan-test".into()),
+                Some(ObjectKey::from_encoded_unchecked("orphan-test")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -772,7 +779,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("orphan-tombstone".into()),
+                Some(ObjectKey::from_encoded_unchecked("orphan-tombstone")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -802,7 +809,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("delete-both".into()),
+                Some(ObjectKey::from_encoded_unchecked("delete-both")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -858,7 +865,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("fail-delete".into()),
+                Some(ObjectKey::from_encoded_unchecked("fail-delete")),
                 &Default::default(),
                 make_stream(&payload),
             )
@@ -911,7 +918,7 @@ mod tests {
         let id = service
             .insert_object(
                 make_context(),
-                Some("delete-cleanup-test".into()),
+                Some(ObjectKey::from_encoded_unchecked("delete-cleanup-test")),
                 &Default::default(),
                 make_stream(&payload),
             )

@@ -17,7 +17,8 @@ to. This makes references into objectstore meaningful on their own, without
 requiring a lookup.
 
 An `ObjectId` consists of an [`ObjectContext`](id::ObjectContext) (the _where_)
-and a key (the _what_). The context contains:
+and an [`ObjectKey`](objectstore_types::key::ObjectKey) (the _what_). The
+context contains:
 
 - A **usecase** — a top-level namespace (e.g. `"attachments"`,
   `"debug-files"`) that groups related objects. A usecase can have its own
@@ -25,6 +26,23 @@ and a key (the _what_). The context contains:
 - **Scopes** — ordered key-value pairs that form a hierarchy within a usecase,
   such as `organization=17, project=42`. They act as both an organizational
   structure and an authorization boundary.
+
+## Object Keys
+
+The key is an [`ObjectKey`](objectstore_types::key::ObjectKey) — a newtype
+that stores a **percent-encoded** string following RFC 3986. Only unreserved
+characters (`A-Z a-z 0-9 - . _ ~`) appear literally; everything else is
+percent-encoded with uppercase hex digits. This means:
+
+- Keys are safe to use directly in HTTP paths and headers (no literal `/` or
+  other reserved characters).
+- The encoded form is the canonical wire representation used in JSON responses
+  and batch headers.
+- Storage paths use the **decoded** form for backward compatibility with
+  existing stored objects.
+- Clients receive the encoded form and decode it for user-facing display.
+
+Keys are limited to 128 encoded bytes and must be non-empty.
 
 See the [`id`] module for details on storage path formatting, scope ordering,
 and key generation.

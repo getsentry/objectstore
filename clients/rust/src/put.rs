@@ -6,6 +6,7 @@ use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
+use percent_encoding::percent_decode_str;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::io::AsyncRead;
@@ -16,10 +17,16 @@ pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use crate::{ClientStream, Session};
 
 /// The response returned from the service after uploading an object.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct PutResponse {
-    /// The key of the object, as stored.
+    /// The key of the object, decoded from the percent-encoded wire form.
     pub key: String,
+}
+
+/// Internal deserialization target for the raw JSON response.
+#[derive(Deserialize)]
+struct RawPutResponse {
+    key: String,
 }
 
 pub(crate) enum PutBody {
@@ -190,6 +197,13 @@ impl PutBuilder {
         builder = builder.headers(self.metadata.to_headers("")?);
 
         let response = builder.body(body).send().await?;
-        Ok(response.error_for_status()?.json().await?)
+        let raw: RawPutResponse = response.error_for_status()?.json().await?;
+        let key = percent_decode_str(&raw.key)
+            .decode_utf8()
+            .map_err(|e| crate::Error::InvalidUrl {
+                message: format!("invalid percent-encoded key in response: {e}"),
+            })?
+            .into_owned();
+        Ok(PutResponse { key })
     }
 }

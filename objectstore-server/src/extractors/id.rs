@@ -4,7 +4,8 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
+use objectstore_types::key::ObjectKeyError;
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
@@ -15,6 +16,7 @@ use crate::state::ServiceState;
 #[derive(Debug)]
 pub enum ObjectRejection {
     Path(PathRejection),
+    InvalidKey(ObjectKeyError),
     Killswitched,
     RateLimited,
 }
@@ -23,6 +25,9 @@ impl IntoResponse for ObjectRejection {
     fn into_response(self) -> Response {
         match self {
             ObjectRejection::Path(rejection) => rejection.into_response(),
+            ObjectRejection::InvalidKey(err) => {
+                (axum::http::StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            }
             ObjectRejection::Killswitched => (
                 axum::http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
@@ -51,10 +56,15 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
         let Path(params) = Path::<ObjectParams>::from_request_parts(parts, state).await?;
-        let id = ObjectId::from_parts(params.usecase, params.scopes, params.key);
+        // MIGRATION: Once all clients send percent-encoded keys, replace with just
+        // `ObjectKey::new(&params.key)` and change the route from {*key} to {key}.
+        let key = ObjectKey::from_encoded(&params.key)
+            .or_else(|_| ObjectKey::new(&params.key))
+            .map_err(ObjectRejection::InvalidKey)?;
+        let id = ObjectId::from_parts(params.usecase, params.scopes, key);
 
         populate_sentry_context(id.context());
-        sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
+        sentry::configure_scope(|s| s.set_extra("key", id.key().encoded().into()));
 
         let service = DownstreamService::from_request_parts(parts, state)
             .await
@@ -272,7 +282,7 @@ mod tests {
         format!(
             "usecase={} key={} scopes_empty={}",
             id.context().usecase,
-            id.key(),
+            id.key().encoded(),
             id.context().scopes.is_empty(),
         )
     }
@@ -287,6 +297,7 @@ mod tests {
 
     fn test_router(state: ServiceState) -> Router {
         Router::new()
+            // MIGRATION: Change to {key} after all clients send percent-encoded keys.
             .route("/objects/{usecase}/{scopes}/{*key}", get(handle_object_id))
             .route("/objects/{usecase}/{scopes}/", post(handle_object_context))
             .with_state(state)
