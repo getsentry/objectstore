@@ -4,8 +4,6 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::response::Response;
 use axum::routing;
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -163,13 +161,7 @@ async fn batch(
 }
 
 fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
-    let encoded = BASE64_STANDARD.encode(key.as_bytes());
-    headers.insert(
-        HEADER_BATCH_OPERATION_KEY,
-        encoded
-            .parse()
-            .expect("base64 encoded string is always a valid header value"),
-    );
+    headers.insert(HEADER_BATCH_OPERATION_KEY, key.as_header_value());
 }
 
 fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {

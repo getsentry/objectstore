@@ -35,6 +35,7 @@
 
 use std::fmt;
 
+pub use objectstore_types::key::ObjectKey;
 use objectstore_types::scope::{Scope, Scopes};
 
 /// Defines where an object, or batch of objects, belongs within the object store.
@@ -102,17 +103,14 @@ pub struct ObjectId {
     pub key: ObjectKey,
 }
 
-/// A key that uniquely identifies an object within its usecase and scopes.
-pub type ObjectKey = String;
-
 impl ObjectId {
     /// Creates a new `ObjectId` with the given `context` and `key`.
-    pub fn new(context: ObjectContext, key: String) -> Self {
+    pub fn new(context: ObjectContext, key: ObjectKey) -> Self {
         Self::optional(context, Some(key))
     }
 
     /// Creates a new `ObjectId` from all of its parts.
-    pub fn from_parts(usecase: String, scopes: Scopes, key: String) -> Self {
+    pub fn from_parts(usecase: String, scopes: Scopes, key: ObjectKey) -> Self {
         Self::new(ObjectContext { usecase, scopes }, key)
     }
 
@@ -127,17 +125,19 @@ impl ObjectId {
     ///
     /// This creates a unique key like [`ObjectId::random`] if no `key` is provided, or otherwise
     /// uses the provided `key`.
-    pub fn optional(context: ObjectContext, key: Option<String>) -> Self {
+    pub fn optional(context: ObjectContext, key: Option<ObjectKey>) -> Self {
         Self {
             context,
-            key: key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            key: key.unwrap_or_else(|| {
+                ObjectKey::from_encoded_unchecked(uuid::Uuid::new_v4().to_string())
+            }),
         }
     }
 
     /// Returns the key of the object.
     ///
     /// See [`key`](field@ObjectId::key) for more information.
-    pub fn key(&self) -> &str {
+    pub fn key(&self) -> &ObjectKey {
         &self.key
     }
 
@@ -191,7 +191,7 @@ impl fmt::Display for AsStoragePath<'_> {
         if !self.inner.context.scopes.is_empty() {
             write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
-        write!(f, "objects/{}", self.inner.key)
+        write!(f, "objects/{}", self.inner.key.decoded())
     }
 }
 
@@ -209,7 +209,7 @@ mod tests {
                     Scope::create("project", "1337").unwrap(),
                 ]),
             },
-            key: "foo/bar".to_string(),
+            key: ObjectKey::new("foo/bar").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
@@ -223,10 +223,10 @@ mod tests {
                 usecase: "testing".to_string(),
                 scopes: Scopes::empty(),
             },
-            key: "foo/bar".to_string(),
+            key: ObjectKey::new("my-key").unwrap(),
         };
 
         let path = object_id.as_storage_path().to_string();
-        assert_eq!(path, "testing/objects/foo/bar");
+        assert_eq!(path, "testing/objects/my-key");
     }
 }

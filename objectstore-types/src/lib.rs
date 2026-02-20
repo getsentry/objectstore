@@ -22,6 +22,14 @@
 //! into hierarchical namespaces and double as the authorization boundary checked
 //! against JWT claims.
 //!
+//! ## Keys
+//!
+//! The [`key`] module defines [`ObjectKey`](key::ObjectKey), a validated
+//! percent-encoded object key. Keys use RFC 3986 unreserved characters literally
+//! and percent-encode everything else. They are limited to 128 encoded bytes and
+//! cannot contain literal `/`, making them safe for use in HTTP paths, headers,
+//! and storage backend paths.
+//!
 //! ## Auth
 //!
 //! The [`auth`] module defines [`Permission`](auth::Permission), the set of
@@ -31,5 +39,6 @@
 #![warn(missing_debug_implementations)]
 
 pub mod auth;
+pub mod key;
 pub mod metadata;
 pub mod scope;

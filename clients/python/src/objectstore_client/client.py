@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import sentry_sdk
 import urllib3
@@ -234,7 +234,8 @@ class Session:
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
-        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
+        encoded_key = quote(key, safe="-._~") if key else ""
+        relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{encoded_key}"
         path = self._base_path.rstrip("/") + relative_path
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
@@ -311,7 +312,7 @@ class Session:
             metric_emitter.record_uncompressed_size(original_body.tell())
             if compression and compression != "none":
                 metric_emitter.record_compressed_size(body.tell(), compression)
-            return res["key"]
+            return unquote(res["key"])
 
     def get(self, key: str, decompress: bool = True) -> GetResponse:
         """

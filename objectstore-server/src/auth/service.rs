@@ -1,4 +1,4 @@
-use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::auth::Permission;
@@ -55,7 +55,7 @@ impl AuthAwareService {
     pub async fn insert_object(
         &self,
         context: ObjectContext,
-        key: Option<String>,
+        key: Option<ObjectKey>,
         metadata: &Metadata,
         stream: PayloadStream,
     ) -> ApiResult<InsertResponse> {

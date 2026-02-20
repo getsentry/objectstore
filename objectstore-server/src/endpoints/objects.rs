@@ -27,6 +27,7 @@ pub fn router() -> Router<ServiceState> {
     Router::new()
         .route("/objects/{usecase}/{scopes}", collection_routes.clone())
         .route("/objects/{usecase}/{scopes}/", collection_routes)
+        // MIGRATION: Change to {key} (single segment) after all clients send percent-encoded keys.
         .route("/objects/{usecase}/{scopes}/{*key}", object_routes)
 }
 
@@ -49,7 +50,7 @@ async fn objects_post(
         .insert_object(context, None, &metadata, body)
         .await?;
     let response = Json(InsertObjectResponse {
-        key: response_id.key().to_string(),
+        key: response_id.key().encoded().to_string(),
     });
 
     Ok((StatusCode::CREATED, response).into_response())
@@ -94,7 +95,7 @@ async fn object_put(
         .await?;
 
     let response = Json(InsertObjectResponse {
-        key: response_id.key.to_string(),
+        key: response_id.key.encoded().to_string(),
     });
 
     Ok((StatusCode::OK, response).into_response())

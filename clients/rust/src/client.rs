@@ -403,7 +403,7 @@ impl Session {
             .push("objects")
             .push(&self.scope.usecase.name)
             .push(&self.scope.scopes.as_api_path().to_string())
-            .extend(object_key.split("/"));
+            .push(object_key);
         drop(segments);
 
         url
@@ -450,7 +450,7 @@ mod tests {
 
         assert_eq!(
             session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo/bar"
+            "http://127.0.0.1:8888/v1/objects/testing/org=12345;project=1337;app_slug=email_app/foo%2Fbar"
         )
     }
 
@@ -463,7 +463,7 @@ mod tests {
 
         assert_eq!(
             session.object_url("foo/bar").to_string(),
-            "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/foo/bar"
+            "http://127.0.0.1:8888/api/prefix/v1/objects/testing/org=12345;project=1337/foo%2Fbar"
         )
     }
 }

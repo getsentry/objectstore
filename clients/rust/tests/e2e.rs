@@ -122,6 +122,7 @@ async fn stores_under_given_key() {
     let request = session.put(body).key("test-key123!!");
     let stored_id = request.send().await.unwrap().key;
 
+    // The client decodes the percent-encoded key from the server
     assert_eq!(stored_id, "test-key123!!");
 }
 
