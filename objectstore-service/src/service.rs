@@ -925,11 +925,11 @@ mod tests {
 
         assert!(
             service.get_object(&id).await.unwrap().is_none(),
-            "get_object"
+            "orphan tombstone should resolve to None on get_object"
         );
         assert!(
             service.get_metadata(&id).await.unwrap().is_none(),
-            "get_metadata"
+            "orphan tombstone should resolve to None on get_metadata"
         );
     }
 
@@ -1021,8 +1021,6 @@ mod tests {
         assert_eq!(body.len(), payload.len());
         assert!(!metadata.is_tombstone());
     }
-
-    // --- Integration test (real emulated backends) ---
 
     // --- Task spawning tests (public API) ---
 
