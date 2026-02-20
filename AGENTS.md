@@ -46,25 +46,32 @@ To test only one package (e.g., when backend services aren't needed):
 cargo test -p objectstore-server --all-features
 ```
 
-## Linting
+## Formatting and Linting
 
-Before committing, run these linting checks (same commands as CI):
+After completing a batch of edits (before responding to the user), always run formatting and linting to keep the code clean. Do not defer this to commit time — run it every time you're done editing and about to hand control back.
 
-### Rust Formatting
+### Rust
 
-Check formatting before committing:
-
-```bash
-cargo fmt --all -- --check
-```
-
-### Rust Linting
-
-Check for compilation errors and clippy lints:
+After editing Rust files, run formatting and clippy:
 
 ```bash
+cargo fmt --all
 cargo clippy --workspace --all-targets --all-features --no-deps
 ```
+
+Fix any issues before responding.
+
+### Python
+
+After editing Python files, run formatting, linting, and type checking:
+
+```bash
+uv run ruff format
+uv run ruff check
+uv run mypy .
+```
+
+Fix any issues before responding.
 
 ### Documentation Validation
 
@@ -74,58 +81,28 @@ When adding docs or moving types, verify documentation references:
 cargo doc --workspace --all-features --no-deps --document-private-items
 ```
 
-### Python Linting
+## After Every Iteration
 
-For Python code, run formatting, linting, and type checking:
+Do these checks after completing changes and before responding to the user.
 
-```bash
-uv run ruff format --check
-uv run ruff check
-uv run mypy .
-```
-
-## Keeping Documentation Up to Date
-
-After making changes, check whether the architecture docs need updating. The service and server crates have a `docs/architecture.md` embedded as crate-level rustdoc via `include_str!`; the types crate has its docs inlined in `lib.rs` and module files:
-
-- `objectstore-service/docs/architecture.md` — two-tier backend system, redirect tombstones, backend trait, object identification, streaming
+**Update architecture docs** if your changes affect documented behavior. Grep `docs/` for terms related to your change. The doc locations are:
+- `objectstore-service/docs/architecture.md` — backends, tombstones, object identification, streaming
 - `objectstore-server/docs/architecture.md` — endpoints, request flow, auth, config, rate limiting, killswitches
-- `objectstore-types/src/lib.rs` + module docs — metadata fields and header mapping, scope system, expiration policies, compression, permissions
+- `objectstore-types/src/lib.rs` + module docs — metadata, scopes, expiration, compression, permissions
 
-Update these docs when:
-- **Always**: architectural changes, new backends, changes to request flow, auth, or tombstone behavior
-- **Usually**: new endpoints, new config fields, new middleware, changes to rate limiting or killswitch behavior
-- **Check**: changes to defaults, thresholds, header names, validation rules, or anything else that is stated as a fact in the docs
+**Reflect on user feedback.** When the user corrects your approach or gives guidance on style, patterns, or organization, consider whether it's a general preference that would apply to future work. If so, suggest adding it to this file.
 
-When in doubt, grep the `docs/` directories for terms related to your change. Stale docs are worse than no docs.
+## Version Control
 
-## Creating Pull Requests
+### Commits
 
-Before creating a PR, follow this workflow to ensure code quality:
+- Use `meta(ai):` prefix for commits changing agent instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/` config, etc.).
+- Use `/create-pr` to create PRs following Sentry's conventions.
 
-### 1. Review for Issues
+### Before Creating PRs
 
-Always use the `find-bugs` skill from `sentry-skills` to review changes and address potential issues:
-
-```
-/find-bugs
-```
-
-This performs a comprehensive review of your changes for bugs, security vulnerabilities, and code quality issues.
-
-### 2. Check Code Complexity
-
-Review the code you added or modified. If the implementation is complex, ask the user whether to run `/code-simplifier` to improve clarity and maintainability. The `code-simplifier` skill (from `sentry-skills`) refines code while preserving functionality.
-
-### 3. Create the PR
-
-Use the `create-pr` skill from `sentry-skills` to create PRs following Sentry's conventions:
-
-```
-/create-pr
-```
-
-This ensures the PR follows Sentry's standards for title, description, and formatting.
+- If the implementation is complex, ask whether to run `/code-simplifier`.
+- Run `/find-bugs` to review for bugs, security, and code quality issues.
 
 ## Project Structure
 
