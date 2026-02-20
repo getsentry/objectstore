@@ -799,4 +799,80 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_get_metadata_bumps_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        // Manually set custom_time to just inside the bump window.
+        // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
+        let object_url = backend.object_url(&id)?;
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        backend.update_custom_time(object_url, old_deadline).await?;
+
+        // First get_metadata sees the old timestamp and triggers a TTI bump.
+        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+
+        // Second get_metadata sees the bumped timestamp.
+        let post_meta = backend.get_metadata(&id).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
+        );
+
+        // Verify the payload is still intact after the bump.
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = read_to_vec(stream).await?;
+        assert_eq!(&payload, b"hello, world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        // A freshly written object has time_expires ≈ now + 2d, which is well outside
+        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
+        let first = backend.get_metadata(&id).await?.unwrap();
+        let first_expiry = first.time_expires.unwrap();
+
+        let second = backend.get_metadata(&id).await?.unwrap();
+        let second_expiry = second.time_expires.unwrap();
+
+        assert_eq!(
+            first_expiry, second_expiry,
+            "Fresh TTI object should not have its expiry bumped"
+        );
+
+        Ok(())
+    }
 }
