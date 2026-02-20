@@ -43,6 +43,10 @@ pub enum Error {
     #[error("GCP authentication error: {0}")]
     GcpAuth(#[from] gcp_auth::Error),
 
+    /// A spawned service task panicked or was cancelled.
+    #[error("service task failed: {0}")]
+    TaskFailed(String),
+
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.
     #[error("storage backend error: {context}")]

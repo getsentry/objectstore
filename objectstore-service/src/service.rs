@@ -1,24 +1,24 @@
 //! Core storage service and configuration.
 //!
-//! This module contains [`StorageService`], the main entry point for storing and
-//! retrieving objects, along with [`StorageConfig`] for backend initialization and
-//! response type aliases for the service API.
-//!
-//! For an overview of the two-tier backend system, redirect tombstones, and
-//! consistency guarantees, see the [crate-level documentation](crate).
+//! [`StorageService`] is the main entry point for storing and retrieving
+//! objects. Each operation runs in a separate tokio task for panic isolation.
+//! See the [crate-level documentation](crate) for the two-tier backend system,
+//! redirect tombstones, and consistency guarantees.
 
+use std::any::Any;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::BytesMut;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
 use crate::backend::common::{BoxedBackend, DeleteOutcome};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -38,7 +38,12 @@ pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
 
-/// High-level asynchronous service for storing and retrieving objects.
+/// Asynchronous storage service with a two-tier backend system.
+///
+/// `StorageService` is the main entry point for storing and retrieving objects.
+/// It routes objects to a high-volume or long-term backend based on size (see
+/// the [crate-level documentation](crate) for details) and maintains redirect
+/// tombstones so that reads never need to probe both backends.
 ///
 /// # Redirect Tombstones
 ///
@@ -70,6 +75,14 @@ pub type DeleteResponse = ();
 /// either direction.
 ///
 /// See the individual methods for per-operation tombstone behavior.
+///
+/// # Run-to-Completion and Panic Isolation
+///
+/// Each operation runs to completion even if the caller is cancelled (e.g., on
+/// client disconnect). This ensures that multi-step operations such as writing
+/// redirect tombstones are never left partially applied. Operations are also
+/// isolated from panics in backend code — a failure in one operation does not
+/// bring down other in-flight work. See [`Error::TaskFailed`].
 #[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
@@ -140,20 +153,114 @@ impl StorageService {
         }))
     }
 
+    /// Spawns a future in a separate task and awaits its result.
+    ///
+    /// Returns [`Error::TaskFailed`] if the spawned task panics. The panic
+    /// message is captured and included in the error for diagnostics.
+    async fn spawn<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(f).catch_unwind().await;
+            let result = match result {
+                Ok(inner) => inner,
+                Err(payload) => Err(Error::TaskFailed(extract_panic_message(payload))),
+            };
+            let _ = tx.send(result);
+        });
+        rx.await
+            .map_err(|_| Error::TaskFailed("task cancelled".into()))?
+    }
+
     /// Creates or overwrites an object.
     ///
-    /// The object is identified by the components of an [`ObjectId`]. The `context` is required,
-    /// while the `key` can be assigned automatically if set to `None`.
+    /// The object is identified by the components of an [`ObjectId`]. The
+    /// `context` is required, while the `key` can be assigned automatically if
+    /// set to `None`.
+    ///
+    /// # Run-to-completion
+    ///
+    /// Once called, the operation runs to completion even if the returned future
+    /// is dropped (e.g., on client disconnect). This guarantees that partially
+    /// written objects are never left without their redirect tombstone.
     ///
     /// # Tombstone handling
     ///
-    /// If the object has a caller-provided key and a redirect tombstone already exists
-    /// at that key, the new write is routed to the long-term backend (preserving the
-    /// existing tombstone as a redirect to the new data).
+    /// If the object has a caller-provided key and a redirect tombstone already
+    /// exists at that key, the new write is routed to the long-term backend
+    /// (preserving the existing tombstone as a redirect to the new data).
     ///
-    /// For long-term writes, the real object is persisted first, then the tombstone.
-    /// If the tombstone write fails, the real object is rolled back to avoid orphans.
+    /// For long-term writes, the real object is persisted first, then the
+    /// tombstone. If the tombstone write fails, the real object is rolled back
+    /// to avoid orphans.
     pub async fn insert_object(
+        &self,
+        context: ObjectContext,
+        key: Option<String>,
+        metadata: Metadata,
+        stream: PayloadStream,
+    ) -> Result<InsertResponse> {
+        let this = self.clone();
+        self.spawn(async move {
+            this.insert_object_inner(context, key, &metadata, stream)
+                .await
+        })
+        .await
+    }
+
+    /// Retrieves only the metadata for an object, without the payload.
+    ///
+    /// # Tombstone handling
+    ///
+    /// Looks up the object in the high-volume backend first. If the result is a
+    /// redirect tombstone, follows the redirect and fetches metadata from the
+    /// long-term backend instead.
+    pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
+        let this = self.clone();
+        self.spawn(async move { this.get_metadata_inner(&id).await })
+            .await
+    }
+
+    /// Streams the contents of an object.
+    ///
+    /// # Tombstone handling
+    ///
+    /// Looks up the object in the high-volume backend first. If the result is a
+    /// redirect tombstone, follows the redirect and fetches the object from the
+    /// long-term backend instead.
+    pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
+        let this = self.clone();
+        self.spawn(async move { this.get_object_inner(&id).await })
+            .await
+    }
+
+    /// Deletes an object, if it exists.
+    ///
+    /// # Run-to-completion
+    ///
+    /// Once called, the operation runs to completion even if the returned future
+    /// is dropped. This guarantees that the tombstone is only removed after the
+    /// long-term object has been successfully deleted.
+    ///
+    /// # Tombstone handling
+    ///
+    /// Attempts to delete from the high-volume backend, but skips deletion if
+    /// the entry is a redirect tombstone. When a tombstone is found, the
+    /// long-term object is deleted first, then the tombstone. This ordering
+    /// ensures that if the long-term delete fails, the tombstone remains and
+    /// the data is still reachable.
+    pub async fn delete_object(&self, id: ObjectId) -> Result<DeleteResponse> {
+        let this = self.clone();
+        self.spawn(async move { this.delete_object_inner(&id).await })
+            .await
+    }
+
+    // --- Private: inline business logic ---
+
+    async fn insert_object_inner(
         &self,
         context: ObjectContext,
         key: Option<String>,
@@ -270,14 +377,7 @@ impl StorageService {
         Ok(id)
     }
 
-    /// Retrieves only the metadata for an object, without downloading the payload.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Looks up the object in the high-volume backend first. If the result is a
-    /// redirect tombstone, follows the redirect and fetches metadata from the
-    /// long-term backend instead.
-    pub async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata_inner(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -300,14 +400,7 @@ impl StorageService {
         Ok(result)
     }
 
-    /// Streams the contents of an object stored at the given key.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Looks up the object in the high-volume backend first. If the result is a
-    /// redirect tombstone, follows the redirect and fetches the object from the
-    /// long-term backend instead.
-    pub async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object_inner(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -343,16 +436,7 @@ impl StorageService {
         Ok(result)
     }
 
-    /// Deletes an object stored at the given key, if it exists.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Attempts to delete from the high-volume backend, but skips deletion if the
-    /// entry is a redirect tombstone. When a tombstone is found, the long-term
-    /// object is deleted first, then the tombstone. This ordering ensures that if
-    /// the long-term delete fails, the tombstone remains and the data is still
-    /// reachable.
-    pub async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object_inner(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -420,6 +504,17 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
     })
 }
 
+/// Extracts a human-readable message from a panic payload.
+fn extract_panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -463,7 +558,7 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("testing".into()),
                 &Default::default(),
@@ -472,7 +567,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object_inner(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -487,7 +582,7 @@ mod tests {
         let service = StorageService::new(config.clone(), config).await.unwrap();
 
         let key = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("testing".into()),
                 &Default::default(),
@@ -496,7 +591,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(&key).await.unwrap().unwrap();
+        let (_metadata, stream) = service.get_object_inner(&key).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -509,8 +604,8 @@ mod tests {
         let (service, _hv, _lt) = make_service();
         let id = ObjectId::new(make_context(), "does-not-exist".into());
 
-        assert!(service.get_object(&id).await.unwrap().is_none());
-        assert!(service.get_metadata(&id).await.unwrap().is_none());
+        assert!(service.get_object_inner(&id).await.unwrap().is_none());
+        assert!(service.get_metadata_inner(&id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -518,7 +613,7 @@ mod tests {
         let (service, _hv, _lt) = make_service();
         let id = ObjectId::new(make_context(), "does-not-exist".into());
 
-        service.delete_object(&id).await.unwrap();
+        service.delete_object_inner(&id).await.unwrap();
     }
 
     #[tokio::test]
@@ -526,7 +621,7 @@ mod tests {
         let (service, _hv, _lt) = make_service();
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 None,
                 &Default::default(),
@@ -537,7 +632,7 @@ mod tests {
 
         assert!(uuid::Uuid::parse_str(id.key()).is_ok());
 
-        let (_, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let (_, stream) = service.get_object_inner(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.as_ref(), b"auto-keyed");
     }
@@ -550,7 +645,7 @@ mod tests {
         let payload = vec![0u8; 100]; // 100 bytes, well under 1 MiB
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("small".into()),
                 &Default::default(),
@@ -572,7 +667,7 @@ mod tests {
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("large".into()),
                 &Default::default(),
@@ -598,7 +693,7 @@ mod tests {
         // First: insert a large object → creates tombstone in hv, payload in lt
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("reinsert-key".into()),
                 &Default::default(),
@@ -614,7 +709,7 @@ mod tests {
         // detect the existing tombstone and route to long-term anyway.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("reinsert-key".into()),
                 &Default::default(),
@@ -646,7 +741,7 @@ mod tests {
         let payload = vec![0u8; 2 * 1024 * 1024]; // force long-term
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("expiry-test".into()),
                 &metadata_in,
@@ -681,7 +776,7 @@ mod tests {
             ..Default::default()
         };
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("redirect-read".into()),
                 &metadata_in,
@@ -691,13 +786,13 @@ mod tests {
             .unwrap();
 
         // get_object should transparently follow the tombstone
-        let (metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let (metadata, stream) = service.get_object_inner(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload.len());
         assert!(!metadata.is_tombstone());
 
         // get_metadata should also follow the tombstone
-        let metadata = service.get_metadata(&id).await.unwrap().unwrap();
+        let metadata = service.get_metadata_inner(&id).await.unwrap().unwrap();
         assert!(!metadata.is_tombstone());
         assert_eq!(metadata.content_type, "image/png");
     }
@@ -746,7 +841,7 @@ mod tests {
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
         let result = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("orphan-test".into()),
                 &Default::default(),
@@ -770,7 +865,7 @@ mod tests {
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("orphan-tombstone".into()),
                 &Default::default(),
@@ -783,11 +878,11 @@ mod tests {
         lt.remove(&id);
 
         assert!(
-            service.get_object(&id).await.unwrap().is_none(),
+            service.get_object_inner(&id).await.unwrap().is_none(),
             "orphan tombstone should resolve to None on get_object"
         );
         assert!(
-            service.get_metadata(&id).await.unwrap().is_none(),
+            service.get_metadata_inner(&id).await.unwrap().is_none(),
             "orphan tombstone should resolve to None on get_metadata"
         );
     }
@@ -800,7 +895,7 @@ mod tests {
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("delete-both".into()),
                 &Default::default(),
@@ -809,7 +904,7 @@ mod tests {
             .await
             .unwrap();
 
-        service.delete_object(&id).await.unwrap();
+        service.delete_object_inner(&id).await.unwrap();
 
         assert!(!hv.contains(&id), "tombstone not cleaned up from hv");
         assert!(!lt.contains(&id), "object not cleaned up from lt");
@@ -856,7 +951,7 @@ mod tests {
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("fail-delete".into()),
                 &Default::default(),
@@ -865,7 +960,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = service.delete_object(&id).await;
+        let result = service.delete_object_inner(&id).await;
         assert!(result.is_err());
 
         // The tombstone in high-volume must still be present
@@ -876,7 +971,7 @@ mod tests {
         );
 
         // The object should still be reachable through the service
-        let (metadata, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let (metadata, stream) = service.get_object_inner(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload.len());
         assert!(!metadata.is_tombstone());
@@ -909,7 +1004,7 @@ mod tests {
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
         let payload = vec![0xAB; 2 * 1024 * 1024]; // 2 MiB
         let id = service
-            .insert_object(
+            .insert_object_inner(
                 make_context(),
                 Some("delete-cleanup-test".into()),
                 &Default::default(),
@@ -919,19 +1014,167 @@ mod tests {
             .unwrap();
 
         // Sanity: the object is readable through the service (follows the tombstone).
-        let (_, stream) = service.get_object(&id).await.unwrap().unwrap();
+        let (_, stream) = service.get_object_inner(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload.len());
 
         // Delete through the service layer.
-        service.delete_object(&id).await.unwrap();
+        service.delete_object_inner(&id).await.unwrap();
 
         // The tombstone in BigTable should be gone, so the service returns None.
-        let after_delete = service.get_object(&id).await.unwrap();
+        let after_delete = service.get_object_inner(&id).await.unwrap();
         assert!(after_delete.is_none(), "tombstone not deleted");
 
         // The real object in GCS must also be gone — no orphan.
         let orphan = gcs_backend.get_object(&id).await.unwrap();
         assert!(orphan.is_none(), "object leaked");
+    }
+
+    // --- Task spawning tests (public API) ---
+
+    #[tokio::test]
+    async fn basic_spawn_insert_and_get() {
+        let (service, _hv, _lt) = make_service();
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("test-key".into()),
+                Metadata::default(),
+                make_stream(b"hello world"),
+            )
+            .await
+            .unwrap();
+
+        let (_, stream) = service.get_object(id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.as_ref(), b"hello world");
+    }
+
+    #[tokio::test]
+    async fn basic_spawn_metadata_and_delete() {
+        let (service, _hv, _lt) = make_service();
+
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("meta-key".into()),
+                Metadata::default(),
+                make_stream(b"data"),
+            )
+            .await
+            .unwrap();
+
+        let metadata = service.get_metadata(id.clone()).await.unwrap();
+        assert!(metadata.is_some());
+
+        service.delete_object(id.clone()).await.unwrap();
+
+        let after = service.get_object(id).await.unwrap();
+        assert!(after.is_none());
+    }
+
+    /// A backend that panics on `get_object` to verify panic isolation.
+    #[derive(Debug)]
+    struct PanickingBackend;
+
+    #[async_trait::async_trait]
+    impl crate::backend::common::Backend for PanickingBackend {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        async fn put_object(
+            &self,
+            _id: &ObjectId,
+            _metadata: &Metadata,
+            _stream: PayloadStream,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_object(&self, _id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+            panic!("intentional panic in get_object");
+        }
+
+        async fn delete_object(&self, _id: &ObjectId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_in_backend_returns_task_failed() {
+        let service =
+            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend));
+
+        let id = ObjectId::new(make_context(), "panic-test".into());
+        let result = service.get_object(id).await;
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected TaskFailed error"),
+        };
+        match err {
+            Error::TaskFailed(msg) => {
+                assert!(
+                    msg.contains("intentional panic in get_object"),
+                    "panic message should be captured, got: {msg}"
+                );
+            }
+            other => panic!("expected TaskFailed, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_does_not_prevent_completion() {
+        let (service, hv, lt) = make_service();
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
+
+        // Spawn the insert manually so we can observe completion after dropping
+        // the receiver. We replicate the spawn pattern but call the inner method
+        // directly to control the oneshot ourselves.
+        let svc = service.clone();
+        let context = make_context();
+        let stream = make_stream(&payload);
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<InsertResponse>>();
+        tokio::spawn(async move {
+            let result = svc
+                .insert_object_inner(
+                    context,
+                    Some("completion-test".into()),
+                    &Metadata::default(),
+                    stream,
+                )
+                .await;
+            let _ = tx.send(result);
+        });
+
+        // Drop the receiver immediately, simulating a cancelled web handler.
+        drop(rx);
+
+        // Poll until the spawned task completes instead of using a fixed sleep.
+        let id = ObjectId::new(make_context(), "completion-test".into());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if lt.contains(&id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Verify the object was fully written despite the receiver being dropped.
+        assert!(
+            lt.contains(&id),
+            "long-term object missing after receiver drop"
+        );
+        // High-volume backend should have the redirect tombstone.
+        let (hv_meta, _) = hv
+            .get_stored(&id)
+            .expect("high-volume entry missing after receiver drop");
+        assert!(
+            hv_meta.is_tombstone(),
+            "tombstone missing after receiver drop"
+        );
     }
 }

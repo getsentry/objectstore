@@ -26,9 +26,9 @@ pub type ServiceState = Arc<Services>;
 pub struct Services {
     /// The server configuration.
     pub config: Config,
-    /// Raw handle to the underlying storage service that does not enforce authorization checks.
+    /// Storage service that spawns operations in isolated tasks.
     ///
-    /// Consider using [`crate::auth::AuthAwareService`].
+    /// Consider using [`crate::auth::AuthAwareService`] for auth-checked access.
     pub service: StorageService,
     /// Directory for EdDSA public keys.
     ///
