@@ -165,11 +165,10 @@ impl StorageService {
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(f).catch_unwind().await;
-            let result = match result {
-                Ok(inner) => inner,
-                Err(payload) => Err(Error::Panic(extract_panic_message(payload))),
-            };
+            let result = std::panic::AssertUnwindSafe(f)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
             let _ = tx.send(result);
         });
         rx.await.map_err(|_| Error::Cancelled)?
