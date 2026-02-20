@@ -43,9 +43,15 @@ pub enum Error {
     #[error("GCP authentication error: {0}")]
     GcpAuth(#[from] gcp_auth::Error),
 
-    /// A spawned service task panicked or was cancelled.
+    /// A spawned service task panicked.
     #[error("service task failed: {0}")]
-    TaskFailed(String),
+    Panic(String),
+
+    /// The caller dropped the request before the operation could deliver its result.
+    ///
+    /// In an HTTP server context, this typically means the client disconnected.
+    #[error("operation cancelled")]
+    Cancelled,
 
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.

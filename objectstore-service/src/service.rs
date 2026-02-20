@@ -82,7 +82,7 @@ pub type DeleteResponse = ();
 /// client disconnect). This ensures that multi-step operations such as writing
 /// redirect tombstones are never left partially applied. Operations are also
 /// isolated from panics in backend code — a failure in one operation does not
-/// bring down other in-flight work. See [`Error::TaskFailed`].
+/// bring down other in-flight work. See [`Error::Panic`].
 #[derive(Clone, Debug)]
 pub struct StorageService(Arc<StorageServiceInner>);
 
@@ -155,8 +155,9 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::TaskFailed`] if the spawned task panics. The panic
-    /// message is captured and included in the error for diagnostics.
+    /// Returns [`Error::Panic`] if the spawned task panics (the panic message
+    /// is captured for diagnostics) or [`Error::Cancelled`] if the task is
+    /// dropped before sending its result.
     async fn spawn<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -167,12 +168,11 @@ impl StorageService {
             let result = std::panic::AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
                 Ok(inner) => inner,
-                Err(payload) => Err(Error::TaskFailed(extract_panic_message(payload))),
+                Err(payload) => Err(Error::Panic(extract_panic_message(payload))),
             };
             let _ = tx.send(result);
         });
-        rx.await
-            .map_err(|_| Error::TaskFailed("task cancelled".into()))?
+        rx.await.map_err(|_| Error::Cancelled)?
     }
 
     /// Creates or overwrites an object.
@@ -1112,16 +1112,16 @@ mod tests {
 
         let err = match result {
             Err(e) => e,
-            Ok(_) => panic!("expected TaskFailed error"),
+            Ok(_) => panic!("expected Panic error"),
         };
         match err {
-            Error::TaskFailed(msg) => {
+            Error::Panic(msg) => {
                 assert!(
                     msg.contains("intentional panic in get_object"),
                     "panic message should be captured, got: {msg}"
                 );
             }
-            other => panic!("expected TaskFailed, got: {other}"),
+            other => panic!("expected Panic, got: {other}"),
         }
     }
 
