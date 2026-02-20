@@ -683,9 +683,15 @@ mod tests {
             "expected AtCapacity, got {result:?}"
         );
 
-        // Unblock the first operation so the test can clean up.
+        // Unblock the first operation.
         hv.resume.notify_one();
         first.await.unwrap().unwrap();
+
+        // Now that the permit is released, a new operation should succeed.
+        service
+            .get_metadata(ObjectId::new(make_context(), "first".into()))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
