@@ -3,6 +3,7 @@
 #![warn(missing_debug_implementations)]
 
 mod backend;
+mod concurrency;
 pub mod error;
 pub mod id;
 pub mod service;

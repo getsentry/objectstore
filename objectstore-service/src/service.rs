@@ -15,6 +15,7 @@ use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
 use crate::backend::common::BoxedBackend;
+use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
 use crate::tiered::TieredStorage;
@@ -84,6 +85,11 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 /// the [crate-level documentation](crate) for details) and maintains redirect
 /// tombstones so that reads never need to probe both backends.
 ///
+/// # Lifecycle
+///
+/// After construction, call [`run`](StorageService::run) (or spawn it as a
+/// background task) to start the service's background processes.
+///
 /// # Redirect Tombstones
 ///
 /// Because the [`ObjectId`] is backend-independent, reads must be able to find
@@ -125,16 +131,15 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 ///
 /// # Concurrency Limit
 ///
-/// A semaphore caps the number of in-flight backend operations. Use
-/// [`with_concurrency_limit`](StorageService::with_concurrency_limit) to set
-/// the limit; without it, the default is [`DEFAULT_CONCURRENCY_LIMIT`].
+/// A semaphore caps the number of in-flight backend operations. The limit is
+/// configured via [`with_concurrency_limit`](StorageService::with_concurrency_limit);
+/// without an explicit value the default is [`DEFAULT_CONCURRENCY_LIMIT`].
 /// Operations that exceed the limit are rejected immediately with
 /// [`Error::AtCapacity`].
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<TieredStorage>,
-    concurrency: Arc<tokio::sync::Semaphore>,
-    max_concurrency: usize,
+    concurrency: ConcurrencyLimiter,
 }
 
 impl StorageService {
@@ -149,36 +154,35 @@ impl StorageService {
     }
 
     fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
-        let max_concurrency = DEFAULT_CONCURRENCY_LIMIT;
         Self {
             inner: Arc::new(TieredStorage {
                 high_volume_backend,
                 long_term_backend,
             }),
-            concurrency: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
-            max_concurrency,
+            concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
 
     /// Sets the maximum number of concurrent backend operations.
     ///
-    /// Operations beyond this limit are rejected with [`Error::AtCapacity`].
+    /// Must be called before [`run`](Self::run). Operations beyond this
+    /// limit are rejected with [`Error::AtCapacity`].
     pub fn with_concurrency_limit(mut self, max: usize) -> Self {
-        self.concurrency = Arc::new(tokio::sync::Semaphore::new(max));
-        self.max_concurrency = max;
+        self.concurrency = ConcurrencyLimiter::new(max);
         self
     }
 
-    /// Tries to acquire a concurrency permit.
+    /// Runs background processes for the storage service.
     ///
-    /// Returns [`Error::AtCapacity`] when the concurrency limit is reached.
-    fn acquire_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        let permit = self.concurrency.clone().try_acquire_owned().map_err(|_| {
-            merni::counter!("service.concurrency.rejected": 1);
-            Error::AtCapacity
-        })?;
-        merni::gauge!("service.concurrency.in_use": self.max_concurrency - self.concurrency.available_permits());
-        Ok(permit)
+    /// Currently emits the `service.concurrency.in_use` gauge once per
+    /// second. This future runs forever and should be spawned as a
+    /// background task.
+    pub async fn run(&self) {
+        self.concurrency
+            .run_emitter(|in_use| async move {
+                merni::gauge!("service.concurrency.in_use": in_use);
+            })
+            .await;
     }
 
     /// Spawns a future in a separate task and awaits its result.
@@ -192,7 +196,9 @@ impl StorageService {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        let permit = self.acquire_permit()?;
+        let permit = self.concurrency.try_acquire().inspect_err(|_| {
+            merni::counter!("service.concurrency.rejected": 1);
+        })?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
