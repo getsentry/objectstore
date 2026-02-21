@@ -49,7 +49,10 @@ impl Services {
 
         let high_volume = map_storage_config(&config.high_volume_storage);
         let long_term = map_storage_config(&config.long_term_storage);
-        let service = StorageService::new(high_volume, long_term).await?;
+        let service = StorageService::new(high_volume, long_term)
+            .await?
+            .with_concurrency_limit(config.service.max_concurrency);
+        service.start();
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());

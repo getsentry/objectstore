@@ -44,7 +44,9 @@ A request flows through several layers before reaching the storage service:
 4. **Handler**: the endpoint handler calls the
    [`AuthAwareService`](auth::AuthAwareService), which checks permissions
    before delegating to the underlying
-   [`StorageService`](objectstore_service::StorageService).
+   [`StorageService`](objectstore_service::StorageService). The service
+   enforces its own backpressure before executing the
+   operation.
 5. **Response**: metadata is mapped to HTTP headers (see
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back.
@@ -98,6 +100,7 @@ Key configuration sections:
   parameters
 - `auth` — key directory and enforcement toggle
 - `rate_limits` — throughput and bandwidth limits
+- `service` — storage service parameters (concurrency limit)
 - `killswitches` — traffic blocking rules
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
@@ -139,6 +142,14 @@ size is known upfront), bytes are recorded directly via
 [`record_bandwidth`](state::Services::record_bandwidth).
 
 Rate-limited requests receive HTTP 429.
+
+### Service Backpressure
+
+Beyond rate limiting, the [`StorageService`](objectstore_service::StorageService)
+itself enforces backpressure through a concurrency limit on in-flight backend
+operations, configured via `service.max_concurrency`. When exceeded, requests
+receive HTTP 429. See the [service architecture docs](objectstore_service) for
+details.
 
 ## Killswitches
 

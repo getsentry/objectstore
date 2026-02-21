@@ -874,6 +874,42 @@ pub struct Config {
 
     /// Definitions for rate limits to enforce on incoming requests.
     pub rate_limits: RateLimits,
+
+    /// Configuration for the [`StorageService`](objectstore_service::StorageService).
+    pub service: Service,
+}
+
+/// Configuration for the [`StorageService`](objectstore_service::StorageService).
+///
+/// Controls operational parameters of the storage service layer that sits
+/// between the HTTP server and the storage backends.
+///
+/// Used in: [`Config::service`]
+///
+/// # Environment Variables
+///
+/// - `OS__SERVICE__MAX_CONCURRENCY`
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Service {
+    /// Maximum number of concurrent backend operations.
+    ///
+    /// This caps the total number of in-flight storage operations (reads,
+    /// writes, deletes) across all requests. Operations that exceed the limit
+    /// are rejected with HTTP 429.
+    ///
+    /// # Default
+    ///
+    /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
+    pub max_concurrency: usize,
+}
+
+impl Default for Service {
+    fn default() -> Self {
+        Self {
+            max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
+        }
+    }
 }
 
 impl Default for Config {
@@ -895,6 +931,7 @@ impl Default for Config {
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),
+            service: Service::default(),
         }
     }
 }

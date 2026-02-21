@@ -54,6 +54,10 @@ pub enum Error {
     #[error("task dropped")]
     Dropped,
 
+    /// The service has reached its concurrency limit and cannot accept more operations.
+    #[error("concurrency limit reached")]
+    AtCapacity,
+
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.
     #[error("storage backend error: {context}")]
