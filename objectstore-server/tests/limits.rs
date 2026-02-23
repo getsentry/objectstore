@@ -6,12 +6,58 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config};
+use objectstore_server::config::{AuthZ, Config, Http};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
 };
 use objectstore_test::server::TestServer;
+
+#[tokio::test]
+async fn test_web_concurrency_limit() -> Result<()> {
+    // Setting max_requests = 0 means every non-exempt request is rejected immediately
+    // with 503, giving us a fully deterministic test without needing concurrent requests.
+    let server = TestServer::with_config(Config {
+        http: Http { max_requests: 0 },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // Regular requests are rejected with 503 Service Unavailable.
+    let response = client
+        .get(server.url("/v1/objects/test/org=1/key"))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503 for regular request at limit"
+    );
+
+    // Health endpoint bypasses the concurrency limit.
+    let response = client.get(server.url("/health")).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "/health must not be subject to the concurrency limit"
+    );
+
+    // Ready endpoint bypasses the concurrency limit.
+    let response = client.get(server.url("/ready")).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "/ready must not be subject to the concurrency limit"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_killswitches() -> Result<()> {

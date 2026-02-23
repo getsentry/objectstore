@@ -2,15 +2,38 @@ use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::RequestExt;
-use axum::extract::{ConnectInfo, MatchedPath, Request};
+use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::time::Instant;
+use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
+
+/// Rejects requests with HTTP 503 when the in-flight request count reaches `max`.
+///
+/// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing
+/// `(InFlightRequestsCounter, usize)` as state — share the counter from
+/// [`InFlightRequestsLayer::pair`](tower_http::metrics::InFlightRequestsLayer) so both
+/// read the same atomic. Health (`/health`) and readiness (`/ready`) are excluded.
+pub async fn limit_web_concurrency(
+    State((counter, max)): State<(InFlightRequestsCounter, usize)>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let matched_path = request.extract_parts::<MatchedPath>().await;
+    let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
+
+    if !matches!(route, "/health" | "/ready") && counter.get() >= max {
+        merni::counter!("web.concurrency.rejected": 1);
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    next.run(request).await
+}
 
 /// Create a `SetResponseHeaderLayer` that sets the `Server` header.
 pub fn set_server_header() -> SetResponseHeaderLayer<HeaderValue> {
@@ -121,5 +144,94 @@ impl Drop for EmitMetricsGuard<'_> {
                 .map(|s| s.as_u16())
                 .unwrap_or(499)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::middleware::from_fn_with_state;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+    use tower_http::metrics::InFlightRequestsLayer;
+
+    use super::*;
+
+    fn make_request(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    /// Builds a test router with the concurrency limit middleware applied.
+    ///
+    /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on
+    /// `resume` before returning. `/health` and `/ready` return 200 immediately.
+    /// Returns `(router, paused, resume)`.
+    fn make_app(max: usize) -> (Router, Arc<Notify>, Arc<Notify>) {
+        let (in_flight_layer, counter) = InFlightRequestsLayer::pair();
+        let paused = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+
+        let app = Router::new()
+            .route(
+                "/v1/test/_/key",
+                get({
+                    let paused = paused.clone();
+                    let resume = resume.clone();
+                    move || async move {
+                        paused.notify_one();
+                        resume.notified().await;
+                        StatusCode::OK.into_response()
+                    }
+                }),
+            )
+            .route("/health", get(|| async { StatusCode::OK.into_response() }))
+            .route("/ready", get(|| async { StatusCode::OK.into_response() }))
+            .layer(from_fn_with_state(
+                (counter.clone(), max),
+                limit_web_concurrency,
+            ))
+            .layer(in_flight_layer);
+
+        (app, paused, resume)
+    }
+
+    #[tokio::test]
+    async fn request_passes_below_limit() {
+        let (app, _paused, resume) = make_app(5);
+        resume.notify_one(); // pre-signal so the handler does not block
+        let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn at_limit_rejects_health_exempt() {
+        let (app, paused, resume) = make_app(1);
+
+        // Hold the counter at 1 with a blocking request.
+        let blocking = tokio::spawn(app.clone().oneshot(make_request("/v1/test/_/key")));
+        paused.notified().await;
+
+        // Regular request is rejected; health and ready bypass the limit.
+        let resp = app
+            .clone()
+            .oneshot(make_request("/v1/test/_/key"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let health = app.clone().oneshot(make_request("/health")).await.unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let ready = app.clone().oneshot(make_request("/ready")).await.unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        resume.notify_one();
+        blocking.await.unwrap().unwrap();
     }
 }
