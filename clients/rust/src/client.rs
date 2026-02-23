@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use reqwest::RequestBuilder;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
+use reqwest::RequestBuilder;
 use url::Url;
 
 use crate::auth::TokenGenerator;

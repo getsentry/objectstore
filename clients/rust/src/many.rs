@@ -6,7 +6,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use futures_util::StreamExt as _;
 use multer::Field;
-use objectstore_types::{Compression, Metadata};
+use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -122,7 +122,7 @@ impl BatchOperation {
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
                     key_to_header_value(&key)?,
                 );
-                headers.extend(metadata.to_headers("", false)?);
+                headers.extend(metadata.to_headers("")?);
 
                 let body = maybe_compress_body(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
