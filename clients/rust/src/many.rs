@@ -365,6 +365,11 @@ impl ManyBuilder {
     ///
     /// This method takes a [`GetBuilder`]/[`PutBuilder`]/[`DeleteBuilder`], which you can
     /// construct using [`Session::get`]/[`Session::put`]/[`Session::delete`].
+    ///
+    /// **Important**: All pushed builders must originate from the same [`Session`] that was used
+    /// to create this [`ManyBuilder`]. Mixing builders from different sessions is not supported
+    /// and will result in all operations being executed against this [`ManyBuilder`]'s session,
+    /// silently ignoring the original builder's session.
     #[allow(private_bounds)]
     pub fn push<B: Into<BatchOperation>>(mut self, builder: B) -> Self {
         self.operations.push(builder.into());
