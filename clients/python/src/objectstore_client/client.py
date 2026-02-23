@@ -11,6 +11,7 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
+from objectstore_client import utils
 from objectstore_client.auth import TokenGenerator
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
@@ -273,6 +274,7 @@ class Session:
         if compression == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
+            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
             headers["Content-Encoding"] = "zstd"
 
         if content_type:
@@ -295,13 +297,6 @@ class Session:
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
-            # urllib3 attempts to rewind the request body on
-            # connect and read failures, which is impossible with
-            # our compressed streams. Disable retries when
-            # compression is used to get a proper exception.
-            retries = (
-                False if compression and compression != "none" else None
-            )  # use the pool's default, set by the Client
             response = self._pool.request(
                 "POST" if not key else "PUT",
                 self._make_url(key),
@@ -309,7 +304,6 @@ class Session:
                 headers=headers,
                 preload_content=True,
                 decode_content=True,
-                retries=retries,
             )
             raise_for_status(response)
             res = response.json()
