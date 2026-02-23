@@ -31,9 +31,6 @@ pub enum Error {
     /// Error when the server returned a malformed response.
     #[error("{0}")]
     MalformedResponse(String),
-    /// Error when parsing a batch response part.
-    #[error("batch response error: {0}")]
-    BatchResponse(String),
     /// Error that indicates failure of an individual operation in a `many` request.
     #[error("operation error (HTTP status code {status}): {message}")]
     OperationError {
