@@ -10,6 +10,8 @@ use tokio::time::Instant;
 use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::endpoints::is_internal_route;
+
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
@@ -18,7 +20,7 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 /// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing
 /// `(InFlightRequestsCounter, usize)` as state — share the counter from
 /// [`InFlightRequestsLayer::pair`](tower_http::metrics::InFlightRequestsLayer) so both
-/// read the same atomic. Health (`/health`) and readiness (`/ready`) are excluded.
+/// read the same atomic. Internal routes (see [`is_internal_route`]) are excluded.
 pub async fn limit_web_concurrency(
     State((counter, max)): State<(InFlightRequestsCounter, usize)>,
     mut request: Request,
@@ -27,7 +29,7 @@ pub async fn limit_web_concurrency(
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    if !matches!(route, "/health" | "/ready" | "/keda") && counter.get() >= max {
+    if !is_internal_route(route) && counter.get() >= max {
         merni::counter!("web.concurrency.rejected": 1);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -84,13 +86,12 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 ///
-/// Health check endpoints (`/health` and `/ready`) are excluded from metrics as they are
-/// operational checks for orchestration.
+/// Internal routes (see [`is_internal_route`]) are excluded from metrics.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    let should_emit = !matches!(route, "/health" | "/ready" | "/keda");
+    let should_emit = !is_internal_route(route);
     let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method()));
 
     let response = next.run(request).await;
