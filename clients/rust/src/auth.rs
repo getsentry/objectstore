@@ -38,7 +38,7 @@ impl std::fmt::Debug for SecretKey {
 /// applied.
 ///
 /// Use this for internal services that have access to an EdDSA keypair. For external
-/// services that already have a pre-signed JWT, use [`ClientBuilder::token`](crate::ClientBuilder::token)
+/// services that already have a pre-signed JWT, use [`Session::with_token`](crate::Session::with_token)
 /// instead.
 #[derive(Debug)]
 pub struct TokenGenerator {

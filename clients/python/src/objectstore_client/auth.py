@@ -27,7 +27,7 @@ class TokenGenerator:
 
     Use this for internal services that have access to an EdDSA keypair. For external
     services that already have a pre-signed JWT, pass the ``token`` parameter to
-    ``Client`` instead.
+    ``Client.session()`` instead.
     """
 
     def __init__(

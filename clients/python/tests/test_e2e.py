@@ -238,13 +238,13 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
     token_generator = TestTokenGenerator.get()
     token = token_generator.sign_for_scope("test-usecase", Scope(org=42, project=1337))
 
-    client = Client(server_url, token=token)
+    client = Client(server_url)
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, token=token, org=42, project=1337)
 
     object_key = session.put(b"static token data")
     assert object_key is not None

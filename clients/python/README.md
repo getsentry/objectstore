@@ -93,17 +93,19 @@ session.put(b"payload", metadata={"source": "upload-service"})
 
 ### Authentication
 
-If your Objectstore instance enforces authorization, you must configure authentication
-on the Client. There are two options:
+If your Objectstore instance enforces authorization, you must configure authentication.
+There are two options:
 
 - **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
   The generator signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed.
+  and scope being accessed. Configured on the `Client`.
 - **Static token** (`token=`) — for external services that receive a pre-signed JWT
   from another source and don't have (or need) access to the signing key.
+  Configured per-session via `client.session()`, since a token is scoped to a
+  specific usecase and scope.
 
 ```python
-from objectstore_client import Client
+from objectstore_client import Client, Usecase
 from objectstore_client.auth import TokenGenerator
 
 # Option 1: Internal service with a keypair
@@ -113,7 +115,8 @@ client = Client(
 )
 
 # Option 2: External service with a pre-signed JWT
-client = Client("http://localhost:8888", token="<pre-signed JWT>")
+client = Client("http://localhost:8888")
+session = client.session(Usecase("my_app"), token="<pre-signed JWT>", org=42, project=1337)
 ```
 
 ## Configuration
@@ -132,7 +135,6 @@ client = Client(
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)
     # metrics_backend=...,   # default: no-op
     # token_generator=...,   # internal services with an EdDSA keypair
-    # token=...,             # external services with a pre-signed JWT
 )
 
 attachments = Usecase("attachments")

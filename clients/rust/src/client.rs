@@ -18,7 +18,6 @@ struct ClientBuilderInner {
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
     token_generator: Option<TokenGenerator>,
-    token: Option<String>,
 }
 
 impl ClientBuilderInner {
@@ -69,7 +68,6 @@ impl ClientBuilder {
             propagate_traces: false,
             reqwest_builder,
             token_generator: None,
-            token: None,
         }))
     }
 
@@ -114,24 +112,10 @@ impl ClientBuilder {
     ///
     /// Use this for internal services that have access to an EdDSA keypair.
     /// For external services that already have a pre-signed JWT, use
-    /// [`Self::token`] instead.
+    /// [`Session::with_token`] instead.
     pub fn token_generator(self, token_generator: TokenGenerator) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.token_generator = Some(token_generator);
-        Self(Ok(inner))
-    }
-
-    /// Sets a static authorization token to send with every request.
-    ///
-    /// Use this for external services that receive a pre-signed JWT from another
-    /// source and don't have access to the signing key. For internal services
-    /// that have an EdDSA keypair, use [`Self::token_generator`] instead.
-    ///
-    /// If both a static token and a [`TokenGenerator`] are set, the static token
-    /// takes precedence.
-    pub fn token(self, token: impl Into<String>) -> Self {
-        let Ok(mut inner) = self.0 else { return self };
-        inner.token = Some(token.into());
         Self(Ok(inner))
     }
 
@@ -152,7 +136,6 @@ impl ClientBuilder {
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
                 token_generator: inner.token_generator,
-                token: inner.token,
             }),
         })
     }
@@ -319,7 +302,6 @@ pub(crate) struct ClientInner {
     service_url: Url,
     propagate_traces: bool,
     token_generator: Option<TokenGenerator>,
-    token: Option<String>,
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -332,10 +314,11 @@ pub(crate) struct ClientInner {
 ///
 /// - **[`TokenGenerator`]** — for internal services that have access to an EdDSA
 ///   keypair. The generator signs a fresh JWT for each request, scoped to the
-///   specific usecase and scope being accessed.
-/// - **Static token** ([`ClientBuilder::token`]) — for external services that
+///   specific usecase and scope being accessed. Configured on the [`ClientBuilder`].
+/// - **Static token** ([`Session::with_token`]) — for external services that
 ///   receive a pre-signed JWT from another source and don't have (or need) access
-///   to the signing key.
+///   to the signing key. Configured per-[`Session`], since a token is scoped to a
+///   specific usecase and scope.
 ///
 /// If both are set, the static token takes precedence.
 ///
@@ -368,12 +351,14 @@ pub(crate) struct ClientInner {
 /// External service with a pre-signed JWT:
 ///
 /// ```no_run
-/// use objectstore_client::Client;
+/// use objectstore_client::{Client, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
-/// let client = Client::builder("http://localhost:8888/")
-///     .token("<pre-signed JWT>")
-///     .build()?;
+/// let client = Client::new("http://localhost:8888/")?;
+/// let session = Usecase::new("my_app")
+///     .for_project(12345, 1337)
+///     .session(&client)?
+///     .with_token("<pre-signed JWT>");
 /// # Ok(())
 /// # }
 /// ```
@@ -409,6 +394,7 @@ impl Client {
         scope.0.map(|inner| Session {
             scope: inner.into(),
             client: self.inner.clone(),
+            token: None,
         })
     }
 }
@@ -420,12 +406,26 @@ impl Client {
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,
+    token: Option<String>,
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {
+    /// Sets a static authorization token to send with every request in this session.
+    ///
+    /// Use this for external services that receive a pre-signed JWT from another
+    /// source and don't have access to the signing key. For internal services
+    /// that have an EdDSA keypair, use [`ClientBuilder::token_generator`] instead.
+    ///
+    /// If both a static token and a [`TokenGenerator`] are set, the static token
+    /// takes precedence.
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
     /// Generates a GET url to the object with the given `key`.
     ///
     /// This can then be used by downstream services to fetch the given object.
@@ -457,7 +457,7 @@ impl Session {
 
         let mut builder = self.client.reqwest.request(method, url);
 
-        if let Some(token) = &self.client.token {
+        if let Some(token) = &self.token {
             builder = builder.bearer_auth(token);
         } else if let Some(token_generator) = &self.client.token_generator {
             let token = token_generator.sign_for_scope(&self.scope)?;

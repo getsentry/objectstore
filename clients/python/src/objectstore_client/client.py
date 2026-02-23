@@ -124,11 +124,8 @@ class Client:
             timeouts).
         token_generator: A ``TokenGenerator`` that signs a fresh JWT for each
             request using an EdDSA keypair. Use this for internal services that
-            have access to the signing key.
-        token: A pre-signed JWT to send with every request. Use this for
-            external services that receive a token from another source and don't
-            have access to the signing key. Takes precedence over
-            ``token_generator`` if both are set.
+            have access to the signing key. For external services that already
+            have a pre-signed JWT, pass ``token`` to ``session()`` instead.
     """
 
     def __init__(
@@ -140,7 +137,6 @@ class Client:
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token_generator: TokenGenerator | None = None,
-        token: str | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -167,9 +163,10 @@ class Client:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
         self._token_generator = token_generator
-        self._token = token
 
-    def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
+    def session(
+        self, usecase: Usecase, token: str | None = None, **scopes: str | int | bool
+    ) -> Session:
         """
         Create a [Session] with the Objectstore server, tied to a specific [Usecase] and
         [Scope].
@@ -189,6 +186,14 @@ class Client:
         ```
         client.session(usecase, org=organization_id, project=project_id, ...)
         ```
+
+        Args:
+            usecase: The Usecase to scope this session to.
+            token: A pre-signed JWT to send with every request in this session.
+                Use this for external services that receive a token from another
+                source and don't have access to the signing key. Takes precedence
+                over the ``token_generator`` configured on the ``Client``.
+            **scopes: Key-value pairs defining the scope within the usecase.
         """
 
         return Session(
@@ -199,7 +204,7 @@ class Client:
             usecase,
             Scope(**scopes),
             self._token_generator,
-            self._token,
+            token,
         )
 
 

@@ -114,17 +114,18 @@ session.put("payload")
 
 ### Authentication
 
-If your Objectstore instance enforces authorization, you must configure authentication
-on the Client. There are two options:
+If your Objectstore instance enforces authorization, you must configure authentication.
+There are two options:
 
 - **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
   The generator signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed.
-- **Static token** (`.token()`) — for external services that receive a pre-signed JWT
-  from another source and don't have (or need) access to the signing key.
+  and scope being accessed. Configured on the [`ClientBuilder`].
+- **Static token** (`.with_token()`) — for external services that receive a pre-signed
+  JWT from another source and don't have (or need) access to the signing key.
+  Configured per-[`Session`], since a token is scoped to a specific usecase and scope.
 
 ```rust,ignore
-use objectstore_client::{Client, SecretKey, TokenGenerator};
+use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 
 // Option 1: Internal service with a keypair
 let client = Client::builder("http://localhost:8888/")
@@ -137,9 +138,11 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
-let client = Client::builder("http://localhost:8888/")
-    .token("<pre-signed JWT>")
-    .build()?;
+let client = Client::new("http://localhost:8888/")?;
+let session = Usecase::new("my_app")
+    .for_project(42, 1337)
+    .session(&client)?
+    .with_token("<pre-signed JWT>");
 ```
 
 ## Configuration
@@ -158,7 +161,6 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         // .timeout(Duration::from_secs(5)) // default: no read timeout (connect: 100ms)
         // .configure_reqwest(|builder| { ... }) // customize the reqwest::ClientBuilder
         // .token_generator(token_generator) // internal services with an EdDSA keypair
-        // .token("pre-signed-jwt") // external services with a pre-signed JWT
         .build()
         .expect("Objectstore client to build successfully")
 });

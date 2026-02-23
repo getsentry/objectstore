@@ -301,12 +301,12 @@ async fn stores_with_static_token() {
 
     let token = sign_static_token("usecase", &[("org", "12345")]);
 
-    let client = Client::builder(server.url("/"))
-        .token(&token)
-        .build()
-        .unwrap();
+    let client = Client::builder(server.url("/")).build().unwrap();
     let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(12345))
+        .unwrap()
+        .with_token(&token);
 
     let body = "hello with static token!";
     let stored_id = session
