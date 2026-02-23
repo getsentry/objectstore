@@ -124,8 +124,9 @@ class Client:
             timeouts).
         token_generator: A ``TokenGenerator`` that signs a fresh JWT for each
             request using an EdDSA keypair. Use this for internal services that
-            have access to the signing key. For external services that already
-            have a pre-signed JWT, pass ``token`` to ``session()`` instead.
+            have access to the signing key. If both a ``token_generator`` and a
+            static ``token`` (passed to ``session()``) are set, the
+            ``token_generator`` takes precedence.
     """
 
     def __init__(
@@ -191,8 +192,9 @@ class Client:
             usecase: The Usecase to scope this session to.
             token: A pre-signed JWT to send with every request in this session.
                 Use this for external services that receive a token from another
-                source and don't have access to the signing key. Takes precedence
-                over the ``token_generator`` configured on the ``Client``.
+                source and don't have access to the signing key. If a
+                ``token_generator`` is configured on the ``Client``, it takes
+                precedence over this token.
             **scopes: Key-value pairs defining the scope within the usecase.
         """
 
@@ -241,13 +243,13 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        elif self._token_generator:
+        if self._token_generator:
             token = self._token_generator.sign_for_scope(
                 self._usecase.name, self._scope
             )
             headers["Authorization"] = f"Bearer {token}"
+        elif self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:

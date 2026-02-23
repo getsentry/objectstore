@@ -111,8 +111,8 @@ impl ClientBuilder {
     /// for each request to Objectstore.
     ///
     /// Use this for internal services that have access to an EdDSA keypair.
-    /// For external services that already have a pre-signed JWT, use
-    /// [`Session::with_token`] instead.
+    /// If both a `TokenGenerator` and a static token ([`Session::with_token`])
+    /// are set, the `TokenGenerator` takes precedence.
     pub fn token_generator(self, token_generator: TokenGenerator) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.token_generator = Some(token_generator);
@@ -320,7 +320,7 @@ pub(crate) struct ClientInner {
 ///   to the signing key. Configured per-[`Session`], since a token is scoped to a
 ///   specific usecase and scope.
 ///
-/// If both are set, the static token takes precedence.
+/// If both are set, the `TokenGenerator` takes precedence.
 ///
 /// # Examples
 ///
@@ -419,8 +419,8 @@ impl Session {
     /// source and don't have access to the signing key. For internal services
     /// that have an EdDSA keypair, use [`ClientBuilder::token_generator`] instead.
     ///
-    /// If both a static token and a [`TokenGenerator`] are set, the static token
-    /// takes precedence.
+    /// If both a static token and a [`TokenGenerator`] are set, the
+    /// `TokenGenerator` takes precedence.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
         self
@@ -457,10 +457,10 @@ impl Session {
 
         let mut builder = self.client.reqwest.request(method, url);
 
-        if let Some(token) = &self.token {
-            builder = builder.bearer_auth(token);
-        } else if let Some(token_generator) = &self.client.token_generator {
+        if let Some(token_generator) = &self.client.token_generator {
             let token = token_generator.sign_for_scope(&self.scope)?;
+            builder = builder.bearer_auth(token);
+        } else if let Some(token) = &self.token {
             builder = builder.bearer_auth(token);
         }
 

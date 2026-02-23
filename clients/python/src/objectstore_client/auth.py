@@ -25,9 +25,9 @@ class TokenGenerator:
     """
     A utility to generate auth tokens for Objectstore requests.
 
-    Use this for internal services that have access to an EdDSA keypair. For external
-    services that already have a pre-signed JWT, pass the ``token`` parameter to
-    ``Client.session()`` instead.
+    Use this for internal services that have access to an EdDSA keypair. If both a
+    ``TokenGenerator`` and a static ``token`` (passed to ``Client.session()``) are set,
+    the ``TokenGenerator`` takes precedence.
     """
 
     def __init__(

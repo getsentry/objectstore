@@ -37,9 +37,9 @@ impl std::fmt::Debug for SecretKey {
 /// Tokens are signed with an EdDSA private key and have certain permissions and expiry timeouts
 /// applied.
 ///
-/// Use this for internal services that have access to an EdDSA keypair. For external
-/// services that already have a pre-signed JWT, use [`Session::with_token`](crate::Session::with_token)
-/// instead.
+/// Use this for internal services that have access to an EdDSA keypair. If both a
+/// `TokenGenerator` and a static token ([`Session::with_token`](crate::Session::with_token))
+/// are set, the `TokenGenerator` takes precedence.
 #[derive(Debug)]
 pub struct TokenGenerator {
     kid: String,
