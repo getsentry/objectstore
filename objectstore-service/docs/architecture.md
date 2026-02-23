@@ -46,22 +46,6 @@ single request. This is intentional:
 The service orchestrates mature, battle-tested backends and keeps its own
 footprint minimal.
 
-Read, delete, and metadata operations run to completion even if the caller is
-cancelled (e.g., due to a client disconnect). This ensures that multi-step
-operations such as deleting an object and its tombstone are never left partially
-applied.
-
-Insert operations support **stream-level cancellation**. When the caller's
-future is dropped (client disconnect), a cancellation token fires, causing the
-payload stream to return an error on its next poll. This aborts the in-flight
-backend upload promptly — releasing the concurrency permit and avoiding wasted
-bandwidth. If the stream has already been fully consumed (upload completing),
-the token has no effect and the operation finishes normally, including the
-redirect tombstone write.
-
-All operations are panic-isolated — a failure in one request does not bring
-down the service.
-
 # Two-Tier Backend System
 
 Every [`StorageService`] is initialized with two backends: a **high-volume**
@@ -145,3 +129,51 @@ The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_
 
 More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may
 be added here in the future.
+
+# Tombstone Consistency
+
+The tombstone system maintains consistency through **operation ordering** rather
+than distributed locks. The invariant is: a redirect tombstone is always the
+**last thing written** and the **last thing removed**.
+
+- On **write**: the real object is persisted in the long-term backend first,
+  then the tombstone is written to the high-volume backend. If the tombstone
+  write fails, the real object is rolled back, leaving nothing in either
+  backend.
+- On **delete**: the real object is removed from the long-term backend first,
+  then the tombstone is removed from the high-volume backend. If the long-term
+  delete fails, the tombstone remains and the data stays reachable — no orphan.
+
+This ensures that at every intermediate step, either the data is fully
+reachable (tombstone points to a live object) or fully absent — never an orphan
+in either backend.
+
+# Task Isolation and Cancellation
+
+Each operation is spawned in a separate task for panic isolation. A failure in
+one operation does not affect other in-flight work. See
+[`Error::Panic`](error::Error).
+
+Read, delete, and metadata operations run to completion even if the caller is
+cancelled (e.g., due to a client disconnect). This protects the tombstone
+ordering invariant described above: a delete that is mid-flight must finish
+removing the long-term object before it removes the tombstone.
+
+Insert operations support **stream-level cancellation**. When the caller's
+future is dropped (client disconnect), a cancellation token fires, causing the
+payload stream to return an error on its next poll. This aborts the in-flight
+backend upload promptly, releasing the concurrency permit and avoiding wasted
+bandwidth.
+
+The cancellation boundary is **stream exhaustion**:
+
+- If the token fires while the stream is still yielding chunks, the long-term
+  backend upload is aborted before any data is committed. No tombstone is
+  needed or written — the system is clean.
+- If the token fires after the stream is fully consumed, the long-term upload
+  has already committed successfully. The token has no effect and the operation
+  continues normally, writing the tombstone and satisfying the consistency
+  invariant above.
+
+This means cancellation is always safe with respect to tombstone consistency:
+either nothing is written, or both the object and its tombstone are written.

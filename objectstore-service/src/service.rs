@@ -131,11 +131,17 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 /// [`Error::Panic`].
 ///
 /// Read, delete, and metadata operations run to completion even if the caller
-/// is cancelled (e.g., on client disconnect). Insert operations support
-/// **stream-level cancellation**: when the caller's future is dropped, the
-/// payload stream is cancelled via a token, causing the in-flight upload to
-/// abort promptly. Once the stream is fully consumed, cancellation has no
-/// effect and the operation completes normally.
+/// is cancelled (e.g., on client disconnect). This protects the tombstone
+/// ordering invariant above: a delete that is mid-flight must finish removing
+/// the long-term object before it removes the tombstone.
+///
+/// Insert operations support **stream-level cancellation**: when the caller's
+/// future is dropped, the payload stream is cancelled via a token, causing the
+/// in-flight upload to abort promptly. The cancellation boundary is stream
+/// exhaustion — if the token fires before all chunks are consumed the upload
+/// is aborted and no tombstone is written; if after, the upload has already
+/// committed and the tombstone write proceeds normally. Either way the
+/// consistency invariant above holds.
 ///
 /// # Concurrency Limit
 ///
