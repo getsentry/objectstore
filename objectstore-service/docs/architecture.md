@@ -130,6 +130,25 @@ with [`Error::AtCapacity`](error::Error::AtCapacity).
 The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
 [`StorageService::with_concurrency_limit`].
 
+## Batch Concurrency
+
+The [`batch`](batch) module provides [`BatchExecutor`](batch::BatchExecutor)
+for running a stream of batch operations concurrently within a bounded window.
+The window is derived at construction time from the service's available permits:
+`ceil(available_permits × 0.10)`, clamped to `[1, 50]`. If no permits are
+available at the time the executor is created, it returns
+[`Error::AtCapacity`](error::Error::AtCapacity), allowing the caller to reject
+the entire batch before reading any operations.
+
+Internally `BatchExecutor` uses `buffer_unordered` to drive up to `window`
+operations concurrently. The operations stream is pulled lazily, so the request
+body (multipart fields) is only read as capacity becomes available — memory
+usage is bounded by `window × max_operation_size`.
+
+The window fraction (10%) is hard-coded. Configurable fractions and
+backend-level batching optimisations (e.g. BigTable multi-read, GCS batch API)
+are out of scope for the current implementation.
+
 ## Further Plans
 
 More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may

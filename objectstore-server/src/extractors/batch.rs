@@ -6,9 +6,8 @@ use axum::extract::{
 };
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
-use objectstore_service::id::ObjectKey;
+use objectstore_service::batch::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
@@ -48,105 +47,72 @@ pub enum BatchError {
     },
 }
 
-#[derive(Debug)]
-pub struct GetOperation {
-    pub key: ObjectKey,
-}
-
-#[derive(Debug)]
-pub struct InsertOperation {
-    pub key: ObjectKey,
-    pub metadata: Metadata,
-    pub payload: Bytes,
-}
-
-#[derive(Debug)]
-pub struct DeleteOperation {
-    pub key: ObjectKey,
-}
-
-#[derive(Debug)]
-pub enum Operation {
-    Get(GetOperation),
-    Insert(InsertOperation),
-    Delete(DeleteOperation),
-}
-
-impl Operation {
-    async fn try_from_field(field: Field<'_>) -> Result<Self, BatchError> {
-        let kind = field
-            .headers()
-            .get(HEADER_BATCH_OPERATION_KIND)
-            .ok_or_else(|| {
-                BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KIND} header"))
-            })?;
-        let kind = kind
-            .to_str()
-            .map_err(|_| {
-                BatchError::BadRequest(format!(
-                    "unable to convert {HEADER_BATCH_OPERATION_KIND} header value to string"
-                ))
-            })?
-            .to_lowercase();
-
-        let key_header = field
-            .headers()
-            .get(HEADER_BATCH_OPERATION_KEY)
-            .ok_or_else(|| {
-                BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KEY} header"))
-            })?
-            .to_str()
-            .map_err(|_| {
-                BatchError::BadRequest(format!(
-                    "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
-                ))
-            })?;
-        let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
+async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchError> {
+    let kind = field
+        .headers()
+        .get(HEADER_BATCH_OPERATION_KIND)
+        .ok_or_else(|| {
+            BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KIND} header"))
+        })?;
+    let kind = kind
+        .to_str()
+        .map_err(|_| {
             BatchError::BadRequest(format!(
-                "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
+                "unable to convert {HEADER_BATCH_OPERATION_KIND} header value to string"
+            ))
+        })?
+        .to_lowercase();
+
+    let key_header = field
+        .headers()
+        .get(HEADER_BATCH_OPERATION_KEY)
+        .ok_or_else(|| {
+            BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KEY} header"))
+        })?
+        .to_str()
+        .map_err(|_| {
+            BatchError::BadRequest(format!(
+                "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
             ))
         })?;
-        let key = String::from_utf8(key_bytes).map_err(|_| {
-            BatchError::BadRequest(format!(
-                "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
-            ))
-        })?;
+    let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
+        BatchError::BadRequest(format!(
+            "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
+        ))
+    })?;
+    let key = String::from_utf8(key_bytes).map_err(|_| {
+        BatchError::BadRequest(format!(
+            "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
+        ))
+    })?;
 
-        let operation = match kind.as_str() {
-            "get" => Operation::Get(GetOperation { key }),
-            "insert" => {
-                let metadata = Metadata::from_headers(field.headers(), "")?;
-                let payload = field.bytes().await?;
-                if payload.len() > MAX_FIELD_SIZE {
-                    return Err(BatchError::LimitExceeded(format!(
-                        "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
-                    )));
-                }
-                Operation::Insert(InsertOperation {
-                    key,
-                    metadata,
-                    payload,
-                })
-            }
-            "delete" => Operation::Delete(DeleteOperation { key }),
-            _ => {
-                return Err(BatchError::BadRequest(format!(
-                    "invalid operation kind: {kind}"
+    let operation = match kind.as_str() {
+        "get" => Operation::Get(Get { key }),
+        "insert" => {
+            let metadata = Metadata::from_headers(field.headers(), "")?;
+            let payload = field.bytes().await?;
+            if payload.len() > MAX_FIELD_SIZE {
+                return Err(BatchError::LimitExceeded(format!(
+                    "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
                 )));
             }
-        };
-        Ok(operation)
-    }
-
-    pub fn key(&self) -> &ObjectKey {
-        match self {
-            Operation::Get(op) => &op.key,
-            Operation::Insert(op) => &op.key,
-            Operation::Delete(op) => &op.key,
+            Operation::Insert(Insert {
+                key,
+                metadata,
+                payload,
+            })
         }
-    }
+        "delete" => Operation::Delete(Delete { key }),
+        _ => {
+            return Err(BatchError::BadRequest(format!(
+                "invalid operation kind: {kind}"
+            )));
+        }
+    };
+    Ok(operation)
 }
 
+/// A lazily-parsed stream of batch operations extracted from a multipart request body.
 pub struct BatchOperationStream(pub BoxStream<'static, Result<Operation, BatchError>>);
 
 impl Debug for BatchOperationStream {
@@ -176,7 +142,7 @@ where
                     )))?;
                 }
                 count += 1;
-                yield Operation::try_from_field(field).await?;
+                yield try_operation_from_field(field).await?;
             }
         }
         .boxed();
@@ -193,6 +159,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, header::CONTENT_TYPE};
     use futures::StreamExt;
+    use objectstore_service::batch::Operation;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
 
     #[tokio::test]

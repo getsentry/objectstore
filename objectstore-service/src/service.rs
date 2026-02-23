@@ -153,7 +153,10 @@ impl StorageService {
         Ok(Self::from_backends(high_volume_backend, long_term_backend))
     }
 
-    fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
+    pub(crate) fn from_backends(
+        high_volume_backend: BoxedBackend,
+        long_term_backend: BoxedBackend,
+    ) -> Self {
         Self {
             inner: Arc::new(TieredStorage {
                 high_volume_backend,
@@ -170,6 +173,11 @@ impl StorageService {
     pub fn with_concurrency_limit(mut self, max: usize) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
         self
+    }
+
+    /// Returns the number of concurrency permits currently available.
+    pub fn available_permits(&self) -> usize {
+        self.concurrency.available_permits()
     }
 
     /// Starts background processes for the storage service.

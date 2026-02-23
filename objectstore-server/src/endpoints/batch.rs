@@ -1,8 +1,9 @@
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
@@ -12,14 +13,16 @@ use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
+use objectstore_service::batch::{BatchExecutor, Operation, OperationResult, Outcome};
+use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchError, BatchOperationStream, Operation};
+use crate::extractors::batch::{BatchError, BatchOperationStream};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
 
@@ -77,89 +80,168 @@ async fn batch(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
-    mut requests: BatchOperationStream,
+    requests: BatchOperationStream,
 ) -> Response {
-    let responses: BoxStream<OperationResponse> = async_stream::stream! {
-        while let Some(operation) = requests.0.next().await {
-            let (operation, key, kind) = match operation {
-                Ok(op) => {
-                    let key = op.key().clone();
-                    let kind = match &op {
-                        Operation::Get(_) => "get",
-                        Operation::Insert(_) => "insert",
-                        Operation::Delete(_) => "delete",
-                    };
-                    (Ok(op), Some(key), Some(kind))
+    // Attempt to acquire a window from available service permits.
+    // If no permits are available, reject the entire batch immediately.
+    let executor = match BatchExecutor::new(&state.service) {
+        Ok(e) => e,
+        Err(objectstore_service::error::Error::AtCapacity) => {
+            return ApiError::Service(objectstore_service::error::Error::AtCapacity)
+                .into_response();
+        }
+        Err(e) => return ApiError::Service(e).into_response(),
+    };
+
+    merni::gauge!("service.batch.window": executor.window());
+
+    let captured_errors: Arc<Mutex<Vec<OperationResponse>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Build a clean stream of validated operations. Parse errors, rate-limit
+    // rejections, and auth failures are captured in `captured_errors` rather
+    // than propagating as stream items, so the executor receives a clean
+    // `Stream<Item = Operation>`.
+    let clean_stream: BoxStream<'static, Operation> = {
+        let captured = Arc::clone(&captured_errors);
+        let state_ref = Arc::clone(&state);
+        let context_ref = context.clone();
+
+        async_stream::stream! {
+            let captured = captured;
+            let state = state_ref;
+            let context = context_ref;
+            // Move the AuthAwareService into this generator so it lives for the
+            // duration of validation without needing Clone or Arc.
+            let service = service;
+            let mut raw = requests.0;
+
+            while let Some(result) = raw.next().await {
+                let mut op = match result {
+                    Ok(op) => op,
+                    Err(e) => {
+                        captured.lock().unwrap().push(OperationResponse::Error(ErrorResponse {
+                            key: None,
+                            kind: None,
+                            error: e.into(),
+                        }));
+                        continue;
+                    }
+                };
+
+                let key = op.key().to_owned();
+                let kind = op.kind();
+
+                // Rate limit check.
+                if !state.rate_limiter.check(&context) {
+                    tracing::debug!("Batch operation rejected due to rate limits");
+                    captured.lock().unwrap().push(OperationResponse::Error(ErrorResponse {
+                        key: Some(key),
+                        kind: Some(kind),
+                        error: BatchError::RateLimited.into(),
+                    }));
+                    continue;
                 }
-                Err(e) => (Err(e), None, None),
-            };
 
-            if !state.rate_limiter.check(&context) {
-                tracing::debug!("Batch operation rejected due to rate limits");
-                yield OperationResponse::Error(ErrorResponse {
-                    key,
-                    kind,
-                    error: BatchError::RateLimited.into(),
-                });
-                continue;
+                // Auth check.
+                let perm = match &op {
+                    Operation::Get(_) => Permission::ObjectRead,
+                    Operation::Insert(_) => Permission::ObjectWrite,
+                    Operation::Delete(_) => Permission::ObjectDelete,
+                };
+                if let Err(e) = service.check_permission(perm, &context) {
+                    captured.lock().unwrap().push(OperationResponse::Error(ErrorResponse {
+                        key: Some(key),
+                        kind: Some(kind),
+                        error: e,
+                    }));
+                    continue;
+                }
+
+                // For inserts: stamp time_created and record bandwidth now that the
+                // operation is known to be valid.
+                if let Operation::Insert(ref mut insert) = op {
+                    insert.metadata.time_created = Some(SystemTime::now());
+                    state.record_bandwidth(&context, insert.payload.len() as u64);
+                }
+
+                yield op;
             }
+        }
+        .boxed()
+    };
 
-            let result = match operation {
-                Ok(operation) => match operation {
-                    Operation::Get(get) => {
-                        let key = get.key.clone();
-                        let result = service
-                            .get_object(ObjectId::new(context.clone(), get.key))
-                            .await;
+    // Run the validated operations through the concurrent executor.
+    let state_for_conv = Arc::clone(&state);
+    let context_for_conv = context.clone();
 
-                        let result = match result {
-                            Ok(Some((metadata, stream))) => {
-                                let metered_stream = state.meter_stream(stream, &context);
-                                match metered_stream.try_collect::<BytesMut>().await {
-                                    Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
-                                    Err(e) => Err(ApiError::Service(e.into())),
-                                }
-                            }
-                            Ok(None) => Ok(None),
-                            Err(e) => Err(e),
-                        };
+    let executor_stream: BoxStream<'static, OperationResponse> = executor
+        .execute(state.service.clone(), context, clean_stream)
+        .then(move |outcome| {
+            let state = Arc::clone(&state_for_conv);
+            let context = context_for_conv.clone();
+            async move { convert_outcome(outcome, &state, &context).await }
+        })
+        .boxed();
 
-                        OperationResponse::Get(GetResponse { key, result })
-                    }
-                    Operation::Insert(insert) => {
-                        let key = insert.key.clone();
-                        let mut metadata = insert.metadata;
-                        metadata.time_created = Some(SystemTime::now());
-
-                        state.record_bandwidth(&context, insert.payload.len() as u64);
-
-                        let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
-                        let result = service
-                            .insert_object(context.clone(), Some(insert.key), metadata, stream)
-                            .await;
-                        OperationResponse::Insert(InsertResponse { key, result })
-                    }
-                    Operation::Delete(delete) => {
-                        let key = delete.key.clone();
-                        let result = service
-                            .delete_object(ObjectId::new(context.clone(), delete.key))
-                            .await;
-                        OperationResponse::Delete(DeleteResponse { key, result })
-                    }
-                },
-                Err(error) => OperationResponse::Error(ErrorResponse {
-                    key,
-                    kind,
-                    error: error.into(),
-                }),
-            };
-            yield result;
+    // Yield executor outcomes first, then append any captured validation errors.
+    let responses: BoxStream<'static, OperationResponse> = async_stream::stream! {
+        let captured = captured_errors;
+        let stream = executor_stream;
+        futures::pin_mut!(stream);
+        while let Some(r) = stream.next().await {
+            yield r;
+        }
+        let drained: Vec<_> = captured.lock().unwrap().drain(..).collect();
+        for error in drained {
+            yield error;
         }
     }
     .boxed();
 
     let r = rand::random::<u128>();
     responses.into_multipart_response(r)
+}
+
+/// Converts a service-level [`Outcome`] into an endpoint [`OperationResponse`].
+///
+/// For get operations this collects the payload stream and applies bandwidth metering.
+async fn convert_outcome(
+    outcome: Outcome,
+    state: &crate::state::Services,
+    context: &ObjectContext,
+) -> OperationResponse {
+    let key = outcome.id.key;
+    match outcome.result {
+        OperationResult::Got(Ok(Some((metadata, stream)))) => {
+            let metered_stream = state.meter_stream(stream, context);
+            match metered_stream.try_collect::<BytesMut>().await {
+                Ok(bytes) => OperationResponse::Get(GetResponse {
+                    key,
+                    result: Ok(Some((metadata, bytes.freeze()))),
+                }),
+                Err(e) => OperationResponse::Get(GetResponse {
+                    key,
+                    result: Err(ApiError::Service(e.into())),
+                }),
+            }
+        }
+        OperationResult::Got(Ok(None)) => OperationResponse::Get(GetResponse {
+            key,
+            result: Ok(None),
+        }),
+        OperationResult::Got(Err(e)) => OperationResponse::Get(GetResponse {
+            key,
+            result: Err(e.into()),
+        }),
+        OperationResult::Inserted(result) => OperationResponse::Insert(InsertResponse {
+            key,
+            result: result.map_err(Into::into),
+        }),
+        OperationResult::Deleted(result) => OperationResponse::Delete(DeleteResponse {
+            key,
+            result: result.map_err(Into::into),
+        }),
+    }
 }
 
 fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {

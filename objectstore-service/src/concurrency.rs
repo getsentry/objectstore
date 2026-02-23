@@ -53,6 +53,11 @@ impl ConcurrencyLimiter {
         })
     }
 
+    /// Returns the number of permits currently available.
+    pub(crate) fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
     /// Returns the number of permits currently held.
     pub(crate) fn used_permits(&self) -> usize {
         self.max - self.semaphore.available_permits()
@@ -109,6 +114,24 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+
+    #[test]
+    fn available_permits_tracks_held() {
+        let limiter = ConcurrencyLimiter::new(5);
+        assert_eq!(limiter.available_permits(), 5);
+
+        let p1 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.available_permits(), 4);
+
+        let p2 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.available_permits(), 3);
+
+        drop(p1);
+        assert_eq!(limiter.available_permits(), 4);
+
+        drop(p2);
+        assert_eq!(limiter.available_permits(), 5);
+    }
 
     #[test]
     fn acquire_and_release() {
