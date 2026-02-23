@@ -192,11 +192,11 @@ mod tests {
             )
             .route("/health", get(|| async { StatusCode::OK.into_response() }))
             .route("/ready", get(|| async { StatusCode::OK.into_response() }))
+            .layer(in_flight_layer)
             .layer(from_fn_with_state(
                 (counter.clone(), max),
                 limit_web_concurrency,
-            ))
-            .layer(in_flight_layer);
+            ));
 
         (app, paused, resume)
     }
@@ -215,7 +215,9 @@ mod tests {
 
         // Hold the counter at 1 with a blocking request.
         let blocking = tokio::spawn(app.clone().oneshot(make_request("/v1/test/_/key")));
-        paused.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), paused.notified())
+            .await
+            .expect("handler did not start within 5s");
 
         // Regular request is rejected; health and ready bypass the limit.
         let resp = app
