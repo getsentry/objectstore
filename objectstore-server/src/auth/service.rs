@@ -53,7 +53,7 @@ impl AuthAwareService {
 
     /// Checks whether the request is authorized for the given permission on the given context.
     ///
-    /// Returns `Ok(())` if authorized, or an [`ApiError`] if not. Equivalent to the internal
+    /// Returns `Ok(())` if authorized, or an [`crate::endpoints::common::ApiError`] if not. Equivalent to the internal
     /// `assert_authorized` check but exposed for callers that validate operations individually
     /// before delegating to a lower-level service.
     pub fn check_permission(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
