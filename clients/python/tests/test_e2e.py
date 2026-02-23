@@ -292,3 +292,9 @@ def test_connect_timeout() -> None:
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         session.get("foo")
+
+    with pytest.raises(urllib3.exceptions.ConnectTimeoutError):
+        session.put(b"test data")
+
+    with pytest.raises(urllib3.exceptions.MaxRetryError):
+        session.put(b"test data", compression="none")
