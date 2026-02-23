@@ -11,6 +11,7 @@ profile.json.gz
 .*.sw*
 .claude/settings.local.json
 .claude/plans
+.claude/worktrees
 
 # Build artifacts
 /**/target
