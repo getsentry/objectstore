@@ -26,6 +26,10 @@ Health endpoints:
 - `GET /ready` — readiness probe (returns 503 when `/tmp/objectstore.down`
   exists, enabling graceful drain)
 
+Autoscaling endpoint:
+- `GET /keda` — Prometheus text-format gauges for KEDA autoscaling (see
+  [KEDA Metrics](#keda-metrics))
+
 ## Request Flow
 
 A request flows through several layers before reaching the storage service:
@@ -175,6 +179,54 @@ layer of backpressure through a concurrency limit on in-flight backend
 operations, configured via `service.max_concurrency`. When exceeded, requests
 receive HTTP 429. See the [service architecture docs](objectstore_service) for
 details.
+
+## KEDA Metrics
+
+`GET /keda` serves a Prometheus text-format (version 0.0.4) snapshot of all
+four rate-limited resources. It is designed for [KEDA](https://keda.sh/)
+Prometheus scalers: every scrape is a self-contained snapshot — no `irate()` or
+scrape-interval arithmetic needed.
+
+The endpoint is exempt from the web concurrency limit and request metrics so
+that it remains available when the server is at capacity.
+
+### Exposed Gauges
+
+| Metric | Always present | Description |
+|---|---|---|
+| `objectstore_bandwidth_ewma` | yes | Current bandwidth in bytes/s (EWMA) |
+| `objectstore_bandwidth_limit` | only when `global_bps` is set | Configured `global_bps` limit |
+| `objectstore_throughput_rps` | yes | Current admitted request rate in requests/s (EWMA) |
+| `objectstore_throughput_limit` | only when `global_rps` is set | Configured `global_rps` limit |
+| `objectstore_requests_in_flight` | yes | Current in-flight HTTP requests |
+| `objectstore_requests_limit` | yes | Configured `http.max_requests` |
+| `objectstore_tasks_in_use` | yes | Current in-flight backend tasks |
+| `objectstore_tasks_limit` | yes | Configured `service.max_concurrency` |
+
+Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
+bandwidth estimator. The accumulator counts fully admitted requests (requests
+that pass all throughput checks).
+
+### Example KEDA ScaledObject Trigger
+
+Scale on the highest utilization across all four resources:
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      query: |
+        max(
+          objectstore_bandwidth_ewma / objectstore_bandwidth_limit
+          or objectstore_throughput_rps / objectstore_throughput_limit
+          or objectstore_requests_in_flight / objectstore_requests_limit
+          or objectstore_tasks_in_use / objectstore_tasks_limit
+        )
+      threshold: "0.7"
+```
+
+Unconfigured limits produce no series and are excluded from `or` automatically.
 
 ## Killswitches
 

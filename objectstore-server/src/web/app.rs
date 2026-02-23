@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::Extension;
 use axum::ServiceExt;
 use axum::extract::Request;
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
@@ -57,7 +58,10 @@ impl App {
                     .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
             );
 
-        let router = endpoints::routes().layer(middleware).with_state(state);
+        let router = endpoints::routes()
+            .layer(middleware)
+            .layer(Extension(in_flight_requests.clone()))
+            .with_state(state);
 
         App {
             router,

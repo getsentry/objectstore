@@ -27,7 +27,7 @@ pub async fn limit_web_concurrency(
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    if !matches!(route, "/health" | "/ready") && counter.get() >= max {
+    if !matches!(route, "/health" | "/ready" | "/keda") && counter.get() >= max {
         merni::counter!("web.concurrency.rejected": 1);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -90,7 +90,7 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    let should_emit = !matches!(route, "/health" | "/ready");
+    let should_emit = !matches!(route, "/health" | "/ready" | "/keda");
     let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method()));
 
     let response = next.run(request).await;
@@ -192,6 +192,7 @@ mod tests {
             )
             .route("/health", get(|| async { StatusCode::OK.into_response() }))
             .route("/ready", get(|| async { StatusCode::OK.into_response() }))
+            .route("/keda", get(|| async { StatusCode::OK.into_response() }))
             .layer(in_flight_layer)
             .layer(from_fn_with_state(
                 (counter.clone(), max),
@@ -232,6 +233,9 @@ mod tests {
 
         let ready = app.clone().oneshot(make_request("/ready")).await.unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
+
+        let keda = app.clone().oneshot(make_request("/keda")).await.unwrap();
+        assert_eq!(keda.status(), StatusCode::OK);
 
         resume.notify_one();
         blocking.await.unwrap().unwrap();

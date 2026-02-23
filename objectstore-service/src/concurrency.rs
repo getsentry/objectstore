@@ -58,6 +58,11 @@ impl ConcurrencyLimiter {
         self.max - self.semaphore.available_permits()
     }
 
+    /// Returns the maximum number of concurrent permits.
+    pub(crate) fn capacity(&self) -> usize {
+        self.max
+    }
+
     /// Waits until all permits have been returned.
     #[allow(dead_code)]
     pub(crate) async fn wait_all(&self) {
@@ -109,6 +114,12 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+
+    #[test]
+    fn capacity_returns_configured_max() {
+        let limiter = ConcurrencyLimiter::new(42);
+        assert_eq!(limiter.capacity(), 42);
+    }
 
     #[test]
     fn acquire_and_release() {

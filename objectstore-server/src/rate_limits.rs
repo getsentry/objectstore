@@ -161,24 +161,66 @@ impl RateLimiter {
             acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    /// Returns the current global bandwidth EWMA in bytes per second.
+    pub fn bandwidth_ewma(&self) -> u64 {
+        self.bandwidth
+            .global
+            .estimate
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the configured global bandwidth limit in bytes/s, if set.
+    pub fn bandwidth_limit(&self) -> Option<u64> {
+        self.bandwidth.config.global_bps
+    }
+
+    /// Returns the current estimated throughput in requests per second.
+    pub fn throughput_rps(&self) -> u64 {
+        self.throughput
+            .global_estimator
+            .estimate
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the configured global throughput limit in requests/s, if set.
+    pub fn throughput_limit(&self) -> Option<u32> {
+        self.throughput.config.global_rps
+    }
 }
 
-/// Shared EWMA state for a single bandwidth estimator entry.
+/// Shared EWMA estimator state.
 ///
-/// The accumulator is incremented as bytes flow through streams, and the estimate is updated
+/// The accumulator is incremented as events occur, and the estimate is updated
 /// periodically by a background task using an exponentially weighted moving average.
 #[derive(Debug)]
-struct BandwidthEstimator {
+struct EwmaEstimator {
     accumulator: Arc<AtomicU64>,
     estimate: Arc<AtomicU64>,
 }
 
-impl BandwidthEstimator {
+impl EwmaEstimator {
     fn new() -> Self {
         Self {
             accumulator: Arc::new(AtomicU64::new(0)),
             estimate: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Updates the EWMA from the accumulator.
+    ///
+    /// Swaps the accumulator to zero, converts the count to a per-second rate using
+    /// `to_rate` (i.e., `1.0 / tick_duration.as_secs_f64()`), then applies the
+    /// EWMA smoothing and stores the floored result in `estimate`.
+    fn update_ewma(&self, ewma: &mut f64, to_rate: f64) {
+        const ALPHA: f64 = 0.2;
+        let current = self
+            .accumulator
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
+        let rate = (current as f64) * to_rate;
+        *ewma = ALPHA * rate + (1.0 - ALPHA) * *ewma;
+        self.estimate
+            .store(ewma.floor() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -186,18 +228,18 @@ impl BandwidthEstimator {
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
     /// Global accumulator/estimator pair.
-    global: Arc<BandwidthEstimator>,
+    global: Arc<EwmaEstimator>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Arc<BandwidthEstimator>>>,
-    scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthEstimator>>>,
+    usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
+    scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
         Self {
             config,
-            global: Arc::new(BandwidthEstimator::new()),
+            global: Arc::new(EwmaEstimator::new()),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
         }
@@ -219,9 +261,9 @@ impl BandwidthRateLimiter {
     /// Iterates over the global estimator as well as all per-usecase and per-scope estimators
     /// on each tick, updating their EWMAs.
     async fn estimator(
-        global: Arc<BandwidthEstimator>,
-        usecases: Arc<papaya::HashMap<String, Arc<BandwidthEstimator>>>,
-        scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthEstimator>>>,
+        global: Arc<EwmaEstimator>,
+        usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
+        scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
     ) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
@@ -238,7 +280,7 @@ impl BandwidthRateLimiter {
             interval.tick().await;
 
             // Global
-            Self::update_ewma(&global, &mut global_ewma, to_bps);
+            global.update_ewma(&mut global_ewma, to_bps);
             merni::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
 
             // Per-usecase
@@ -246,7 +288,7 @@ impl BandwidthRateLimiter {
                 let guard = usecases.pin();
                 for (key, estimator) in guard.iter() {
                     let ewma = usecase_ewmas.entry(key.clone()).or_insert(0.0);
-                    Self::update_ewma(estimator, ewma, to_bps);
+                    estimator.update_ewma(ewma, to_bps);
                 }
             }
 
@@ -255,26 +297,13 @@ impl BandwidthRateLimiter {
                 let guard = scopes.pin();
                 for (key, estimator) in guard.iter() {
                     let ewma = scope_ewmas.entry(key.clone()).or_insert(0.0);
-                    Self::update_ewma(estimator, ewma, to_bps);
+                    estimator.update_ewma(ewma, to_bps);
                 }
             }
 
             merni::gauge!("server.rate_limiter.bandwidth.scope_map_size": scopes.len());
             merni::gauge!("server.rate_limiter.bandwidth.usecase_map_size": usecases.len());
         }
-    }
-
-    /// Updates a single EWMA estimator from its accumulator.
-    fn update_ewma(estimator: &BandwidthEstimator, ewma: &mut f64, to_bps: f64) {
-        const ALPHA: f64 = 0.2;
-        let current = estimator
-            .accumulator
-            .swap(0, std::sync::atomic::Ordering::Relaxed);
-        let bps = (current as f64) * to_bps;
-        *ewma = ALPHA * bps + (1.0 - ALPHA) * *ewma;
-        estimator
-            .estimate
-            .store(ewma.floor() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn check(&self, context: &ObjectContext) -> bool {
@@ -329,17 +358,15 @@ impl BandwidthRateLimiter {
 
         if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();
-            let estimator = guard.get_or_insert_with(context.usecase.clone(), || {
-                Arc::new(BandwidthEstimator::new())
-            });
+            let estimator = guard
+                .get_or_insert_with(context.usecase.clone(), || Arc::new(EwmaEstimator::new()));
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
         if self.scope_bps().is_some() {
             let guard = self.scopes.pin();
-            let estimator = guard.get_or_insert_with(context.scopes.clone(), || {
-                Arc::new(BandwidthEstimator::new())
-            });
+            let estimator =
+                guard.get_or_insert_with(context.scopes.clone(), || Arc::new(EwmaEstimator::new()));
             accs.push(Arc::clone(&estimator.accumulator));
         }
 
@@ -365,6 +392,8 @@ impl BandwidthRateLimiter {
 struct ThroughputRateLimiter {
     config: ThroughputLimits,
     global: Option<Mutex<TokenBucket>>,
+    /// Global EWMA estimator for admitted request rate.
+    global_estimator: Arc<EwmaEstimator>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
@@ -381,6 +410,7 @@ impl ThroughputRateLimiter {
         Self {
             config,
             global,
+            global_estimator: Arc::new(EwmaEstimator::new()),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
             rules: papaya::HashMap::new(),
@@ -390,12 +420,18 @@ impl ThroughputRateLimiter {
     fn start(&self) {
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
+        let global_estimator = Arc::clone(&self.global_estimator);
         // NB: This task has no shutdown mechanism — the rate limiter is only created once.
         // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            const TICK: Duration = Duration::from_millis(50);
+            let mut interval = tokio::time::interval(TICK);
+            let to_rps = 1.0 / TICK.as_secs_f64();
+            let mut global_ewma: f64 = 0.0;
             loop {
                 interval.tick().await;
+                global_estimator.update_ewma(&mut global_ewma, to_rps);
+                merni::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
                 merni::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
                 merni::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
             }
@@ -446,6 +482,11 @@ impl ThroughputRateLimiter {
                 return false;
             }
         }
+
+        // Count this admitted request in the EWMA accumulator.
+        self.global_estimator
+            .accumulator
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         true
     }
@@ -576,5 +617,129 @@ impl Stream for MeteredPayloadStream {
             }
         }
         res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objectstore_service::id::ObjectContext;
+    use objectstore_types::scope::{Scope, Scopes};
+
+    use super::*;
+
+    fn make_context() -> ObjectContext {
+        ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
+        }
+    }
+
+    #[test]
+    fn ewma_estimator_update_applies_alpha() {
+        let estimator = EwmaEstimator::new();
+        const TICK: f64 = 0.05; // 50ms
+        let to_rate = 1.0 / TICK;
+        let mut ewma: f64 = 0.0;
+
+        // Simulate 10 events in one 50ms tick → 200 /s raw rate.
+        // After one step: 0.2 * 200 + 0.8 * 0 = 40.
+        estimator
+            .accumulator
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        estimator.update_ewma(&mut ewma, to_rate);
+        assert_eq!(
+            estimator
+                .estimate
+                .load(std::sync::atomic::Ordering::Relaxed),
+            40
+        );
+
+        // Accumulator must have been zeroed.
+        assert_eq!(
+            estimator
+                .accumulator
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn throughput_check_increments_accumulator() {
+        let limiter = ThroughputRateLimiter::new(ThroughputLimits {
+            global_rps: Some(1000),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            limiter
+                .global_estimator
+                .accumulator
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        let context = make_context();
+        assert!(limiter.check(&context));
+        assert!(limiter.check(&context));
+
+        assert_eq!(
+            limiter
+                .global_estimator
+                .accumulator
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn throughput_rejected_does_not_increment_accumulator() {
+        let limiter = ThroughputRateLimiter::new(ThroughputLimits {
+            global_rps: Some(1),
+            burst: 0,
+            ..Default::default()
+        });
+
+        let context = make_context();
+        // First call admitted (consumes the one token), second rejected.
+        assert!(limiter.check(&context));
+        assert!(!limiter.check(&context));
+
+        assert_eq!(
+            limiter
+                .global_estimator
+                .accumulator
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1 // only the admitted request
+        );
+    }
+
+    #[test]
+    fn rate_limiter_accessors_with_config() {
+        let rate_limiter = RateLimiter::new(RateLimits {
+            throughput: ThroughputLimits {
+                global_rps: Some(500),
+                ..Default::default()
+            },
+            bandwidth: BandwidthLimits {
+                global_bps: Some(1_000_000),
+                ..Default::default()
+            },
+        });
+
+        assert_eq!(rate_limiter.bandwidth_limit(), Some(1_000_000));
+        assert_eq!(rate_limiter.throughput_limit(), Some(500));
+        // Estimates start at 0 before any background tick.
+        assert_eq!(rate_limiter.bandwidth_ewma(), 0);
+        assert_eq!(rate_limiter.throughput_rps(), 0);
+    }
+
+    #[test]
+    fn rate_limiter_accessors_no_limits() {
+        let rate_limiter = RateLimiter::new(RateLimits::default());
+
+        assert_eq!(rate_limiter.bandwidth_limit(), None);
+        assert_eq!(rate_limiter.throughput_limit(), None);
+        assert_eq!(rate_limiter.bandwidth_ewma(), 0);
+        assert_eq!(rate_limiter.throughput_rps(), 0);
     }
 }

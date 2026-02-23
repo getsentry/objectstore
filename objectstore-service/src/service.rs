@@ -172,6 +172,16 @@ impl StorageService {
         self
     }
 
+    /// Returns the number of backend tasks currently in flight.
+    pub fn tasks_in_use(&self) -> usize {
+        self.concurrency.used_permits()
+    }
+
+    /// Returns the maximum number of concurrent backend tasks.
+    pub fn tasks_capacity(&self) -> usize {
+        self.concurrency.capacity()
+    }
+
     /// Starts background processes for the storage service.
     ///
     /// Currently spawns a task that emits the `service.concurrency.in_use`
@@ -725,6 +735,39 @@ mod tests {
             .get_metadata(ObjectId::new(make_context(), "first".into()))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tasks_capacity_returns_configured_limit() {
+        let hv = GatedBackend::new("cap-hv");
+        let lt = GatedBackend::new("cap-lt");
+        let service =
+            StorageService::from_backends(Box::new(hv), Box::new(lt)).with_concurrency_limit(7);
+        assert_eq!(service.tasks_capacity(), 7);
+    }
+
+    #[tokio::test]
+    async fn tasks_in_use_tracks_in_flight() {
+        let (service, hv, _lt) = make_limited_service(5);
+
+        assert_eq!(service.tasks_in_use(), 0);
+
+        // Kick off a request that blocks in the backend, holding a permit.
+        let svc = service.clone();
+        let _blocked = tokio::spawn(async move {
+            svc.insert_object(
+                make_context(),
+                Some("in-use-test".into()),
+                Metadata::default(),
+                make_stream(b"data"),
+            )
+            .await
+        });
+
+        hv.paused.notified().await;
+        assert_eq!(service.tasks_in_use(), 1);
+
+        hv.resume.notify_one();
     }
 
     #[tokio::test]

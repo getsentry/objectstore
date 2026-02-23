@@ -9,6 +9,7 @@ use crate::state::ServiceState;
 mod batch;
 pub mod common;
 pub mod health;
+mod keda;
 mod objects;
 
 pub fn routes() -> Router<ServiceState> {
@@ -18,5 +19,6 @@ pub fn routes() -> Router<ServiceState> {
 
     Router::new()
         .merge(health::router())
+        .merge(keda::router())
         .nest("/v1/", routes_v1)
 }
