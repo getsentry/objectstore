@@ -251,4 +251,11 @@ async fn fails_with_insufficient_auth_token_perms() {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
+
+    let delete_result = session.delete("some-key").send().await;
+    println!("{:?}", delete_result);
+    match delete_result {
+        Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
+        _ => panic!("Expected error"),
+    }
 }
