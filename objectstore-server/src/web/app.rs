@@ -42,6 +42,10 @@ impl App {
         //  - Responses go from bottom to top
         let middleware = ServiceBuilder::new()
             .layer(axum::middleware::from_fn(m::emit_request_metrics))
+            .layer(axum::middleware::from_fn_with_state(
+                (in_flight_requests.clone(), state.config.http.max_requests),
+                m::limit_web_concurrency,
+            ))
             .layer(in_flight_layer)
             .layer(CatchPanicLayer::custom(m::handle_panic))
             .layer(m::set_server_header())
