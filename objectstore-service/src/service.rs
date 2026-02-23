@@ -193,7 +193,12 @@ impl StorageService {
     /// [`Error::Panic`] if the spawned task panics (the panic message
     /// is captured for diagnostics), or [`Error::Dropped`] if the task is
     /// dropped before sending its result.
-    async fn spawn<T, F>(&self, f: F) -> Result<T>
+    ///
+    /// Emits `service.task.start` (counter) after acquiring a permit and
+    /// `service.task.duration` (distribution) when the task completes, tagged
+    /// with the given `operation` name and an `outcome` of `"success"` or
+    /// `"error"`.
+    async fn spawn<T, F>(&self, operation: &'static str, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
@@ -202,12 +207,22 @@ impl StorageService {
             merni::counter!("service.concurrency.rejected": 1);
         })?;
 
+        merni::counter!("service.task.start": 1, "operation" => operation);
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
             let result = std::panic::AssertUnwindSafe(f)
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
+
+            merni::distribution!(
+                "service.task.duration"@s: start.elapsed(),
+                "operation" => operation,
+                "outcome" => if result.is_ok() { "success" } else { "error" }
+            );
+
             let _ = tx.send(result);
             drop(permit);
         });
@@ -243,8 +258,10 @@ impl StorageService {
         stream: PayloadStream,
     ) -> Result<InsertResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn(async move { inner.insert_object(context, key, &metadata, stream).await })
-            .await
+        self.spawn("insert", async move {
+            inner.insert_object(context, key, &metadata, stream).await
+        })
+        .await
     }
 
     /// Retrieves only the metadata for an object, without the payload.
@@ -256,7 +273,7 @@ impl StorageService {
     /// long-term backend instead.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn(async move { inner.get_metadata(&id).await })
+        self.spawn("get_metadata", async move { inner.get_metadata(&id).await })
             .await
     }
 
@@ -269,7 +286,8 @@ impl StorageService {
     /// long-term backend instead.
     pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn(async move { inner.get_object(&id).await }).await
+        self.spawn("get", async move { inner.get_object(&id).await })
+            .await
     }
 
     /// Deletes an object, if it exists.
@@ -289,7 +307,7 @@ impl StorageService {
     /// the data is still reachable.
     pub async fn delete_object(&self, id: ObjectId) -> Result<DeleteResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn(async move { inner.delete_object(&id).await })
+        self.spawn("delete", async move { inner.delete_object(&id).await })
             .await
     }
 }
