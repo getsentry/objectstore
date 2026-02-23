@@ -255,11 +255,13 @@ mod tests {
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
     use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::make_stream;
+    use crate::stream::{CancelAfterChunks, CancellableStream, make_chunked_stream, make_stream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -617,6 +619,113 @@ mod tests {
                 "simulated long-term delete failure",
             )))
         }
+    }
+
+    // --- Stream cancellation tests ---
+
+    #[tokio::test]
+    async fn cancelled_stream_during_buffering_writes_nothing() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let token = CancellationToken::new();
+
+        // Multi-chunk stream that cancels the token after the first chunk.
+        // The buffering loop will read chunk 1, then on the next poll the
+        // CancellableStream detects the cancelled token and returns an error.
+        let data = vec![0u8; 512 * 1024]; // 512 KiB, fits in buffering
+        let inner = CancelAfterChunks::new(
+            make_chunked_stream(&data, 64 * 1024),
+            token.clone(),
+            1, // cancel after first chunk
+        )
+        .into_stream();
+        let stream = CancellableStream::new(inner, token).into_stream();
+
+        let result = storage
+            .insert_object(
+                make_context(),
+                Some("buffer-cancel".into()),
+                &Default::default(),
+                stream,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let id = ObjectId::new(make_context(), "buffer-cancel".into());
+        assert!(!hv.contains(&id), "cancelled insert wrote to high-volume");
+        assert!(!lt.contains(&id), "cancelled insert wrote to long-term");
+    }
+
+    #[tokio::test]
+    async fn cancelled_stream_during_lt_upload_writes_nothing() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let token = CancellationToken::new();
+
+        // 2 MiB payload in 512 KiB chunks (4 chunks total). The buffering loop
+        // reads until > 1 MiB and breaks (consuming 3 chunks = 1.5 MiB). The
+        // remaining chunk is chained into the long-term backend's upload stream.
+        //
+        // CancelAfterChunks cancels the token after chunk 3 — i.e. right when
+        // buffering completes and before the remaining chunk is read. The
+        // CancellableStream then catches the cancellation on the next poll
+        // during the backend write.
+        let data = vec![0xABu8; 2 * 1024 * 1024];
+        let inner = CancelAfterChunks::new(
+            make_chunked_stream(&data, 512 * 1024),
+            token.clone(),
+            3, // cancel after 3 chunks (1.5 MiB buffered, triggering LT path)
+        )
+        .into_stream();
+        let stream = CancellableStream::new(inner, token).into_stream();
+
+        let result = storage
+            .insert_object(
+                make_context(),
+                Some("lt-cancel".into()),
+                &Default::default(),
+                stream,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let id = ObjectId::new(make_context(), "lt-cancel".into());
+        assert!(!lt.contains(&id), "cancelled insert left data in long-term");
+        assert!(
+            !hv.contains(&id),
+            "cancelled insert left tombstone in high-volume"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_insert_unaffected_by_late_cancel() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let token = CancellationToken::new();
+
+        // 2 MiB payload as a single chunk — the stream is fully consumed during
+        // buffering and the backend write uses locally buffered data. The token
+        // is never checked after the stream is exhausted.
+        let data = vec![0xCDu8; 2 * 1024 * 1024];
+        let stream = CancellableStream::new(make_stream(&data), token.clone()).into_stream();
+
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("late-cancel".into()),
+                &Default::default(),
+                stream,
+            )
+            .await
+            .unwrap();
+
+        // Cancel the token after the insert completed.
+        token.cancel();
+
+        // Both the long-term object and the tombstone should exist.
+        let (lt_meta, lt_bytes) = lt.get_stored(&id).expect("long-term object missing");
+        assert!(!lt_meta.is_tombstone());
+        assert_eq!(lt_bytes.len(), data.len());
+
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone missing");
+        assert!(hv_meta.is_tombstone());
     }
 
     /// When the long-term delete fails, the tombstone must be preserved so the

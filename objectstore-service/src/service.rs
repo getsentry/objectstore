@@ -7,17 +7,20 @@
 
 use std::any::Any;
 use std::future::Future;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
 use objectstore_types::metadata::Metadata;
+use tokio_util::sync::CancellationToken;
 
 use crate::PayloadStream;
 use crate::backend::common::BoxedBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::stream::CancellableStream;
 use crate::tiered::TieredStorage;
 
 /// Service response for [`StorageService::get_object`].
@@ -121,13 +124,18 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 ///
 /// See the individual methods for per-operation tombstone behavior.
 ///
-/// # Run-to-Completion and Panic Isolation
+/// # Task Isolation and Cancellation
 ///
-/// Each operation runs to completion even if the caller is cancelled (e.g., on
-/// client disconnect). This ensures that multi-step operations such as writing
-/// redirect tombstones are never left partially applied. Operations are also
-/// isolated from panics in backend code — a failure in one operation does not
-/// bring down other in-flight work. See [`Error::Panic`].
+/// Each operation is spawned in a separate task for panic isolation — a failure
+/// in one operation does not bring down other in-flight work. See
+/// [`Error::Panic`].
+///
+/// Read, delete, and metadata operations run to completion even if the caller
+/// is cancelled (e.g., on client disconnect). Insert operations support
+/// **stream-level cancellation**: when the caller's future is dropped, the
+/// payload stream is cancelled via a token, causing the in-flight upload to
+/// abort promptly. Once the stream is fully consumed, cancellation has no
+/// effect and the operation completes normally.
 ///
 /// # Concurrency Limit
 ///
@@ -217,10 +225,15 @@ impl StorageService {
                 .await
                 .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
 
+            let outcome = match &result {
+                Ok(_) => "success",
+                Err(Error::Io(e)) if e.kind() == io::ErrorKind::ConnectionAborted => "cancelled",
+                Err(_) => "error",
+            };
             merni::distribution!(
                 "service.task.duration"@s: start.elapsed(),
                 "operation" => operation,
-                "outcome" => if result.is_ok() { "success" } else { "error" }
+                "outcome" => outcome
             );
 
             let _ = tx.send(result);
@@ -235,11 +248,15 @@ impl StorageService {
     /// `context` is required, while the `key` can be assigned automatically if
     /// set to `None`.
     ///
-    /// # Run-to-completion
+    /// # Stream-level cancellation
     ///
-    /// Once called, the operation runs to completion even if the returned future
-    /// is dropped (e.g., on client disconnect). This guarantees that partially
-    /// written objects are never left without their redirect tombstone.
+    /// When the returned future is dropped (e.g., on client disconnect), the
+    /// payload stream is cancelled via a [`CancellationToken`]. The spawned
+    /// task continues to run, but the next stream poll returns
+    /// [`ConnectionAborted`](io::ErrorKind::ConnectionAborted), causing the
+    /// backend to abort the in-flight upload. Once the stream is exhausted
+    /// (all data sent), cancellation has no effect and the operation completes
+    /// normally — including the redirect tombstone write.
     ///
     /// # Tombstone handling
     ///
@@ -257,6 +274,9 @@ impl StorageService {
         metadata: Metadata,
         stream: PayloadStream,
     ) -> Result<InsertResponse> {
+        let token = CancellationToken::new();
+        let _guard = token.clone().drop_guard();
+        let stream = CancellableStream::new(stream, token).into_stream();
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
             inner.insert_object(context, key, &metadata, stream).await
@@ -632,15 +652,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receiver_drop_does_not_prevent_completion() {
+    async fn receiver_drop_cancels_insert() {
         let hv = GatedBackend::new("gated-hv");
         let lt = GatedBackend::new("gated-lt").with_pause();
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
+        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
+            .with_concurrency_limit(1);
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
             make_context(),
-            Some("completion-test".into()),
+            Some("cancel-test".into()),
             Metadata::default(),
             make_stream(&payload),
         );
@@ -653,23 +674,34 @@ mod tests {
             _ = paused.notified() => {}
         }
 
-        // The spawned task is now blocked inside put_object, and the caller
-        // request (including the oneshot receiver) has been dropped. Unpause so
-        // the task can finish writing.
+        // Dropping the request cancelled the stream token. Unblock the backend
+        // so the task can attempt to finish (and fail due to the cancelled stream).
         lt.resume.notify_one();
 
-        // Wait for the tombstone write to the high-volume backend, which is the
-        // last step of the long-term insert path.
-        let on_put = Arc::clone(&hv.on_put);
-        tokio::time::timeout(Duration::from_secs(5), on_put.notified())
-            .await
-            .expect("timed out waiting for tombstone write");
+        // Wait for the permit to be released, proving the task completed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let id = ObjectId::new(make_context(), "cancel-test".into());
+                match service.get_metadata(id).await {
+                    Err(Error::AtCapacity) => tokio::task::yield_now().await,
+                    _ => break,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for permit release");
 
-        // Verify the object was fully written despite the caller being dropped.
-        let id = ObjectId::new(make_context(), "completion-test".into());
-        assert!(lt.inner.contains(&id), "long-term object missing");
-        let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
-        assert!(meta.is_tombstone(), "expected redirect tombstone");
+        // No data should be in either backend: the long-term write was cancelled
+        // before it could succeed, and the tombstone was never written.
+        let id = ObjectId::new(make_context(), "cancel-test".into());
+        assert!(
+            !lt.inner.contains(&id),
+            "cancelled insert left data in long-term"
+        );
+        assert!(
+            !hv.inner.contains(&id),
+            "cancelled insert left tombstone in high-volume"
+        );
     }
 
     // --- Concurrency limit tests ---

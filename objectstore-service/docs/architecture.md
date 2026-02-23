@@ -46,10 +46,21 @@ single request. This is intentional:
 The service orchestrates mature, battle-tested backends and keeps its own
 footprint minimal.
 
-Each storage operation runs to completion even if the caller is cancelled (e.g.,
-due to a client disconnect). This ensures that multi-step operations such as
-writing redirect tombstones are never left partially applied. Operations are also
-panic-isolated — a failure in one request does not bring down the service.
+Read, delete, and metadata operations run to completion even if the caller is
+cancelled (e.g., due to a client disconnect). This ensures that multi-step
+operations such as deleting an object and its tombstone are never left partially
+applied.
+
+Insert operations support **stream-level cancellation**. When the caller's
+future is dropped (client disconnect), a cancellation token fires, causing the
+payload stream to return an error on its next poll. This aborts the in-flight
+backend upload promptly — releasing the concurrency permit and avoiding wasted
+bandwidth. If the stream has already been fully consumed (upload completing),
+the token has no effect and the operation finishes normally, including the
+redirect tombstone write.
+
+All operations are panic-isolated — a failure in one request does not bring
+down the service.
 
 # Two-Tier Backend System
 
