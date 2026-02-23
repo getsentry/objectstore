@@ -85,16 +85,16 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let file_len = reader.get_ref().metadata().await?.len() as usize;
+        let file_len = reader.get_ref().metadata().await?.len();
         let mut metadata: Metadata =
             serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
                 context: "failed to deserialize metadata".to_string(),
                 cause,
             })?;
         let payload_size = file_len
-            .checked_sub(metadata_line.len())
+            .checked_sub(metadata_line.len() as u64)
             .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
-        metadata.size = Some(payload_size);
+        metadata.size = Some(payload_size as usize);
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
