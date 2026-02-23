@@ -297,6 +297,14 @@ class Session:
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
+            retries = None  # by default use the pool's value, set by the Client
+            if compression == "zstd":
+                # For compressed bodies, don't attempt read retries,
+                # as the stream cannot be rewound after data has been consumed.
+                pool_retries = self._pool.retries
+                if isinstance(pool_retries, urllib3.Retry):
+                    retries = pool_retries.new(read=0)
+
             response = self._pool.request(
                 "POST" if not key else "PUT",
                 self._make_url(key),
@@ -304,6 +312,7 @@ class Session:
                 headers=headers,
                 preload_content=True,
                 decode_content=True,
+                retries=retries,
             )
             raise_for_status(response)
             res = response.json()
