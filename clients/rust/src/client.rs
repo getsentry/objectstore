@@ -18,6 +18,7 @@ struct ClientBuilderInner {
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
     token_generator: Option<TokenGenerator>,
+    token: Option<String>,
 }
 
 impl ClientBuilderInner {
@@ -68,6 +69,7 @@ impl ClientBuilder {
             propagate_traces: false,
             reqwest_builder,
             token_generator: None,
+            token: None,
         }))
     }
 
@@ -107,11 +109,29 @@ impl ClientBuilder {
         Self(Ok(inner))
     }
 
-    /// Sets a [`TokenGenerator`] that will be used to sign authorization tokens before
-    /// sending requests to Objectstore.
+    /// Sets a [`TokenGenerator`] that will be used to sign a fresh authorization token
+    /// for each request to Objectstore.
+    ///
+    /// Use this for internal services that have access to an EdDSA keypair.
+    /// For external services that already have a pre-signed JWT, use
+    /// [`Self::token`] instead.
     pub fn token_generator(self, token_generator: TokenGenerator) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.token_generator = Some(token_generator);
+        Self(Ok(inner))
+    }
+
+    /// Sets a static authorization token to send with every request.
+    ///
+    /// Use this for external services that receive a pre-signed JWT from another
+    /// source and don't have access to the signing key. For internal services
+    /// that have an EdDSA keypair, use [`Self::token_generator`] instead.
+    ///
+    /// If both a static token and a [`TokenGenerator`] are set, the static token
+    /// takes precedence.
+    pub fn token(self, token: impl Into<String>) -> Self {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.token = Some(token.into());
         Self(Ok(inner))
     }
 
@@ -132,6 +152,7 @@ impl ClientBuilder {
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
                 token_generator: inner.token_generator,
+                token: inner.token,
             }),
         })
     }
@@ -298,6 +319,7 @@ pub(crate) struct ClientInner {
     service_url: Url,
     propagate_traces: bool,
     token_generator: Option<TokenGenerator>,
+    token: Option<String>,
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -305,10 +327,21 @@ pub(crate) struct ClientInner {
 /// To perform CRUD operations, one has to create a Client, and then scope it to a [`Usecase`]
 /// and Scope in order to create a [`Session`].
 ///
-/// If your Objectstore instance enforces authorization checks, you must provide a
-/// [`TokenGenerator`] on creation.
+/// If your Objectstore instance enforces authorization checks, you must provide
+/// authentication via one of:
 ///
-/// # Example
+/// - **[`TokenGenerator`]** — for internal services that have access to an EdDSA
+///   keypair. The generator signs a fresh JWT for each request, scoped to the
+///   specific usecase and scope being accessed.
+/// - **Static token** ([`ClientBuilder::token`]) — for external services that
+///   receive a pre-signed JWT from another source and don't have (or need) access
+///   to the signing key.
+///
+/// If both are set, the static token takes precedence.
+///
+/// # Examples
+///
+/// Internal service with a keypair:
 ///
 /// ```no_run
 /// use std::time::Duration;
@@ -328,13 +361,19 @@ pub(crate) struct ClientInner {
 ///     .propagate_traces(true)
 ///     .token_generator(token_generator)
 ///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
-/// let session = Usecase::new("my_app")
-///     .for_project(12345, 1337)
-///     .session(&client)?;
+/// External service with a pre-signed JWT:
 ///
-/// let response = session.put("hello world").send().await?;
+/// ```no_run
+/// use objectstore_client::Client;
 ///
+/// # fn example() -> objectstore_client::Result<()> {
+/// let client = Client::builder("http://localhost:8888/")
+///     .token("<pre-signed JWT>")
+///     .build()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -418,7 +457,9 @@ impl Session {
 
         let mut builder = self.client.reqwest.request(method, url);
 
-        if let Some(token_generator) = &self.client.token_generator {
+        if let Some(token) = &self.client.token {
+            builder = builder.bearer_auth(token);
+        } else if let Some(token_generator) = &self.client.token_generator {
             let token = token_generator.sign_for_scope(&self.scope)?;
             builder = builder.bearer_auth(token);
         }

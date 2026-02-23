@@ -16,6 +16,7 @@ from objectstore_client import Client, Usecase
 from objectstore_client.auth import Permission, TokenGenerator
 from objectstore_client.client import RequestError
 from objectstore_client.metadata import TimeToLive
+from objectstore_client.scope import Scope
 
 TEST_EDDSA_KID: str = "test_kid"
 TEST_EDDSA_PRIVKEY_PATH: str = (
@@ -228,6 +229,31 @@ def test_not_found_with_different_scope(server_url: str) -> None:
 
     # Now make sure we can't fetch it
     session = client.session(test_usecase, org=42, project=9999)
+    with pytest.raises(RequestError) as exc_info:
+        session.get(object_key)
+    assert exc_info.value.status == 404
+
+
+def test_full_cycle_with_static_token(server_url: str) -> None:
+    token_generator = TestTokenGenerator.get()
+    token = token_generator.sign_for_scope("test-usecase", Scope(org=42, project=1337))
+
+    client = Client(server_url, token=token)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(b"static token data")
+    assert object_key is not None
+
+    retrieved = session.get(object_key)
+    assert retrieved.payload.read() == b"static token data"
+
+    session.delete(object_key)
+
     with pytest.raises(RequestError) as exc_info:
         session.get(object_key)
     assert exc_info.value.status == 404

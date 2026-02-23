@@ -122,8 +122,13 @@ class Client:
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
             timeouts).
-        token_generator: A [`TokenGenerator`] created with parameters for signing
-            objectstore auth tokens.
+        token_generator: A ``TokenGenerator`` that signs a fresh JWT for each
+            request using an EdDSA keypair. Use this for internal services that
+            have access to the signing key.
+        token: A pre-signed JWT to send with every request. Use this for
+            external services that receive a token from another source and don't
+            have access to the signing key. Takes precedence over
+            ``token_generator`` if both are set.
     """
 
     def __init__(
@@ -135,6 +140,7 @@ class Client:
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token_generator: TokenGenerator | None = None,
+        token: str | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -161,6 +167,7 @@ class Client:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
         self._token_generator = token_generator
+        self._token = token
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -192,6 +199,7 @@ class Client:
             usecase,
             Scope(**scopes),
             self._token_generator,
+            self._token,
         )
 
 
@@ -211,6 +219,7 @@ class Session:
         usecase: Usecase,
         scope: Scope,
         token_generator: TokenGenerator | None,
+        token: str | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -219,6 +228,7 @@ class Session:
         self._usecase = usecase
         self._scope = scope
         self._token_generator = token_generator
+        self._token = token
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
@@ -226,7 +236,9 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if self._token_generator:
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        elif self._token_generator:
             token = self._token_generator.sign_for_scope(
                 self._usecase.name, self._scope
             )

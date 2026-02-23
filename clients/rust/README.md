@@ -112,6 +112,36 @@ session.put("payload")
     .send().await?;
 ```
 
+### Authentication
+
+If your Objectstore instance enforces authorization, you must configure authentication
+on the Client. There are two options:
+
+- **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
+  The generator signs a fresh JWT for each request, scoped to the specific usecase
+  and scope being accessed.
+- **Static token** (`.token()`) — for external services that receive a pre-signed JWT
+  from another source and don't have (or need) access to the signing key.
+
+```rust,ignore
+use objectstore_client::{Client, SecretKey, TokenGenerator};
+
+// Option 1: Internal service with a keypair
+let client = Client::builder("http://localhost:8888/")
+    .token_generator(
+        TokenGenerator::new(SecretKey {
+            secret_key: "<private key>".into(),
+            kid: "my-service".into(),
+        })?
+    )
+    .build()?;
+
+// Option 2: External service with a pre-signed JWT
+let client = Client::builder("http://localhost:8888/")
+    .token("<pre-signed JWT>")
+    .build()?;
+```
+
 ## Configuration
 
 In production, store the [`Client`] and [`Usecase`] in a `static` and reuse them.
@@ -127,7 +157,8 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         // .propagate_traces(true) // default: false
         // .timeout(Duration::from_secs(5)) // default: no read timeout (connect: 100ms)
         // .configure_reqwest(|builder| { ... }) // customize the reqwest::ClientBuilder
-        // .token_generator(token_generator) // for authorized Objectstore instances
+        // .token_generator(token_generator) // internal services with an EdDSA keypair
+        // .token("pre-signed-jwt") // external services with a pre-signed JWT
         .build()
         .expect("Objectstore client to build successfully")
 });

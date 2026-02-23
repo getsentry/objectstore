@@ -22,6 +22,14 @@ class Permission(StrEnum):
 
 
 class TokenGenerator:
+    """
+    A utility to generate auth tokens for Objectstore requests.
+
+    Use this for internal services that have access to an EdDSA keypair. For external
+    services that already have a pre-signed JWT, pass the ``token`` parameter to
+    ``Client`` instead.
+    """
+
     def __init__(
         self,
         kid: str,
