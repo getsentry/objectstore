@@ -402,11 +402,21 @@ impl Client {
 /// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
 ///
 /// Create a Session using [`Client::session`] or [`Scope::session`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,
     token: Option<String>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("scope", &self.scope)
+            .field("client", &self.client)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
