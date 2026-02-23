@@ -79,6 +79,8 @@ impl super::common::Backend for InMemoryBackend {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(entry.map(|(metadata, bytes)| {
+            let mut metadata = metadata;
+            metadata.size = Some(bytes.len());
             let stream = futures_util::stream::once(async move { Ok(bytes) }).boxed();
             (metadata, stream)
         }))

@@ -85,11 +85,16 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata =
+        let file_len = reader.get_ref().metadata().await?.len();
+        let mut metadata: Metadata =
             serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
                 context: "failed to deserialize metadata".to_string(),
                 cause,
             })?;
+        let payload_size = file_len
+            .checked_sub(metadata_line.len() as u64)
+            .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
+        metadata.size = Some(payload_size as usize);
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
@@ -151,7 +156,13 @@ mod tests {
         let (read_metadata, stream) = backend.get_object(&id).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(read_metadata, metadata);
+        assert_eq!(
+            read_metadata,
+            Metadata {
+                size: Some(file_contents.len()),
+                ..metadata
+            }
+        );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
@@ -178,7 +189,13 @@ mod tests {
             .unwrap();
 
         let read_metadata = backend.get_metadata(&id).await.unwrap().unwrap();
-        assert_eq!(read_metadata, metadata);
+        assert_eq!(
+            read_metadata,
+            Metadata {
+                size: Some(7),
+                ..metadata
+            }
+        );
     }
 
     #[tokio::test]

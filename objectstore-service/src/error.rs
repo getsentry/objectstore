@@ -78,6 +78,14 @@ impl Error {
             cause,
         }
     }
+
+    /// Creates an [`Error::Generic`] with a context string and no cause.
+    pub fn generic(context: impl Into<String>) -> Self {
+        Self::Generic {
+            context: context.into(),
+            cause: None,
+        }
+    }
 }
 
 /// Result type for service operations.
