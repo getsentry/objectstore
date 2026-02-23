@@ -4,6 +4,8 @@
 //! gauges for every rate-limited resource. Each scrape is a self-contained snapshot — no
 //! `irate()` or Prometheus scrape-interval arithmetic needed.
 
+use std::fmt::Write as _;
+
 use axum::Extension;
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -29,51 +31,46 @@ async fn keda(
     let tasks_in_use = state.service.tasks_in_use();
     let tasks_capacity = state.service.tasks_capacity();
 
-    let mut output = String::new();
-
-    output.push_str("# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n");
-    output.push_str("# TYPE objectstore_bandwidth_ewma gauge\n");
-    output.push_str(&format!("objectstore_bandwidth_ewma {bw_ewma}\n"));
+    let mut output = format!(
+        "# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
+         # TYPE objectstore_bandwidth_ewma gauge\n\
+         objectstore_bandwidth_ewma {bw_ewma}\n\
+         # HELP objectstore_throughput_rps Current admitted request rate in requests/s (EWMA)\n\
+         # TYPE objectstore_throughput_rps gauge\n\
+         objectstore_throughput_rps {tp_rps}\n\
+         # HELP objectstore_requests_in_flight Current in-flight HTTP requests\n\
+         # TYPE objectstore_requests_in_flight gauge\n\
+         objectstore_requests_in_flight {req_in_flight}\n\
+         # HELP objectstore_requests_limit Configured maximum concurrent HTTP requests\n\
+         # TYPE objectstore_requests_limit gauge\n\
+         objectstore_requests_limit {req_limit}\n\
+         # HELP objectstore_tasks_in_use Current in-flight backend tasks\n\
+         # TYPE objectstore_tasks_in_use gauge\n\
+         objectstore_tasks_in_use {tasks_in_use}\n\
+         # HELP objectstore_tasks_limit Configured maximum concurrent backend tasks\n\
+         # TYPE objectstore_tasks_limit gauge\n\
+         objectstore_tasks_limit {tasks_capacity}\n"
+    );
 
     if let Some(limit) = bw_limit {
-        output.push_str(
-            "# HELP objectstore_bandwidth_limit Configured global bandwidth limit in bytes/s\n",
-        );
-        output.push_str("# TYPE objectstore_bandwidth_limit gauge\n");
-        output.push_str(&format!("objectstore_bandwidth_limit {limit}\n"));
+        write!(
+            output,
+            "# HELP objectstore_bandwidth_limit Configured global bandwidth limit in bytes/s\n\
+             # TYPE objectstore_bandwidth_limit gauge\n\
+             objectstore_bandwidth_limit {limit}\n"
+        )
+        .expect("writing to String is infallible");
     }
-
-    output.push_str(
-        "# HELP objectstore_throughput_rps Current admitted request rate in requests/s (EWMA)\n",
-    );
-    output.push_str("# TYPE objectstore_throughput_rps gauge\n");
-    output.push_str(&format!("objectstore_throughput_rps {tp_rps}\n"));
 
     if let Some(limit) = tp_limit {
-        output.push_str(
-            "# HELP objectstore_throughput_limit Configured global throughput limit in requests/s\n",
-        );
-        output.push_str("# TYPE objectstore_throughput_limit gauge\n");
-        output.push_str(&format!("objectstore_throughput_limit {limit}\n"));
+        write!(
+            output,
+            "# HELP objectstore_throughput_limit Configured global throughput limit in requests/s\n\
+             # TYPE objectstore_throughput_limit gauge\n\
+             objectstore_throughput_limit {limit}\n"
+        )
+        .expect("writing to String is infallible");
     }
-
-    output.push_str("# HELP objectstore_requests_in_flight Current in-flight HTTP requests\n");
-    output.push_str("# TYPE objectstore_requests_in_flight gauge\n");
-    output.push_str(&format!("objectstore_requests_in_flight {req_in_flight}\n"));
-
-    output.push_str(
-        "# HELP objectstore_requests_limit Configured maximum concurrent HTTP requests\n",
-    );
-    output.push_str("# TYPE objectstore_requests_limit gauge\n");
-    output.push_str(&format!("objectstore_requests_limit {req_limit}\n"));
-
-    output.push_str("# HELP objectstore_tasks_in_use Current in-flight backend tasks\n");
-    output.push_str("# TYPE objectstore_tasks_in_use gauge\n");
-    output.push_str(&format!("objectstore_tasks_in_use {tasks_in_use}\n"));
-
-    output.push_str("# HELP objectstore_tasks_limit Configured maximum concurrent backend tasks\n");
-    output.push_str("# TYPE objectstore_tasks_limit gauge\n");
-    output.push_str(&format!("objectstore_tasks_limit {tasks_capacity}\n"));
 
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
