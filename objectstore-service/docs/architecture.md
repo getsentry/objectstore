@@ -154,10 +154,10 @@ Each operation is spawned in a separate task for panic isolation. A failure in
 one operation does not affect other in-flight work. See
 [`Error::Panic`](error::Error).
 
-Read, delete, and metadata operations run to completion even if the caller is
-cancelled (e.g., due to a client disconnect). This protects the tombstone
-ordering invariant described above: a delete that is mid-flight must finish
-removing the long-term object before it removes the tombstone.
+Operations support different cancellation strategies based on their consistency
+requirements:
+
+## Insert — Stream-Level Cancellation
 
 Insert operations support **stream-level cancellation**. When the caller's
 future is dropped (client disconnect), a cancellation token fires, causing the
@@ -177,3 +177,22 @@ The cancellation boundary is **stream exhaustion**:
 
 This means cancellation is always safe with respect to tombstone consistency:
 either nothing is written, or both the object and its tombstone are written.
+
+## Read and Metadata — Task-Level Cancellation
+
+Read (`get_object`) and metadata (`get_metadata`) operations support
+**task-level cancellation**. When the caller's future is dropped, a
+`CancellationToken` fires inside the spawned task, racing against the backend
+call via `select!`. The backend future is dropped at its current `.await` point,
+releasing the concurrency permit and closing any in-flight HTTP/RPC connections.
+
+Since reads are side-effect-free, this is always safe — there is no consistency
+invariant to protect. This prevents disconnected clients from holding permits
+and starving valid requests under load.
+
+## Delete — Run-to-Completion
+
+Delete operations **run to completion** even if the caller is cancelled. This
+protects the tombstone ordering invariant described above: a delete that is
+mid-flight must finish removing the long-term object before it removes the
+tombstone.

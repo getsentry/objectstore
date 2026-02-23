@@ -130,18 +130,28 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 /// in one operation does not bring down other in-flight work. See
 /// [`Error::Panic`].
 ///
-/// Read, delete, and metadata operations run to completion even if the caller
-/// is cancelled (e.g., on client disconnect). This protects the tombstone
-/// ordering invariant above: a delete that is mid-flight must finish removing
-/// the long-term object before it removes the tombstone.
+/// Operations support different cancellation strategies based on their
+/// consistency requirements:
 ///
-/// Insert operations support **stream-level cancellation**: when the caller's
-/// future is dropped, the payload stream is cancelled via a token, causing the
-/// in-flight upload to abort promptly. The cancellation boundary is stream
-/// exhaustion — if the token fires before all chunks are consumed the upload
-/// is aborted and no tombstone is written; if after, the upload has already
-/// committed and the tombstone write proceeds normally. Either way the
-/// consistency invariant above holds.
+/// - **Inserts** use **stream-level cancellation**: when the caller's future is
+///   dropped, the payload stream is cancelled via a token, causing the in-flight
+///   upload to abort promptly. The cancellation boundary is stream exhaustion —
+///   if the token fires before all chunks are consumed the upload is aborted and
+///   no tombstone is written; if after, the upload has already committed and the
+///   tombstone write proceeds normally. Either way the consistency invariant
+///   above holds.
+///
+/// - **Reads and metadata** use **task-level cancellation**: when the caller's
+///   future is dropped, a [`CancellationToken`] fires inside the spawned task,
+///   racing against the backend call via `select!`. The backend future is
+///   dropped at its current `.await` point, releasing the concurrency permit and
+///   closing any in-flight connections. Since reads are side-effect-free, this
+///   is always safe.
+///
+/// - **Deletes** **run to completion** even if the caller is cancelled. This
+///   protects the tombstone ordering invariant above: a delete that is
+///   mid-flight must finish removing the long-term object before it removes
+///   the tombstone.
 ///
 /// # Concurrency Limit
 ///
@@ -292,18 +302,44 @@ impl StorageService {
 
     /// Retrieves only the metadata for an object, without the payload.
     ///
+    /// # Task-level cancellation
+    ///
+    /// When the returned future is dropped (e.g., on client disconnect), a
+    /// [`CancellationToken`] fires inside the spawned task, racing against the
+    /// backend call via `select!`. The backend future is dropped at its current
+    /// `.await` point, releasing the concurrency permit and closing any
+    /// in-flight connections.
+    ///
     /// # Tombstone handling
     ///
     /// Looks up the object in the high-volume backend first. If the result is a
     /// redirect tombstone, follows the redirect and fetches metadata from the
     /// long-term backend instead.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
+        let token = CancellationToken::new();
+        let _guard = token.clone().drop_guard();
         let inner = Arc::clone(&self.inner);
-        self.spawn("get_metadata", async move { inner.get_metadata(&id).await })
-            .await
+        self.spawn("get_metadata", async move {
+            tokio::select! {
+                result = inner.get_metadata(&id) => result,
+                _ = token.cancelled() => Err(Error::Io(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "operation cancelled",
+                ))),
+            }
+        })
+        .await
     }
 
     /// Streams the contents of an object.
+    ///
+    /// # Task-level cancellation
+    ///
+    /// When the returned future is dropped (e.g., on client disconnect), a
+    /// [`CancellationToken`] fires inside the spawned task, racing against the
+    /// backend call via `select!`. The backend future is dropped at its current
+    /// `.await` point, releasing the concurrency permit and closing any
+    /// in-flight connections.
     ///
     /// # Tombstone handling
     ///
@@ -311,9 +347,19 @@ impl StorageService {
     /// redirect tombstone, follows the redirect and fetches the object from the
     /// long-term backend instead.
     pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
+        let token = CancellationToken::new();
+        let _guard = token.clone().drop_guard();
         let inner = Arc::clone(&self.inner);
-        self.spawn("get", async move { inner.get_object(&id).await })
-            .await
+        self.spawn("get", async move {
+            tokio::select! {
+                result = inner.get_object(&id) => result,
+                _ = token.cancelled() => Err(Error::Io(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "operation cancelled",
+                ))),
+            }
+        })
+        .await
     }
 
     /// Deletes an object, if it exists.
@@ -596,11 +642,15 @@ mod tests {
         assert!(msg.contains("intentional panic in get_object"), "{msg}");
     }
 
-    /// In-memory backend with optional synchronization for `put_object`.
+    /// In-memory backend with optional synchronization for `put_object` and
+    /// `get_object`.
     ///
     /// When `pause` is enabled, each `put_object` call notifies `paused` and
     /// then waits on `resume` before proceeding. After the write completes,
     /// `on_put` is always notified regardless of the `pause` setting.
+    ///
+    /// When `pause_get` is enabled, each `get_object` call notifies
+    /// `get_paused` and then waits on `get_resume` before proceeding.
     #[derive(Debug, Clone)]
     struct GatedBackend {
         inner: InMemoryBackend,
@@ -608,6 +658,9 @@ mod tests {
         paused: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
         on_put: Arc<tokio::sync::Notify>,
+        pause_get: bool,
+        get_paused: Arc<tokio::sync::Notify>,
+        get_resume: Arc<tokio::sync::Notify>,
     }
 
     impl GatedBackend {
@@ -618,11 +671,19 @@ mod tests {
                 paused: Arc::new(tokio::sync::Notify::new()),
                 resume: Arc::new(tokio::sync::Notify::new()),
                 on_put: Arc::new(tokio::sync::Notify::new()),
+                pause_get: false,
+                get_paused: Arc::new(tokio::sync::Notify::new()),
+                get_resume: Arc::new(tokio::sync::Notify::new()),
             }
         }
 
         fn with_pause(mut self) -> Self {
             self.pause = true;
+            self
+        }
+
+        fn with_pause_get(mut self) -> Self {
+            self.pause_get = true;
             self
         }
     }
@@ -649,6 +710,10 @@ mod tests {
         }
 
         async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+            if self.pause_get {
+                self.get_paused.notify_one();
+                self.get_resume.notified().await;
+            }
             self.inner.get_object(id).await
         }
 
@@ -708,6 +773,96 @@ mod tests {
             !hv.inner.contains(&id),
             "cancelled insert left tombstone in high-volume"
         );
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_cancels_get() {
+        let hv = GatedBackend::new("gated-hv").with_pause_get();
+        let lt = GatedBackend::new("gated-lt");
+        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
+            .with_concurrency_limit(1);
+
+        // Insert a small object (goes to HV, no gating on puts).
+        let id = ObjectId::new(make_context(), "cancel-get-test".into());
+        hv.inner
+            .put_object(&id, &Metadata::default(), make_stream(b"payload"))
+            .await
+            .unwrap();
+
+        // Start a get through the public API. select! drops the future once the
+        // backend signals it has paused, simulating a client disconnect mid-read.
+        let request = service.get_object(id.clone());
+        let paused = Arc::clone(&hv.get_paused);
+        tokio::select! {
+            _ = request => panic!("get should not complete while backend is paused"),
+            _ = paused.notified() => {}
+        }
+
+        // Unblock the backend so the spawned task can observe cancellation.
+        hv.get_resume.notify_one();
+
+        // The permit must be released — verify by running a non-get operation
+        // (inserts without a key don't hit the get gate).
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Err(Error::AtCapacity) = service
+                .insert_object(
+                    make_context(),
+                    None,
+                    Metadata::default(),
+                    make_stream(b"ok"),
+                )
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for permit release after cancelled get");
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_cancels_get_metadata() {
+        let hv = GatedBackend::new("gated-hv").with_pause_get();
+        let lt = GatedBackend::new("gated-lt");
+        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
+            .with_concurrency_limit(1);
+
+        // Insert a small object (goes to HV, no gating on puts).
+        let id = ObjectId::new(make_context(), "cancel-meta-test".into());
+        hv.inner
+            .put_object(&id, &Metadata::default(), make_stream(b"payload"))
+            .await
+            .unwrap();
+
+        // Start a get_metadata through the public API. select! drops the future
+        // once the backend signals it has paused.
+        let request = service.get_metadata(id.clone());
+        let paused = Arc::clone(&hv.get_paused);
+        tokio::select! {
+            _ = request => panic!("get_metadata should not complete while backend is paused"),
+            _ = paused.notified() => {}
+        }
+
+        // Unblock the backend so the spawned task can observe cancellation.
+        hv.get_resume.notify_one();
+
+        // The permit must be released — verify by running a non-get operation
+        // (inserts without a key don't hit the get gate).
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Err(Error::AtCapacity) = service
+                .insert_object(
+                    make_context(),
+                    None,
+                    Metadata::default(),
+                    make_stream(b"ok"),
+                )
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for permit release after cancelled get_metadata");
     }
 
     // --- Concurrency limit tests ---
