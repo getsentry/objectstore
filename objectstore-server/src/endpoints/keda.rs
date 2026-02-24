@@ -33,9 +33,15 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
     let tasks_limit = state.service.tasks_limit();
 
     let mut output = format!(
-        "# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
+        "# HELP objectstore_bytes_total Total bytes transferred since startup\n\
+         # TYPE objectstore_bytes_total counter\n\
+         objectstore_bytes_total {bw_total}\n\
+         # HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
          # TYPE objectstore_bandwidth_ewma gauge\n\
          objectstore_bandwidth_ewma {bw_ewma}\n\
+         # HELP objectstore_requests_total Total admitted requests since startup\n\
+         # TYPE objectstore_requests_total counter\n\
+         objectstore_requests_total {tp_total}\n\
          # HELP objectstore_throughput_ewma Current admitted request rate in requests/s (EWMA)\n\
          # TYPE objectstore_throughput_ewma gauge\n\
          objectstore_throughput_ewma {tp_rps}\n\
@@ -50,13 +56,7 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
          objectstore_tasks_running {tasks_running}\n\
          # HELP objectstore_tasks_limit Configured maximum concurrent backend tasks\n\
          # TYPE objectstore_tasks_limit gauge\n\
-         objectstore_tasks_limit {tasks_limit}\n\
-         # HELP objectstore_bytes_total Total bytes transferred since startup\n\
-         # TYPE objectstore_bytes_total counter\n\
-         objectstore_bytes_total {bw_total}\n\
-         # HELP objectstore_requests_total Total admitted requests since startup\n\
-         # TYPE objectstore_requests_total counter\n\
-         objectstore_requests_total {tp_total}\n"
+         objectstore_tasks_limit {tasks_limit}\n"
     );
 
     if let Some(limit) = bw_limit {
