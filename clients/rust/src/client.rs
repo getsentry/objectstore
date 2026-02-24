@@ -286,6 +286,11 @@ impl Scope {
         Self(result)
     }
 
+    /// Returns a reference to the inner scope data, or `None` if the scope is invalid.
+    pub(crate) fn as_inner(&self) -> Option<&ScopeInner> {
+        self.0.as_ref().ok()
+    }
+
     /// Creates a session for this scope using the given client.
     ///
     /// # Errors
