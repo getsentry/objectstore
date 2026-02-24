@@ -511,6 +511,8 @@ impl ThroughputRateLimiter {
         }
 
         // Count this admitted request in the EWMA accumulator and the cumulative counter.
+        // NB: u64 wrapping is not a practical concern — at 1M rps it takes ~585k years.
+        // Prometheus irate() also handles counter resets gracefully should it ever occur.
         self.global_estimator
             .accumulator
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
