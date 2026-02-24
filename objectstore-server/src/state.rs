@@ -65,6 +65,7 @@ impl Services {
         rate_limiter.start();
 
         let request_counter = RequestCounter::new(config.http.max_requests);
+        tokio::spawn(request_counter.clone().run_emitter());
 
         Ok(Arc::new(Self {
             config,

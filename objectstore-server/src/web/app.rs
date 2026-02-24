@@ -18,7 +18,6 @@ use crate::web::middleware as m;
 #[derive(Debug)]
 pub struct App {
     router: axum::Router,
-    state: ServiceState,
     graceful_shutdown: bool,
 }
 
@@ -55,7 +54,6 @@ impl App {
 
         App {
             router,
-            state,
             graceful_shutdown: false,
         }
     }
@@ -75,33 +73,20 @@ impl App {
     pub async fn serve(self, listener: TcpListener) -> Result<()> {
         let Self {
             router,
-            state,
             graceful_shutdown,
         } = self;
 
         let service =
             ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(router);
 
-        let guard = if graceful_shutdown {
-            Some(elegant_departure::get_shutdown_guard())
+        if graceful_shutdown {
+            let guard = elegant_departure::get_shutdown_guard();
+            axum::serve(listener, service)
+                .with_graceful_shutdown(guard.wait_owned())
+                .await?;
         } else {
-            None
-        };
-
-        let server = async {
-            if let Some(ref guard) = guard {
-                axum::serve(listener, service)
-                    .with_graceful_shutdown(guard.wait_owned())
-                    .await
-            } else {
-                axum::serve(listener, service).await
-            }
-        };
-
-        let emitter = state.request_counter.clone().run_emitter();
-
-        let (serve_result, _) = tokio::join!(server, emitter);
-        serve_result?;
+            axum::serve(listener, service).await?;
+        }
 
         Ok(())
     }
