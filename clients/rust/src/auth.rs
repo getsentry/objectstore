@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
+use objectstore_types::scope;
 use serde::{Deserialize, Serialize};
 
 use crate::ScopeInner;
@@ -126,6 +127,28 @@ impl TokenGenerator {
     pub fn permissions(mut self, permissions: &[Permission]) -> Self {
         self.permissions = HashSet::from_iter(permissions.iter().cloned());
         self
+    }
+
+    /// Sign a token for the given [`Scope`](crate::Scope), returning the JWT string.
+    ///
+    /// Use this to produce a static token that can be handed to an external service
+    /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid or the JWT cannot be signed.
+    pub fn sign(&self, scope: &crate::Scope) -> crate::Result<String> {
+        let scope = match &scope.0 {
+            Ok(inner) => inner,
+            Err(crate::Error::InvalidScope(err)) => {
+                return Err(err.clone().into());
+            }
+            // Return an ad-hoc `Unreachable` variant to avoid panicking.
+            // It should be impossible to run into a different error variant other than
+            // `InvalidScope`, unless we add a new variant and forget to update this code path.
+            _ => return Err(scope::InvalidScopeError::Unreachable.into()),
+        };
+        self.sign_for_scope(scope)
     }
 
     /// Sign a new token for the passed-in scope using the configured expiry and permissions.

@@ -252,7 +252,7 @@ impl ScopeInner {
 /// To construct a [`Scope`], use [`Usecase::for_organization`], [`Usecase::for_project`], or
 /// [`Usecase::scope`] for custom scopes.
 #[derive(Debug)]
-pub struct Scope(crate::Result<ScopeInner>);
+pub struct Scope(pub(crate) crate::Result<ScopeInner>);
 
 impl Scope {
     /// Creates a new root-level Scope for the given usecase.
@@ -345,14 +345,21 @@ pub(crate) struct ClientInner {
 /// # }
 /// ```
 ///
-/// External service with a pre-signed JWT:
+/// External service with a pre-signed JWT (obtained via
+/// [`TokenGenerator::sign`](crate::TokenGenerator::sign)):
 ///
 /// ```no_run
-/// use objectstore_client::{Client, Usecase};
+/// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
+/// let scope = Usecase::new("my_app").for_project(42, 1337);
+/// let token = TokenGenerator::new(SecretKey {
+///     secret_key: "<private key>".into(),
+///     kid: "my-service".into(),
+/// })?.sign(&scope)?;
+///
 /// let client = Client::builder("http://localhost:8888/")
-///     .token("<pre-signed JWT>")
+///     .token(token)
 ///     .build()?;
 /// # Ok(())
 /// # }
