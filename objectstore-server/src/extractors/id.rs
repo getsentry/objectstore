@@ -234,13 +234,13 @@ mod tests {
     use objectstore_service::{StorageConfig, StorageService};
     use tempfile::TempDir;
     use tower::ServiceExt;
-    use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 
     use crate::auth::PublicKeyDirectory;
     use crate::config::{Config, Storage};
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
+    use crate::web::RequestCounter;
 
     async fn test_state(mut config: Config) -> (ServiceState, TempDir) {
         let tempdir = TempDir::new().unwrap();
@@ -265,7 +265,7 @@ mod tests {
             service,
             key_directory,
             rate_limiter,
-            request_counter: InFlightRequestsCounter::new(),
+            request_counter: RequestCounter::new(0),
         });
         (state, tempdir)
     }

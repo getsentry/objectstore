@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints::is_internal_route;
-use crate::state::ServiceState;
+use crate::web::RequestCounter;
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
@@ -18,19 +18,17 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 /// Rejects requests with HTTP 503 when the in-flight request count reaches the configured
 /// maximum.
 ///
-/// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing
-/// [`ServiceState`]. The in-flight counter is shared with the
-/// [`InFlightRequestsLayer`](tower_http::metrics::InFlightRequestsLayer) so both read the
-/// same atomic. Internal routes (see [`is_internal_route`]) are excluded.
+/// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing a
+/// [`RequestCounter`]. Internal routes (see [`is_internal_route`]) are excluded.
 pub async fn limit_web_concurrency(
-    State(state): State<ServiceState>,
+    State(counter): State<RequestCounter>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    if !is_internal_route(route) && state.request_counter.get() >= state.config.http.max_requests {
+    if !is_internal_route(route) && counter.count() >= counter.limit() {
         merni::counter!("web.concurrency.rejected": 1);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -159,17 +157,8 @@ mod tests {
     use axum::middleware::from_fn_with_state;
     use axum::response::IntoResponse;
     use axum::routing::get;
-    use objectstore_service::{StorageConfig, StorageService};
-    use tempfile::TempDir;
     use tokio::sync::Notify;
     use tower::ServiceExt;
-    use tower_http::metrics::InFlightRequestsLayer;
-    use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
-
-    use crate::auth::PublicKeyDirectory;
-    use crate::config::Config;
-    use crate::rate_limits::RateLimiter;
-    use crate::state::Services;
 
     use super::*;
 
@@ -177,38 +166,13 @@ mod tests {
         Request::builder().uri(uri).body(Body::empty()).unwrap()
     }
 
-    /// Builds a test router with the concurrency limit middleware applied.
+    /// Builds a test router with [`limit_web_concurrency`] applied.
     ///
-    /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on
-    /// `resume` before returning. `/health` and `/ready` return 200 immediately.
-    /// Returns `(router, paused, resume, _tempdir)` — hold `_tempdir` to keep
-    /// the filesystem backend alive.
-    async fn make_app(max: usize) -> (Router, Arc<Notify>, Arc<Notify>, TempDir) {
-        let tempdir = TempDir::new().unwrap();
-        let fs_config = StorageConfig::FileSystem {
-            path: tempdir.path(),
-        };
-        let service = StorageService::new(fs_config.clone(), fs_config)
-            .await
-            .unwrap();
-
-        let mut config = Config::default();
-        config.http.max_requests = max;
-
-        let request_counter = InFlightRequestsCounter::new();
-        let in_flight_layer = InFlightRequestsLayer::new(request_counter.clone());
-
-        let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
-        let rate_limiter = RateLimiter::new(config.rate_limits.clone());
-
-        let state = Arc::new(Services {
-            config,
-            service,
-            key_directory,
-            rate_limiter,
-            request_counter,
-        });
-
+    /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on `resume`
+    /// before returning, allowing tests to hold a request in-flight. Internal routes
+    /// (`/health`, `/ready`, `/keda`) return 200 immediately.
+    fn make_app(max: usize) -> (Router, Arc<Notify>, Arc<Notify>) {
+        let counter = RequestCounter::new(max);
         let paused = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
 
@@ -228,15 +192,15 @@ mod tests {
             .route("/health", get(|| async { StatusCode::OK.into_response() }))
             .route("/ready", get(|| async { StatusCode::OK.into_response() }))
             .route("/keda", get(|| async { StatusCode::OK.into_response() }))
-            .layer(in_flight_layer)
-            .layer(from_fn_with_state(state, limit_web_concurrency));
+            .layer(counter.layer())
+            .layer(from_fn_with_state(counter, limit_web_concurrency));
 
-        (app, paused, resume, tempdir)
+        (app, paused, resume)
     }
 
     #[tokio::test]
     async fn request_passes_below_limit() {
-        let (app, _paused, resume, _tempdir) = make_app(5).await;
+        let (app, _paused, resume) = make_app(5);
         resume.notify_one(); // pre-signal so the handler does not block
         let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -244,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn at_limit_rejects_health_exempt() {
-        let (app, paused, resume, _tempdir) = make_app(1).await;
+        let (app, paused, resume) = make_app(1);
 
         // Hold the counter at 1 with a blocking request.
         let blocking = tokio::spawn(app.clone().oneshot(make_request("/v1/test/_/key")));
@@ -252,7 +216,7 @@ mod tests {
             .await
             .expect("handler did not start within 5s");
 
-        // Regular request is rejected; health and ready bypass the limit.
+        // Regular request is rejected; internal routes bypass the limit.
         let resp = app
             .clone()
             .oneshot(make_request("/v1/test/_/key"))

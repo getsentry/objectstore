@@ -21,8 +21,8 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
     let bw_limit = state.rate_limiter.bandwidth_limit();
     let tp_rps = state.rate_limiter.throughput_rps();
     let tp_limit = state.rate_limiter.throughput_limit();
-    let req_in_flight = state.request_counter.get();
-    let req_limit = state.config.http.max_requests;
+    let req_in_flight = state.request_counter.count();
+    let req_limit = state.request_counter.limit();
     let tasks_running = state.service.tasks_running();
     let tasks_limit = state.service.tasks_limit();
 

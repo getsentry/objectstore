@@ -5,13 +5,13 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
-use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 
 use objectstore_service::id::ObjectContext;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
+use crate::web::RequestCounter;
 
 /// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
@@ -38,11 +38,11 @@ pub struct Services {
     pub key_directory: PublicKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
-    /// Counter for in-flight HTTP requests.
+    /// In-flight HTTP request counter with the configured limit.
     ///
-    /// Shared with the [`InFlightRequestsLayer`](tower_http::metrics::InFlightRequestsLayer) so
-    /// both the middleware and the layer read the same atomic.
-    pub request_counter: InFlightRequestsCounter,
+    /// Shared with the web layer so the concurrency-limit middleware, the tracking
+    /// layer, and any endpoint that reads the count all see the same atomic.
+    pub request_counter: RequestCounter,
 }
 
 impl Services {
@@ -63,7 +63,8 @@ impl Services {
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
         rate_limiter.start();
-        let request_counter = InFlightRequestsCounter::new();
+
+        let request_counter = RequestCounter::new(config.http.max_requests);
 
         Ok(Arc::new(Self {
             config,

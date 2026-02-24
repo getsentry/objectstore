@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use anyhow::Result;
 use axum::ServiceExt;
@@ -8,16 +7,12 @@ use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::metrics::InFlightRequestsLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 
 use crate::endpoints;
 use crate::state::ServiceState;
 use crate::web::middleware as m;
-
-/// Interval for emitting the in-flight requests gauge metric.
-const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The objectstore web server application.
 #[derive(Debug)]
@@ -33,8 +28,6 @@ impl App {
     /// The applications sets up middlewares and routes for the objectstore web API. Use
     /// [`serve`](Self::serve) to run the server future.
     pub fn new(state: ServiceState) -> Self {
-        let in_flight_layer = InFlightRequestsLayer::new(state.request_counter.clone());
-
         // Build the router middleware into a single service which runs _after_ routing. Service
         // builder order defines layers added first will be called first. This means:
         //  - Requests go from top to bottom
@@ -42,10 +35,10 @@ impl App {
         let middleware = ServiceBuilder::new()
             .layer(axum::middleware::from_fn(m::emit_request_metrics))
             .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
+                state.request_counter.clone(),
                 m::limit_web_concurrency,
             ))
-            .layer(in_flight_layer)
+            .layer(state.request_counter.layer())
             .layer(CatchPanicLayer::custom(m::handle_panic))
             .layer(m::set_server_header())
             .layer(NewSentryLayer::new_from_top())
@@ -105,10 +98,7 @@ impl App {
             }
         };
 
-        let request_counter = state.request_counter.clone();
-        let emitter = request_counter.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
-            merni::gauge!("server.requests.in_flight": count);
-        });
+        let emitter = state.request_counter.clone().run_emitter();
 
         let (serve_result, _) = tokio::join!(server, emitter);
         serve_result?;
