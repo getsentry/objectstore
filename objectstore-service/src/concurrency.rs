@@ -40,7 +40,7 @@ impl ConcurrencyLimiter {
     /// Tries to acquire `count` permits at once as a single owned reservation.
     ///
     /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
-    pub(crate) fn try_reserve(&self, count: usize) -> Result<OwnedSemaphorePermit> {
+    pub fn try_reserve(&self, count: usize) -> Result<OwnedSemaphorePermit> {
         self.semaphore
             .clone()
             .try_acquire_many_owned(count as u32)
@@ -64,7 +64,7 @@ impl ConcurrencyLimiter {
     }
 
     /// Returns the number of permits currently available.
-    pub(crate) fn available_permits(&self) -> usize {
+    pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
 
