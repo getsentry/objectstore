@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.18
+
+### New Features ✨
+
+- (clients) Add static token auth, consolidate token generator by @lcian in [#330](https://github.com/getsentry/objectstore/pull/330)
+- (python-client) Improve retries for compressed bodies by @lcian in [#329](https://github.com/getsentry/objectstore/pull/329)
+
+### Bug Fixes 🐛
+
+- (python-client) Avoid mutable default argument in TokenGenerator by @lcian in [#336](https://github.com/getsentry/objectstore/pull/336)
+- (rust-client) Check HTTP status on DELETE responses by @lcian in [#333](https://github.com/getsentry/objectstore/pull/333)
+
 ## 0.0.17
 
 ### New Features ✨
