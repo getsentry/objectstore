@@ -45,7 +45,7 @@
       --python-border: rgba(167, 139, 250, 0.15);
 
       --gradient-card-server: linear-gradient(135deg, rgba(78, 164, 220, 0.12), rgba(34, 211, 238, 0.05));
-      --gradient-card-rust: linear-gradient(135deg, rgba(245, 84, 152, 0.12), rgba(255, 107, 107, 0.05));
+      --gradient-card-rust: linear-gradient(135deg, rgba(212, 132, 90, 0.15), rgba(180, 100, 60, 0.05));
       --gradient-card-python: linear-gradient(135deg, rgba(139, 92, 246, 0.12), rgba(167, 139, 250, 0.05));
     }
 
@@ -138,7 +138,7 @@
     .hero-sentry-logo {
       display: inline-block;
       margin-bottom: 2rem;
-      color: rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.19);
       animation: fadeIn 0.5s ease 0.05s both;
     }
 
@@ -149,9 +149,9 @@
 
     .hero-title {
       font-size: clamp(3rem, 7vw, 5.5rem);
-      font-weight: 800;
+      font-weight: 700;
       letter-spacing: -0.055em;
-      line-height: 0.9;
+      line-height: 0.95;
       margin-bottom: 1.5rem;
       color: var(--text);
       animation: fadeIn 0.6s ease 0.1s both;
@@ -169,7 +169,7 @@
 
     /* ─── Docs section ─── */
     .docs {
-      padding: 2rem 2rem 0;
+      padding: 2rem 2rem 2.5rem;
       flex: 1;
       display: flex;
       flex-direction: column;
@@ -203,7 +203,9 @@
     }
 
     .card {
-      background: rgba(33, 29, 48, 0.66);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 100%);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
       padding: 1.75rem 1.5rem;
       text-decoration: none;
       color: inherit;
