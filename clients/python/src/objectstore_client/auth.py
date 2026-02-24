@@ -22,6 +22,14 @@ class Permission(StrEnum):
 
 
 class TokenGenerator:
+    """
+    A utility to generate auth tokens for Objectstore requests.
+
+    Use this for internal services that have access to an EdDSA keypair. You can
+    pass a ``TokenGenerator`` directly to ``Client(token=...)`` and it will sign
+    a fresh JWT for each request.
+    """
+
     def __init__(
         self,
         kid: str,
@@ -54,3 +62,11 @@ class TokenGenerator:
         }
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
+
+
+TokenProvider = TokenGenerator | str
+"""Authentication provider for Objectstore requests.
+
+Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
+or a static pre-signed JWT string.
+"""

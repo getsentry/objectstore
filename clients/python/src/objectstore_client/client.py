@@ -12,7 +12,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
-from objectstore_client.auth import TokenGenerator
+from objectstore_client.auth import TokenGenerator, TokenProvider
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -123,8 +123,11 @@ class Client:
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
             timeouts).
-        token_generator: A [`TokenGenerator`] created with parameters for signing
-            objectstore auth tokens.
+        token: A ``TokenGenerator`` that signs a fresh JWT for each request
+            using an EdDSA keypair, or a static pre-signed JWT string used
+            as-is for every request. Use a ``TokenGenerator`` for internal
+            services that have access to the signing key, and a string for
+            external services that receive a token from another source.
     """
 
     def __init__(
@@ -135,7 +138,7 @@ class Client:
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
-        token_generator: TokenGenerator | None = None,
+        token: TokenProvider | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -161,7 +164,7 @@ class Client:
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
-        self._token_generator = token_generator
+        self._token = token
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -183,6 +186,10 @@ class Client:
         ```
         client.session(usecase, org=organization_id, project=project_id, ...)
         ```
+
+        Args:
+            usecase: The Usecase to scope this session to.
+            **scopes: Key-value pairs defining the scope within the usecase.
         """
 
         return Session(
@@ -192,7 +199,7 @@ class Client:
             self._propagate_traces,
             usecase,
             Scope(**scopes),
-            self._token_generator,
+            self._token,
         )
 
 
@@ -211,7 +218,7 @@ class Session:
         propagate_traces: bool,
         usecase: Usecase,
         scope: Scope,
-        token_generator: TokenGenerator | None,
+        token: TokenProvider | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -219,7 +226,7 @@ class Session:
         self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
-        self._token_generator = token_generator
+        self._token = token
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
@@ -227,11 +234,11 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if self._token_generator:
-            token = self._token_generator.sign_for_scope(
-                self._usecase.name, self._scope
-            )
-            headers["Authorization"] = f"Bearer {token}"
+        if isinstance(self._token, TokenGenerator):
+            signed = self._token.sign_for_scope(self._usecase.name, self._scope)
+            headers["Authorization"] = f"Bearer {signed}"
+        elif isinstance(self._token, str):
+            headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:

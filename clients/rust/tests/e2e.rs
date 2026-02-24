@@ -1,12 +1,54 @@
+use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
+use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
+use serde::Serialize;
 
 pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
     LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
+
+#[derive(Serialize)]
+struct JwtClaims {
+    exp: u64,
+    permissions: HashSet<Permission>,
+    res: JwtRes,
+}
+
+#[derive(Serialize)]
+struct JwtRes {
+    #[serde(rename = "os:usecase")]
+    usecase: String,
+    #[serde(flatten)]
+    scopes: BTreeMap<String, String>,
+}
+
+/// Signs a static token for the given usecase and scopes.
+fn sign_static_token(usecase: &str, scopes: &[(&str, &str)]) -> String {
+    let encoding_key = EncodingKey::from_ed_pem(TEST_EDDSA_PRIVKEY.as_bytes()).unwrap();
+    let claims = JwtClaims {
+        exp: get_current_timestamp() + 60,
+        permissions: HashSet::from([
+            Permission::ObjectRead,
+            Permission::ObjectWrite,
+            Permission::ObjectDelete,
+        ]),
+        res: JwtRes {
+            usecase: usecase.into(),
+            scopes: scopes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        },
+    };
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_EDDSA_KID.into());
+    encode(&header, &claims, &encoding_key).unwrap()
+}
 
 async fn test_server() -> TestServer {
     TestServer::with_config(config::Config {
@@ -32,7 +74,7 @@ async fn stores_uncompressed() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -61,7 +103,7 @@ async fn uses_zstd_by_default() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -92,7 +134,7 @@ async fn deletes_stores_stuff() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -112,7 +154,7 @@ async fn stores_under_given_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -148,7 +190,7 @@ async fn overwrites_existing_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -170,7 +212,7 @@ async fn not_found_with_wrong_scope() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -190,7 +232,7 @@ async fn stores_with_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -214,7 +256,7 @@ async fn stores_without_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -239,7 +281,7 @@ async fn fails_with_insufficient_auth_token_perms() {
     let token_generator = test_token_generator().permissions(&[]);
 
     let client = Client::builder(server.url("/"))
-        .token_generator(token_generator)
+        .token(token_generator)
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -258,4 +300,31 @@ async fn fails_with_insufficient_auth_token_perms() {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
+}
+
+#[tokio::test]
+async fn stores_with_static_token() {
+    let server = test_server().await;
+
+    let token = sign_static_token("usecase", &[("org", "12345")]);
+
+    let client = Client::builder(server.url("/"))
+        .token(token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let body = "hello with static token!";
+    let stored_id = session
+        .put(body)
+        .compression(None)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    let received = response.payload().await.unwrap();
+    assert_eq!(received, body);
 }
