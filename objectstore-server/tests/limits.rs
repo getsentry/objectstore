@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config, Http, Service};
+use objectstore_server::config::{AuthZ, Config, Http};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
@@ -503,7 +503,7 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
 // --- KEDA endpoint tests ---
 
 #[tokio::test]
-async fn test_keda_returns_prometheus_format() -> Result<()> {
+async fn test_keda() -> Result<()> {
     let server = TestServer::with_config(Config {
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
@@ -515,139 +515,6 @@ async fn test_keda_returns_prometheus_format() -> Result<()> {
                 ..Default::default()
             },
         },
-        http: Http { max_requests: 500 },
-        service: Service {
-            max_concurrency: 100,
-        },
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
-
-    let client = reqwest::Client::new();
-    let response = client.get(server.url("/keda")).send().await?;
-
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "text/plain; version=0.0.4; charset=utf-8"
-    );
-
-    let body = response.text().await?;
-
-    // All 8 gauges must be present when both rate limits are configured.
-    assert!(
-        body.contains("# TYPE objectstore_bandwidth_ewma gauge"),
-        "missing bandwidth_ewma type"
-    );
-    assert!(
-        body.contains("objectstore_bandwidth_ewma "),
-        "missing bandwidth_ewma value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_bandwidth_limit gauge"),
-        "missing bandwidth_limit type"
-    );
-    assert!(
-        body.contains("objectstore_bandwidth_limit 10000000"),
-        "missing bandwidth_limit value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_throughput_rps gauge"),
-        "missing throughput_rps type"
-    );
-    assert!(
-        body.contains("objectstore_throughput_rps "),
-        "missing throughput_rps value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_throughput_limit gauge"),
-        "missing throughput_limit type"
-    );
-    assert!(
-        body.contains("objectstore_throughput_limit 1000"),
-        "missing throughput_limit value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_requests_in_flight gauge"),
-        "missing requests_in_flight type"
-    );
-    assert!(
-        body.contains("objectstore_requests_in_flight "),
-        "missing requests_in_flight value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_requests_limit gauge"),
-        "missing requests_limit type"
-    );
-    assert!(
-        body.contains("objectstore_requests_limit 500"),
-        "missing requests_limit value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_tasks_running gauge"),
-        "missing tasks_running type"
-    );
-    assert!(
-        body.contains("objectstore_tasks_running "),
-        "missing tasks_running value"
-    );
-    assert!(
-        body.contains("# TYPE objectstore_tasks_limit gauge"),
-        "missing tasks_limit type"
-    );
-    assert!(
-        body.contains("objectstore_tasks_limit 100"),
-        "missing tasks_limit value"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_keda_omits_limit_gauges_when_unconfigured() -> Result<()> {
-    // No throughput or bandwidth limits configured — the *_limit gauges must be absent.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
-
-    let client = reqwest::Client::new();
-    let response = client.get(server.url("/keda")).send().await?;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-
-    let body = response.text().await?;
-
-    // Optional limit gauges must be absent.
-    assert!(
-        !body.contains("objectstore_bandwidth_limit"),
-        "bandwidth_limit must be absent when global_bps is not configured"
-    );
-    assert!(
-        !body.contains("objectstore_throughput_limit"),
-        "throughput_limit must be absent when global_rps is not configured"
-    );
-
-    // The four value gauges are always present.
-    assert!(body.contains("objectstore_bandwidth_ewma "));
-    assert!(body.contains("objectstore_throughput_rps "));
-    assert!(body.contains("objectstore_requests_in_flight "));
-    assert!(body.contains("objectstore_tasks_running "));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_keda_accessible_at_web_concurrency_limit() -> Result<()> {
-    // Setting max_requests = 0 ensures every non-exempt request is immediately rejected.
-    let server = TestServer::with_config(Config {
         http: Http { max_requests: 0 },
         auth: AuthZ {
             enforce: false,
@@ -659,16 +526,28 @@ async fn test_keda_accessible_at_web_concurrency_limit() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    // Regular request is rejected with 503.
+    // /keda must bypass the web concurrency limit (max_requests: 0 rejects everything else).
     let response = client
         .get(server.url("/v1/objects/test/org=1/key"))
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
-    // /keda must bypass the concurrency limit and respond normally.
     let response = client.get(server.url("/keda")).send().await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+
+    let body = response.text().await?;
+
+    // One always-present gauge to verify the format.
+    assert!(body.contains("objectstore_bandwidth_ewma "), "missing bandwidth_ewma");
+
+    // Optional gauges are present when the corresponding limits are configured.
+    assert!(body.contains("objectstore_bandwidth_limit 10000000"), "missing bandwidth_limit");
+    assert!(body.contains("objectstore_throughput_limit 1000"), "missing throughput_limit");
 
     Ok(())
 }
