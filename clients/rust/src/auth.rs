@@ -137,9 +137,9 @@ impl TokenGenerator {
     ///
     /// Returns an error if the scope is invalid or if signing fails.
     pub fn sign(&self, scope: &crate::Scope) -> crate::Result<String> {
-        let inner = scope.as_inner().ok_or(crate::Error::InvalidScope(
-            objectstore_types::scope::InvalidScopeError::Empty,
-        ))?;
+        let inner = scope.as_inner().ok_or_else(|| crate::Error::InvalidUrl {
+            message: "cannot sign token for an invalid scope".to_owned(),
+        })?;
         self.sign_for_scope(inner)
     }
 
