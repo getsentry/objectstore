@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+git_revision=$(git rev-parse HEAD)
+
 BINARY=${1:-objectstore}
 case "$BINARY" in
     objectstore) PACKAGE="objectstore-server" ;;
@@ -27,5 +29,6 @@ docker build \
     --platform linux/amd64 \
     -f Dockerfile \
     --build-arg BINARY="$BINARY" \
+    --label "org.opencontainers.image.revision"="$git_revision" \
     -t "$BINARY:latest" \
     "target/x86_64-unknown-linux-gnu/release/"

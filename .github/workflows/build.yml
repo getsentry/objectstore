@@ -52,12 +52,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: |
+            ghcr.io/getsentry/objectstore
+            us-docker.pkg.dev/sentryio/objectstore-mr/image
+          tags: |
+            type=raw,value=${{ matrix.platform }}
+
       - name: Build Image
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           platforms: linux/${{ matrix.platform }}
-          tags: ${{ matrix.platform }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
           push: false
 
