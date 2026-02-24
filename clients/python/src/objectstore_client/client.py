@@ -266,6 +266,9 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
         """
+        if compression and compression != "none" and compression != "zstd":
+            raise ValueError(f"Invalid compression value: {compression}")
+
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
