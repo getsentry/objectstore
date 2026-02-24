@@ -8,7 +8,7 @@ use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
 use url::Url;
 
-use crate::auth::TokenGenerator;
+use crate::auth::TokenProvider;
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -17,7 +17,7 @@ struct ClientBuilderInner {
     service_url: Url,
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
-    token_generator: Option<TokenGenerator>,
+    token: Option<TokenProvider>,
 }
 
 impl ClientBuilderInner {
@@ -67,7 +67,7 @@ impl ClientBuilder {
             service_url,
             propagate_traces: false,
             reqwest_builder,
-            token_generator: None,
+            token: None,
         }))
     }
 
@@ -107,15 +107,15 @@ impl ClientBuilder {
         Self(Ok(inner))
     }
 
-    /// Sets a [`TokenGenerator`] that will be used to sign a fresh authorization token
-    /// for each request to Objectstore.
+    /// Sets the authentication token to use for requests to Objectstore.
     ///
-    /// Use this for internal services that have access to an EdDSA keypair.
-    /// If both a `TokenGenerator` and a static token ([`Session::with_token`])
-    /// are set, the `TokenGenerator` takes precedence.
-    pub fn token_generator(self, token_generator: TokenGenerator) -> Self {
+    /// Accepts anything that implements `Into<TokenProvider>`:
+    /// - A [`TokenGenerator`](crate::TokenGenerator) — for internal services that have access to
+    ///   an EdDSA keypair. The generator signs a fresh JWT for each request.
+    /// - A `String` or `&str` — a pre-signed JWT, used as-is for every request.
+    pub fn token(self, token: impl Into<TokenProvider>) -> Self {
         let Ok(mut inner) = self.0 else { return self };
-        inner.token_generator = Some(token_generator);
+        inner.token = Some(token.into());
         Self(Ok(inner))
     }
 
@@ -135,7 +135,7 @@ impl ClientBuilder {
                 reqwest: inner.reqwest_builder.build()?,
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
-                token_generator: inner.token_generator,
+                token: inner.token,
             }),
         })
     }
@@ -301,7 +301,7 @@ pub(crate) struct ClientInner {
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,
-    token_generator: Option<TokenGenerator>,
+    token: Option<TokenProvider>,
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -310,17 +310,14 @@ pub(crate) struct ClientInner {
 /// and Scope in order to create a [`Session`].
 ///
 /// If your Objectstore instance enforces authorization checks, you must provide
-/// authentication via one of:
+/// authentication via [`ClientBuilder::token`]. It accepts anything that converts
+/// into a [`TokenProvider`]:
 ///
-/// - **[`TokenGenerator`]** — for internal services that have access to an EdDSA
-///   keypair. The generator signs a fresh JWT for each request, scoped to the
-///   specific usecase and scope being accessed. Configured on the [`ClientBuilder`].
-/// - **Static token** ([`Session::with_token`]) — for external services that
-///   receive a pre-signed JWT from another source and don't have (or need) access
-///   to the signing key. Configured per-[`Session`], since a token is scoped to a
-///   specific usecase and scope.
-///
-/// If both are set, the `TokenGenerator` takes precedence.
+/// - **[`TokenGenerator`](crate::TokenGenerator)** — for internal services that have access to
+///   an EdDSA keypair. The generator signs a fresh JWT for each request, scoped to the
+///   specific usecase and scope being accessed.
+/// - **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
+///   Use this for external services that receive a token from another source.
 ///
 /// # Examples
 ///
@@ -342,7 +339,7 @@ pub(crate) struct ClientInner {
 /// let client = Client::builder("http://localhost:8888/")
 ///     .timeout(Duration::from_secs(1))
 ///     .propagate_traces(true)
-///     .token_generator(token_generator)
+///     .token(token_generator)
 ///     .build()?;
 /// # Ok(())
 /// # }
@@ -354,11 +351,9 @@ pub(crate) struct ClientInner {
 /// use objectstore_client::{Client, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
-/// let client = Client::new("http://localhost:8888/")?;
-/// let session = Usecase::new("my_app")
-///     .for_project(12345, 1337)
-///     .session(&client)?
-///     .with_token("<pre-signed JWT>");
+/// let client = Client::builder("http://localhost:8888/")
+///     .token("<pre-signed JWT>")
+///     .build()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -394,7 +389,6 @@ impl Client {
         scope.0.map(|inner| Session {
             scope: inner.into(),
             client: self.inner.clone(),
-            token: None,
         })
     }
 }
@@ -402,40 +396,16 @@ impl Client {
 /// Represents a session with Objectstore, tied to a specific Usecase and Scope within it.
 ///
 /// Create a Session using [`Client::session`] or [`Scope::session`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub(crate) scope: Arc<ScopeInner>,
     pub(crate) client: Arc<ClientInner>,
-    token: Option<String>,
-}
-
-impl std::fmt::Debug for Session {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("scope", &self.scope)
-            .field("client", &self.client)
-            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
-            .finish()
-    }
 }
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
 
 impl Session {
-    /// Sets a static authorization token to send with every request in this session.
-    ///
-    /// Use this for external services that receive a pre-signed JWT from another
-    /// source and don't have access to the signing key. For internal services
-    /// that have an EdDSA keypair, use [`ClientBuilder::token_generator`] instead.
-    ///
-    /// If both a static token and a [`TokenGenerator`] are set, the
-    /// `TokenGenerator` takes precedence.
-    pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
-        self
-    }
-
     /// Generates a GET url to the object with the given `key`.
     ///
     /// This can then be used by downstream services to fetch the given object.
@@ -467,11 +437,15 @@ impl Session {
 
         let mut builder = self.client.reqwest.request(method, url);
 
-        if let Some(token_generator) = &self.client.token_generator {
-            let token = token_generator.sign_for_scope(&self.scope)?;
-            builder = builder.bearer_auth(token);
-        } else if let Some(token) = &self.token {
-            builder = builder.bearer_auth(token);
+        match &self.client.token {
+            Some(TokenProvider::Generator(generator)) => {
+                let token = generator.sign_for_scope(&self.scope)?;
+                builder = builder.bearer_auth(token);
+            }
+            Some(TokenProvider::Static(token)) => {
+                builder = builder.bearer_auth(token);
+            }
+            None => {}
         }
 
         if self.client.propagate_traces {

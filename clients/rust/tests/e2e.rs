@@ -74,7 +74,7 @@ async fn stores_uncompressed() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -103,7 +103,7 @@ async fn uses_zstd_by_default() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -134,7 +134,7 @@ async fn deletes_stores_stuff() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -154,7 +154,7 @@ async fn stores_under_given_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -190,7 +190,7 @@ async fn overwrites_existing_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -212,7 +212,7 @@ async fn not_found_with_wrong_scope() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -232,7 +232,7 @@ async fn stores_with_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -256,7 +256,7 @@ async fn stores_without_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token_generator(test_token_generator())
+        .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -281,7 +281,7 @@ async fn fails_with_insufficient_auth_token_perms() {
     let token_generator = test_token_generator().permissions(&[]);
 
     let client = Client::builder(server.url("/"))
-        .token_generator(token_generator)
+        .token(token_generator)
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -301,12 +301,12 @@ async fn stores_with_static_token() {
 
     let token = sign_static_token("usecase", &[("org", "12345")]);
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token(token)
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
-    let session = client
-        .session(usecase.for_organization(12345))
-        .unwrap()
-        .with_token(&token);
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "hello with static token!";
     let stored_id = session

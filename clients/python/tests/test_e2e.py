@@ -129,7 +129,10 @@ def server_url() -> Generator[str]:
 
 
 def test_full_cycle(server_url: str) -> None:
-    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -157,7 +160,10 @@ def test_full_cycle(server_url: str) -> None:
 
 
 def test_full_cycle_with_origin(server_url: str) -> None:
-    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -174,7 +180,10 @@ def test_full_cycle_with_origin(server_url: str) -> None:
 
 
 def test_full_cycle_uncompressed(server_url: str) -> None:
-    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         compression="none",
@@ -202,7 +211,10 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
 
 
 def test_full_cycle_structured_key(server_url: str) -> None:
-    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -217,7 +229,10 @@ def test_full_cycle_structured_key(server_url: str) -> None:
 
 
 def test_not_found_with_different_scope(server_url: str) -> None:
-    client = Client(server_url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -238,13 +253,13 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
     token_generator = TestTokenGenerator.get()
     token = token_generator.sign_for_scope("test-usecase", Scope(org=42, project=1337))
 
-    client = Client(server_url)
+    client = Client(server_url, token=token)
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, token=token, org=42, project=1337)
+    session = client.session(test_usecase, org=42, project=1337)
 
     object_key = session.put(b"static token data")
     assert object_key is not None
@@ -260,9 +275,7 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
 
 
 def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
-    client = Client(
-        server_url, token_generator=TestTokenGenerator.create(permissions=[])
-    )
+    client = Client(server_url, token=TestTokenGenerator.create(permissions=[]))
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -283,7 +296,11 @@ def test_read_timeout() -> None:
     addr = s.getsockname()
     url = f"http://127.0.0.1:{addr[1]}"
 
-    client = Client(url, timeout_ms=500, token_generator=TestTokenGenerator.get())
+    client = Client(
+        url,
+        timeout_ms=500,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",
@@ -305,7 +322,10 @@ def test_connect_timeout() -> None:
     url = "http://10.255.255.1:9"
 
     # Do NOT set timeout_ms to ensure we exercise default timeouts
-    client = Client(url, token_generator=TestTokenGenerator.get())
+    client = Client(
+        url,
+        token=TestTokenGenerator.get(),
+    )
     test_usecase = Usecase(
         "test-usecase",
         compression="zstd",

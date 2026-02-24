@@ -32,14 +32,54 @@ impl std::fmt::Debug for SecretKey {
     }
 }
 
+/// Authentication provider for Objectstore requests.
+///
+/// Can be either a [`TokenGenerator`] that signs a fresh JWT per request,
+/// or a static pre-signed JWT string.
+pub enum TokenProvider {
+    /// A pre-signed JWT token string, used as-is for every request.
+    Static(String),
+    /// A generator that signs a fresh JWT for each request using an EdDSA keypair.
+    Generator(TokenGenerator),
+}
+
+impl std::fmt::Debug for TokenProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenProvider::Static(_) => f.write_str("TokenProvider::Static([redacted])"),
+            TokenProvider::Generator(g) => {
+                f.debug_tuple("TokenProvider::Generator").field(g).finish()
+            }
+        }
+    }
+}
+
+impl From<TokenGenerator> for TokenProvider {
+    fn from(generator: TokenGenerator) -> Self {
+        TokenProvider::Generator(generator)
+    }
+}
+
+impl From<String> for TokenProvider {
+    fn from(token: String) -> Self {
+        TokenProvider::Static(token)
+    }
+}
+
+impl From<&str> for TokenProvider {
+    fn from(token: &str) -> Self {
+        TokenProvider::Static(token.to_owned())
+    }
+}
+
 /// A utility to generate auth tokens to be used in Objectstore requests.
 ///
 /// Tokens are signed with an EdDSA private key and have certain permissions and expiry timeouts
 /// applied.
 ///
-/// Use this for internal services that have access to an EdDSA keypair. If both a
-/// `TokenGenerator` and a static token ([`Session::with_token`](crate::Session::with_token))
-/// are set, the `TokenGenerator` takes precedence.
+/// Use this for internal services that have access to an EdDSA keypair. You can pass a
+/// `TokenGenerator` directly to [`ClientBuilder::token`](crate::ClientBuilder::token),
+/// and it will be automatically converted into a [`TokenProvider::Generator`].
 #[derive(Debug)]
 pub struct TokenGenerator {
     kid: String,

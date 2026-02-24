@@ -93,16 +93,14 @@ session.put(b"payload", metadata={"source": "upload-service"})
 
 ### Authentication
 
-If your Objectstore instance enforces authorization, you must configure authentication.
-There are two options:
+If your Objectstore instance enforces authorization, you must configure authentication
+via the `token` parameter on `Client`. It accepts either:
 
-- **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
+- A **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
   The generator signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed. Configured on the `Client`.
-- **Static token** (`token=`) — for external services that receive a pre-signed JWT
-  from another source and don't have (or need) access to the signing key.
-  Configured per-session via `client.session()`, since a token is scoped to a
-  specific usecase and scope.
+  and scope being accessed.
+- A **`str`** — a pre-signed JWT, used as-is for every request.
+  Use this for external services that receive a token from another source.
 
 ```python
 from objectstore_client import Client, Usecase
@@ -111,12 +109,11 @@ from objectstore_client.auth import TokenGenerator
 # Option 1: Internal service with a keypair
 client = Client(
     "http://localhost:8888",
-    token_generator=TokenGenerator(kid="my-service", secret_key="<private key>"),
+    token=TokenGenerator(kid="my-service", secret_key="<private key>"),
 )
 
 # Option 2: External service with a pre-signed JWT
-client = Client("http://localhost:8888")
-session = client.session(Usecase("my_app"), token="<pre-signed JWT>", org=42, project=1337)
+client = Client("http://localhost:8888", token="<pre-signed JWT>")
 ```
 
 ## Configuration
@@ -134,7 +131,7 @@ client = Client(
     timeout_ms=None,         # default: no read timeout (connect: 100ms)
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)
     # metrics_backend=...,   # default: no-op
-    # token_generator=...,   # internal services with an EdDSA keypair
+    # token=...,             # see Authentication section
 )
 
 attachments = Usecase("attachments")

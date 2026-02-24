@@ -114,22 +114,21 @@ session.put("payload")
 
 ### Authentication
 
-If your Objectstore instance enforces authorization, you must configure authentication.
-There are two options:
+If your Objectstore instance enforces authorization, you must configure authentication
+via [`ClientBuilder::token`]. It accepts either:
 
-- **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
+- A **[`TokenGenerator`]** — for internal services that have access to an EdDSA keypair.
   The generator signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed. Configured on the [`ClientBuilder`].
-- **Static token** (`.with_token()`) — for external services that receive a pre-signed
-  JWT from another source and don't have (or need) access to the signing key.
-  Configured per-[`Session`], since a token is scoped to a specific usecase and scope.
+  and scope being accessed.
+- A **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
+  Use this for external services that receive a token from another source.
 
 ```rust,ignore
 use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 
 // Option 1: Internal service with a keypair
 let client = Client::builder("http://localhost:8888/")
-    .token_generator(
+    .token(
         TokenGenerator::new(SecretKey {
             secret_key: "<private key>".into(),
             kid: "my-service".into(),
@@ -138,11 +137,9 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
-let client = Client::new("http://localhost:8888/")?;
-let session = Usecase::new("my_app")
-    .for_project(42, 1337)
-    .session(&client)?
-    .with_token("<pre-signed JWT>");
+let client = Client::builder("http://localhost:8888/")
+    .token("<pre-signed JWT>")
+    .build()?;
 ```
 
 ## Configuration
@@ -160,7 +157,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         // .propagate_traces(true) // default: false
         // .timeout(Duration::from_secs(5)) // default: no read timeout (connect: 100ms)
         // .configure_reqwest(|builder| { ... }) // customize the reqwest::ClientBuilder
-        // .token_generator(token_generator) // internal services with an EdDSA keypair
+        // .token(token_generator) // see Authentication section
         .build()
         .expect("Objectstore client to build successfully")
 });
