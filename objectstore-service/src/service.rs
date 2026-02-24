@@ -180,6 +180,21 @@ impl StorageService {
         self.concurrency.available_permits()
     }
 
+    /// Creates a [`BatchExecutor`](crate::batch::BatchExecutor) by pre-acquiring a share of available permits.
+    ///
+    /// The window size is `ceil(available × 0.10)`, clamped to `[1, 50]`. Returns
+    /// [`Error::AtCapacity`] if no permits are available.
+    pub fn batch(&self) -> Result<crate::batch::BatchExecutor> {
+        let available = self.available_permits();
+        let window = ((available as f64 * 0.10).ceil() as usize).clamp(1, 50);
+        let reservation = self.concurrency.try_reserve(window)?;
+        Ok(crate::batch::BatchExecutor {
+            tiered: Arc::clone(&self.inner),
+            window,
+            reservation,
+        })
+    }
+
     /// Starts background processes for the storage service.
     ///
     /// Currently spawns a task that emits the `service.concurrency.in_use`
@@ -351,7 +366,7 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
 }
 
 /// Extracts a human-readable message from a panic payload.
-fn extract_panic_message(payload: Box<dyn Any + Send>) -> String {
+pub(crate) fn extract_panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {
