@@ -2379,7 +2379,6 @@ name = "objectstore-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-stream",
  "async-trait",
  "bigtable_rs",
  "bytes",

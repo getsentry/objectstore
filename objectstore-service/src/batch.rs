@@ -226,47 +226,44 @@ impl BatchExecutor {
             reservation,
         } = self;
 
-        async_stream::stream! {
-            // Hold the reservation for the stream's lifetime.
-            let _reservation = reservation;
+        operations
+            .map(move |(idx, item)| {
+                // `reservation` is captured here so the permit is held for the
+                // lifetime of the Map adaptor (and thus the BufferUnordered below).
+                let _ = &reservation;
 
-            let mut buffered = std::pin::pin!(operations
-                .map(move |(idx, item)| {
-                    let tiered = Arc::clone(&tiered);
-                    let context = context.clone();
-                    async move {
-                        match item {
-                            Err(e) => (idx, Err(e)),
-                            Ok(op) => {
-                                let handle = tokio::spawn(execute_single(tiered, context, op));
-                                match handle.await {
-                                    Ok(Ok(response)) => (idx, Ok(response)),
-                                    Ok(Err(e)) => (idx, Err(E::from(e))),
-                                    Err(join_err) => {
-                                        let msg = if join_err.is_panic() {
-                                            crate::service::extract_panic_message(
-                                                join_err.into_panic(),
-                                            )
-                                        } else {
-                                            "task cancelled".to_owned()
-                                        };
-                                        (idx, Err(E::from(Error::Panic(msg))))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                })
-                .buffer_unordered(window));
+                let tiered = Arc::clone(&tiered);
+                let context = context.clone();
+                async move { (idx, spawn_operation(tiered, context, item).await) }
+            })
+            .buffer_unordered(window)
+    }
+}
 
-            while let Some(item) = buffered.next().await {
-                yield item;
-            }
+/// Spawns a single operation with panic isolation, passing through pre-existing errors.
+async fn spawn_operation<E>(
+    tiered: Arc<TieredStorage>,
+    context: ObjectContext,
+    item: Result<Operation, E>,
+) -> Result<OpResponse, E>
+where
+    E: From<Error>,
+{
+    match tokio::spawn(execute_operation(tiered, context, item?)).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(e)) => Err(e.into()),
+        Err(join_err) => {
+            let msg = if join_err.is_panic() {
+                crate::service::extract_panic_message(join_err.into_panic())
+            } else {
+                "task cancelled".to_owned()
+            };
+            Err(Error::Panic(msg).into())
         }
     }
 }
 
-async fn execute_single(
+async fn execute_operation(
     tiered: Arc<TieredStorage>,
     context: ObjectContext,
     op: Operation,
