@@ -252,7 +252,7 @@ impl ScopeInner {
 /// To construct a [`Scope`], use [`Usecase::for_organization`], [`Usecase::for_project`], or
 /// [`Usecase::scope`] for custom scopes.
 #[derive(Debug)]
-pub struct Scope(crate::Result<ScopeInner>);
+pub struct Scope(pub(crate) crate::Result<ScopeInner>);
 
 impl Scope {
     /// Creates a new root-level Scope for the given usecase.
@@ -284,10 +284,6 @@ impl Scope {
         });
 
         Self(result)
-    }
-
-    pub(crate) fn inner(&self) -> Result<&ScopeInner, &crate::Error> {
-        self.0.as_ref()
     }
 
     /// Creates a session for this scope using the given client.

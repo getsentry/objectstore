@@ -121,7 +121,7 @@ impl Scope {
 }
 
 /// An error indicating that a scope is invalid, returned by [`Scope::create`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum InvalidScopeError {
     /// Indicates that either the key or value is empty.
     #[error("key and value must be non-empty")]
@@ -129,6 +129,10 @@ pub enum InvalidScopeError {
     /// Indicates that the key or value contains an invalid character.
     #[error("invalid character '{0}'")]
     InvalidChar(char),
+    /// Placeholder error variant for use in `objectstore_client::auth::TokenGenerator`.
+    /// This should never be encountered in practice.
+    #[error("unexpected error, please report a bug")]
+    Unreachable,
 }
 
 /// An ordered set of resource scopes.
