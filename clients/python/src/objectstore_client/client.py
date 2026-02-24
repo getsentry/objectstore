@@ -12,7 +12,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
-from objectstore_client.auth import Token, TokenGenerator
+from objectstore_client.auth import TokenGenerator, TokenProvider
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -138,7 +138,7 @@ class Client:
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
-        token: Token | None = None,
+        token: TokenProvider | None = None,
     ):
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
@@ -218,7 +218,7 @@ class Session:
         propagate_traces: bool,
         usecase: Usecase,
         scope: Scope,
-        token: Token | None = None,
+        token: TokenProvider | None = None,
     ):
         self._pool = pool
         self._base_path = base_path

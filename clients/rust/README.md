@@ -137,6 +137,8 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
+// The token is typically obtained from an internal service that signs it
+// using a TokenGenerator, and then passed to the external consumer.
 let client = Client::builder("http://localhost:8888/")
     .token("<pre-signed JWT>")
     .build()?;

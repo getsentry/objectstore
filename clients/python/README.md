@@ -113,7 +113,15 @@ client = Client(
 )
 
 # Option 2: External service with a pre-signed JWT
-client = Client("http://localhost:8888", token="<pre-signed JWT>")
+# Use TokenGenerator.sign_for_scope() to obtain a static token from an
+# internal service, then pass it to the external consumer:
+from objectstore_client.scope import Scope
+
+token = TokenGenerator(
+    kid="my-service", secret_key="<private key>",
+).sign_for_scope("my_app", Scope(org=42, project=1337))
+
+client = Client("http://localhost:8888", token=token)
 ```
 
 ## Configuration

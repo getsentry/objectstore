@@ -64,8 +64,8 @@ class TokenGenerator:
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
 
-Token = TokenGenerator | str
-"""Authentication token for Objectstore requests.
+TokenProvider = TokenGenerator | str
+"""Authentication provider for Objectstore requests.
 
 Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
