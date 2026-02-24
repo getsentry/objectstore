@@ -142,7 +142,10 @@ impl RateLimiter {
     ///
     /// Returns `true` if the context is within the rate limits, `false` otherwise.
     pub fn check(&self, context: &ObjectContext) -> bool {
-        self.throughput.check(context) && self.bandwidth.check(context)
+        // Bandwidth is checked first because it is a pure read (no token consumption).
+        // Throughput increments the EWMA accumulator only on success, so checking it
+        // second ensures rejected requests are never counted toward admitted traffic.
+        self.bandwidth.check(context) && self.throughput.check(context)
     }
 
     /// Returns all bandwidth accumulators (global + per-usecase + per-scope) for the given context.
@@ -710,6 +713,44 @@ mod tests {
                 .accumulator
                 .load(std::sync::atomic::Ordering::Relaxed),
             1 // only the admitted request
+        );
+    }
+
+    #[test]
+    fn bandwidth_rejection_does_not_increment_throughput_accumulator() {
+        // global_bps of 1 means the estimate (0 initially) is not > 1, so the first
+        // call passes the bandwidth check. Use 0 to guarantee an immediate reject.
+        // BandwidthRateLimiter::check rejects when estimate > global_bps, so set
+        // global_bps = 0 to make the bandwidth check always reject.
+        let limiter = RateLimiter::new(RateLimits {
+            throughput: ThroughputLimits {
+                global_rps: Some(1000),
+                ..Default::default()
+            },
+            bandwidth: BandwidthLimits {
+                global_bps: Some(0),
+                ..Default::default()
+            },
+        });
+
+        // Prime the bandwidth EWMA so it exceeds the limit.
+        limiter
+            .bandwidth
+            .global
+            .estimate
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+
+        let context = make_context();
+        assert!(!limiter.check(&context));
+
+        // The throughput accumulator must still be 0.
+        assert_eq!(
+            limiter
+                .throughput
+                .global_estimator
+                .accumulator
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
     }
 
