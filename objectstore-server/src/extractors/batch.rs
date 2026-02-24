@@ -7,7 +7,7 @@ use axum::extract::{
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use futures::{StreamExt, stream::BoxStream};
-use objectstore_service::batch::{Delete, Get, Insert, Operation};
+use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
@@ -159,7 +159,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, header::CONTENT_TYPE};
     use futures::StreamExt;
-    use objectstore_service::batch::Operation;
+    use objectstore_service::streaming::Operation;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
 
     #[tokio::test]

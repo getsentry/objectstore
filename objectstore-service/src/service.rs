@@ -190,15 +190,17 @@ impl StorageService {
         self.concurrency.total_permits()
     }
 
-    /// Creates a [`BatchExecutor`](crate::batch::BatchExecutor) by pre-acquiring a share of available permits.
+    /// Prepares to stream multiple operations concurrently against this service.
     ///
-    /// The window size is `ceil(available × 0.10)`, clamped to `[1, 50]`. Returns
-    /// [`Error::AtCapacity`] if no permits are available.
-    pub fn batch(&self) -> Result<crate::batch::BatchExecutor> {
+    /// Operations are executed concurrently up to a window derived from the
+    /// service's current capacity. The permits for that window are reserved
+    /// upfront — if the service is at capacity, this returns
+    /// [`Error::AtCapacity`] immediately before any operations are read.
+    pub fn stream(&self) -> Result<crate::streaming::StreamExecutor> {
         let available = self.tasks_available();
         let window = ((available as f64 * 0.10).ceil() as usize).clamp(1, 50);
         let reservation = self.concurrency.try_reserve(window)?;
-        Ok(crate::batch::BatchExecutor {
+        Ok(crate::streaming::StreamExecutor {
             tiered: Arc::clone(&self.inner),
             window,
             reservation,

@@ -1,6 +1,6 @@
-//! Batch operation types and concurrent executor.
+//! Streaming operation types and concurrent executor.
 //!
-//! [`BatchExecutor`] processes a stream of `(idx, Result<`[`Operation`]`, E>)` tuples
+//! [`StreamExecutor`] processes a stream of `(idx, Result<`[`Operation`]`, E>)` tuples
 //! concurrently within a bounded window. Errors in the input stream pass through
 //! unchanged; successful operations are executed against `TieredStorage` directly,
 //! with [`tokio::spawn`] for panic isolation and run-to-completion guarantees.
@@ -8,21 +8,21 @@
 //! ## Window and Permit Reservation
 //!
 //! The concurrency window is derived from the service's available permits at the time
-//! [`StorageService::batch`](crate::service::StorageService::batch) is called: `ceil(tasks_available × 0.10)`, clamped to
+//! [`StorageService::stream`](crate::service::StorageService::stream) is called: `ceil(tasks_available × 0.10)`, clamped to
 //! `[1, 50]`. The executor pre-acquires exactly `window` permits from the service's
 //! `ConcurrencyLimiter` as a single bulk reservation. These permits are held for the
 //! lifetime of the returned stream — released atomically when the stream is fully
 //! consumed or dropped.
 //!
 //! This means:
-//! - If the service is at capacity, [`StorageService::batch`](crate::service::StorageService::batch) fails immediately with
+//! - If the service is at capacity, [`StorageService::stream`](crate::service::StorageService::stream) fails immediately with
 //!   [`Error::AtCapacity`] before any operations are read.
 //! - During execution, operations call the storage backend directly without acquiring
 //!   additional per-operation permits.
 //!
 //! ## Concurrency Model
 //!
-//! [`BatchExecutor::execute`] uses `buffer_unordered` to drive up to `window`
+//! [`StreamExecutor::execute`] uses `buffer_unordered` to drive up to `window`
 //! operations concurrently. The input stream is pulled lazily — at most `window`
 //! operations are in-flight at once, bounding memory to roughly
 //! `window × max_operation_size`. Results are yielded in completion order.
@@ -34,8 +34,8 @@
 //! ## Future Scope
 //!
 //! The window fraction (10%) is hard-coded. Configurable fractions, adaptive window
-//! sizing, and backend-level batching optimizations (e.g. BigTable multi-read, GCS
-//! batch API) are out of scope for the current implementation.
+//! sizing, and backend-level optimizations (e.g. BigTable multi-read, GCS batch API)
+//! are out of scope for the current implementation.
 
 use std::sync::Arc;
 
@@ -74,7 +74,7 @@ pub struct Delete {
     pub key: ObjectKey,
 }
 
-/// A single operation in a batch request.
+/// A single streaming operation.
 #[derive(Debug)]
 pub enum Operation {
     /// Insert a new object.
@@ -114,7 +114,7 @@ impl Operation {
     }
 }
 
-/// The response of a single executed batch operation.
+/// The response of a single executed streaming operation.
 ///
 /// Each variant carries the fields needed to render a response part.
 /// The kind (`"insert"`, `"get"`, `"delete"`) is derivable via [`OpResponse::kind`].
@@ -183,21 +183,21 @@ impl std::fmt::Debug for OpResponse {
     }
 }
 
-/// Executes batch operations with bounded concurrency.
+/// Executes streaming operations with bounded concurrency.
 ///
-/// Construct via [`StorageService::batch`](crate::service::StorageService::batch),
+/// Construct via [`StorageService::stream`](crate::service::StorageService::stream),
 /// which pre-acquires the concurrency window from the service's available permits.
 ///
 /// See the [module documentation](self) for a full description of the window
 /// calculation, permit reservation, and concurrency model.
 #[derive(Debug)]
-pub struct BatchExecutor {
+pub struct StreamExecutor {
     pub(crate) tiered: Arc<TieredStorage>,
     pub(crate) window: usize,
     pub(crate) reservation: OwnedSemaphorePermit,
 }
 
-impl BatchExecutor {
+impl StreamExecutor {
     /// Returns the concurrency window computed at construction.
     pub fn window(&self) -> usize {
         self.window
@@ -220,7 +220,7 @@ impl BatchExecutor {
     where
         E: From<Error> + Send + 'static,
     {
-        let BatchExecutor {
+        let StreamExecutor {
             tiered,
             window,
             reservation,
@@ -332,27 +332,27 @@ mod tests {
         futures_util::stream::iter(ops.into_iter().enumerate().map(|(i, op)| (i, Ok(op))))
     }
 
-    // --- BatchExecutor window and capacity tests ---
+    // --- StreamExecutor window and capacity tests ---
 
     #[test]
     fn at_capacity_when_no_permits() {
         let service = make_service_with_limit(0);
-        assert!(matches!(service.batch(), Err(Error::AtCapacity)));
+        assert!(matches!(service.stream(), Err(Error::AtCapacity)));
     }
 
     #[test]
     fn window_computation() {
         // 10 available → ceil(10 × 0.10) = 1
         let s = make_service_with_limit(10);
-        assert_eq!(s.batch().unwrap().window(), 1);
+        assert_eq!(s.stream().unwrap().window(), 1);
 
         // 100 available → ceil(100 × 0.10) = 10
         let s = make_service_with_limit(100);
-        assert_eq!(s.batch().unwrap().window(), 10);
+        assert_eq!(s.stream().unwrap().window(), 10);
 
         // 500 available → ceil(500 × 0.10) = 50
         let s = make_service_with_limit(500);
-        assert_eq!(s.batch().unwrap().window(), 50);
+        assert_eq!(s.stream().unwrap().window(), 50);
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         // 1–9 available → ceil(N × 0.10) < 1 → clamped to 1
         for n in 1..=9 {
             let s = make_service_with_limit(n);
-            let w = s.batch().unwrap().window();
+            let w = s.stream().unwrap().window();
             assert_eq!(w, 1, "expected window 1 for {n} permits, got {w}");
         }
     }
@@ -370,17 +370,17 @@ mod tests {
         // 501+ available → ceil(N × 0.10) > 50 → clamped to 50
         for n in [501, 1000, 10000] {
             let s = make_service_with_limit(n);
-            let w = s.batch().unwrap().window();
+            let w = s.stream().unwrap().window();
             assert_eq!(w, 50, "expected window 50 for {n} permits, got {w}");
         }
     }
 
-    // --- BatchExecutor::execute() correctness tests ---
+    // --- StreamExecutor::execute() correctness tests ---
 
     #[tokio::test]
     async fn execute_empty_stream() {
         let service = make_service();
-        let executor = service.batch().unwrap();
+        let executor = service.stream().unwrap();
         let outcomes: Vec<_> = executor
             .execute(
                 make_context(),
@@ -420,7 +420,7 @@ mod tests {
             Operation::Delete(Delete { key: "key1".into() }),
         ];
 
-        let executor = service.batch().unwrap();
+        let executor = service.stream().unwrap();
         let outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
 
         assert_eq!(outcomes.len(), 4);
@@ -502,7 +502,7 @@ mod tests {
         let service = crate::service::StorageService::from_backends(Box::new(gated), Box::new(lt))
             .with_concurrency_limit(100);
 
-        let executor = service.batch().unwrap();
+        let executor = service.stream().unwrap();
         assert_eq!(executor.window(), 10);
 
         // Submit 10 inserts. With window=10, all should be in-flight simultaneously.
@@ -546,7 +546,7 @@ mod tests {
     #[tokio::test]
     async fn batch_rejected_when_permits_exhausted() {
         // Service with limit=1. One background insert holds the only permit.
-        // service.batch() must fail with AtCapacity.
+        // service.stream() must fail with AtCapacity.
         let (paused_tx, mut paused_rx) = tokio::sync::mpsc::channel::<()>(2);
         let resume = Arc::new(tokio::sync::Notify::new());
 
@@ -574,9 +574,9 @@ mod tests {
         });
         paused_rx.recv().await.unwrap();
 
-        // Permit is held — batch() must fail immediately with AtCapacity.
+        // Permit is held — stream() must fail immediately with AtCapacity.
         assert!(
-            matches!(service.batch(), Err(Error::AtCapacity)),
+            matches!(service.stream(), Err(Error::AtCapacity)),
             "expected AtCapacity when all permits are held"
         );
 

@@ -12,8 +12,8 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use objectstore_service::batch::{OpResponse, Operation};
 use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_service::streaming::{OpResponse, Operation};
 
 use crate::auth::AuthAwareService;
 use crate::batch::{
@@ -65,7 +65,7 @@ async fn batch(
     Xt(context): Xt<ObjectContext>,
     requests: BatchOperationStream,
 ) -> Response {
-    let batch = match state.service.batch() {
+    let batch = match state.service.stream() {
         Ok(b) => b,
         Err(e) => return ApiError::Service(e).into_response(),
     };
