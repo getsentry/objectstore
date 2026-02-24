@@ -202,7 +202,7 @@ that it remains available when the server is at capacity.
 | `objectstore_throughput_limit` | only when `global_rps` is set | Configured `global_rps` limit |
 | `objectstore_requests_in_flight` | yes | Current in-flight HTTP requests |
 | `objectstore_requests_limit` | yes | Configured `http.max_requests` |
-| `objectstore_tasks_in_use` | yes | Current in-flight backend tasks |
+| `objectstore_tasks_running` | yes | Current running backend tasks |
 | `objectstore_tasks_limit` | yes | Configured `service.max_concurrency` |
 
 Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
@@ -223,7 +223,7 @@ triggers:
           objectstore_bandwidth_ewma / objectstore_bandwidth_limit
           or objectstore_throughput_rps / objectstore_throughput_limit
           or objectstore_requests_in_flight / objectstore_requests_limit
-          or objectstore_tasks_in_use / objectstore_tasks_limit
+          or objectstore_tasks_running / objectstore_tasks_limit
         )
       threshold: "0.7"
 ```

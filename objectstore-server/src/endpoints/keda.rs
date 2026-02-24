@@ -23,8 +23,8 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
     let tp_limit = state.rate_limiter.throughput_limit();
     let req_in_flight = state.request_counter.get();
     let req_limit = state.config.http.max_requests;
-    let tasks_in_use = state.service.tasks_in_use();
-    let tasks_capacity = state.service.tasks_capacity();
+    let tasks_running = state.service.tasks_running();
+    let tasks_limit = state.service.tasks_limit();
 
     let mut output = format!(
         "# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
@@ -39,12 +39,12 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
          # HELP objectstore_requests_limit Configured maximum concurrent HTTP requests\n\
          # TYPE objectstore_requests_limit gauge\n\
          objectstore_requests_limit {req_limit}\n\
-         # HELP objectstore_tasks_in_use Current in-flight backend tasks\n\
-         # TYPE objectstore_tasks_in_use gauge\n\
-         objectstore_tasks_in_use {tasks_in_use}\n\
+         # HELP objectstore_tasks_running Current running backend tasks\n\
+         # TYPE objectstore_tasks_running gauge\n\
+         objectstore_tasks_running {tasks_running}\n\
          # HELP objectstore_tasks_limit Configured maximum concurrent backend tasks\n\
          # TYPE objectstore_tasks_limit gauge\n\
-         objectstore_tasks_limit {tasks_capacity}\n"
+         objectstore_tasks_limit {tasks_limit}\n"
     );
 
     if let Some(limit) = bw_limit {

@@ -588,12 +588,12 @@ async fn test_keda_returns_prometheus_format() -> Result<()> {
         "missing requests_limit value"
     );
     assert!(
-        body.contains("# TYPE objectstore_tasks_in_use gauge"),
-        "missing tasks_in_use type"
+        body.contains("# TYPE objectstore_tasks_running gauge"),
+        "missing tasks_running type"
     );
     assert!(
-        body.contains("objectstore_tasks_in_use "),
-        "missing tasks_in_use value"
+        body.contains("objectstore_tasks_running "),
+        "missing tasks_running value"
     );
     assert!(
         body.contains("# TYPE objectstore_tasks_limit gauge"),
@@ -639,7 +639,7 @@ async fn test_keda_omits_limit_gauges_when_unconfigured() -> Result<()> {
     assert!(body.contains("objectstore_bandwidth_ewma "));
     assert!(body.contains("objectstore_throughput_rps "));
     assert!(body.contains("objectstore_requests_in_flight "));
-    assert!(body.contains("objectstore_tasks_in_use "));
+    assert!(body.contains("objectstore_tasks_running "));
 
     Ok(())
 }
