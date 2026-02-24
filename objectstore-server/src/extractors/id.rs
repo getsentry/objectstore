@@ -234,6 +234,7 @@ mod tests {
     use objectstore_service::{StorageConfig, StorageService};
     use tempfile::TempDir;
     use tower::ServiceExt;
+    use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 
     use crate::auth::PublicKeyDirectory;
     use crate::config::{Config, Storage};
@@ -264,6 +265,7 @@ mod tests {
             service,
             key_directory,
             rate_limiter,
+            request_counter: InFlightRequestsCounter::new(),
         });
         (state, tempdir)
     }

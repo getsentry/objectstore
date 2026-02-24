@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::Extension;
 use axum::ServiceExt;
 use axum::extract::Request;
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
@@ -10,7 +9,6 @@ use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::metrics::InFlightRequestsLayer;
-use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 
@@ -25,7 +23,7 @@ const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Debug)]
 pub struct App {
     router: axum::Router,
-    in_flight_requests: InFlightRequestsCounter,
+    state: ServiceState,
     graceful_shutdown: bool,
 }
 
@@ -35,7 +33,7 @@ impl App {
     /// The applications sets up middlewares and routes for the objectstore web API. Use
     /// [`serve`](Self::serve) to run the server future.
     pub fn new(state: ServiceState) -> Self {
-        let (in_flight_layer, in_flight_requests) = InFlightRequestsLayer::pair();
+        let in_flight_layer = InFlightRequestsLayer::new(state.request_counter.clone());
 
         // Build the router middleware into a single service which runs _after_ routing. Service
         // builder order defines layers added first will be called first. This means:
@@ -44,7 +42,7 @@ impl App {
         let middleware = ServiceBuilder::new()
             .layer(axum::middleware::from_fn(m::emit_request_metrics))
             .layer(axum::middleware::from_fn_with_state(
-                (in_flight_requests.clone(), state.config.http.max_requests),
+                state.clone(),
                 m::limit_web_concurrency,
             ))
             .layer(in_flight_layer)
@@ -60,12 +58,11 @@ impl App {
 
         let router = endpoints::routes()
             .layer(middleware)
-            .layer(Extension(in_flight_requests.clone()))
-            .with_state(state);
+            .with_state(state.clone());
 
         App {
             router,
-            in_flight_requests,
+            state,
             graceful_shutdown: false,
         }
     }
@@ -85,7 +82,7 @@ impl App {
     pub async fn serve(self, listener: TcpListener) -> Result<()> {
         let Self {
             router,
-            in_flight_requests,
+            state,
             graceful_shutdown,
         } = self;
 
@@ -108,7 +105,8 @@ impl App {
             }
         };
 
-        let emitter = in_flight_requests.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
+        let request_counter = state.request_counter.clone();
+        let emitter = request_counter.run_emitter(IN_FLIGHT_INTERVAL, |count| async move {
             merni::gauge!("server.requests.in_flight": count);
         });
 

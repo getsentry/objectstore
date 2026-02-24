@@ -5,6 +5,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
+use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 
 use objectstore_service::id::ObjectContext;
 
@@ -37,6 +38,11 @@ pub struct Services {
     pub key_directory: PublicKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
+    /// Counter for in-flight HTTP requests.
+    ///
+    /// Shared with the [`InFlightRequestsLayer`](tower_http::metrics::InFlightRequestsLayer) so
+    /// both the middleware and the layer read the same atomic.
+    pub request_counter: InFlightRequestsCounter,
 }
 
 impl Services {
@@ -57,12 +63,14 @@ impl Services {
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
         rate_limiter.start();
+        let request_counter = InFlightRequestsCounter::new();
 
         Ok(Arc::new(Self {
             config,
             service,
             key_directory,
             rate_limiter,
+            request_counter,
         }))
     }
 

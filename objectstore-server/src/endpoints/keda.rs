@@ -6,11 +6,9 @@
 
 use std::fmt::Write as _;
 
-use axum::Extension;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::{Router, routing};
-use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 
 use crate::state::ServiceState;
 
@@ -18,15 +16,12 @@ pub fn router() -> Router<ServiceState> {
     Router::new().route("/keda", routing::get(keda))
 }
 
-async fn keda(
-    State(state): State<ServiceState>,
-    Extension(counter): Extension<InFlightRequestsCounter>,
-) -> impl IntoResponse {
+async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
     let bw_ewma = state.rate_limiter.bandwidth_ewma();
     let bw_limit = state.rate_limiter.bandwidth_limit();
     let tp_rps = state.rate_limiter.throughput_rps();
     let tp_limit = state.rate_limiter.throughput_limit();
-    let req_in_flight = counter.get();
+    let req_in_flight = state.request_counter.get();
     let req_limit = state.config.http.max_requests;
     let tasks_in_use = state.service.tasks_in_use();
     let tasks_capacity = state.service.tasks_capacity();
