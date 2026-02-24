@@ -35,12 +35,12 @@ class TokenGenerator:
         kid: str,
         secret_key: str,
         expiry_seconds: int = 60,
-        permissions: list[Permission] = Permission.max(),
+        permissions: list[Permission] | None = None,
     ):
         self.kid = kid
         self.secret_key = secret_key
         self.expiry_seconds = expiry_seconds
-        self.permissions = permissions
+        self.permissions = permissions if permissions is not None else Permission.max()
 
     def sign_for_scope(self, usecase: str, scope: Scope) -> str:
         """
