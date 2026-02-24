@@ -307,7 +307,7 @@ class Session:
                 pool_retries = self._pool.retries
                 if isinstance(pool_retries, urllib3.Retry):
                     retries = pool_retries.new(read=0)
-                else:
+                elif isinstance(pool_retries, int):
                     retries = urllib3.Retry(pool_retries, read=0)
 
             response = self._pool.request(
