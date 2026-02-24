@@ -198,7 +198,7 @@ Pre-smoothed rates, self-contained per scrape (no `irate()` arithmetic needed):
 | Resource | Utilization | Limit |
 |---|---|---|
 | Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
-| Throughput | `objectstore_throughput_rps` | `objectstore_throughput_limit` (only when `global_rps` is set) |
+| Throughput | `objectstore_throughput_ewma` | `objectstore_throughput_limit` (only when `global_rps` is set) |
 | HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
 | Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
 
@@ -213,8 +213,8 @@ KEDA queries for an unsmoothed, immediately responsive rate:
 
 | Counter | Description |
 |---|---|
-| `objectstore_bandwidth_bytes_total` | Total bytes transferred since startup |
-| `objectstore_admitted_requests_total` | Total admitted requests since startup |
+| `objectstore_bytes_total` | Total bytes transferred since startup |
+| `objectstore_requests_total` | Total admitted requests since startup |
 
 ### Example KEDA ScaledObject Triggers
 
@@ -230,7 +230,7 @@ triggers:
       query: |
         max(
           objectstore_bandwidth_ewma / objectstore_bandwidth_limit
-          or objectstore_throughput_rps / objectstore_throughput_limit
+          or objectstore_throughput_ewma / objectstore_throughput_limit
           or objectstore_requests_in_flight / objectstore_requests_limit
           or objectstore_tasks_running / objectstore_tasks_limit
         )
@@ -248,8 +248,8 @@ triggers:
       serverAddress: http://prometheus:9090
       query: |
         max(
-          irate(objectstore_bandwidth_bytes_total[2m]) / objectstore_bandwidth_limit
-          or irate(objectstore_admitted_requests_total[2m]) / objectstore_throughput_limit
+          irate(objectstore_bytes_total[2m]) / objectstore_bandwidth_limit
+          or irate(objectstore_requests_total[2m]) / objectstore_throughput_limit
           or objectstore_requests_in_flight / objectstore_requests_limit
           or objectstore_tasks_running / objectstore_tasks_limit
         )

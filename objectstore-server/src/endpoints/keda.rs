@@ -2,9 +2,9 @@
 //!
 //! Exposes a `/keda` endpoint in Prometheus text format (version 0.0.4) with:
 //!
-//! - **EWMA gauges** (`objectstore_bandwidth_ewma`, `objectstore_throughput_rps`): pre-computed
+//! - **EWMA gauges** (`objectstore_bandwidth_ewma`, `objectstore_throughput_ewma`): pre-computed
 //!   rates, self-contained per scrape with no `irate()` arithmetic needed (kept for backward compat).
-//! - **Monotonic counters** (`objectstore_bandwidth_bytes_total`, `objectstore_admitted_requests_total`):
+//! - **Monotonic counters** (`objectstore_bytes_total`, `objectstore_requests_total`):
 //!   cumulative totals since startup; use `irate(counter[window])` in KEDA queries for an
 //!   unsmoothed, immediately responsive rate.
 
@@ -36,9 +36,9 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
         "# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
          # TYPE objectstore_bandwidth_ewma gauge\n\
          objectstore_bandwidth_ewma {bw_ewma}\n\
-         # HELP objectstore_throughput_rps Current admitted request rate in requests/s (EWMA)\n\
-         # TYPE objectstore_throughput_rps gauge\n\
-         objectstore_throughput_rps {tp_rps}\n\
+         # HELP objectstore_throughput_ewma Current admitted request rate in requests/s (EWMA)\n\
+         # TYPE objectstore_throughput_ewma gauge\n\
+         objectstore_throughput_ewma {tp_rps}\n\
          # HELP objectstore_requests_in_flight Current in-flight HTTP requests\n\
          # TYPE objectstore_requests_in_flight gauge\n\
          objectstore_requests_in_flight {req_in_flight}\n\
@@ -51,12 +51,12 @@ async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
          # HELP objectstore_tasks_limit Configured maximum concurrent backend tasks\n\
          # TYPE objectstore_tasks_limit gauge\n\
          objectstore_tasks_limit {tasks_limit}\n\
-         # HELP objectstore_bandwidth_bytes_total Total bytes transferred since startup\n\
-         # TYPE objectstore_bandwidth_bytes_total counter\n\
-         objectstore_bandwidth_bytes_total {bw_total}\n\
-         # HELP objectstore_admitted_requests_total Total admitted requests since startup\n\
-         # TYPE objectstore_admitted_requests_total counter\n\
-         objectstore_admitted_requests_total {tp_total}\n"
+         # HELP objectstore_bytes_total Total bytes transferred since startup\n\
+         # TYPE objectstore_bytes_total counter\n\
+         objectstore_bytes_total {bw_total}\n\
+         # HELP objectstore_requests_total Total admitted requests since startup\n\
+         # TYPE objectstore_requests_total counter\n\
+         objectstore_requests_total {tp_total}\n"
     );
 
     if let Some(limit) = bw_limit {

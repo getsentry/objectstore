@@ -560,12 +560,12 @@ async fn test_keda() -> Result<()> {
 
     // Counters are present.
     assert!(
-        body.contains("objectstore_bandwidth_bytes_total "),
-        "missing bandwidth_bytes_total"
+        body.contains("objectstore_bytes_total "),
+        "missing bytes_total"
     );
     assert!(
-        body.contains("objectstore_admitted_requests_total "),
-        "missing admitted_requests_total"
+        body.contains("objectstore_requests_total "),
+        "missing requests_total"
     );
 
     Ok(())
