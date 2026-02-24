@@ -8,7 +8,7 @@
 //! ## Window and Permit Reservation
 //!
 //! The concurrency window is derived from the service's available permits at the time
-//! [`StorageService::batch`](crate::service::StorageService::batch) is called: `ceil(available_permits × 0.10)`, clamped to
+//! [`StorageService::batch`](crate::service::StorageService::batch) is called: `ceil(tasks_available × 0.10)`, clamped to
 //! `[1, 50]`. The executor pre-acquires exactly `window` permits from the service's
 //! `ConcurrencyLimiter` as a single bulk reservation. These permits are held for the
 //! lifetime of the returned stream — released atomically when the stream is fully

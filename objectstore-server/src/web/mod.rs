@@ -14,7 +14,9 @@
 
 mod app;
 mod middleware;
+mod request_counter;
 mod server;
 
 pub use app::App;
+pub use request_counter::RequestCounter;
 pub use server::server;

@@ -240,6 +240,7 @@ mod tests {
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
+    use crate::web::RequestCounter;
 
     async fn test_state(mut config: Config) -> (ServiceState, TempDir) {
         let tempdir = TempDir::new().unwrap();
@@ -264,6 +265,7 @@ mod tests {
             service,
             key_directory,
             rate_limiter,
+            request_counter: RequestCounter::new(0),
         });
         (state, tempdir)
     }

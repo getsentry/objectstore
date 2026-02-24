@@ -175,9 +175,19 @@ impl StorageService {
         self
     }
 
-    /// Returns the number of concurrency permits currently available.
-    pub fn available_permits(&self) -> usize {
+    /// Returns the number of backend task slots currently available.
+    pub fn tasks_available(&self) -> usize {
         self.concurrency.available_permits()
+    }
+
+    /// Returns the number of backend tasks currently running.
+    pub fn tasks_running(&self) -> usize {
+        self.concurrency.used_permits()
+    }
+
+    /// Returns the configured limit for concurrent backend tasks.
+    pub fn tasks_limit(&self) -> usize {
+        self.concurrency.total_permits()
     }
 
     /// Creates a [`BatchExecutor`](crate::batch::BatchExecutor) by pre-acquiring a share of available permits.
@@ -185,7 +195,7 @@ impl StorageService {
     /// The window size is `ceil(available × 0.10)`, clamped to `[1, 50]`. Returns
     /// [`Error::AtCapacity`] if no permits are available.
     pub fn batch(&self) -> Result<crate::batch::BatchExecutor> {
-        let available = self.available_permits();
+        let available = self.tasks_available();
         let window = ((available as f64 * 0.10).ceil() as usize).clamp(1, 50);
         let reservation = self.concurrency.try_reserve(window)?;
         Ok(crate::batch::BatchExecutor {
@@ -748,6 +758,39 @@ mod tests {
             .get_metadata(ObjectId::new(make_context(), "first".into()))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tasks_limit_returns_configured_limit() {
+        let hv = GatedBackend::new("cap-hv");
+        let lt = GatedBackend::new("cap-lt");
+        let service =
+            StorageService::from_backends(Box::new(hv), Box::new(lt)).with_concurrency_limit(7);
+        assert_eq!(service.tasks_limit(), 7);
+    }
+
+    #[tokio::test]
+    async fn tasks_running_tracks_in_flight() {
+        let (service, hv, _lt) = make_limited_service(5);
+
+        assert_eq!(service.tasks_running(), 0);
+
+        // Kick off a request that blocks in the backend, holding a permit.
+        let svc = service.clone();
+        let _blocked = tokio::spawn(async move {
+            svc.insert_object(
+                make_context(),
+                Some("in-use-test".into()),
+                Metadata::default(),
+                make_stream(b"data"),
+            )
+            .await
+        });
+
+        hv.paused.notified().await;
+        assert_eq!(service.tasks_running(), 1);
+
+        hv.resume.notify_one();
     }
 
     #[tokio::test]

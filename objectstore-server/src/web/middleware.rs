@@ -7,27 +7,28 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::time::Instant;
-use tower_http::metrics::in_flight_requests::InFlightRequestsCounter;
 use tower_http::set_header::SetResponseHeaderLayer;
+
+use crate::endpoints::is_internal_route;
+use crate::web::RequestCounter;
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 
-/// Rejects requests with HTTP 503 when the in-flight request count reaches `max`.
+/// Rejects requests with HTTP 503 when the in-flight request count reaches the configured
+/// maximum.
 ///
-/// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing
-/// `(InFlightRequestsCounter, usize)` as state — share the counter from
-/// [`InFlightRequestsLayer::pair`](tower_http::metrics::InFlightRequestsLayer) so both
-/// read the same atomic. Health (`/health`) and readiness (`/ready`) are excluded.
+/// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing a
+/// [`RequestCounter`]. Internal routes (see [`is_internal_route`]) are excluded.
 pub async fn limit_web_concurrency(
-    State((counter, max)): State<(InFlightRequestsCounter, usize)>,
+    State(counter): State<RequestCounter>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    if !matches!(route, "/health" | "/ready") && counter.get() >= max {
+    if !is_internal_route(route) && counter.count() >= counter.limit() {
         merni::counter!("web.concurrency.rejected": 1);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -84,13 +85,12 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 ///
-/// Health check endpoints (`/health` and `/ready`) are excluded from metrics as they are
-/// operational checks for orchestration.
+/// Internal routes (see [`is_internal_route`]) are excluded from metrics.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    let should_emit = !matches!(route, "/health" | "/ready");
+    let should_emit = !is_internal_route(route);
     let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method()));
 
     let response = next.run(request).await;
@@ -159,7 +159,6 @@ mod tests {
     use axum::routing::get;
     use tokio::sync::Notify;
     use tower::ServiceExt;
-    use tower_http::metrics::InFlightRequestsLayer;
 
     use super::*;
 
@@ -167,13 +166,13 @@ mod tests {
         Request::builder().uri(uri).body(Body::empty()).unwrap()
     }
 
-    /// Builds a test router with the concurrency limit middleware applied.
+    /// Builds a test router with [`limit_web_concurrency`] applied.
     ///
-    /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on
-    /// `resume` before returning. `/health` and `/ready` return 200 immediately.
-    /// Returns `(router, paused, resume)`.
+    /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on `resume`
+    /// before returning, allowing tests to hold a request in-flight. Internal routes
+    /// (`/health`, `/ready`, `/keda`) return 200 immediately.
     fn make_app(max: usize) -> (Router, Arc<Notify>, Arc<Notify>) {
-        let (in_flight_layer, counter) = InFlightRequestsLayer::pair();
+        let counter = RequestCounter::new(max);
         let paused = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
 
@@ -192,11 +191,9 @@ mod tests {
             )
             .route("/health", get(|| async { StatusCode::OK.into_response() }))
             .route("/ready", get(|| async { StatusCode::OK.into_response() }))
-            .layer(in_flight_layer)
-            .layer(from_fn_with_state(
-                (counter.clone(), max),
-                limit_web_concurrency,
-            ));
+            .route("/keda", get(|| async { StatusCode::OK.into_response() }))
+            .layer(counter.layer())
+            .layer(from_fn_with_state(counter, limit_web_concurrency));
 
         (app, paused, resume)
     }
@@ -219,7 +216,7 @@ mod tests {
             .await
             .expect("handler did not start within 5s");
 
-        // Regular request is rejected; health and ready bypass the limit.
+        // Regular request is rejected; internal routes bypass the limit.
         let resp = app
             .clone()
             .oneshot(make_request("/v1/test/_/key"))
@@ -232,6 +229,9 @@ mod tests {
 
         let ready = app.clone().oneshot(make_request("/ready")).await.unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
+
+        let keda = app.clone().oneshot(make_request("/keda")).await.unwrap();
+        assert_eq!(keda.status(), StatusCode::OK);
 
         resume.notify_one();
         blocking.await.unwrap().unwrap();

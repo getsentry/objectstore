@@ -9,7 +9,13 @@ use crate::state::ServiceState;
 mod batch;
 pub mod common;
 pub mod health;
+mod keda;
 mod objects;
+
+/// Returns `true` for internal endpoints that are exempt from metrics and concurrency limits.
+pub fn is_internal_route(route: &str) -> bool {
+    matches!(route, "/health" | "/ready" | "/keda")
+}
 
 pub fn routes() -> Router<ServiceState> {
     let routes_v1 = Router::new()
@@ -18,5 +24,6 @@ pub fn routes() -> Router<ServiceState> {
 
     Router::new()
         .merge(health::router())
+        .merge(keda::router())
         .nest("/v1/", routes_v1)
 }

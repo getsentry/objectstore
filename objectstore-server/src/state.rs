@@ -11,6 +11,7 @@ use objectstore_service::id::ObjectContext;
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
+use crate::web::RequestCounter;
 
 /// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
@@ -37,6 +38,11 @@ pub struct Services {
     pub key_directory: PublicKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
+    /// In-flight HTTP request counter with the configured limit.
+    ///
+    /// Shared with the web layer so the concurrency-limit middleware, the tracking
+    /// layer, and any endpoint that reads the count all see the same atomic.
+    pub request_counter: RequestCounter,
 }
 
 impl Services {
@@ -58,11 +64,15 @@ impl Services {
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
         rate_limiter.start();
 
+        let request_counter = RequestCounter::new(config.http.max_requests);
+        tokio::spawn(request_counter.clone().run_emitter());
+
         Ok(Arc::new(Self {
             config,
             service,
             key_directory,
             rate_limiter,
+            request_counter,
         }))
     }
 

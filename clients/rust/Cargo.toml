@@ -27,7 +27,9 @@ tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
 
 [dev-dependencies]
+jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 
