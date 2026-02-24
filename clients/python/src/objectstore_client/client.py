@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from io import BytesIO
-from typing import IO, Any, Literal, NamedTuple, cast
+from typing import IO, Any, Literal, NamedTuple, cast, get_args
 from urllib.parse import urlparse
 
 import sentry_sdk
@@ -266,8 +266,8 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
         """
-        if compression and compression != "none" and compression != "zstd":
-            raise ValueError(f"Invalid compression value: {compression}")
+        if compression and compression not in get_args(Compression):
+            raise ValueError(f"Invalid compression: {compression}")
 
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
