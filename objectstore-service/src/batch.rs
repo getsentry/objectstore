@@ -168,7 +168,7 @@ impl std::fmt::Debug for OpResponse {
             } => f
                 .debug_struct("Got")
                 .field("key", key)
-                .field("response", &"Some(<stream>)")
+                .field("response", &format_args!("Some(<stream>)"))
                 .finish(),
             OpResponse::Got {
                 key,
@@ -176,7 +176,7 @@ impl std::fmt::Debug for OpResponse {
             } => f
                 .debug_struct("Got")
                 .field("key", key)
-                .field("response", &"None")
+                .field("response", &format_args!("None"))
                 .finish(),
             OpResponse::Deleted { key } => f.debug_struct("Deleted").field("key", key).finish(),
         }
