@@ -877,6 +877,12 @@ pub struct Config {
 
     /// Configuration for the [`StorageService`](objectstore_service::StorageService).
     pub service: Service,
+
+    /// Configuration for the HTTP layer.
+    ///
+    /// Controls HTTP-level settings that operate before requests reach the
+    /// storage service. See [`Http`] for configuration options.
+    pub http: Http,
 }
 
 /// Configuration for the [`StorageService`](objectstore_service::StorageService).
@@ -912,6 +918,54 @@ impl Default for Service {
     }
 }
 
+/// Default maximum number of concurrent in-flight HTTP requests.
+///
+/// Requests beyond this limit are rejected with HTTP 503.
+pub const DEFAULT_MAX_HTTP_REQUESTS: usize = 10_000;
+
+/// Configuration for the HTTP layer.
+///
+/// Controls behaviour at the HTTP request level, before requests reach the
+/// storage service. Grouping these settings separately from [`Service`] keeps
+/// HTTP-layer and service-layer concerns distinct and provides a natural home
+/// for future HTTP-level settings (e.g. timeouts, body size limits).
+///
+/// Used in: [`Config::http`]
+///
+/// # Environment Variables
+///
+/// - `OS__HTTP__MAX_REQUESTS`
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Http {
+    /// Maximum number of concurrent in-flight HTTP requests.
+    ///
+    /// This is a flood protection limit. When the number of requests currently
+    /// being processed reaches this value, new requests are rejected immediately
+    /// with HTTP 503. Health and readiness endpoints (`/health`, `/ready`) are
+    /// excluded from this limit.
+    ///
+    /// Unlike readiness-based backpressure, direct rejection responds in
+    /// milliseconds and recovers the moment any in-flight request completes.
+    ///
+    /// # Default
+    ///
+    /// [`DEFAULT_MAX_HTTP_REQUESTS`]
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__HTTP__MAX_REQUESTS`
+    pub max_requests: usize,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            max_requests: DEFAULT_MAX_HTTP_REQUESTS,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -932,6 +986,7 @@ impl Default for Config {
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),
             service: Service::default(),
+            http: Http::default(),
         }
     }
 }

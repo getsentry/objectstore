@@ -100,7 +100,8 @@ Key configuration sections:
   parameters
 - `auth` — key directory and enforcement toggle
 - `rate_limits` — throughput and bandwidth limits
-- `service` — storage service parameters (concurrency limit)
+- `http` — HTTP layer parameters (concurrency limit)
+- `service` — storage service parameters (backend concurrency limit)
 - `killswitches` — traffic blocking rules
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
@@ -143,10 +144,34 @@ size is known upfront), bytes are recorded directly via
 
 Rate-limited requests receive HTTP 429.
 
+### Web Concurrency Limit
+
+Before requests reach the storage service, a web-tier concurrency limit
+protects against connection floods. When the number of in-flight HTTP requests
+reaches `http.max_requests` (default: 10,000), new requests are rejected
+immediately with HTTP 503. Health and readiness endpoints (`/health`, `/ready`)
+are excluded from this limit. Rejections are counted in the
+`web.concurrency.rejected` metric.
+
+Direct 503 rejection is preferred over readiness-based backpressure:
+
+- **Instant response and recovery**: direct 503 responds in milliseconds and
+  frees capacity the moment any request completes. Readiness probes run on
+  periodic intervals, leaving a window of continued overload and wasting
+  capacity during recovery.
+- **No cascade risk**: multiple pods failing readiness probes simultaneously
+  concentrates traffic onto remaining pods. Direct rejection keeps every pod in
+  the pool and self-regulating.
+- **Correct health semantics**: a busy pod is still *ready* — its dependencies
+  are reachable and it can serve traffic. Conflating load with readiness muddies
+  alerting and incident response.
+- **Environment-independent**: works in any deployment, not just Kubernetes.
+
 ### Service Backpressure
 
-Beyond rate limiting, the [`StorageService`](objectstore_service::StorageService)
-itself enforces backpressure through a concurrency limit on in-flight backend
+Beyond rate limiting and the web concurrency limit, the
+[`StorageService`](objectstore_service::StorageService) enforces a second
+layer of backpressure through a concurrency limit on in-flight backend
 operations, configured via `service.max_concurrency`. When exceeded, requests
 receive HTTP 429. See the [service architecture docs](objectstore_service) for
 details.
