@@ -128,6 +128,23 @@ impl TokenGenerator {
         self
     }
 
+    /// Sign a token for the given [`Scope`](crate::Scope), returning the JWT string.
+    ///
+    /// Use this to produce a static token that can be handed to an external service
+    /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid or the JWT cannot be signed.
+    pub fn sign(&self, scope: &crate::Scope) -> crate::Result<String> {
+        match scope.inner() {
+            Ok(inner) => self.sign_for_scope(inner),
+            Err(err) => Err(crate::Error::InvalidUrl {
+                message: err.to_string(),
+            }),
+        }
+    }
+
     /// Sign a new token for the passed-in scope using the configured expiry and permissions.
     pub(crate) fn sign_for_scope(&self, scope: &ScopeInner) -> crate::Result<String> {
         let claims = JwtClaims {

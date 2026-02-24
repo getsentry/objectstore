@@ -286,6 +286,10 @@ impl Scope {
         Self(result)
     }
 
+    pub(crate) fn inner(&self) -> Result<&ScopeInner, &crate::Error> {
+        self.0.as_ref()
+    }
+
     /// Creates a session for this scope using the given client.
     ///
     /// # Errors
@@ -345,14 +349,21 @@ pub(crate) struct ClientInner {
 /// # }
 /// ```
 ///
-/// External service with a pre-signed JWT:
+/// External service with a pre-signed JWT (obtained via
+/// [`TokenGenerator::sign`](crate::TokenGenerator::sign)):
 ///
 /// ```no_run
-/// use objectstore_client::{Client, Usecase};
+/// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
+/// let scope = Usecase::new("my_app").for_project(42, 1337);
+/// let token = TokenGenerator::new(SecretKey {
+///     secret_key: "<private key>".into(),
+///     kid: "my-service".into(),
+/// })?.sign(&scope)?;
+///
 /// let client = Client::builder("http://localhost:8888/")
-///     .token("<pre-signed JWT>")
+///     .token(token)
 ///     .build()?;
 /// # Ok(())
 /// # }
