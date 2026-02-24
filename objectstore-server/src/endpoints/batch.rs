@@ -134,35 +134,9 @@ async fn convert_to_part(
         Ok(OpResponse::Got {
             key,
             response: Some((metadata, stream)),
-        }) => {
-            let metered = state.meter_stream(stream, context);
-            match metered.try_collect::<BytesMut>().await {
-                Ok(bytes) => {
-                    let mut metadata_headers = match metadata.to_headers("") {
-                        Ok(h) => h,
-                        Err(err) => {
-                            let error: ApiError = BatchError::ResponseSerialization {
-                                context: "serializing object metadata".to_owned(),
-                                cause: Box::new(err),
-                            }
-                            .into();
-                            return create_error_part(idx, &error);
-                        }
-                    };
-                    let content_type = metadata_headers.remove(CONTENT_TYPE);
-                    create_success_part(
-                        idx,
-                        &key,
-                        "get",
-                        StatusCode::OK,
-                        content_type,
-                        bytes.freeze(),
-                        Some(metadata_headers),
-                    )
-                }
-                Err(e) => create_error_part(idx, &ApiError::Service(e.into())),
-            }
-        }
+        }) => got_to_part(idx, key, metadata, stream, state, context)
+            .await
+            .unwrap_or_else(|e| create_error_part(idx, &e)),
         Ok(OpResponse::Got {
             key,
             response: None,
@@ -195,6 +169,40 @@ async fn convert_to_part(
         ),
         Err(error) => create_error_part(idx, &error),
     }
+}
+
+async fn got_to_part(
+    idx: usize,
+    key: ObjectKey,
+    metadata: objectstore_types::metadata::Metadata,
+    stream: objectstore_service::PayloadStream,
+    state: &crate::state::Services,
+    context: &ObjectContext,
+) -> Result<Part, ApiError> {
+    let bytes = state
+        .meter_stream(stream, context)
+        .try_collect::<BytesMut>()
+        .await
+        .map_err(|e| ApiError::Service(e.into()))?
+        .freeze();
+
+    let mut metadata_headers = metadata.to_headers("").map_err(|err| {
+        ApiError::from(BatchError::ResponseSerialization {
+            context: "serializing object metadata".to_owned(),
+            cause: Box::new(err),
+        })
+    })?;
+
+    let content_type = metadata_headers.remove(CONTENT_TYPE);
+    Ok(create_success_part(
+        idx,
+        &key,
+        "get",
+        StatusCode::OK,
+        content_type,
+        bytes,
+        Some(metadata_headers),
+    ))
 }
 
 fn insert_index_header(headers: &mut HeaderMap, idx: usize) {
