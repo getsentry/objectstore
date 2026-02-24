@@ -185,25 +185,18 @@ details.
 ## KEDA Metrics
 
 `GET /keda` serves a Prometheus text-format (version 0.0.4) snapshot of all
-four rate-limited resources. It is designed for [KEDA](https://keda.sh/)
-Prometheus scalers: every scrape is a self-contained snapshot — no `irate()` or
-scrape-interval arithmetic needed.
-
-The endpoint is exempt from the web concurrency limit and request metrics so
-that it remains available when the server is at capacity.
+four rate-limited resources for use with [KEDA](https://keda.sh/) Prometheus
+scalers. The endpoint is exempt from the web concurrency limit and request
+metrics so that it remains available when the server is at capacity.
 
 ### Exposed Gauges
 
-| Metric | Always present | Description |
+| Resource | Utilization | Limit |
 |---|---|---|
-| `objectstore_bandwidth_ewma` | yes | Current bandwidth in bytes/s (EWMA) |
-| `objectstore_bandwidth_limit` | only when `global_bps` is set | Configured `global_bps` limit |
-| `objectstore_throughput_rps` | yes | Current admitted request rate in requests/s (EWMA) |
-| `objectstore_throughput_limit` | only when `global_rps` is set | Configured `global_rps` limit |
-| `objectstore_requests_in_flight` | yes | Current in-flight HTTP requests |
-| `objectstore_requests_limit` | yes | Configured `http.max_requests` |
-| `objectstore_tasks_running` | yes | Current running backend tasks |
-| `objectstore_tasks_limit` | yes | Configured `service.max_concurrency` |
+| Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
+| Throughput | `objectstore_throughput_rps` | `objectstore_throughput_limit` (only when `global_rps` is set) |
+| HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
+| Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
 
 Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
 bandwidth estimator. The accumulator counts fully admitted requests (requests
