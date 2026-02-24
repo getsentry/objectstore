@@ -95,6 +95,15 @@ impl Operation {
         }
     }
 
+    /// Returns the permission required to perform this operation.
+    pub fn permission(&self) -> objectstore_types::auth::Permission {
+        match self {
+            Operation::Get(_) => objectstore_types::auth::Permission::ObjectRead,
+            Operation::Insert(_) => objectstore_types::auth::Permission::ObjectWrite,
+            Operation::Delete(_) => objectstore_types::auth::Permission::ObjectDelete,
+        }
+    }
+
     /// Returns the kind name for this operation.
     pub fn kind(&self) -> &'static str {
         match self {

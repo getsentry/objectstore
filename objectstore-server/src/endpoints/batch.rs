@@ -14,7 +14,6 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::batch::{OpResponse, Operation};
 use objectstore_service::id::{ObjectContext, ObjectKey};
-use objectstore_types::auth::Permission;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{
@@ -93,14 +92,7 @@ async fn batch(
     // Step 3: auth check
     let authorized = validate(rate_limited, {
         let context = context.clone();
-        move |op| {
-            let perm = match op {
-                Operation::Get(_) => Permission::ObjectRead,
-                Operation::Insert(_) => Permission::ObjectWrite,
-                Operation::Delete(_) => Permission::ObjectDelete,
-            };
-            service.check_permission(perm, &context)
-        }
+        move |op| service.check_permission(op.permission(), &context)
     });
 
     // Step 4: stamp inserts with time_created and record bandwidth
