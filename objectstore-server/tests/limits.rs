@@ -543,11 +543,20 @@ async fn test_keda() -> Result<()> {
     let body = response.text().await?;
 
     // One always-present gauge to verify the format.
-    assert!(body.contains("objectstore_bandwidth_ewma "), "missing bandwidth_ewma");
+    assert!(
+        body.contains("objectstore_bandwidth_ewma "),
+        "missing bandwidth_ewma"
+    );
 
     // Optional gauges are present when the corresponding limits are configured.
-    assert!(body.contains("objectstore_bandwidth_limit 10000000"), "missing bandwidth_limit");
-    assert!(body.contains("objectstore_throughput_limit 1000"), "missing throughput_limit");
+    assert!(
+        body.contains("objectstore_bandwidth_limit 10000000"),
+        "missing bandwidth_limit"
+    );
+    assert!(
+        body.contains("objectstore_throughput_limit 1000"),
+        "missing throughput_limit"
+    );
 
     Ok(())
 }
