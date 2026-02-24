@@ -129,21 +129,6 @@ impl TokenGenerator {
     }
 
     /// Sign a new token for the passed-in scope using the configured expiry and permissions.
-    ///
-    /// This is useful when an internal service needs to produce a static JWT to hand off
-    /// to an external consumer that doesn't have access to the signing key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the scope is invalid or if signing fails.
-    pub fn sign(&self, scope: &crate::Scope) -> crate::Result<String> {
-        let inner = scope.as_inner().ok_or_else(|| crate::Error::InvalidUrl {
-            message: "cannot sign token for an invalid scope".to_owned(),
-        })?;
-        self.sign_for_scope(inner)
-    }
-
-    /// Sign a new token for the passed-in scope using the configured expiry and permissions.
     pub(crate) fn sign_for_scope(&self, scope: &ScopeInner) -> crate::Result<String> {
         let claims = JwtClaims {
             exp: get_current_timestamp() + self.expiry_seconds,
