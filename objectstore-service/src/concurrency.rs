@@ -21,7 +21,7 @@ const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 /// Permits are acquired with [`try_acquire`](Self::try_acquire) and
 /// automatically returned when the [`ConcurrencyPermit`] is dropped.
 #[derive(Clone, Debug)]
-pub(crate) struct ConcurrencyLimiter {
+pub struct ConcurrencyLimiter {
     semaphore: Arc<Semaphore>,
     max: usize,
     released: Arc<Notify>,
@@ -29,7 +29,7 @@ pub(crate) struct ConcurrencyLimiter {
 
 impl ConcurrencyLimiter {
     /// Creates a new limiter with the given maximum number of permits.
-    pub(crate) fn new(max: usize) -> Self {
+    pub fn new(max: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(max)),
             max,
@@ -40,7 +40,7 @@ impl ConcurrencyLimiter {
     /// Tries to acquire a concurrency permit.
     ///
     /// Returns [`Error::AtCapacity`] when all permits are held.
-    pub(crate) fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
@@ -54,13 +54,18 @@ impl ConcurrencyLimiter {
     }
 
     /// Returns the number of permits currently held.
-    pub(crate) fn used_permits(&self) -> usize {
+    pub fn used_permits(&self) -> usize {
         self.max - self.semaphore.available_permits()
+    }
+
+    /// Returns the total number of permits.
+    pub fn total_permits(&self) -> usize {
+        self.max
     }
 
     /// Waits until all permits have been returned.
     #[allow(dead_code)]
-    pub(crate) async fn wait_all(&self) {
+    pub async fn wait_all(&self) {
         loop {
             let notified = self.released.notified();
             if self.used_permits() == 0 {
@@ -74,7 +79,7 @@ impl ConcurrencyLimiter {
     ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
-    pub(crate) async fn run_emitter<F, Fut>(&self, mut emit: F)
+    pub async fn run_emitter<F, Fut>(&self, mut emit: F)
     where
         F: FnMut(usize) -> Fut,
         Fut: Future<Output = ()>,
@@ -91,7 +96,7 @@ impl ConcurrencyLimiter {
 ///
 /// Dropping this permit releases it back to the [`ConcurrencyLimiter`] and
 /// notifies any task waiting in [`ConcurrencyLimiter::wait_all`].
-pub(crate) struct ConcurrencyPermit {
+pub struct ConcurrencyPermit {
     permit: Option<OwnedSemaphorePermit>,
     released: Arc<Notify>,
 }
@@ -109,6 +114,12 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+
+    #[test]
+    fn total_permits_returns_configured_max() {
+        let limiter = ConcurrencyLimiter::new(42);
+        assert_eq!(limiter.total_permits(), 42);
+    }
 
     #[test]
     fn acquire_and_release() {

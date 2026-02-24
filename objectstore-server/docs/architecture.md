@@ -21,10 +21,16 @@ All object operations live under the `/v1/` prefix:
 Scopes are encoded in the URL path using Matrix URI syntax:
 `org=123;project=456`. An underscore (`_`) represents empty scopes.
 
-Health endpoints:
-- `GET /health` — liveness probe (always returns 200)
-- `GET /ready` — readiness probe (returns 503 when `/tmp/objectstore.down`
-  exists, enabling graceful drain)
+### Internal Endpoints
+
+Internal endpoints are exempt from authentication, rate limiting, and the web
+concurrency limit so they remain available when the server is under load.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness probe (always returns 200) |
+| `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+| `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](#keda-metrics)) |
 
 ## Request Flow
 
@@ -175,6 +181,47 @@ layer of backpressure through a concurrency limit on in-flight backend
 operations, configured via `service.max_concurrency`. When exceeded, requests
 receive HTTP 429. See the [service architecture docs](objectstore_service) for
 details.
+
+## KEDA Metrics
+
+`GET /keda` serves a Prometheus text-format (version 0.0.4) snapshot of all
+four rate-limited resources for use with [KEDA](https://keda.sh/) Prometheus
+scalers. The endpoint is exempt from the web concurrency limit and request
+metrics so that it remains available when the server is at capacity.
+
+### Exposed Gauges
+
+| Resource | Utilization | Limit |
+|---|---|---|
+| Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
+| Throughput | `objectstore_throughput_rps` | `objectstore_throughput_limit` (only when `global_rps` is set) |
+| HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
+| Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
+
+Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
+bandwidth estimator. The accumulator counts fully admitted requests (requests
+that pass all throughput checks).
+
+### Example KEDA ScaledObject Trigger
+
+Scale on the highest utilization across all four resources:
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      query: |
+        max(
+          objectstore_bandwidth_ewma / objectstore_bandwidth_limit
+          or objectstore_throughput_rps / objectstore_throughput_limit
+          or objectstore_requests_in_flight / objectstore_requests_limit
+          or objectstore_tasks_running / objectstore_tasks_limit
+        )
+      threshold: "0.7"
+```
+
+Unconfigured limits produce no series and are excluded from `or` automatically.
 
 ## Killswitches
 

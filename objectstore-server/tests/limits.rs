@@ -499,3 +499,64 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
 
     Ok(())
 }
+
+// --- KEDA endpoint tests ---
+
+#[tokio::test]
+async fn test_keda() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            throughput: ThroughputLimits {
+                global_rps: Some(1000),
+                ..Default::default()
+            },
+            bandwidth: BandwidthLimits {
+                global_bps: Some(10_000_000),
+                ..Default::default()
+            },
+        },
+        http: Http { max_requests: 0 },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // /keda must bypass the web concurrency limit (max_requests: 0 rejects everything else).
+    let response = client
+        .get(server.url("/v1/objects/test/org=1/key"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    let response = client.get(server.url("/keda")).send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+
+    let body = response.text().await?;
+
+    // One always-present gauge to verify the format.
+    assert!(
+        body.contains("objectstore_bandwidth_ewma "),
+        "missing bandwidth_ewma"
+    );
+
+    // Optional gauges are present when the corresponding limits are configured.
+    assert!(
+        body.contains("objectstore_bandwidth_limit 10000000"),
+        "missing bandwidth_limit"
+    );
+    assert!(
+        body.contains("objectstore_throughput_limit 1000"),
+        "missing throughput_limit"
+    );
+
+    Ok(())
+}
