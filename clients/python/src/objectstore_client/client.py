@@ -11,6 +11,7 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
+from objectstore_client import utils
 from objectstore_client.auth import TokenGenerator
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
@@ -265,6 +266,9 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
         """
+        if compression and compression not in ("none", "zstd"):
+            raise ValueError(f"Invalid compression: {compression}")
+
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
@@ -273,6 +277,7 @@ class Session:
         if compression == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
+            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
             headers["Content-Encoding"] = "zstd"
 
         if content_type:
@@ -295,6 +300,16 @@ class Session:
         with measure_storage_operation(
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
+            retries = None  # by default use the pool's value, set by the Client
+            if compression == "zstd":
+                # For compressed bodies, don't attempt read retries,
+                # as the stream cannot be rewound after data has been consumed.
+                pool_retries = self._pool.retries
+                if isinstance(pool_retries, urllib3.Retry):
+                    retries = pool_retries.new(read=0)
+                elif isinstance(pool_retries, int):
+                    retries = urllib3.Retry(pool_retries, read=0)
+
             response = self._pool.request(
                 "POST" if not key else "PUT",
                 self._make_url(key),
@@ -302,6 +317,7 @@ class Session:
                 headers=headers,
                 preload_content=True,
                 decode_content=True,
+                retries=retries,
             )
             raise_for_status(response)
             res = response.json()
