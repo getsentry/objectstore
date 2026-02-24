@@ -190,6 +190,20 @@ impl RateLimiter {
     pub fn throughput_limit(&self) -> Option<u32> {
         self.throughput.config.global_rps
     }
+
+    /// Returns total bytes transferred since startup.
+    pub fn bandwidth_total_bytes(&self) -> u64 {
+        self.bandwidth
+            .total_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns total admitted requests since startup.
+    pub fn throughput_total_admitted(&self) -> u64 {
+        self.throughput
+            .total_admitted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Shared EWMA estimator state.
@@ -232,6 +246,8 @@ struct BandwidthRateLimiter {
     config: BandwidthLimits,
     /// Global accumulator/estimator pair.
     global: Arc<EwmaEstimator>,
+    /// Cumulative bytes transferred since startup. Never reset.
+    total_bytes: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
@@ -243,6 +259,7 @@ impl BandwidthRateLimiter {
         Self {
             config,
             global: Arc::new(EwmaEstimator::new()),
+            total_bytes: Arc::new(AtomicU64::new(0)),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
         }
@@ -356,8 +373,12 @@ impl BandwidthRateLimiter {
     /// Returns all accumulators (global + per-usecase + per-scope) for the given context.
     ///
     /// Creates entries in the per-usecase/per-scope maps if they don't exist yet.
+    /// Always includes `total_bytes` (cumulative, never reset) as the first entry.
     fn accumulators(&self, context: &ObjectContext) -> Vec<Arc<AtomicU64>> {
-        let mut accs = vec![Arc::clone(&self.global.accumulator)];
+        let mut accs = vec![
+            Arc::clone(&self.total_bytes),
+            Arc::clone(&self.global.accumulator),
+        ];
 
         if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();
@@ -397,6 +418,8 @@ struct ThroughputRateLimiter {
     global: Option<Mutex<TokenBucket>>,
     /// Global EWMA estimator for admitted request rate.
     global_estimator: Arc<EwmaEstimator>,
+    /// Cumulative admitted requests since startup. Never reset.
+    total_admitted: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
     usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
@@ -414,6 +437,7 @@ impl ThroughputRateLimiter {
             config,
             global,
             global_estimator: Arc::new(EwmaEstimator::new()),
+            total_admitted: Arc::new(AtomicU64::new(0)),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
             rules: papaya::HashMap::new(),
@@ -486,9 +510,13 @@ impl ThroughputRateLimiter {
             }
         }
 
-        // Count this admitted request in the EWMA accumulator.
+        // Count this admitted request in the EWMA accumulator and the cumulative counter.
+        // NB: u64 wrapping is not a practical concern — at 1M rps it takes ~585k years.
+        // Prometheus irate() also handles counter resets gracefully should it ever occur.
         self.global_estimator
             .accumulator
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_admitted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         true

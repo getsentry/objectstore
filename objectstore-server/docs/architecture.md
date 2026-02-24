@@ -189,12 +189,16 @@ four rate-limited resources for use with [KEDA](https://keda.sh/) Prometheus
 scalers. The endpoint is exempt from the web concurrency limit and request
 metrics so that it remains available when the server is at capacity.
 
-### Exposed Gauges
+### Exposed Metrics
+
+#### EWMA Gauges
+
+Pre-smoothed rates, self-contained per scrape (no `irate()` arithmetic needed):
 
 | Resource | Utilization | Limit |
 |---|---|---|
 | Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
-| Throughput | `objectstore_throughput_rps` | `objectstore_throughput_limit` (only when `global_rps` is set) |
+| Throughput | `objectstore_throughput_ewma` | `objectstore_throughput_limit` (only when `global_rps` is set) |
 | HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
 | Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
 
@@ -202,7 +206,19 @@ Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
 bandwidth estimator. The accumulator counts fully admitted requests (requests
 that pass all throughput checks).
 
-### Example KEDA ScaledObject Trigger
+#### Counters
+
+Monotonically increasing totals since startup; use `irate(counter[window])` in
+KEDA queries for an unsmoothed, immediately responsive rate:
+
+| Counter | Description |
+|---|---|
+| `objectstore_bytes_total` | Total bytes transferred since startup |
+| `objectstore_requests_total` | Total admitted requests since startup |
+
+### Example KEDA ScaledObject Triggers
+
+#### Using EWMA gauges (backward-compatible)
 
 Scale on the highest utilization across all four resources:
 
@@ -214,7 +230,26 @@ triggers:
       query: |
         max(
           objectstore_bandwidth_ewma / objectstore_bandwidth_limit
-          or objectstore_throughput_rps / objectstore_throughput_limit
+          or objectstore_throughput_ewma / objectstore_throughput_limit
+          or objectstore_requests_in_flight / objectstore_requests_limit
+          or objectstore_tasks_running / objectstore_tasks_limit
+        )
+      threshold: "0.7"
+```
+
+#### Using counters with `irate()` (more responsive)
+
+Uses the last two scraped values for an instantaneous rate with no smoothing lag:
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      query: |
+        max(
+          irate(objectstore_bytes_total[2m]) / objectstore_bandwidth_limit
+          or irate(objectstore_requests_total[2m]) / objectstore_throughput_limit
           or objectstore_requests_in_flight / objectstore_requests_limit
           or objectstore_tasks_running / objectstore_tasks_limit
         )

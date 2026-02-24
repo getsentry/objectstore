@@ -1,8 +1,12 @@
 //! KEDA autoscaling metrics endpoint.
 //!
-//! Exposes a `/keda` endpoint in Prometheus text format (version 0.0.4) with pre-computed
-//! gauges for every rate-limited resource. Each scrape is a self-contained snapshot — no
-//! `irate()` or Prometheus scrape-interval arithmetic needed.
+//! Exposes a `/keda` endpoint in Prometheus text format (version 0.0.4) with:
+//!
+//! - **EWMA gauges** (`objectstore_bandwidth_ewma`, `objectstore_throughput_ewma`): pre-computed
+//!   rates, self-contained per scrape with no `irate()` arithmetic needed (kept for backward compat).
+//! - **Monotonic counters** (`objectstore_bytes_total`, `objectstore_requests_total`):
+//!   cumulative totals since startup; use `irate(counter[window])` in KEDA queries for an
+//!   unsmoothed, immediately responsive rate.
 
 use std::fmt::Write as _;
 
@@ -19,20 +23,28 @@ pub fn router() -> Router<ServiceState> {
 async fn keda(State(state): State<ServiceState>) -> impl IntoResponse {
     let bw_ewma = state.rate_limiter.bandwidth_ewma();
     let bw_limit = state.rate_limiter.bandwidth_limit();
+    let bw_total = state.rate_limiter.bandwidth_total_bytes();
     let tp_rps = state.rate_limiter.throughput_rps();
     let tp_limit = state.rate_limiter.throughput_limit();
+    let tp_total = state.rate_limiter.throughput_total_admitted();
     let req_in_flight = state.request_counter.count();
     let req_limit = state.request_counter.limit();
     let tasks_running = state.service.tasks_running();
     let tasks_limit = state.service.tasks_limit();
 
     let mut output = format!(
-        "# HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
+        "# HELP objectstore_bytes_total Total bytes transferred since startup\n\
+         # TYPE objectstore_bytes_total counter\n\
+         objectstore_bytes_total {bw_total}\n\
+         # HELP objectstore_bandwidth_ewma Current bandwidth in bytes/s (EWMA)\n\
          # TYPE objectstore_bandwidth_ewma gauge\n\
          objectstore_bandwidth_ewma {bw_ewma}\n\
-         # HELP objectstore_throughput_rps Current admitted request rate in requests/s (EWMA)\n\
-         # TYPE objectstore_throughput_rps gauge\n\
-         objectstore_throughput_rps {tp_rps}\n\
+         # HELP objectstore_requests_total Total admitted requests since startup\n\
+         # TYPE objectstore_requests_total counter\n\
+         objectstore_requests_total {tp_total}\n\
+         # HELP objectstore_throughput_ewma Current admitted request rate in requests/s (EWMA)\n\
+         # TYPE objectstore_throughput_ewma gauge\n\
+         objectstore_throughput_ewma {tp_rps}\n\
          # HELP objectstore_requests_in_flight Current in-flight HTTP requests\n\
          # TYPE objectstore_requests_in_flight gauge\n\
          objectstore_requests_in_flight {req_in_flight}\n\

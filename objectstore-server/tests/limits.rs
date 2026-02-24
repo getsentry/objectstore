@@ -558,5 +558,15 @@ async fn test_keda() -> Result<()> {
         "missing throughput_limit"
     );
 
+    // Counters are present.
+    assert!(
+        body.contains("objectstore_bytes_total "),
+        "missing bytes_total"
+    );
+    assert!(
+        body.contains("objectstore_requests_total "),
+        "missing requests_total"
+    );
+
     Ok(())
 }
