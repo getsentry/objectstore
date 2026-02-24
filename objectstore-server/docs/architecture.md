@@ -21,14 +21,16 @@ All object operations live under the `/v1/` prefix:
 Scopes are encoded in the URL path using Matrix URI syntax:
 `org=123;project=456`. An underscore (`_`) represents empty scopes.
 
-Health endpoints:
-- `GET /health` — liveness probe (always returns 200)
-- `GET /ready` — readiness probe (returns 503 when `/tmp/objectstore.down`
-  exists, enabling graceful drain)
+### Internal Endpoints
 
-Autoscaling endpoint:
-- `GET /keda` — Prometheus text-format gauges for KEDA autoscaling (see
-  [KEDA Metrics](#keda-metrics))
+Internal endpoints are exempt from authentication, rate limiting, and the web
+concurrency limit so they remain available when the server is under load.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness probe (always returns 200) |
+| `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+| `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](#keda-metrics)) |
 
 ## Request Flow
 
