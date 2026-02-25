@@ -72,26 +72,38 @@ enum BatchOperation {
 
 impl From<GetBuilder> for BatchOperation {
     fn from(value: GetBuilder) -> Self {
-        BatchOperation::Get {
-            key: value.key,
-            decompress: value.decompress,
-        }
+        let GetBuilder {
+            key,
+            decompress,
+            session: _session,
+        } = value;
+        BatchOperation::Get { key, decompress }
     }
 }
 
 impl From<PutBuilder> for BatchOperation {
     fn from(value: PutBuilder) -> Self {
+        let PutBuilder {
+            key,
+            metadata,
+            body,
+            session: _session,
+        } = value;
         BatchOperation::Insert {
-            key: value.key,
-            metadata: value.metadata,
-            body: value.body,
+            key,
+            metadata,
+            body,
         }
     }
 }
 
 impl From<DeleteBuilder> for BatchOperation {
     fn from(value: DeleteBuilder) -> Self {
-        BatchOperation::Delete { key: value.key }
+        let DeleteBuilder {
+            key,
+            session: _session,
+        } = value;
+        BatchOperation::Delete { key }
     }
 }
 
