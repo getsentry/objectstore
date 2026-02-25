@@ -5,12 +5,10 @@
 //! See the [crate-level documentation](crate) for the two-tier backend system,
 //! redirect tombstones, and consistency guarantees.
 
-use std::any::Any;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use futures_util::FutureExt;
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
@@ -247,26 +245,7 @@ impl StorageService {
             merni::counter!("service.concurrency.rejected": 1);
         })?;
 
-        merni::counter!("service.task.start": 1, "operation" => operation);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            let result = std::panic::AssertUnwindSafe(f)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
-
-            merni::distribution!(
-                "service.task.duration"@s: start.elapsed(),
-                "operation" => operation,
-                "outcome" => if result.is_ok() { "success" } else { "error" }
-            );
-
-            let _ = tx.send(result);
-            drop(permit);
-        });
-        rx.await.map_err(|_| Error::Dropped)?
+        crate::concurrency::spawn_metered(operation, permit, f).await
     }
 
     /// Creates or overwrites an object.
@@ -380,17 +359,6 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             .await?,
         ),
     })
-}
-
-/// Extracts a human-readable message from a panic payload.
-pub(crate) fn extract_panic_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_owned()
-    }
 }
 
 #[cfg(test)]

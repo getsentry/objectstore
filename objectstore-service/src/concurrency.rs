@@ -4,11 +4,15 @@
 //! using a tokio semaphore. Each acquired [`ConcurrencyPermit`] notifies
 //! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
 //! all permits have been returned.
+//!
+//! [`spawn_metered`] spawns an arbitrary future as an isolated task with panic
+//! recovery and `service.task.*` metric emission.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
@@ -128,6 +132,44 @@ impl Drop for ConcurrencyPermit {
         drop(self.permit.take());
         self.released.notify_waiters();
     }
+}
+
+/// Spawns a future on a dedicated task with panic isolation and timing metrics.
+///
+/// The `guard` is moved into the spawned task and dropped after the future
+/// completes, ensuring any resource it represents (e.g. a concurrency permit)
+/// outlives the operation.
+///
+/// Emits `service.task.start` (counter) before spawning and
+/// `service.task.duration` (distribution) when the task completes, both tagged
+/// with the given `operation` name. The duration tag includes an `outcome` of
+/// `"success"` or `"error"`.
+pub async fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    merni::counter!("service.task.start": 1, "operation" => operation);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let start = tokio::time::Instant::now();
+        let result = std::panic::AssertUnwindSafe(f)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| Err(Error::panic(payload)));
+
+        merni::distribution!(
+            "service.task.duration"@s: start.elapsed(),
+            "operation" => operation,
+            "outcome" => if result.is_ok() { "success" } else { "error" }
+        );
+
+        let _ = tx.send(result);
+        drop(guard);
+    });
+    rx.await.map_err(|_| Error::Dropped)?
 }
 
 #[cfg(test)]

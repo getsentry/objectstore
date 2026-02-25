@@ -238,43 +238,20 @@ impl StreamExecutor {
                 let permit = Arc::clone(&reservation);
                 let tiered = Arc::clone(&tiered);
                 let context = context.clone();
-                async move { (idx, spawn_operation(tiered, context, permit, item).await) }
+                async move {
+                    let op = match item {
+                        Ok(op) => op,
+                        Err(e) => return (idx, Err(e)),
+                    };
+
+                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, async move {
+                        execute_operation(tiered, context, op).await
+                    });
+
+                    (idx, spawn.await.map_err(E::from))
+                }
             })
             .buffer_unordered(window)
-    }
-}
-
-/// Spawns a single operation with panic isolation, passing through pre-existing errors.
-///
-/// The `permit` is moved into the spawned task so that the concurrency
-/// reservation is held until the task completes, even if the caller's future
-/// is cancelled (e.g. the output stream is dropped).
-async fn spawn_operation<E>(
-    tiered: Arc<TieredStorage>,
-    context: ObjectContext,
-    permit: Arc<ConcurrencyPermit>,
-    item: Result<Operation, E>,
-) -> Result<OpResponse, E>
-where
-    E: From<Error>,
-{
-    let op = item?;
-    match tokio::spawn(async move {
-        let _permit = permit;
-        execute_operation(tiered, context, op).await
-    })
-    .await
-    {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(e)) => Err(e.into()),
-        Err(join_err) => {
-            let msg = if join_err.is_panic() {
-                crate::service::extract_panic_message(join_err.into_panic())
-            } else {
-                "task cancelled".to_owned()
-            };
-            Err(Error::Panic(msg).into())
-        }
     }
 }
 
