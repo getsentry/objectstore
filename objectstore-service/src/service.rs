@@ -5,12 +5,10 @@
 //! See the [crate-level documentation](crate) for the two-tier backend system,
 //! redirect tombstones, and consistency guarantees.
 
-use std::any::Any;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use futures_util::FutureExt;
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
@@ -18,6 +16,7 @@ use crate::backend::common::BoxedBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::streaming::StreamExecutor;
 use crate::tiered::TieredStorage;
 
 /// Service response for [`StorageService::get_object`].
@@ -153,7 +152,10 @@ impl StorageService {
         Ok(Self::from_backends(high_volume_backend, long_term_backend))
     }
 
-    fn from_backends(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
+    pub(crate) fn from_backends(
+        high_volume_backend: BoxedBackend,
+        long_term_backend: BoxedBackend,
+    ) -> Self {
         Self {
             inner: Arc::new(TieredStorage {
                 high_volume_backend,
@@ -172,6 +174,11 @@ impl StorageService {
         self
     }
 
+    /// Returns the number of backend task slots currently available.
+    pub fn tasks_available(&self) -> usize {
+        self.concurrency.available_permits()
+    }
+
     /// Returns the number of backend tasks currently running.
     pub fn tasks_running(&self) -> usize {
         self.concurrency.used_permits()
@@ -180,6 +187,31 @@ impl StorageService {
     /// Returns the configured limit for concurrent backend tasks.
     pub fn tasks_limit(&self) -> usize {
         self.concurrency.total_permits()
+    }
+
+    /// Prepares to stream multiple operations concurrently against this service.
+    ///
+    /// Operations are executed concurrently up to a window derived from the
+    /// service's current capacity. The permits for that window are reserved
+    /// upfront — if the service is at capacity, this returns
+    /// [`Error::AtCapacity`] immediately before any operations are read.
+    pub fn stream(&self) -> Result<StreamExecutor> {
+        let available = self.tasks_available();
+        let window = (available as f64 * 0.10).ceil() as usize;
+
+        let acquire_result = match window {
+            0 => Err(Error::AtCapacity),
+            _ => self.concurrency.try_acquire_many(window),
+        };
+        let reservation = acquire_result.inspect_err(|_| {
+            merni::counter!("service.concurrency.rejected": 1);
+        })?;
+
+        Ok(StreamExecutor {
+            tiered: Arc::clone(&self.inner),
+            window,
+            reservation,
+        })
     }
 
     /// Starts background processes for the storage service.
@@ -217,26 +249,7 @@ impl StorageService {
             merni::counter!("service.concurrency.rejected": 1);
         })?;
 
-        merni::counter!("service.task.start": 1, "operation" => operation);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            let result = std::panic::AssertUnwindSafe(f)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|payload| Err(Error::Panic(extract_panic_message(payload))));
-
-            merni::distribution!(
-                "service.task.duration"@s: start.elapsed(),
-                "operation" => operation,
-                "outcome" => if result.is_ok() { "success" } else { "error" }
-            );
-
-            let _ = tx.send(result);
-            drop(permit);
-        });
-        rx.await.map_err(|_| Error::Dropped)?
+        crate::concurrency::spawn_metered(operation, permit, f).await
     }
 
     /// Creates or overwrites an object.
@@ -350,17 +363,6 @@ async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBacken
             .await?,
         ),
     })
-}
-
-/// Extracts a human-readable message from a panic payload.
-fn extract_panic_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_owned()
-    }
 }
 
 #[cfg(test)]

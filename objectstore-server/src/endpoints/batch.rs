@@ -1,25 +1,27 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
-use futures::stream::BoxStream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
-use objectstore_types::metadata::Metadata;
+use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_service::streaming::{OpResponse, Operation};
 
 use crate::auth::AuthAwareService;
-use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
-use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
+use crate::batch::{
+    HEADER_BATCH_OPERATION_INDEX, HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND,
+};
+use crate::endpoints::common::{ApiError, ApiErrorResponse};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchError, BatchOperationStream, Operation};
+use crate::extractors::batch::{BatchError, BatchOperationStream};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
 
@@ -33,133 +35,185 @@ pub fn router() -> Router<ServiceState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
 }
 
-struct GetResponse {
-    pub key: ObjectKey,
-    pub result: ApiResult<Option<(Metadata, Bytes)>>,
-}
-
-impl std::fmt::Debug for GetResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GetResponse")
-            .field("key", &self.key)
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-struct InsertResponse {
-    pub key: ObjectKey,
-    pub result: ApiResult<objectstore_service::service::InsertResponse>,
-}
-
-#[derive(Debug)]
-struct DeleteResponse {
-    pub key: ObjectKey,
-    pub result: ApiResult<objectstore_service::service::DeleteResponse>,
-}
-
-#[derive(Debug)]
-struct ErrorResponse {
-    pub key: Option<ObjectKey>,
-    pub kind: Option<&'static str>,
-    pub error: ApiError,
-}
-
-#[derive(Debug)]
-enum OperationResponse {
-    Get(GetResponse),
-    Insert(InsertResponse),
-    Delete(DeleteResponse),
-    Error(ErrorResponse),
+/// Applies a per-operation check to a stream of indexed operations.
+///
+/// Errors already in the stream pass through unchanged. For each `Ok(op)`,
+/// `check` is called: if it returns `Err(e)` the item becomes `Err(e)`;
+/// otherwise the item remains `Ok(op)`.
+fn validate<S, E, F>(
+    stream: S,
+    check: F,
+) -> impl futures::Stream<Item = (usize, Result<Operation, E>)> + Send + 'static
+where
+    S: futures::Stream<Item = (usize, Result<Operation, E>)> + Send + 'static,
+    F: Fn(&Operation) -> Result<(), E> + Send + 'static,
+{
+    stream.map(move |(idx, item)| {
+        (
+            idx,
+            item.and_then(|op| {
+                check(&op)?;
+                Ok(op)
+            }),
+        )
+    })
 }
 
 async fn batch(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
-    mut requests: BatchOperationStream,
+    requests: BatchOperationStream,
 ) -> Response {
-    let responses: BoxStream<OperationResponse> = async_stream::stream! {
-        while let Some(operation) = requests.0.next().await {
-            let (operation, key, kind) = match operation {
-                Ok(op) => {
-                    let key = op.key().clone();
-                    let kind = match &op {
-                        Operation::Get(_) => "get",
-                        Operation::Insert(_) => "insert",
-                        Operation::Delete(_) => "delete",
-                    };
-                    (Ok(op), Some(key), Some(kind))
-                }
-                Err(e) => (Err(e), None, None),
-            };
+    let batch = match state.service.stream() {
+        Ok(b) => b,
+        Err(e) => return ApiError::Service(e).into_response(),
+    };
 
-            if !state.rate_limiter.check(&context) {
+    merni::gauge!("service.batch.window": batch.window());
+
+    // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
+    let parsed = requests.0.map(|r| r.map_err(ApiError::from)).enumerate();
+
+    // Step 2: rate-limit check
+    let rate_limited = validate(parsed, {
+        let state = Arc::clone(&state);
+        let context = context.clone();
+        move |_op| {
+            if state.rate_limiter.check(&context) {
+                Ok(())
+            } else {
                 tracing::debug!("Batch operation rejected due to rate limits");
-                yield OperationResponse::Error(ErrorResponse {
-                    key,
-                    kind,
-                    error: BatchError::RateLimited.into(),
-                });
-                continue;
+                Err(ApiError::from(BatchError::RateLimited))
             }
-
-            let result = match operation {
-                Ok(operation) => match operation {
-                    Operation::Get(get) => {
-                        let key = get.key.clone();
-                        let result = service
-                            .get_object(ObjectId::new(context.clone(), get.key))
-                            .await;
-
-                        let result = match result {
-                            Ok(Some((metadata, stream))) => {
-                                let metered_stream = state.meter_stream(stream, &context);
-                                match metered_stream.try_collect::<BytesMut>().await {
-                                    Ok(bytes) => Ok(Some((metadata, bytes.freeze()))),
-                                    Err(e) => Err(ApiError::Service(e.into())),
-                                }
-                            }
-                            Ok(None) => Ok(None),
-                            Err(e) => Err(e),
-                        };
-
-                        OperationResponse::Get(GetResponse { key, result })
-                    }
-                    Operation::Insert(insert) => {
-                        let key = insert.key.clone();
-                        let mut metadata = insert.metadata;
-                        metadata.time_created = Some(SystemTime::now());
-
-                        state.record_bandwidth(&context, insert.payload.len() as u64);
-
-                        let stream = futures_util::stream::once(async { Ok(insert.payload) }).boxed();
-                        let result = service
-                            .insert_object(context.clone(), Some(insert.key), metadata, stream)
-                            .await;
-                        OperationResponse::Insert(InsertResponse { key, result })
-                    }
-                    Operation::Delete(delete) => {
-                        let key = delete.key.clone();
-                        let result = service
-                            .delete_object(ObjectId::new(context.clone(), delete.key))
-                            .await;
-                        OperationResponse::Delete(DeleteResponse { key, result })
-                    }
-                },
-                Err(error) => OperationResponse::Error(ErrorResponse {
-                    key,
-                    kind,
-                    error: error.into(),
-                }),
-            };
-            yield result;
         }
-    }
-    .boxed();
+    });
 
-    let r = rand::random::<u128>();
-    responses.into_multipart_response(r)
+    // Step 3: auth check
+    let authorized = validate(rate_limited, {
+        let context = context.clone();
+        move |op| service.check_permission(op.permission(), &context)
+    });
+
+    // Step 4: stamp inserts with time_created and record bandwidth
+    let stamped = authorized.map({
+        let state = Arc::clone(&state);
+        let context = context.clone();
+        move |(idx, mut item)| {
+            if let Ok(Operation::Insert(ins)) = &mut item {
+                ins.metadata.time_created = Some(SystemTime::now());
+                state.record_bandwidth(&context, ins.payload.len() as u64);
+            }
+            (idx, item)
+        }
+    });
+
+    // Step 5: execute concurrently, then convert each result to a multipart Part
+    let state_ref = Arc::clone(&state);
+    let context_ref = context.clone();
+    let responses = batch.execute(context, stamped).then(move |(idx, result)| {
+        let state = Arc::clone(&state_ref);
+        let context = context_ref.clone();
+        async move { convert_to_part(idx, result, &state, &context).await }
+    });
+
+    responses.into_multipart_response(rand::random())
+}
+
+/// Converts a single operation result to a multipart [`Part`].
+///
+/// For get operations this collects the payload stream and applies bandwidth metering.
+/// The `x-sn-batch-operation-index` header is set on every part.
+async fn convert_to_part(
+    idx: usize,
+    result: Result<OpResponse, ApiError>,
+    state: &crate::state::Services,
+    context: &ObjectContext,
+) -> Part {
+    match result {
+        Ok(OpResponse::Got {
+            key,
+            response: Some((metadata, stream)),
+        }) => got_to_part(idx, key, metadata, stream, state, context)
+            .await
+            .unwrap_or_else(|e| create_error_part(idx, &e)),
+        Ok(OpResponse::Got {
+            key,
+            response: None,
+        }) => create_success_part(
+            idx,
+            &key,
+            "get",
+            StatusCode::NOT_FOUND,
+            None,
+            Bytes::new(),
+            None,
+        ),
+        Ok(OpResponse::Inserted { id }) => create_success_part(
+            idx,
+            &id.key,
+            "insert",
+            // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
+            // layer doesn't allow us to distinguish between them currently
+            StatusCode::CREATED,
+            None,
+            Bytes::new(),
+            None,
+        ),
+        Ok(OpResponse::Deleted { key }) => create_success_part(
+            idx,
+            &key,
+            "delete",
+            StatusCode::NO_CONTENT,
+            None,
+            Bytes::new(),
+            None,
+        ),
+        Err(error) => create_error_part(idx, &error),
+    }
+}
+
+async fn got_to_part(
+    idx: usize,
+    key: ObjectKey,
+    metadata: objectstore_types::metadata::Metadata,
+    stream: objectstore_service::PayloadStream,
+    state: &crate::state::Services,
+    context: &ObjectContext,
+) -> Result<Part, ApiError> {
+    let bytes = state
+        .meter_stream(stream, context)
+        .try_collect::<BytesMut>()
+        .await
+        .map_err(|e| ApiError::Service(e.into()))?
+        .freeze();
+
+    let mut metadata_headers = metadata.to_headers("").map_err(|err| {
+        ApiError::from(BatchError::ResponseSerialization {
+            context: "serializing object metadata".to_owned(),
+            cause: Box::new(err),
+        })
+    })?;
+
+    let content_type = metadata_headers.remove(CONTENT_TYPE);
+    Ok(create_success_part(
+        idx,
+        &key,
+        "get",
+        StatusCode::OK,
+        content_type,
+        bytes,
+        Some(metadata_headers),
+    ))
+}
+
+fn insert_index_header(headers: &mut HeaderMap, idx: usize) {
+    headers.insert(
+        HEADER_BATCH_OPERATION_INDEX,
+        idx.to_string()
+            .parse()
+            .expect("usize display is always a valid header value"),
+    );
 }
 
 fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
@@ -196,6 +250,7 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
 }
 
 fn create_success_part(
+    idx: usize,
     key: &ObjectKey,
     kind: &str,
     status: StatusCode,
@@ -204,6 +259,7 @@ fn create_success_part(
     additional_headers: Option<HeaderMap>,
 ) -> Part {
     let mut headers = HeaderMap::new();
+    insert_index_header(&mut headers, idx);
     insert_key_header(&mut headers, key);
     insert_kind_header(&mut headers, kind);
     insert_status_header(&mut headers, status);
@@ -213,14 +269,9 @@ fn create_success_part(
     Part::new(body, headers, content_type)
 }
 
-fn create_error_part(key: Option<&ObjectKey>, kind: Option<&str>, error: &ApiError) -> Part {
+fn create_error_part(idx: usize, error: &ApiError) -> Part {
     let mut headers = HeaderMap::new();
-    if let Some(key) = key {
-        insert_key_header(&mut headers, key);
-    }
-    if let Some(kind) = kind {
-        insert_kind_header(&mut headers, kind);
-    }
+    insert_index_header(&mut headers, idx);
     insert_status_header(&mut headers, error.status());
 
     let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error))
@@ -232,70 +283,4 @@ fn create_error_part(key: Option<&ObjectKey>, kind: Option<&str>, error: &ApiErr
         })
         .unwrap_or_default();
     Part::new(Bytes::from(error_body), headers, None)
-}
-
-impl From<OperationResponse> for Part {
-    fn from(value: OperationResponse) -> Self {
-        match value {
-            OperationResponse::Get(GetResponse { key, result }) => match result {
-                Ok(Some((metadata, bytes))) => {
-                    let mut metadata_headers = match metadata.to_headers("") {
-                        Ok(headers) => headers,
-                        Err(err) => {
-                            let err = BatchError::ResponseSerialization {
-                                context: "serializing object metadata".to_owned(),
-                                cause: Box::new(err),
-                            }
-                            .into();
-                            return create_error_part(Some(&key), Some("get"), &err);
-                        }
-                    };
-                    create_success_part(
-                        &key,
-                        "get",
-                        StatusCode::OK,
-                        metadata_headers.remove(CONTENT_TYPE),
-                        bytes,
-                        Some(metadata_headers),
-                    )
-                }
-                Ok(None) => create_success_part(
-                    &key,
-                    "get",
-                    StatusCode::NOT_FOUND,
-                    None,
-                    Bytes::new(),
-                    None,
-                ),
-                Err(error) => create_error_part(Some(&key), Some("get"), &error),
-            },
-            OperationResponse::Insert(InsertResponse { key, result }) => match result {
-                // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
-                // layer doesn't allow us to distinguish between them currently
-                Ok(_) => create_success_part(
-                    &key,
-                    "insert",
-                    StatusCode::CREATED,
-                    None,
-                    Bytes::new(),
-                    None,
-                ),
-                Err(error) => create_error_part(Some(&key), Some("insert"), &error),
-            },
-            OperationResponse::Delete(DeleteResponse { key, result }) => match result {
-                Ok(_) => create_success_part(
-                    &key,
-                    "delete",
-                    StatusCode::NO_CONTENT,
-                    None,
-                    Bytes::new(),
-                    None,
-                ),
-                Err(error) => create_error_part(Some(&key), Some("delete"), &error),
-            },
-            OperationResponse::Error(ErrorResponse { key, kind, error }) => {
-                create_error_part(key.as_ref(), kind, &error)
-            }
-        }
-    }
 }

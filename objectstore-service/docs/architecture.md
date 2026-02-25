@@ -130,6 +130,15 @@ with [`Error::AtCapacity`](error::Error::AtCapacity).
 The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
 [`StorageService::with_concurrency_limit`].
 
+## Streaming Concurrency
+
+The [`streaming`](streaming) module provides [`StreamExecutor`](streaming::StreamExecutor)
+for running a stream of operations concurrently within a bounded window. It is
+intended for efficient handling of batch requests, where multiple operations
+arrive together and should be dispatched in parallel rather than sequentially.
+See the [module documentation](streaming) for the window formula, permit
+reservation, lazy pulling, memory bounds, and concurrency model.
+
 ## Further Plans
 
 More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may

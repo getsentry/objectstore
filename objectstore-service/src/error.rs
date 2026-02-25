@@ -3,6 +3,8 @@
 //! [`Error`] covers I/O, serialization, HTTP, metadata, authentication,
 //! and backend-specific failures. [`Result`] is the corresponding alias.
 
+use std::any::Any;
+
 use thiserror::Error as ThisError;
 
 /// Error type for service operations.
@@ -71,6 +73,18 @@ pub enum Error {
 }
 
 impl Error {
+    /// Creates an [`Error::Panic`] from a panic payload, extracting the message.
+    pub fn panic(payload: Box<dyn Any + Send>) -> Self {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_owned()
+        };
+        Self::Panic(msg)
+    }
+
     /// Creates an [`Error::Reqwest`] from a reqwest error with context.
     pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
         Self::Reqwest {

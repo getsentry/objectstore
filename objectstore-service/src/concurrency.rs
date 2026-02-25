@@ -4,11 +4,15 @@
 //! using a tokio semaphore. Each acquired [`ConcurrencyPermit`] notifies
 //! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
 //! all permits have been returned.
+//!
+//! [`spawn_metered`] spawns an arbitrary future as an isolated task with panic
+//! recovery and `service.task.*` metric emission.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
@@ -37,20 +41,36 @@ impl ConcurrencyLimiter {
         }
     }
 
-    /// Tries to acquire a concurrency permit.
+    /// Tries to acquire `count` permits at once as a single bulk reservation.
     ///
-    /// Returns [`Error::AtCapacity`] when all permits are held.
-    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+    /// Returns a [`ConcurrencyPermit`] that releases all `count` permits and
+    /// notifies waiters on drop, just like single-permit acquisition.
+    ///
+    /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
+    pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
-            .try_acquire_owned()
+            .try_acquire_many_owned(count as u32)
             .map_err(|_| Error::AtCapacity)?;
-
         Ok(ConcurrencyPermit {
             permit: Some(permit),
             released: Arc::clone(&self.released),
         })
+    }
+
+    /// Tries to acquire a single concurrency permit.
+    ///
+    /// Convenience shorthand for `try_acquire_many(1)`.
+    ///
+    /// Returns [`Error::AtCapacity`] when all permits are held.
+    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+        self.try_acquire_many(1)
+    }
+
+    /// Returns the number of permits currently available.
+    pub fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
     }
 
     /// Returns the number of permits currently held.
@@ -101,11 +121,55 @@ pub struct ConcurrencyPermit {
     released: Arc<Notify>,
 }
 
+impl std::fmt::Debug for ConcurrencyPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConcurrencyPermit").finish_non_exhaustive()
+    }
+}
+
 impl Drop for ConcurrencyPermit {
     fn drop(&mut self) {
         drop(self.permit.take());
         self.released.notify_waiters();
     }
+}
+
+/// Spawns a future on a dedicated task with panic isolation and timing metrics.
+///
+/// The `guard` is moved into the spawned task and dropped after the future
+/// completes, ensuring any resource it represents (e.g. a concurrency permit)
+/// outlives the operation.
+///
+/// Emits `service.task.start` (counter) before spawning and
+/// `service.task.duration` (distribution) when the task completes, both tagged
+/// with the given `operation` name. The duration tag includes an `outcome` of
+/// `"success"` or `"error"`.
+pub async fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    merni::counter!("service.task.start": 1, "operation" => operation);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let start = tokio::time::Instant::now();
+        let result = std::panic::AssertUnwindSafe(f)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| Err(Error::panic(payload)));
+
+        merni::distribution!(
+            "service.task.duration"@s: start.elapsed(),
+            "operation" => operation,
+            "outcome" => if result.is_ok() { "success" } else { "error" }
+        );
+
+        let _ = tx.send(result);
+        drop(guard);
+    });
+    rx.await.map_err(|_| Error::Dropped)?
 }
 
 #[cfg(test)]
@@ -114,6 +178,24 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+
+    #[test]
+    fn available_permits_tracks_held() {
+        let limiter = ConcurrencyLimiter::new(5);
+        assert_eq!(limiter.available_permits(), 5);
+
+        let p1 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.available_permits(), 4);
+
+        let p2 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.available_permits(), 3);
+
+        drop(p1);
+        assert_eq!(limiter.available_permits(), 4);
+
+        drop(p2);
+        assert_eq!(limiter.available_permits(), 5);
+    }
 
     #[test]
     fn total_permits_returns_configured_max() {
