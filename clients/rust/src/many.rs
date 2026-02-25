@@ -160,22 +160,6 @@ fn key_to_header_value(key: &str) -> HeaderValue {
     HeaderValue::try_from(encoded).expect("percent-encoded string is always a valid header value")
 }
 
-/// Client-side context for an operation.
-enum OperationContext {
-    Get { key: String, decompress: bool },
-    Insert { key: Option<String> },
-    Delete { key: String },
-}
-
-impl OperationContext {
-    fn key(&self) -> Option<&str> {
-        match self {
-            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
-            OperationContext::Insert { key } => key.as_deref(),
-        }
-    }
-}
-
 /// The result of an individual operation.
 #[derive(Debug)]
 pub enum OperationResult {
@@ -190,6 +174,22 @@ pub enum OperationResult {
     /// This can happen if the response contains malformed or missing headers, references
     /// unknown operation indices, or if a network error occurs while reading a response part.
     Error(Error),
+}
+
+/// Context for an operation, used to map a response part to the proper `OperationResult` variant.
+enum OperationContext {
+    Get { key: String, decompress: bool },
+    Insert { key: Option<String> },
+    Delete { key: String },
+}
+
+impl OperationContext {
+    fn key(&self) -> Option<&str> {
+        match self {
+            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Insert { key } => key.as_deref(),
+        }
+    }
 }
 
 impl OperationResult {
@@ -301,14 +301,11 @@ impl OperationResult {
 }
 
 /// Container for the results of all operations in a many request.
-///
-/// Implements [`Stream`] so that results can be consumed lazily as they arrive
-/// from successive batch requests.
 pub struct OperationResults(Pin<Box<dyn Stream<Item = OperationResult> + Send>>);
 
 impl fmt::Debug for OperationResults {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[Stream]")
+        f.write_str("OperationResults([Stream])")
     }
 }
 
@@ -321,7 +318,8 @@ impl Stream for OperationResults {
 }
 
 impl OperationResults {
-    /// Drains the remaining stream, returning an error if any of the operations failed.
+    /// Drains the remaining stream.
+    /// Returns an error (containing a vec of all errors) if any of the operations failed.
     pub async fn error_for_failures(mut self) -> crate::Result<(), Vec<crate::Error>> {
         let mut errs = Vec::new();
         while let Some(res) = self.next().await {
