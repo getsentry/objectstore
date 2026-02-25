@@ -153,6 +153,8 @@ async fn convert_to_part(
             idx,
             &id.key,
             "insert",
+            // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
+            // layer doesn't allow us to distinguish between them currently
             StatusCode::CREATED,
             None,
             Bytes::new(),
