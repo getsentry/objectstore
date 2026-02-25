@@ -252,17 +252,26 @@ impl OperationResult {
                     .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
                     .map(|s| s.into_owned())
             })
-            .or_else(|| ctx.key().map(str::to_owned))
-            .ok_or_else(|| {
-                Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
-                ))
-            })?;
+            .or_else(|| ctx.key().map(str::to_owned));
 
         let body = field.bytes().await?;
 
         let is_error =
             status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
+
+        // For error responses, the key may be absent (e.g., server-generated key inserts
+        // that fail before execution). Use a sentinel fallback since the key is only
+        // informational in error results.
+        // For success responses, the key is always required.
+        let key = match key {
+            Some(key) => key,
+            None if is_error => "<unknown>".to_owned(),
+            None => {
+                return Err(Error::MalformedResponse(format!(
+                    "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
+                )));
+            }
+        };
         if is_error {
             let message = String::from_utf8_lossy(&body).into_owned();
             let error = Error::OperationFailure { status, message };
