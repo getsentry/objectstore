@@ -8,8 +8,8 @@
 //! ## Window and Permit Reservation
 //!
 //! The concurrency window is derived from the service's available permits at the time
-//! [`StorageService::stream`](crate::service::StorageService::stream) is called: `ceil(tasks_available × 0.10)`, clamped to
-//! `[1, 50]`. The executor pre-acquires exactly `window` permits from the service's
+//! [`StorageService::stream`](crate::service::StorageService::stream) is called: `ceil(tasks_available × 0.10)`.
+//! The executor pre-acquires exactly `window` permits from the service's
 //! `ConcurrencyLimiter` as a single bulk reservation. The reservation is shared
 //! (via `Arc`) with every spawned task, so permits are released only after every
 //! in-flight task completes — even if the output stream is dropped early.
@@ -356,37 +356,25 @@ mod tests {
 
     #[test]
     fn window_computation() {
-        // 10 available → ceil(10 × 0.10) = 1
+        // ceil(1 × 0.10) = 1
+        let s = make_service_with_limit(1);
+        assert_eq!(s.stream().unwrap().window(), 1);
+
+        // ceil(10 × 0.10) = 1
         let s = make_service_with_limit(10);
         assert_eq!(s.stream().unwrap().window(), 1);
 
-        // 100 available → ceil(100 × 0.10) = 10
+        // ceil(100 × 0.10) = 10
         let s = make_service_with_limit(100);
         assert_eq!(s.stream().unwrap().window(), 10);
 
-        // 500 available → ceil(500 × 0.10) = 50
+        // ceil(500 × 0.10) = 50
         let s = make_service_with_limit(500);
         assert_eq!(s.stream().unwrap().window(), 50);
-    }
 
-    #[test]
-    fn window_clamped_to_min() {
-        // 1–9 available → ceil(N × 0.10) < 1 → clamped to 1
-        for n in 1..=9 {
-            let s = make_service_with_limit(n);
-            let w = s.stream().unwrap().window();
-            assert_eq!(w, 1, "expected window 1 for {n} permits, got {w}");
-        }
-    }
-
-    #[test]
-    fn window_clamped_to_max() {
-        // 501+ available → ceil(N × 0.10) > 50 → clamped to 50
-        for n in [501, 1000, 10000] {
-            let s = make_service_with_limit(n);
-            let w = s.stream().unwrap().window();
-            assert_eq!(w, 50, "expected window 50 for {n} permits, got {w}");
-        }
+        // ceil(1000 × 0.10) = 100
+        let s = make_service_with_limit(1000);
+        assert_eq!(s.stream().unwrap().window(), 100);
     }
 
     // --- StreamExecutor::execute() correctness tests ---

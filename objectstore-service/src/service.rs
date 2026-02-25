@@ -199,7 +199,10 @@ impl StorageService {
     /// [`Error::AtCapacity`] immediately before any operations are read.
     pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
-        let window = ((available as f64 * 0.10).ceil() as usize).clamp(1, 50);
+        let window = (available as f64 * 0.10).ceil() as usize;
+        if window == 0 {
+            return Err(Error::AtCapacity);
+        }
         let reservation = self.concurrency.try_acquire_many(window)?;
         Ok(StreamExecutor {
             tiered: Arc::clone(&self.inner),
