@@ -231,19 +231,21 @@ impl OperationResult {
             ))
         })?;
 
-        // For insert operations with server-assigned keys, fall back to the response header.
-        let key = match &ctx.key {
-            Some(k) => k.clone(),
-            None => headers
-                .remove(HEADER_BATCH_OPERATION_KEY)
-                .and_then(|v| {
-                    v.to_str()
-                        .ok()
-                        .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
-                        .map(|s| s.into_owned())
-                })
-                .unwrap_or_default(),
-        };
+        // Prioritize the server-provided key, fall back to the one from context.
+        let key = headers
+            .remove(HEADER_BATCH_OPERATION_KEY)
+            .and_then(|v| {
+                v.to_str()
+                    .ok()
+                    .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
+                    .map(|s| s.into_owned())
+            })
+            .or_else(|| ctx.key.clone())
+            .ok_or_else(|| {
+                Error::MalformedResponse(format!(
+                    "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
+                ))
+            })?;
 
         let kind = ctx.kind;
 
