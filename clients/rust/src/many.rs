@@ -176,7 +176,7 @@ pub enum OperationResult {
     Error(Error),
 }
 
-/// Context for an operation, used to map a response part to the proper `OperationResult` variant.
+/// Context for an operation, used to map a response part to a proper `OperationResult`.
 enum OperationContext {
     Get { key: String, decompress: bool },
     Insert { key: Option<String> },
