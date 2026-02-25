@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use futures_util::StreamExt as _;
+use async_stream::stream;
+use futures_util::{Stream, StreamExt as _};
 use multer::Field;
 use objectstore_types::metadata::Metadata;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
@@ -298,31 +302,49 @@ impl OperationResult {
 }
 
 /// Container for the results of all operations in a many request.
-#[derive(Debug)]
-pub struct OperationResults(Vec<OperationResult>);
+///
+/// Implements [`Stream`] so that results can be consumed lazily as they arrive
+/// from successive batch requests.
+pub struct OperationResults(Pin<Box<dyn Stream<Item = OperationResult> + Send>>);
 
-impl IntoIterator for OperationResults {
+impl fmt::Debug for OperationResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[Stream]")
+    }
+}
+
+impl Stream for OperationResults {
     type Item = OperationResult;
-    type IntoIter = std::vec::IntoIter<OperationResult>;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.as_mut().poll_next(cx)
     }
 }
 
 impl OperationResults {
-    /// Consumes the results, returning an error if any of the operations failed.
-    pub fn error_for_failures(self) -> crate::Result<(), Vec<crate::Error>> {
-        let errs: Vec<_> = self
-            .0
-            .into_iter()
-            .filter_map(|res| match res {
-                OperationResult::Get(_, get) => get.err(),
-                OperationResult::Put(_, put) => put.err(),
-                OperationResult::Delete(_, delete) => delete.err(),
-                OperationResult::Error(error) => Some(error),
-            })
-            .collect();
+    /// Drains the remaining stream, returning an error if any of the operations failed.
+    pub async fn error_for_failures(mut self) -> crate::Result<(), Vec<crate::Error>> {
+        let mut errs = Vec::new();
+        while let Some(res) = self.next().await {
+            match res {
+                OperationResult::Get(_, get) => {
+                    if let Err(e) = get {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Put(_, put) => {
+                    if let Err(e) = put {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Delete(_, delete) => {
+                    if let Err(e) = delete {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Error(error) => errs.push(error),
+            }
+        }
         if errs.is_empty() {
             return Ok(());
         }
@@ -330,133 +352,134 @@ impl OperationResults {
     }
 }
 
-impl ManyBuilder {
-    /// Executes all enqueued operations, returning an iterator over their results.
-    /// The results are not guaranteed to be in the order they were originally enqueued in.
-    pub async fn send(mut self) -> OperationResults {
-        let mut all_results = Vec::new();
+async fn send_batch(
+    session: &Session,
+    operations: Vec<BatchOperation>,
+) -> crate::Result<Vec<OperationResult>> {
+    let context_map: HashMap<usize, OperationContext> = operations
+        .iter()
+        .enumerate()
+        .map(|(idx, op)| {
+            let ctx = match op {
+                BatchOperation::Get { key, decompress } => OperationContext::Get {
+                    key: key.clone(),
+                    decompress: *decompress,
+                },
+                BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
+                BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+            };
+            (idx, ctx)
+        })
+        .collect();
+    let num_operations = operations.len();
 
-        while !self.operations.is_empty() {
-            let chunk_size = self.operations.len().min(MAX_BATCH_SIZE);
-            let chunk: Vec<_> = self.operations.drain(..chunk_size).collect();
-
-            // Extract operation context before send_batch consumes the chunk,
-            // so we can create typed error results if the batch fails.
-            let contexts: Vec<_> = chunk
-                .iter()
-                .map(|op| match op {
-                    BatchOperation::Get { key, .. } => OperationContext::Get {
-                        key: key.clone(),
-                        decompress: false, // not used for error reporting
-                    },
-                    BatchOperation::Insert { key, .. } => {
-                        OperationContext::Insert { key: key.clone() }
-                    }
-                    BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
-                })
-                .collect();
-
-            match self.send_batch(chunk).await {
-                Ok(results) => all_results.extend(results),
-                Err(e) => {
-                    let msg = e.to_string();
-                    all_results.extend(contexts.into_iter().map(|ctx| {
-                        let error = Error::MalformedResponse(msg.clone());
-                        let key = ctx.key().unwrap_or_default().to_owned();
-                        match ctx {
-                            OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
-                            OperationContext::Insert { .. } => {
-                                OperationResult::Put(key, Err(error))
-                            }
-                            OperationContext::Delete { .. } => {
-                                OperationResult::Delete(key, Err(error))
-                            }
-                        }
-                    }));
-                }
-            }
-        }
-
-        OperationResults(all_results)
+    let mut form = reqwest::multipart::Form::new();
+    for op in operations.into_iter() {
+        let part = op.into_part().await?;
+        form = form.part("part", part);
     }
 
-    async fn send_batch(
-        &self,
-        operations: Vec<BatchOperation>,
-    ) -> crate::Result<Vec<OperationResult>> {
-        let context_map: HashMap<usize, OperationContext> = operations
-            .iter()
-            .enumerate()
-            .map(|(idx, op)| {
-                let ctx = match op {
-                    BatchOperation::Get { key, decompress } => OperationContext::Get {
-                        key: key.clone(),
-                        decompress: *decompress,
-                    },
-                    BatchOperation::Insert { key, .. } => {
-                        OperationContext::Insert { key: key.clone() }
-                    }
-                    BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
-                };
-                (idx, ctx)
-            })
-            .collect();
-        let num_operations = operations.len();
+    let request = session.batch_request()?.multipart(form);
+    let response = request.send().await?.error_for_status()?;
 
-        let mut form = reqwest::multipart::Form::new();
-        for op in operations.into_iter() {
-            let part = op.into_part().await?;
-            form = form.part("part", part);
+    let boundary = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::MalformedResponse("missing Content-Type header".to_owned()))
+        .map(multer::parse_boundary)??;
+
+    let byte_stream = response.bytes_stream().map(|r| r.map_err(io::Error::other));
+    let mut multipart = multer::Multipart::new(byte_stream, boundary);
+
+    let mut results = Vec::new();
+    let mut seen_indices = HashSet::new();
+    while let Some(field) = multipart.next_field().await? {
+        let (index, result) = OperationResult::from_field(field, &context_map).await;
+        if let Some(idx) = index {
+            seen_indices.insert(idx);
         }
+        results.push(result);
+    }
 
-        let request = self.session.batch_request()?.multipart(form);
-        let response = request.send().await?.error_for_status()?;
-
-        let boundary = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Error::MalformedResponse("missing Content-Type header".to_owned()))
-            .map(multer::parse_boundary)??;
-
-        let stream = response.bytes_stream().map(|r| r.map_err(io::Error::other));
-        let mut multipart = multer::Multipart::new(stream, boundary);
-
-        let mut results = Vec::new();
-        let mut seen_indices = HashSet::new();
-        while let Some(field) = multipart.next_field().await? {
-            let (index, result) = OperationResult::from_field(field, &context_map).await;
-            if let Some(idx) = index {
-                seen_indices.insert(idx);
-            }
+    for idx in 0..num_operations {
+        if !seen_indices.contains(&idx) {
+            let error = Error::MalformedResponse(format!(
+                "server did not return a response for operation at index {idx}"
+            ));
+            let result = match context_map.get(&idx) {
+                Some(ctx) => {
+                    let key = ctx.key().unwrap_or_default().to_owned();
+                    match ctx {
+                        OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+                        OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
+                        OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+                    }
+                }
+                None => OperationResult::Error(error),
+            };
             results.push(result);
         }
+    }
 
-        for idx in 0..num_operations {
-            if !seen_indices.contains(&idx) {
-                let error = Error::MalformedResponse(format!(
-                    "server did not return a response for operation at index {idx}"
-                ));
-                let result = match context_map.get(&idx) {
-                    Some(ctx) => {
-                        let key = ctx.key().unwrap_or_default().to_owned();
-                        match ctx {
-                            OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
-                            OperationContext::Insert { .. } => {
-                                OperationResult::Put(key, Err(error))
-                            }
-                            OperationContext::Delete { .. } => {
-                                OperationResult::Delete(key, Err(error))
-                            }
+    Ok(results)
+}
+
+impl ManyBuilder {
+    /// Executes all enqueued operations, returning a stream over their results.
+    /// The results are not guaranteed to be in the order they were originally enqueued in.
+    pub fn send(self) -> OperationResults {
+        let session = self.session;
+        let mut operations = self.operations;
+
+        let inner = stream! {
+            while !operations.is_empty() {
+                let chunk_size = operations.len().min(MAX_BATCH_SIZE);
+                let chunk: Vec<_> = operations.drain(..chunk_size).collect();
+
+                // Extract operation context before send_batch consumes the chunk,
+                // so we can create typed error results if the batch fails.
+                let contexts: Vec<_> = chunk
+                    .iter()
+                    .map(|op| match op {
+                        BatchOperation::Get { key, .. } => OperationContext::Get {
+                            key: key.clone(),
+                            decompress: false, // not used for error reporting
+                        },
+                        BatchOperation::Insert { key, .. } => {
+                            OperationContext::Insert { key: key.clone() }
+                        }
+                        BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+                    })
+                    .collect();
+
+                match send_batch(&session, chunk).await {
+                    Ok(results) => {
+                        for result in results {
+                            yield result;
                         }
                     }
-                    None => OperationResult::Error(error),
-                };
-                results.push(result);
+                    Err(e) => {
+                        let msg = e.to_string();
+                        for ctx in contexts {
+                            let error = Error::MalformedResponse(msg.clone());
+                            let key = ctx.key().unwrap_or_default().to_owned();
+                            yield match ctx {
+                                OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+                                OperationContext::Insert { .. } => {
+                                    OperationResult::Put(key, Err(error))
+                                }
+                                OperationContext::Delete { .. } => {
+                                    OperationResult::Delete(key, Err(error))
+                                }
+                            };
+                        }
+                    }
+                }
             }
-        }
+        };
 
-        Ok(results)
+        OperationResults(Box::pin(inner))
     }
 
     /// Enqueues an operation.

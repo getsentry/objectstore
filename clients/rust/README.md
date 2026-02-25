@@ -117,6 +117,7 @@ session.put("payload")
 The Many API allows you to enqueue multiple requests that the client can execute using Objectstore's batch endpoint, minimizing network overhead.
 
 ```rust
+use futures_util::StreamExt as _;
 use objectstore_client::{Client, Usecase, OperationResult, Result};
 
 async fn example_batch() -> Result<()> {
@@ -131,9 +132,8 @@ async fn example_batch() -> Result<()> {
         .push(session.put("file2 contents").key("file2"))
         .push(session.put("file3 contents").key("file3"))
         .send()
-        .await
-        .into_iter()
-        .collect();
+        .collect()
+        .await;
 
     for result in results {
         match result {

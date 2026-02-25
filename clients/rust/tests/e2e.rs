@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
+use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_client::{Client, Error, OperationResult, SecretKey, TokenGenerator, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
@@ -349,9 +350,8 @@ async fn batch_operations() {
         .push(session.put("third object").compression(None).key("key-3"))
         .push(session.put("fourth object").compression(None).key("key-4"))
         .send()
-        .await
-        .into_iter()
-        .collect();
+        .collect()
+        .await;
 
     assert_eq!(results.len(), 4);
     let mut keys: Vec<String> = results
@@ -377,9 +377,8 @@ async fn batch_operations() {
                 .key("key-4"),
         )
         .send()
-        .await
-        .into_iter()
-        .collect();
+        .collect()
+        .await;
 
     assert_eq!(results.len(), 4);
 
@@ -454,9 +453,8 @@ async fn batch_insert_without_key() {
         .many()
         .push(session.put("keyless object").compression(None))
         .send()
-        .await
-        .into_iter()
-        .collect();
+        .collect()
+        .await;
 
     assert_eq!(results.len(), 1);
 

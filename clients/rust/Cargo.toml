@@ -30,6 +30,7 @@ tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
 
 [dev-dependencies]
+futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
 serde = { workspace = true }
