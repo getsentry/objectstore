@@ -260,8 +260,8 @@ impl OperationResult {
             status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
 
         // For error responses, the key may be absent (e.g., server-generated key inserts
-        // that fail before execution). Use a sentinel fallback since the key is only
-        // informational in error results.
+        // that fail before execution — the server never generated a key and the client
+        // never provided one). Use a sentinel fallback since there is no key to report.
         // For success responses, the key is always required.
         let key = match key {
             Some(key) => key,
