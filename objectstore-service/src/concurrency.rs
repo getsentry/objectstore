@@ -37,30 +37,31 @@ impl ConcurrencyLimiter {
         }
     }
 
-    /// Tries to acquire `count` permits at once as a single owned reservation.
+    /// Tries to acquire `count` permits at once as a single bulk reservation.
+    ///
+    /// Returns a [`ConcurrencyPermit`] that releases all `count` permits and
+    /// notifies waiters on drop, just like single-permit acquisition.
     ///
     /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
-    pub fn try_reserve(&self, count: usize) -> Result<OwnedSemaphorePermit> {
-        self.semaphore
-            .clone()
-            .try_acquire_many_owned(count as u32)
-            .map_err(|_| Error::AtCapacity)
-    }
-
-    /// Tries to acquire a concurrency permit.
-    ///
-    /// Returns [`Error::AtCapacity`] when all permits are held.
-    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+    pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
-            .try_acquire_owned()
+            .try_acquire_many_owned(count as u32)
             .map_err(|_| Error::AtCapacity)?;
-
         Ok(ConcurrencyPermit {
             permit: Some(permit),
             released: Arc::clone(&self.released),
         })
+    }
+
+    /// Tries to acquire a single concurrency permit.
+    ///
+    /// Convenience shorthand for `try_acquire_many(1)`.
+    ///
+    /// Returns [`Error::AtCapacity`] when all permits are held.
+    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+        self.try_acquire_many(1)
     }
 
     /// Returns the number of permits currently available.
@@ -114,6 +115,12 @@ impl ConcurrencyLimiter {
 pub struct ConcurrencyPermit {
     permit: Option<OwnedSemaphorePermit>,
     released: Arc<Notify>,
+}
+
+impl std::fmt::Debug for ConcurrencyPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConcurrencyPermit").finish_non_exhaustive()
+    }
 }
 
 impl Drop for ConcurrencyPermit {

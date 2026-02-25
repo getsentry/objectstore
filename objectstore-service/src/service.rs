@@ -18,6 +18,7 @@ use crate::backend::common::BoxedBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::streaming::StreamExecutor;
 use crate::tiered::TieredStorage;
 
 /// Service response for [`StorageService::get_object`].
@@ -196,11 +197,11 @@ impl StorageService {
     /// service's current capacity. The permits for that window are reserved
     /// upfront — if the service is at capacity, this returns
     /// [`Error::AtCapacity`] immediately before any operations are read.
-    pub fn stream(&self) -> Result<crate::streaming::StreamExecutor> {
+    pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
         let window = ((available as f64 * 0.10).ceil() as usize).clamp(1, 50);
-        let reservation = self.concurrency.try_reserve(window)?;
-        Ok(crate::streaming::StreamExecutor {
+        let reservation = self.concurrency.try_acquire_many(window)?;
+        Ok(StreamExecutor {
             tiered: Arc::clone(&self.inner),
             window,
             reservation,

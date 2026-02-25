@@ -10,9 +10,9 @@
 //! The concurrency window is derived from the service's available permits at the time
 //! [`StorageService::stream`](crate::service::StorageService::stream) is called: `ceil(tasks_available × 0.10)`, clamped to
 //! `[1, 50]`. The executor pre-acquires exactly `window` permits from the service's
-//! `ConcurrencyLimiter` as a single bulk reservation. These permits are held for the
-//! lifetime of the returned stream — released atomically when the stream is fully
-//! consumed or dropped.
+//! `ConcurrencyLimiter` as a single bulk reservation. The reservation is shared
+//! (via `Arc`) with every spawned task, so permits are released only after every
+//! in-flight task completes — even if the output stream is dropped early.
 //!
 //! This means:
 //! - If the service is at capacity, [`StorageService::stream`](crate::service::StorageService::stream) fails immediately with
@@ -39,15 +39,14 @@
 
 use std::sync::Arc;
 
-use futures_util::{Stream, StreamExt};
-use objectstore_types::metadata::Metadata;
-use tokio::sync::OwnedSemaphorePermit;
-
 use crate::PayloadStream;
+use crate::concurrency::ConcurrencyPermit;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
 use crate::service::GetResponse;
 use crate::tiered::TieredStorage;
+use futures_util::{Stream, StreamExt};
+use objectstore_types::metadata::Metadata;
 
 /// An insert operation: stores an object at the given key.
 #[derive(Debug)]
@@ -194,7 +193,7 @@ impl std::fmt::Debug for OpResponse {
 pub struct StreamExecutor {
     pub(crate) tiered: Arc<TieredStorage>,
     pub(crate) window: usize,
-    pub(crate) reservation: OwnedSemaphorePermit,
+    pub(crate) reservation: ConcurrencyPermit,
 }
 
 impl StreamExecutor {
@@ -211,7 +210,9 @@ impl StreamExecutor {
     /// at a time, each in an isolated [`tokio::spawn`].
     ///
     /// Results are yielded in completion order (not submission order). The permit
-    /// reservation is held until the returned stream is fully consumed or dropped.
+    /// reservation is held until every spawned task has completed — if the stream
+    /// is dropped early, in-flight tasks run to completion before the permits are
+    /// released.
     pub fn execute<E>(
         self,
         context: ObjectContext,
@@ -226,30 +227,43 @@ impl StreamExecutor {
             reservation,
         } = self;
 
+        // Arc-wrap so each spawned task can hold a clone. Permits are released
+        // only when the last clone is dropped — i.e. after every spawned task
+        // completes, even if the output stream is dropped early.
+        let reservation = Arc::new(reservation);
+
         operations
             .map(move |(idx, item)| {
-                // `reservation` is captured here so the permit is held for the
-                // lifetime of the Map adaptor (and thus the BufferUnordered below).
-                let _ = &reservation;
-
+                let permit = Arc::clone(&reservation);
                 let tiered = Arc::clone(&tiered);
                 let context = context.clone();
-                async move { (idx, spawn_operation(tiered, context, item).await) }
+                async move { (idx, spawn_operation(tiered, context, permit, item).await) }
             })
             .buffer_unordered(window)
     }
 }
 
 /// Spawns a single operation with panic isolation, passing through pre-existing errors.
+///
+/// The `permit` is moved into the spawned task so that the concurrency
+/// reservation is held until the task completes, even if the caller's future
+/// is cancelled (e.g. the output stream is dropped).
 async fn spawn_operation<E>(
     tiered: Arc<TieredStorage>,
     context: ObjectContext,
+    permit: Arc<ConcurrencyPermit>,
     item: Result<Operation, E>,
 ) -> Result<OpResponse, E>
 where
     E: From<Error>,
 {
-    match tokio::spawn(execute_operation(tiered, context, item?)).await {
+    let op = item?;
+    match tokio::spawn(async move {
+        let _permit = permit;
+        execute_operation(tiered, context, op).await
+    })
+    .await
+    {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(e)) => Err(e.into()),
         Err(join_err) => {
