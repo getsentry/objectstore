@@ -240,7 +240,7 @@ impl OperationResult {
         let is_error = status >= 400 && !(kind == "get" && status == 404);
         if is_error {
             let message = String::from_utf8_lossy(&body).into_owned();
-            let error = Error::OperationError { status, message };
+            let error = Error::OperationFailure { status, message };
 
             return match kind {
                 "get" => Ok((index, OperationResult::Get(key, Err(error)))),
