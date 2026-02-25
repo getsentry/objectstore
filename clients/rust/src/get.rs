@@ -1,11 +1,12 @@
 use std::{fmt, io};
 
+use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::StatusCode;
+use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::client::maybe_decompress;
 use crate::{ClientStream, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
@@ -88,5 +89,21 @@ impl GetBuilder {
         let stream = maybe_decompress(stream, &mut metadata, self.decompress);
 
         Ok(Some(GetResponse { metadata, stream }))
+    }
+}
+
+/// Wraps a stream in a zstd decompression layer if the metadata indicates zstd compression
+/// and `decompress` is `true`. Clears `metadata.compression` when decompression is applied.
+pub(crate) fn maybe_decompress(
+    stream: ClientStream,
+    metadata: &mut Metadata,
+    decompress: bool,
+) -> ClientStream {
+    match (metadata.compression, decompress) {
+        (Some(Compression::Zstd), true) => {
+            metadata.compression = None;
+            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
+        }
+        _ => stream,
     }
 }

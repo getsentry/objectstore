@@ -8,9 +8,9 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
-use crate::client::maybe_decompress;
 use crate::error::Error;
-use crate::put::{PutBody, maybe_compress_body};
+use crate::get::maybe_decompress;
+use crate::put::{PutBody, maybe_compress};
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse, Session,
 };
@@ -128,7 +128,7 @@ impl BatchOperation {
                 }
                 headers.extend(metadata.to_headers("")?);
 
-                let body = maybe_compress_body(body, metadata.compression);
+                let body = maybe_compress(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
