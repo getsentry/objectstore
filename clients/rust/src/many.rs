@@ -1,15 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 
-use async_compression::tokio::bufread::ZstdDecoder;
 use futures_util::StreamExt as _;
 use multer::Field;
-use objectstore_types::metadata::{Compression, Metadata};
+use objectstore_types::metadata::Metadata;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
-use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::client::maybe_decompress;
 use crate::error::Error;
 use crate::put::{PutBody, maybe_compress_body};
 use crate::{
@@ -258,15 +257,9 @@ impl OperationResult {
                 } else {
                     let mut metadata = Metadata::from_headers(&headers, "")?;
 
-                    let stream = match (metadata.compression, ctx.decompress) {
-                        (Some(Compression::Zstd), true) => {
-                            metadata.compression = None;
-                            let stream =
-                                futures_util::stream::once(async move { Ok::<_, io::Error>(body) });
-                            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
-                        }
-                        _ => futures_util::stream::once(async move { Ok(body) }).boxed(),
-                    };
+                    let stream =
+                        futures_util::stream::once(async move { Ok::<_, io::Error>(body) }).boxed();
+                    let stream = maybe_decompress(stream, &mut metadata, ctx.decompress);
 
                     OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
                 }

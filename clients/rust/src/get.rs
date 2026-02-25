@@ -1,14 +1,11 @@
 use std::{fmt, io};
 
-use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::Metadata;
 use reqwest::StatusCode;
-use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::metadata::Compression;
-
+use crate::client::maybe_decompress;
 use crate::{ClientStream, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
@@ -87,14 +84,8 @@ impl GetBuilder {
 
         let mut metadata = Metadata::from_headers(response.headers(), "")?;
 
-        let stream = response.bytes_stream().map_err(io::Error::other);
-        let stream = match (metadata.compression, self.decompress) {
-            (Some(Compression::Zstd), true) => {
-                metadata.compression = None;
-                ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
-            }
-            _ => stream.boxed(),
-        };
+        let stream = response.bytes_stream().map_err(io::Error::other).boxed();
+        let stream = maybe_decompress(stream, &mut metadata, self.decompress);
 
         Ok(Some(GetResponse { metadata, stream }))
     }

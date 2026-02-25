@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use objectstore_types::metadata::{Compression, ExpirationPolicy};
+use objectstore_types::metadata::{Compression, ExpirationPolicy, Metadata};
 use objectstore_types::scope;
 use reqwest::RequestBuilder;
 use url::Url;
@@ -412,6 +412,26 @@ pub struct Session {
 
 /// The type of [`Stream`](futures_util::Stream) to be used for a PUT request.
 pub type ClientStream = BoxStream<'static, io::Result<Bytes>>;
+
+/// Wraps a stream in a zstd decompression layer if the metadata indicates zstd compression
+/// and `decompress` is `true`. Clears `metadata.compression` when decompression is applied.
+pub(crate) fn maybe_decompress(
+    stream: ClientStream,
+    metadata: &mut Metadata,
+    decompress: bool,
+) -> ClientStream {
+    use async_compression::tokio::bufread::ZstdDecoder;
+    use futures_util::StreamExt;
+    use tokio_util::io::{ReaderStream, StreamReader};
+
+    match (metadata.compression, decompress) {
+        (Some(Compression::Zstd), true) => {
+            metadata.compression = None;
+            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
+        }
+        _ => stream,
+    }
+}
 
 impl Session {
     /// Generates a GET url to the object with the given `key`.
