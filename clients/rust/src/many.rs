@@ -20,12 +20,21 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
-/// Context about a request operation, used to interpret response parts without
-/// relying on server-provided kind/key headers.
-struct OperationContext {
-    kind: &'static str,
-    key: Option<String>,
-    decompress: bool,
+/// Client-side context for an operation, used to interpret response parts
+/// without relying on server-provided kind/key headers.
+enum OperationContext {
+    Get { key: String, decompress: bool },
+    Insert { key: Option<String> },
+    Delete { key: String },
+}
+
+impl OperationContext {
+    fn key(&self) -> Option<&str> {
+        match self {
+            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Insert { key } => key.as_deref(),
+        }
+    }
 }
 
 /// Maximum number of operations per batch request (server limit).
@@ -240,32 +249,33 @@ impl OperationResult {
                     .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
                     .map(|s| s.into_owned())
             })
-            .or_else(|| ctx.key.clone())
+            .or_else(|| ctx.key().map(str::to_owned))
             .ok_or_else(|| {
                 Error::MalformedResponse(format!(
                     "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
                 ))
             })?;
 
-        let kind = ctx.kind;
-
         let body = field.bytes().await?;
 
-        let is_error = status >= 400 && !(kind == "get" && status == 404);
+        let is_error =
+            status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
         if is_error {
             let message = String::from_utf8_lossy(&body).into_owned();
             let error = Error::OperationFailure { status, message };
 
-            return match kind {
-                "get" => Ok((index, OperationResult::Get(key, Err(error)))),
-                "insert" => Ok((index, OperationResult::Put(key, Err(error)))),
-                "delete" => Ok((index, OperationResult::Delete(key, Err(error)))),
-                _ => Ok((index, OperationResult::Error(error))),
-            };
+            return Ok((
+                index,
+                match ctx {
+                    OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+                    OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
+                    OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+                },
+            ));
         }
 
-        let result = match kind {
-            "get" => {
+        let result = match ctx {
+            OperationContext::Get { decompress, .. } => {
                 if status == 404 {
                     OperationResult::Get(key, Ok(None))
                 } else {
@@ -273,19 +283,15 @@ impl OperationResult {
 
                     let stream =
                         futures_util::stream::once(async move { Ok::<_, io::Error>(body) }).boxed();
-                    let stream = maybe_decompress(stream, &mut metadata, ctx.decompress);
+                    let stream = maybe_decompress(stream, &mut metadata, *decompress);
 
                     OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
                 }
             }
-            "insert" => OperationResult::Put(key.clone(), Ok(PutResponse { key })),
-            "delete" => OperationResult::Delete(key, Ok(())),
-            _ => {
-                return Err(Error::MalformedResponse(format!(
-                    "unknown operation kind: {kind}, body: {}",
-                    String::from_utf8_lossy(&body)
-                )));
+            OperationContext::Insert { .. } => {
+                OperationResult::Put(key.clone(), Ok(PutResponse { key }))
             }
+            OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
         };
         Ok((index, result))
     }
@@ -339,11 +345,14 @@ impl ManyBuilder {
             let contexts: Vec<_> = chunk
                 .iter()
                 .map(|op| match op {
-                    BatchOperation::Get { key, .. } => ("get", key.clone()),
+                    BatchOperation::Get { key, .. } => OperationContext::Get {
+                        key: key.clone(),
+                        decompress: false, // not used for error reporting
+                    },
                     BatchOperation::Insert { key, .. } => {
-                        ("insert", key.clone().unwrap_or_default())
+                        OperationContext::Insert { key: key.clone() }
                     }
-                    BatchOperation::Delete { key } => ("delete", key.clone()),
+                    BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
                 })
                 .collect();
 
@@ -351,13 +360,17 @@ impl ManyBuilder {
                 Ok(results) => all_results.extend(results),
                 Err(e) => {
                     let msg = e.to_string();
-                    all_results.extend(contexts.into_iter().map(|(kind, key)| {
+                    all_results.extend(contexts.into_iter().map(|ctx| {
                         let error = Error::MalformedResponse(msg.clone());
-                        match kind {
-                            "get" => OperationResult::Get(key, Err(error)),
-                            "insert" => OperationResult::Put(key, Err(error)),
-                            "delete" => OperationResult::Delete(key, Err(error)),
-                            _ => OperationResult::Error(error),
+                        let key = ctx.key().unwrap_or_default().to_owned();
+                        match ctx {
+                            OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+                            OperationContext::Insert { .. } => {
+                                OperationResult::Put(key, Err(error))
+                            }
+                            OperationContext::Delete { .. } => {
+                                OperationResult::Delete(key, Err(error))
+                            }
                         }
                     }));
                 }
@@ -376,21 +389,14 @@ impl ManyBuilder {
             .enumerate()
             .map(|(idx, op)| {
                 let ctx = match op {
-                    BatchOperation::Get { key, decompress } => OperationContext {
-                        kind: "get",
-                        key: Some(key.clone()),
+                    BatchOperation::Get { key, decompress } => OperationContext::Get {
+                        key: key.clone(),
                         decompress: *decompress,
                     },
-                    BatchOperation::Insert { key, .. } => OperationContext {
-                        kind: "insert",
-                        key: key.clone(),
-                        decompress: false,
-                    },
-                    BatchOperation::Delete { key } => OperationContext {
-                        kind: "delete",
-                        key: Some(key.clone()),
-                        decompress: false,
-                    },
+                    BatchOperation::Insert { key, .. } => {
+                        OperationContext::Insert { key: key.clone() }
+                    }
+                    BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
                 };
                 (idx, ctx)
             })
@@ -433,12 +439,15 @@ impl ManyBuilder {
                 ));
                 let result = match context_map.get(&idx) {
                     Some(ctx) => {
-                        let key = ctx.key.clone().unwrap_or_default();
-                        match ctx.kind {
-                            "get" => OperationResult::Get(key, Err(error)),
-                            "insert" => OperationResult::Put(key, Err(error)),
-                            "delete" => OperationResult::Delete(key, Err(error)),
-                            _ => OperationResult::Error(error),
+                        let key = ctx.key().unwrap_or_default().to_owned();
+                        match ctx {
+                            OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+                            OperationContext::Insert { .. } => {
+                                OperationResult::Put(key, Err(error))
+                            }
+                            OperationContext::Delete { .. } => {
+                                OperationResult::Delete(key, Err(error))
+                            }
                         }
                     }
                     None => OperationResult::Error(error),
