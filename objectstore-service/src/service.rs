@@ -203,6 +203,7 @@ impl StorageService {
         if window == 0 {
             return Err(Error::AtCapacity);
         }
+
         let reservation = self.concurrency.try_acquire_many(window)?;
         Ok(StreamExecutor {
             tiered: Arc::clone(&self.inner),
