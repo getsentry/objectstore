@@ -21,6 +21,14 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
+/// Context about a request operation, used to interpret response parts without
+/// relying on server-provided kind/key headers.
+struct OperationContext {
+    kind: &'static str,
+    key: Option<String>,
+    decompress: bool,
+}
+
 /// Maximum number of operations per batch request (server limit).
 const MAX_BATCH_SIZE: usize = 1000;
 
@@ -164,31 +172,29 @@ pub enum OperationResult {
 impl OperationResult {
     async fn from_field(
         field: Field<'_>,
-        decompress_map: &HashMap<usize, bool>,
+        context_map: &HashMap<usize, OperationContext>,
     ) -> (Option<usize>, Self) {
-        match Self::try_from_field(field, decompress_map).await {
-            Ok((index, result)) => (index, result),
+        match Self::try_from_field(field, context_map).await {
+            Ok((index, result)) => (Some(index), result),
             Err(e) => (None, OperationResult::Error(e)),
         }
     }
 
     async fn try_from_field(
         field: Field<'_>,
-        decompress_map: &HashMap<usize, bool>,
-    ) -> Result<(Option<usize>, Self), Error> {
+        context_map: &HashMap<usize, OperationContext>,
+    ) -> Result<(usize, Self), Error> {
         let mut headers = field.headers().clone();
-        let index: Option<usize> = headers
+
+        let index: usize = headers
             .remove(HEADER_BATCH_OPERATION_INDEX)
-            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()));
-        let key = headers.remove(HEADER_BATCH_OPERATION_KEY).and_then(|v| {
-            v.to_str()
-                .ok()
-                .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
-                .map(|s| s.into_owned())
-        });
-        let kind = headers
-            .remove(HEADER_BATCH_OPERATION_KIND)
-            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
+            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
+            .ok_or_else(|| {
+                Error::MalformedResponse(format!(
+                    "missing or invalid {HEADER_BATCH_OPERATION_INDEX} header"
+                ))
+            })?;
+
         let status: u16 = headers
             .remove(HEADER_BATCH_OPERATION_STATUS)
             .and_then(|v| {
@@ -208,24 +214,27 @@ impl OperationResult {
                 ))
             })?;
 
-        let (key, kind) = match (key, kind) {
-            (Some(k), Some(kd)) => (k, kd),
-            (None, None) => {
-                let body = field.bytes().await?;
-                let message = String::from_utf8_lossy(&body).into_owned();
-                return Ok((
-                    index,
-                    OperationResult::Error(Error::OperationError { status, message }),
-                ));
-            }
-            _ => {
-                // One header present but not the other is malformed
-                return Err(Error::MalformedResponse(format!(
-                    "inconsistent batch headers: both {HEADER_BATCH_OPERATION_KEY} and \
-                     {HEADER_BATCH_OPERATION_KIND} must be present or absent together"
-                )));
-            }
+        let ctx = context_map.get(&index).ok_or_else(|| {
+            Error::MalformedResponse(format!(
+                "response references unknown operation index {index}"
+            ))
+        })?;
+
+        // For insert operations with server-assigned keys, fall back to the response header.
+        let key = match &ctx.key {
+            Some(k) => k.clone(),
+            None => headers
+                .remove(HEADER_BATCH_OPERATION_KEY)
+                .and_then(|v| {
+                    v.to_str()
+                        .ok()
+                        .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
+                        .map(|s| s.into_owned())
+                })
+                .unwrap_or_default(),
         };
+
+        let kind = ctx.kind;
 
         let body = field.bytes().await?;
 
@@ -234,7 +243,7 @@ impl OperationResult {
             let message = String::from_utf8_lossy(&body).into_owned();
             let error = Error::OperationError { status, message };
 
-            return match kind.as_str() {
+            return match kind {
                 "get" => Ok((index, OperationResult::Get(key, Err(error)))),
                 "insert" => Ok((index, OperationResult::Put(key, Err(error)))),
                 "delete" => Ok((index, OperationResult::Delete(key, Err(error)))),
@@ -242,17 +251,14 @@ impl OperationResult {
             };
         }
 
-        let result = match kind.as_str() {
+        let result = match kind {
             "get" => {
                 if status == 404 {
                     OperationResult::Get(key, Ok(None))
                 } else {
                     let mut metadata = Metadata::from_headers(&headers, "")?;
-                    let should_decompress = index
-                        .and_then(|idx| decompress_map.get(&idx).copied())
-                        .unwrap_or(false);
 
-                    let stream = match (metadata.compression, should_decompress) {
+                    let stream = match (metadata.compression, ctx.decompress) {
                         (Some(Compression::Zstd), true) => {
                             metadata.compression = None;
                             let stream =
@@ -339,12 +345,28 @@ impl ManyBuilder {
         &self,
         operations: Vec<BatchOperation>,
     ) -> crate::Result<Vec<OperationResult>> {
-        let decompress_map: HashMap<usize, bool> = operations
+        let context_map: HashMap<usize, OperationContext> = operations
             .iter()
             .enumerate()
-            .filter_map(|(idx, op)| match op {
-                BatchOperation::Get { decompress, .. } => Some((idx, *decompress)),
-                _ => None,
+            .map(|(idx, op)| {
+                let ctx = match op {
+                    BatchOperation::Get { key, decompress } => OperationContext {
+                        kind: "get",
+                        key: Some(key.clone()),
+                        decompress: *decompress,
+                    },
+                    BatchOperation::Insert { key, .. } => OperationContext {
+                        kind: "insert",
+                        key: key.clone(),
+                        decompress: false,
+                    },
+                    BatchOperation::Delete { key } => OperationContext {
+                        kind: "delete",
+                        key: Some(key.clone()),
+                        decompress: false,
+                    },
+                };
+                (idx, ctx)
             })
             .collect();
         let num_operations = operations.len();
@@ -371,7 +393,7 @@ impl ManyBuilder {
         let mut results = Vec::new();
         let mut seen_indices = HashSet::new();
         while let Some(field) = multipart.next_field().await? {
-            let (index, result) = OperationResult::from_field(field, &decompress_map).await;
+            let (index, result) = OperationResult::from_field(field, &context_map).await;
             if let Some(idx) = index {
                 seen_indices.insert(idx);
             }
