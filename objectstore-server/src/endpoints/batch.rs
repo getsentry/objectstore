@@ -5,7 +5,6 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
-use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -13,6 +12,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 use crate::auth::AuthAwareService;
 use crate::batch::{

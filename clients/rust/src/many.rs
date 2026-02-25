@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use async_compression::tokio::bufread::ZstdDecoder;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use futures_util::StreamExt as _;
 use multer::Field;
 use objectstore_types::metadata::{Compression, Metadata};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -13,8 +13,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::error::Error;
 use crate::put::{PutBody, maybe_compress_body};
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse,
-    Session,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse, Session,
 };
 
 const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
@@ -55,7 +54,7 @@ enum BatchOperation {
         decompress: bool,
     },
     Insert {
-        key: String,
+        key: Option<String>,
         metadata: Metadata,
         body: PutBody,
     },
@@ -75,12 +74,8 @@ impl From<GetBuilder> for BatchOperation {
 
 impl From<PutBuilder> for BatchOperation {
     fn from(value: PutBuilder) -> Self {
-        // XXX: batch PUTs need to carry a key by design
-        let key = value
-            .key
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         BatchOperation::Insert {
-            key,
+            key: value.key,
             metadata: value.metadata,
             body: value.body,
         }
@@ -118,10 +113,12 @@ impl BatchOperation {
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
                     HeaderValue::from_static("insert"),
                 );
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                    key_to_header_value(&key)?,
-                );
+                if let Some(key) = &key {
+                    headers.insert(
+                        HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
+                        key_to_header_value(key)?,
+                    );
+                }
                 headers.extend(metadata.to_headers("")?);
 
                 let body = maybe_compress_body(body, metadata.compression);
@@ -272,7 +269,7 @@ impl OperationResult {
                 return Err(Error::MalformedResponse(format!(
                     "unknown operation kind: {kind}, body: {}",
                     String::from_utf8_lossy(&body)
-                )))
+                )));
             }
         };
         Ok((index, result))

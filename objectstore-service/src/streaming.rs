@@ -52,8 +52,8 @@ use crate::tiered::TieredStorage;
 /// An insert operation: stores an object at the given key.
 #[derive(Debug)]
 pub struct Insert {
-    /// The key to store the object under.
-    pub key: ObjectKey,
+    /// The key to store the object under. When `None`, the server generates a key.
+    pub key: Option<ObjectKey>,
     /// Metadata for the object.
     pub metadata: Metadata,
     /// The object payload. Batch inserts are fully buffered (≤1 MiB).
@@ -86,12 +86,14 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// Returns the key for this operation.
-    pub fn key(&self) -> &ObjectKey {
+    /// Returns the key for this operation, if one was provided.
+    ///
+    /// Insert operations may omit the key (server-generated), so this returns `Option`.
+    pub fn key(&self) -> Option<&ObjectKey> {
         match self {
-            Operation::Insert(op) => &op.key,
-            Operation::Get(op) => &op.key,
-            Operation::Delete(op) => &op.key,
+            Operation::Insert(op) => op.key.as_ref(),
+            Operation::Get(op) => Some(&op.key),
+            Operation::Delete(op) => Some(&op.key),
         }
     }
 
@@ -273,7 +275,7 @@ async fn execute_operation(
             let stream: PayloadStream =
                 futures_util::stream::once(futures_util::future::ready(Ok(insert.payload))).boxed();
             let id = tiered
-                .insert_object(context, Some(insert.key), &insert.metadata, stream)
+                .insert_object(context, insert.key, &insert.metadata, stream)
                 .await?;
             Ok(OpResponse::Inserted { id })
         }
@@ -393,7 +395,7 @@ mod tests {
                 key: "nonexistent".into(),
             }),
             Operation::Insert(Insert {
-                key: "key2".into(),
+                key: Some("key2".into()),
                 metadata: Metadata::default(),
                 payload: Bytes::from("world"),
             }),
@@ -410,7 +412,7 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
             assert!(
-                !response.key().is_empty(),
+                !response.key().as_str().is_empty(),
                 "response must have a non-empty key"
             );
         }
@@ -489,7 +491,7 @@ mod tests {
         let ops: Vec<Operation> = (0..10)
             .map(|i| {
                 Operation::Insert(Insert {
-                    key: format!("key{i}"),
+                    key: Some(format!("key{i}")),
                     metadata: Metadata::default(),
                     payload: Bytes::from(format!("data{i}")),
                 })

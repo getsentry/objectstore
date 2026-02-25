@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use objectstore_server::config::{AuthZ, Config, Http, Service};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
 };
 use objectstore_test::server::TestServer;
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 #[tokio::test]
 async fn test_web_concurrency_limit() -> Result<()> {

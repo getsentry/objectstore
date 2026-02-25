@@ -405,13 +405,21 @@ async fn batch_operations() {
     }
 
     // GET key-1 (uncompressed)
-    let get1 = gets.remove("key-1").expect("missing get key-1").unwrap().unwrap();
+    let get1 = gets
+        .remove("key-1")
+        .expect("missing get key-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
     assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
 
     // GET key-2 (automatic decompression)
-    let get2 = gets.remove("key-2").expect("missing get key-2").unwrap().unwrap();
+    let get2 = gets
+        .remove("key-2")
+        .expect("missing get key-2")
+        .unwrap()
+        .unwrap();
     assert_eq!(get2.metadata.compression, None);
     assert!(get2.metadata.time_created.is_some());
     assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
@@ -430,4 +438,44 @@ async fn batch_operations() {
     // Verify the deleted object is gone
     let response = session.get("key-3").send().await.unwrap();
     assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn batch_insert_without_key() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // Insert without specifying a key — the server should generate one
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("keyless object").compression(None))
+        .send()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    assert_eq!(results.len(), 1);
+
+    let server_key = match &results[0] {
+        OperationResult::Put(key, Ok(_)) => key.clone(),
+        other => panic!("Expected Put result, got: {:?}", other),
+    };
+
+    // The server should have assigned a non-empty key
+    assert!(
+        !server_key.is_empty(),
+        "server-assigned key must not be empty"
+    );
+
+    // Verify we can retrieve the object using the server-assigned key
+    let response = session.get(&server_key).send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "keyless object");
 }
