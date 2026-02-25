@@ -152,7 +152,7 @@ async fn example_batch() -> Result<()> {
 ```
 
 If you don't need to inspect individual operation results and just want to fail if any error occurs,
-use [`error_for_failures`] which drains the stream and returns all errors at once:
+use `error_for_failures` which drains the stream and returns all errors at once:
 
 ```rust,ignore
 session
