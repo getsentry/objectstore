@@ -1,9 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use async_compression::tokio::bufread::ZstdDecoder;
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use futures_util::StreamExt as _;
 use multer::Field;
 use objectstore_types::metadata::{Compression, Metadata};
@@ -14,10 +13,11 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::error::Error;
 use crate::put::{PutBody, maybe_compress_body};
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse,
     Session,
 };
 
+const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
@@ -51,16 +51,16 @@ impl Session {
 #[derive(Debug)]
 enum BatchOperation {
     Get {
-        key: ObjectKey,
+        key: String,
         decompress: bool,
     },
     Insert {
-        key: ObjectKey,
+        key: String,
         metadata: Metadata,
         body: PutBody,
     },
     Delete {
-        key: ObjectKey,
+        key: String,
     },
 }
 
@@ -144,7 +144,7 @@ impl BatchOperation {
 }
 
 fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
-    let encoded = BASE64_STANDARD.encode(key.as_bytes());
+    let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
     HeaderValue::try_from(encoded)
         .map_err(|e| Error::MalformedResponse(format!("invalid object key for header value: {e}")))
 }
@@ -153,11 +153,11 @@ fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
 #[derive(Debug)]
 pub enum OperationResult {
     /// The result of a get operation. Returns `Ok(None)` if the object was not found.
-    Get(ObjectKey, Result<Option<GetResponse>, Error>),
+    Get(String, Result<Option<GetResponse>, Error>),
     /// The result of a put operation.
-    Put(ObjectKey, Result<PutResponse, Error>),
+    Put(String, Result<PutResponse, Error>),
     /// The result of a delete operation.
-    Delete(ObjectKey, Result<DeleteResponse, Error>),
+    Delete(String, Result<DeleteResponse, Error>),
     /// The server returned an error for one of the operations, but it's impossible to determine
     /// which one exactly.
     /// This can happen if either the client or the server encounter parsing errors, batch size
@@ -166,25 +166,29 @@ pub enum OperationResult {
 }
 
 impl OperationResult {
-    async fn from_field(field: Field<'_>, decompress_map: &HashMap<ObjectKey, bool>) -> Self {
+    async fn from_field(
+        field: Field<'_>,
+        decompress_map: &HashMap<usize, bool>,
+    ) -> (Option<usize>, Self) {
         match Self::try_from_field(field, decompress_map).await {
-            Ok(result) => result,
-            Err(e) => OperationResult::Error(e),
+            Ok((index, result)) => (index, result),
+            Err(e) => (None, OperationResult::Error(e)),
         }
     }
 
     async fn try_from_field(
         field: Field<'_>,
-        decompress_map: &HashMap<ObjectKey, bool>,
-    ) -> Result<Self, Error> {
+        decompress_map: &HashMap<usize, bool>,
+    ) -> Result<(Option<usize>, Self), Error> {
         let mut headers = field.headers().clone();
+        let index: Option<usize> = headers
+            .remove(HEADER_BATCH_OPERATION_INDEX)
+            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()));
         let key = headers.remove(HEADER_BATCH_OPERATION_KEY).and_then(|v| {
-            v.to_str().ok().and_then(|encoded| {
-                BASE64_STANDARD
-                    .decode(encoded)
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-            })
+            v.to_str()
+                .ok()
+                .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
+                .map(|s| s.into_owned())
         });
         let kind = headers
             .remove(HEADER_BATCH_OPERATION_KIND)
@@ -232,20 +236,22 @@ impl OperationResult {
             let error = Error::OperationError { status, message };
 
             return match kind.as_str() {
-                "get" => Ok(OperationResult::Get(key, Err(error))),
-                "insert" => Ok(OperationResult::Put(key, Err(error))),
-                "delete" => Ok(OperationResult::Delete(key, Err(error))),
-                _ => Ok(OperationResult::Error(error)),
+                "get" => Ok((index, OperationResult::Get(key, Err(error)))),
+                "insert" => Ok((index, OperationResult::Put(key, Err(error)))),
+                "delete" => Ok((index, OperationResult::Delete(key, Err(error)))),
+                _ => Ok((index, OperationResult::Error(error))),
             };
         }
 
-        match kind.as_str() {
+        let result = match kind.as_str() {
             "get" => {
                 if status == 404 {
-                    Ok(OperationResult::Get(key, Ok(None)))
+                    OperationResult::Get(key, Ok(None))
                 } else {
                     let mut metadata = Metadata::from_headers(&headers, "")?;
-                    let should_decompress = decompress_map.get(&key).copied().unwrap_or(false);
+                    let should_decompress = index
+                        .and_then(|idx| decompress_map.get(&idx).copied())
+                        .unwrap_or(false);
 
                     let stream = match (metadata.compression, should_decompress) {
                         (Some(Compression::Zstd), true) => {
@@ -257,19 +263,19 @@ impl OperationResult {
                         _ => futures_util::stream::once(async move { Ok(body) }).boxed(),
                     };
 
-                    Ok(OperationResult::Get(
-                        key,
-                        Ok(Some(GetResponse { metadata, stream })),
-                    ))
+                    OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
                 }
             }
-            "insert" => Ok(OperationResult::Put(key.clone(), Ok(PutResponse { key }))),
-            "delete" => Ok(OperationResult::Delete(key, Ok(()))),
-            _ => Err(Error::MalformedResponse(format!(
-                "unknown operation kind: {kind}, body: {}",
-                String::from_utf8_lossy(&body)
-            ))),
-        }
+            "insert" => OperationResult::Put(key.clone(), Ok(PutResponse { key })),
+            "delete" => OperationResult::Delete(key, Ok(())),
+            _ => {
+                return Err(Error::MalformedResponse(format!(
+                    "unknown operation kind: {kind}, body: {}",
+                    String::from_utf8_lossy(&body)
+                )))
+            }
+        };
+        Ok((index, result))
     }
 }
 
@@ -326,13 +332,15 @@ impl ManyBuilder {
         &self,
         operations: Vec<BatchOperation>,
     ) -> crate::Result<Vec<OperationResult>> {
-        let decompress_map: HashMap<ObjectKey, bool> = operations
+        let decompress_map: HashMap<usize, bool> = operations
             .iter()
-            .filter_map(|op| match op {
-                BatchOperation::Get { key, decompress } => Some((key.clone(), *decompress)),
+            .enumerate()
+            .filter_map(|(idx, op)| match op {
+                BatchOperation::Get { decompress, .. } => Some((idx, *decompress)),
                 _ => None,
             })
             .collect();
+        let num_operations = operations.len();
 
         let mut form = reqwest::multipart::Form::new();
         for op in operations.into_iter() {
@@ -354,8 +362,21 @@ impl ManyBuilder {
         let mut multipart = multer::Multipart::new(stream, boundary);
 
         let mut results = Vec::new();
+        let mut seen_indices = HashSet::new();
         while let Some(field) = multipart.next_field().await? {
-            results.push(OperationResult::from_field(field, &decompress_map).await);
+            let (index, result) = OperationResult::from_field(field, &decompress_map).await;
+            if let Some(idx) = index {
+                seen_indices.insert(idx);
+            }
+            results.push(result);
+        }
+
+        for idx in 0..num_operations {
+            if !seen_indices.contains(&idx) {
+                results.push(OperationResult::Error(Error::MalformedResponse(format!(
+                    "server did not return a response for operation at index {idx}"
+                ))));
+            }
         }
 
         Ok(results)

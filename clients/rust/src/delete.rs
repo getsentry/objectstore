@@ -1,4 +1,4 @@
-use crate::{ObjectKey, Session};
+use crate::Session;
 
 /// The result from a successful [`delete()`](Session::delete) call.
 pub type DeleteResponse = ();
@@ -17,7 +17,7 @@ impl Session {
 #[derive(Debug)]
 pub struct DeleteBuilder {
     pub(crate) session: Session,
-    pub(crate) key: ObjectKey,
+    pub(crate) key: String,
 }
 
 impl DeleteBuilder {

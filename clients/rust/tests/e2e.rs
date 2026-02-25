@@ -355,13 +355,14 @@ async fn batch_operations() {
         .collect();
 
     assert_eq!(results.len(), 4);
-    let keys: Vec<String> = results
+    let mut keys: Vec<String> = results
         .iter()
         .map(|r| match r {
             OperationResult::Put(key, Ok(_)) => key.clone(),
             other => panic!("Expected Put result, got: {:?}", other),
         })
         .collect();
+    keys.sort();
     assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
 
     // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
@@ -384,47 +385,42 @@ async fn batch_operations() {
 
     assert_eq!(results.len(), 4);
 
-    let mut results_iter = results.into_iter();
-
-    // First GET result
-    match results_iter.next().unwrap() {
-        OperationResult::Get(key, Ok(Some(response))) => {
-            assert_eq!(key, "key-1");
-            assert_eq!(response.metadata.compression, None);
-            assert!(response.metadata.time_created.is_some());
-            let payload = response.payload().await.unwrap();
-            assert_eq!(payload, "first object");
+    // Results may come back in any order due to concurrent execution, so collect into a map by key
+    let mut gets = BTreeMap::new();
+    let mut deletes = HashSet::new();
+    let mut puts = HashSet::new();
+    for result in results {
+        match result {
+            OperationResult::Get(key, inner) => {
+                gets.insert(key, inner);
+            }
+            OperationResult::Delete(key, Ok(())) => {
+                deletes.insert(key);
+            }
+            OperationResult::Put(key, Ok(_)) => {
+                puts.insert(key);
+            }
+            other => panic!("Unexpected result: {:?}", other),
         }
-        other => panic!("Expected Get(key-1) with Some, got: {:?}", other),
     }
 
-    // Second GET result (automatic decompression)
-    match results_iter.next().unwrap() {
-        OperationResult::Get(key, Ok(Some(response))) => {
-            assert_eq!(key, "key-2");
-            assert_eq!(response.metadata.compression, None);
-            assert!(response.metadata.time_created.is_some());
-            let payload = response.payload().await.unwrap();
-            assert_eq!(payload, "second object");
-        }
-        other => panic!("Expected Get(key-2) with Some, got: {:?}", other),
-    }
+    // GET key-1 (uncompressed)
+    let get1 = gets.remove("key-1").expect("missing get key-1").unwrap().unwrap();
+    assert_eq!(get1.metadata.compression, None);
+    assert!(get1.metadata.time_created.is_some());
+    assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
 
-    // DELETE result
-    match results_iter.next().unwrap() {
-        OperationResult::Delete(key, Ok(())) => {
-            assert_eq!(key, "key-3");
-        }
-        other => panic!("Expected Delete(key-3) success, got: {:?}", other),
-    }
+    // GET key-2 (automatic decompression)
+    let get2 = gets.remove("key-2").expect("missing get key-2").unwrap().unwrap();
+    assert_eq!(get2.metadata.compression, None);
+    assert!(get2.metadata.time_created.is_some());
+    assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
 
-    // PUT result (override)
-    match results_iter.next().unwrap() {
-        OperationResult::Put(key, Ok(_)) => {
-            assert_eq!(key, "key-4");
-        }
-        other => panic!("Expected Put(key-4) success, got: {:?}", other),
-    }
+    // DELETE key-3
+    assert!(deletes.contains("key-3"), "missing delete for key-3");
+
+    // PUT key-4 (override)
+    assert!(puts.contains("key-4"), "missing put for key-4");
 
     // Verify the overridden object has the new content
     let response = session.get("key-4").send().await.unwrap().unwrap();

@@ -5,8 +5,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -217,12 +216,12 @@ fn insert_index_header(headers: &mut HeaderMap, idx: usize) {
 }
 
 fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
-    let encoded = BASE64_STANDARD.encode(key.as_bytes());
+    let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
     headers.insert(
         HEADER_BATCH_OPERATION_KEY,
         encoded
             .parse()
-            .expect("base64 encoded string is always a valid header value"),
+            .expect("percent-encoded string is always a valid header value"),
     );
 }
 

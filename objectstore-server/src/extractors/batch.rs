@@ -4,8 +4,7 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
+use percent_encoding::percent_decode_str;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
@@ -75,16 +74,14 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
                 "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
             ))
         })?;
-    let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
-        BatchError::BadRequest(format!(
-            "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
-        ))
-    })?;
-    let key = String::from_utf8(key_bytes).map_err(|_| {
-        BatchError::BadRequest(format!(
-            "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
-        ))
-    })?;
+    let key = percent_decode_str(key_header)
+        .decode_utf8()
+        .map_err(|_| {
+            BatchError::BadRequest(format!(
+                "unable to percent-decode {HEADER_BATCH_OPERATION_KEY} header value"
+            ))
+        })?
+        .into_owned();
 
     let operation = match kind.as_str() {
         "get" => Operation::Get(Get { key }),
@@ -161,6 +158,7 @@ mod tests {
     use futures::StreamExt;
     use objectstore_service::streaming::Operation;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
+    use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
     #[tokio::test]
     async fn test_valid_request_works() {
@@ -193,10 +191,10 @@ mod tests {
              \r\n\
              \r\n\
              --boundary--\r\n",
-            key0 = BASE64_STANDARD.encode("test0"),
-            key1 = BASE64_STANDARD.encode("test1"),
-            key2 = BASE64_STANDARD.encode("test2"),
-            key3 = BASE64_STANDARD.encode("test3"),
+            key0 = percent_encode(b"test0", NON_ALPHANUMERIC),
+            key1 = percent_encode(b"test1", NON_ALPHANUMERIC),
+            key2 = percent_encode(b"test2", NON_ALPHANUMERIC),
+            key3 = percent_encode(b"test3", NON_ALPHANUMERIC),
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
         );
@@ -245,7 +243,7 @@ mod tests {
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
         for i in 0..(MAX_OPERATIONS + 1) {
-            let key = BASE64_STANDARD.encode(format!("test{i}"));
+            let key = percent_encode(format!("test{i}").as_bytes(), NON_ALPHANUMERIC).to_string();
             body.push_str(&format!(
                 "--boundary\r\n\
                  {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
@@ -276,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn test_operation_body_size_limit_enforced() {
         let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
-        let key = BASE64_STANDARD.encode("test");
+        let key = percent_encode(b"test", NON_ALPHANUMERIC).to_string();
         let body = format!(
             "--boundary\r\n\
              {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
