@@ -131,7 +131,7 @@ async fn example_batch() -> Result<()> {
         .push(session.put("file2 contents").key("file2"))
         .push(session.put("file3 contents").key("file3"))
         .send()
-        .await?
+        .await
         .into_iter()
         .collect();
 

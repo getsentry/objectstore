@@ -350,7 +350,6 @@ async fn batch_operations() {
         .push(session.put("fourth object").compression(None).key("key-4"))
         .send()
         .await
-        .unwrap()
         .into_iter()
         .collect();
 
@@ -379,7 +378,6 @@ async fn batch_operations() {
         )
         .send()
         .await
-        .unwrap()
         .into_iter()
         .collect();
 
@@ -457,7 +455,6 @@ async fn batch_insert_without_key() {
         .push(session.put("keyless object").compression(None))
         .send()
         .await
-        .unwrap()
         .into_iter()
         .collect();
 

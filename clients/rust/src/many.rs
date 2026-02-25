@@ -313,18 +313,26 @@ impl OperationResults {
 
 impl ManyBuilder {
     /// Executes all enqueued operations, returning an iterator over their results.
-    /// The results are not guaranteed to be in the same order as the original enqueuing order.
-    pub async fn send(mut self) -> crate::Result<OperationResults> {
+    /// The results are not guaranteed to be in the order they were originally enqueued in.
+    pub async fn send(mut self) -> OperationResults {
         let mut all_results = Vec::new();
 
         while !self.operations.is_empty() {
             let chunk_size = self.operations.len().min(MAX_BATCH_SIZE);
             let chunk: Vec<_> = self.operations.drain(..chunk_size).collect();
-            let results = self.send_batch(chunk).await?;
-            all_results.extend(results);
+            match self.send_batch(chunk).await {
+                Ok(results) => all_results.extend(results),
+                Err(e) => {
+                    let msg = e.to_string();
+                    all_results
+                        .extend((0..chunk_size).map(|_| {
+                            OperationResult::Error(Error::MalformedResponse(msg.clone()))
+                        }));
+                }
+            }
         }
 
-        Ok(OperationResults(all_results))
+        OperationResults(all_results)
     }
 
     async fn send_batch(
