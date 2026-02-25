@@ -116,6 +116,8 @@ session.put("payload")
 
 The Many API allows you to enqueue multiple requests that the client can execute using Objectstore's batch endpoint, minimizing network overhead.
 
+`send()` returns a stream of the results of each operation. Results are **not** guaranteed to be in the order they were originally enqueued in.
+
 ```rust
 use futures_util::StreamExt as _;
 use objectstore_client::{Client, Usecase, OperationResult, Result};
@@ -126,24 +128,42 @@ async fn example_batch() -> Result<()> {
         .for_project(42, 1337)
         .session(&client)?;
 
-    let results: Vec<_> = session
+    let mut results = session
         .many()
         .push(session.put("file1 contents").key("file1"))
         .push(session.put("file2 contents").key("file2"))
         .push(session.put("file3 contents").key("file3"))
-        .send()
-        .collect()
-        .await;
+        .send();
 
-    for result in results {
+    while let Some(result) = results.next().await {
         match result {
-            // ...
-            _ => {},
+            OperationResult::Put(_key, Ok(_response)) => { /* ... */ }
+            OperationResult::Get(_key, Ok(_object)) => { /* ... */ }
+            OperationResult::Delete(_key, Ok(_response)) => { /* ... */ }
+            OperationResult::Put(_key, Err(_e))
+            | OperationResult::Get(_key, Err(_e))
+            | OperationResult::Delete(_key, Err(_e)) => { /* handle per-op error */ }
+            OperationResult::Error(_e) => { /* unattributable error */ }
         }
     }
 
     Ok(())
 }
+```
+
+If you don't need to inspect individual operation results and just want to fail if any error occurs,
+use [`error_for_failures`] which drains the stream and returns all errors at once:
+
+```rust,ignore
+session
+    .many()
+    .push(session.put("file1 contents").key("file1"))
+    .push(session.put("file2 contents").key("file2"))
+    .push(session.put("file3 contents").key("file3"))
+    .send()
+    .error_for_failures()
+    .await
+    .map_err(|errors| { /* errors: Vec<Error> */ })?;
 ```
 
 ### Authentication
