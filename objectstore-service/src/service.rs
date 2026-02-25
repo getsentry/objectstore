@@ -198,11 +198,15 @@ impl StorageService {
     pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
         let window = (available as f64 * 0.10).ceil() as usize;
-        if window == 0 {
-            return Err(Error::AtCapacity);
-        }
 
-        let reservation = self.concurrency.try_acquire_many(window)?;
+        let acquire_result = match window {
+            0 => Err(Error::AtCapacity),
+            _ => self.concurrency.try_acquire_many(window),
+        };
+        let reservation = acquire_result.inspect_err(|_| {
+            merni::counter!("service.concurrency.rejected": 1);
+        })?;
+
         Ok(StreamExecutor {
             tiered: Arc::clone(&self.inner),
             window,
