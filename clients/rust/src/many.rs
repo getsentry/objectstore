@@ -24,23 +24,6 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
-/// Client-side context for an operation, used to interpret response parts
-/// without relying on server-provided kind/key headers.
-enum OperationContext {
-    Get { key: String, decompress: bool },
-    Insert { key: Option<String> },
-    Delete { key: String },
-}
-
-impl OperationContext {
-    fn key(&self) -> Option<&str> {
-        match self {
-            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
-            OperationContext::Insert { key } => key.as_deref(),
-        }
-    }
-}
-
 /// Maximum number of operations per batch request (server limit).
 const MAX_BATCH_SIZE: usize = 1000;
 
@@ -175,6 +158,22 @@ impl BatchOperation {
 fn key_to_header_value(key: &str) -> HeaderValue {
     let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
     HeaderValue::try_from(encoded).expect("percent-encoded string is always a valid header value")
+}
+
+/// Client-side context for an operation.
+enum OperationContext {
+    Get { key: String, decompress: bool },
+    Insert { key: Option<String> },
+    Delete { key: String },
+}
+
+impl OperationContext {
+    fn key(&self) -> Option<&str> {
+        match self {
+            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Insert { key } => key.as_deref(),
+        }
+    }
 }
 
 /// The result of an individual operation.
