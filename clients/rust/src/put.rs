@@ -171,6 +171,7 @@ pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) ->
         }
         (None, PutBody::Buffer(bytes)) => bytes.into(),
         (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
+        // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
     }
 }
 
