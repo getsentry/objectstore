@@ -173,10 +173,10 @@ pub enum OperationResult {
     Put(String, Result<PutResponse, Error>),
     /// The result of a delete operation.
     Delete(String, Result<DeleteResponse, Error>),
-    /// The server returned an error for one of the operations, but it's impossible to determine
-    /// which one exactly.
-    /// This can happen if either the client or the server encounter parsing errors, batch size
-    /// limits  or unexpected request/response formats.
+    /// An error occurred while parsing or correlating a response part, making it impossible
+    /// to attribute the error to a specific operation.
+    /// This can happen if the response contains malformed or missing headers, references
+    /// unknown operation indices, or if a network error occurs while reading a response part.
     Error(Error),
 }
 
