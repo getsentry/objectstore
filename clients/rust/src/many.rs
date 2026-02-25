@@ -319,14 +319,33 @@ impl ManyBuilder {
         while !self.operations.is_empty() {
             let chunk_size = self.operations.len().min(MAX_BATCH_SIZE);
             let chunk: Vec<_> = self.operations.drain(..chunk_size).collect();
+
+            // Extract operation context before send_batch consumes the chunk,
+            // so we can create typed error results if the batch fails.
+            let contexts: Vec<_> = chunk
+                .iter()
+                .map(|op| match op {
+                    BatchOperation::Get { key, .. } => ("get", key.clone()),
+                    BatchOperation::Insert { key, .. } => {
+                        ("insert", key.clone().unwrap_or_default())
+                    }
+                    BatchOperation::Delete { key } => ("delete", key.clone()),
+                })
+                .collect();
+
             match self.send_batch(chunk).await {
                 Ok(results) => all_results.extend(results),
                 Err(e) => {
                     let msg = e.to_string();
-                    all_results
-                        .extend((0..chunk_size).map(|_| {
-                            OperationResult::Error(Error::MalformedResponse(msg.clone()))
-                        }));
+                    all_results.extend(contexts.into_iter().map(|(kind, key)| {
+                        let error = Error::MalformedResponse(msg.clone());
+                        match kind {
+                            "get" => OperationResult::Get(key, Err(error)),
+                            "insert" => OperationResult::Put(key, Err(error)),
+                            "delete" => OperationResult::Delete(key, Err(error)),
+                            _ => OperationResult::Error(error),
+                        }
+                    }));
                 }
             }
         }
@@ -395,9 +414,22 @@ impl ManyBuilder {
 
         for idx in 0..num_operations {
             if !seen_indices.contains(&idx) {
-                results.push(OperationResult::Error(Error::MalformedResponse(format!(
+                let error = Error::MalformedResponse(format!(
                     "server did not return a response for operation at index {idx}"
-                ))));
+                ));
+                let result = match context_map.get(&idx) {
+                    Some(ctx) => {
+                        let key = ctx.key.clone().unwrap_or_default();
+                        match ctx.kind {
+                            "get" => OperationResult::Get(key, Err(error)),
+                            "insert" => OperationResult::Put(key, Err(error)),
+                            "delete" => OperationResult::Delete(key, Err(error)),
+                            _ => OperationResult::Error(error),
+                        }
+                    }
+                    None => OperationResult::Error(error),
+                };
+                results.push(result);
             }
         }
 
