@@ -320,7 +320,9 @@ impl Stream for OperationResults {
 impl OperationResults {
     /// Drains the remaining stream.
     /// Returns an error (containing a vec of all errors) if any of the operations failed.
-    pub async fn error_for_failures(mut self) -> crate::Result<(), Vec<crate::Error>> {
+    pub async fn error_for_failures(
+        mut self,
+    ) -> crate::Result<(), impl Iterator<Item = crate::Error>> {
         let mut errs = Vec::new();
         while let Some(res) = self.next().await {
             match res {
@@ -345,7 +347,7 @@ impl OperationResults {
         if errs.is_empty() {
             return Ok(());
         }
-        Err(errs)
+        Err(errs.into_iter())
     }
 }
 
