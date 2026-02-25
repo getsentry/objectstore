@@ -29,7 +29,6 @@ tokio = "1.45.0"
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
 
-
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
