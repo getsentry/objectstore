@@ -99,7 +99,7 @@ impl BatchOperation {
                 );
                 headers.insert(
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                    key_to_header_value(&key)?,
+                    key_to_header_value(&key),
                 );
                 Ok(Part::text("").headers(headers))
             }
@@ -116,7 +116,7 @@ impl BatchOperation {
                 if let Some(key) = &key {
                     headers.insert(
                         HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                        key_to_header_value(key)?,
+                        key_to_header_value(key),
                     );
                 }
                 headers.extend(metadata.to_headers("")?);
@@ -132,7 +132,7 @@ impl BatchOperation {
                 );
                 headers.insert(
                     HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                    key_to_header_value(&key)?,
+                    key_to_header_value(&key),
                 );
                 Ok(Part::text("").headers(headers))
             }
@@ -140,10 +140,9 @@ impl BatchOperation {
     }
 }
 
-fn key_to_header_value(key: &str) -> crate::Result<HeaderValue> {
+fn key_to_header_value(key: &str) -> HeaderValue {
     let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
-    HeaderValue::try_from(encoded)
-        .map_err(|e| Error::MalformedResponse(format!("invalid object key for header value: {e}")))
+    HeaderValue::try_from(encoded).expect("percent-encoded string is always a valid header value")
 }
 
 /// The result of an individual operation.
