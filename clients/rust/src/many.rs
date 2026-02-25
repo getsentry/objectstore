@@ -457,9 +457,9 @@ impl ManyBuilder {
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
+                        let shared = std::sync::Arc::new(e);
                         for ctx in contexts {
-                            let error = Error::MalformedResponse(msg.clone());
+                            let error = Error::Batch(shared.clone());
                             let key = ctx.key().unwrap_or_default().to_owned();
                             yield match ctx {
                                 OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
