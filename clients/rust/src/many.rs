@@ -327,8 +327,8 @@ impl Stream for OperationResults {
 }
 
 impl OperationResults {
-    /// Drains the remaining stream.
-    /// Returns an error (containing a vec of all errors) if any of the operations failed.
+    /// Drains the remaining stream, returning an error containing an iterator of all individual
+    /// errors for the operations that failed, if any.
     pub async fn error_for_failures(
         mut self,
     ) -> crate::Result<(), impl Iterator<Item = crate::Error>> {
