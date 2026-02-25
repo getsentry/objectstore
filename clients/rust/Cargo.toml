@@ -5,7 +5,7 @@ description = "Client SDK for Objectstore, the Sentry object storage platform"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../../LICENSE.md"
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 rust-version = "1.89"
 publish = true
@@ -31,7 +31,9 @@ url = "2.5.7"
 uuid = { workspace = true }
 
 [dev-dependencies]
+jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 

@@ -14,9 +14,9 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let inner = state.service.clone();
+        let service = state.service.clone();
         if !state.config.auth.enforce {
-            return Ok(AuthAwareService::new(inner, None));
+            return Ok(AuthAwareService::new(service, None));
         }
 
         let encoded_token = parts
@@ -28,7 +28,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         let context = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
             .inspect_err(|err| tracing::debug!("Authorization rejected: `{:?}`", err))?;
 
-        Ok(AuthAwareService::new(state.service.clone(), Some(context)))
+        Ok(AuthAwareService::new(service, Some(context)))
     }
 }
 

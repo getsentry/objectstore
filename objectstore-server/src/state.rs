@@ -6,9 +6,12 @@ use futures_util::StreamExt;
 use objectstore_service::{PayloadStream, StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
+use objectstore_service::id::ObjectContext;
+
 use crate::auth::PublicKeyDirectory;
 use crate::config::{Config, Storage};
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
+use crate::web::RequestCounter;
 
 /// Shared reference to the objectstore [`Services`].
 pub type ServiceState = Arc<Services>;
@@ -26,7 +29,7 @@ pub struct Services {
     pub config: Config,
     /// Raw handle to the underlying storage service that does not enforce authorization checks.
     ///
-    /// Consider using [`crate::auth::AuthAwareService`].
+    /// Consider using [`crate::auth::AuthAwareService`] for auth-checked access.
     pub service: StorageService,
     /// Directory for EdDSA public keys.
     ///
@@ -35,6 +38,11 @@ pub struct Services {
     pub key_directory: PublicKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
+    /// In-flight HTTP request counter with the configured limit.
+    ///
+    /// Shared with the web layer so the concurrency-limit middleware, the tracking
+    /// layer, and any endpoint that reads the count all see the same atomic.
+    pub request_counter: RequestCounter,
 }
 
 impl Services {
@@ -47,22 +55,37 @@ impl Services {
 
         let high_volume = map_storage_config(&config.high_volume_storage);
         let long_term = map_storage_config(&config.long_term_storage);
-        let service = StorageService::new(high_volume, long_term).await?;
+        let service = StorageService::new(high_volume, long_term)
+            .await?
+            .with_concurrency_limit(config.service.max_concurrency);
+        service.start();
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
+        rate_limiter.start();
+
+        let request_counter = RequestCounter::new(config.http.max_requests);
+        tokio::spawn(request_counter.clone().run_emitter());
 
         Ok(Arc::new(Self {
             config,
             service,
             key_directory,
             rate_limiter,
+            request_counter,
         }))
     }
 
     /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn wrap_stream(&self, stream: PayloadStream) -> PayloadStream {
-        MeteredPayloadStream::from(stream, self.rate_limiter.bytes_accumulator()).boxed()
+    pub fn meter_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
+        MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context)).boxed()
+    }
+
+    /// Records bandwidth usage for the given context without wrapping a stream.
+    ///
+    /// Used for cases where the payload size is known upfront (e.g. batch INSERT).
+    pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
+        self.rate_limiter.record_bandwidth(context, bytes);
     }
 }
 

@@ -5,7 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::ServiceError;
+use objectstore_service::error::Error as ServiceError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,7 +90,7 @@ impl ApiError {
             }
 
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-
+            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(_) => {
                 tracing::error!(error = self as &dyn Error, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR

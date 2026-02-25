@@ -26,7 +26,8 @@ impl DeleteBuilder {
         self.session
             .request(reqwest::Method::DELETE, &self.key)?
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }

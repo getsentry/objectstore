@@ -874,6 +874,96 @@ pub struct Config {
 
     /// Definitions for rate limits to enforce on incoming requests.
     pub rate_limits: RateLimits,
+
+    /// Configuration for the [`StorageService`](objectstore_service::StorageService).
+    pub service: Service,
+
+    /// Configuration for the HTTP layer.
+    ///
+    /// Controls HTTP-level settings that operate before requests reach the
+    /// storage service. See [`Http`] for configuration options.
+    pub http: Http,
+}
+
+/// Configuration for the [`StorageService`](objectstore_service::StorageService).
+///
+/// Controls operational parameters of the storage service layer that sits
+/// between the HTTP server and the storage backends.
+///
+/// Used in: [`Config::service`]
+///
+/// # Environment Variables
+///
+/// - `OS__SERVICE__MAX_CONCURRENCY`
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Service {
+    /// Maximum number of concurrent backend operations.
+    ///
+    /// This caps the total number of in-flight storage operations (reads,
+    /// writes, deletes) across all requests. Operations that exceed the limit
+    /// are rejected with HTTP 429.
+    ///
+    /// # Default
+    ///
+    /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
+    pub max_concurrency: usize,
+}
+
+impl Default for Service {
+    fn default() -> Self {
+        Self {
+            max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
+        }
+    }
+}
+
+/// Default maximum number of concurrent in-flight HTTP requests.
+///
+/// Requests beyond this limit are rejected with HTTP 503.
+pub const DEFAULT_MAX_HTTP_REQUESTS: usize = 10_000;
+
+/// Configuration for the HTTP layer.
+///
+/// Controls behaviour at the HTTP request level, before requests reach the
+/// storage service. Grouping these settings separately from [`Service`] keeps
+/// HTTP-layer and service-layer concerns distinct and provides a natural home
+/// for future HTTP-level settings (e.g. timeouts, body size limits).
+///
+/// Used in: [`Config::http`]
+///
+/// # Environment Variables
+///
+/// - `OS__HTTP__MAX_REQUESTS`
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Http {
+    /// Maximum number of concurrent in-flight HTTP requests.
+    ///
+    /// This is a flood protection limit. When the number of requests currently
+    /// being processed reaches this value, new requests are rejected immediately
+    /// with HTTP 503. Health and readiness endpoints (`/health`, `/ready`) are
+    /// excluded from this limit.
+    ///
+    /// Unlike readiness-based backpressure, direct rejection responds in
+    /// milliseconds and recovers the moment any in-flight request completes.
+    ///
+    /// # Default
+    ///
+    /// [`DEFAULT_MAX_HTTP_REQUESTS`]
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__HTTP__MAX_REQUESTS`
+    pub max_requests: usize,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            max_requests: DEFAULT_MAX_HTTP_REQUESTS,
+        }
+    }
 }
 
 impl Default for Config {
@@ -895,6 +985,8 @@ impl Default for Config {
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),
+            service: Service::default(),
+            http: Http::default(),
         }
     }
 }
@@ -1226,6 +1318,10 @@ mod tests {
                           - ["org", "456"]
                           - ["project", "789"]
                         pct: 10
+                  bandwidth:
+                    global_bps: 1048576
+                    usecase_pct: 50
+                    scope_pct: 25
                 "#,
             )
             .unwrap();
@@ -1255,7 +1351,11 @@ mod tests {
                         },
                     ],
                 },
-                bandwidth: BandwidthLimits::default(),
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(1_048_576),
+                    usecase_pct: Some(50),
+                    scope_pct: Some(25),
+                },
             };
 
             let config = Config::load(Some(tempfile.path())).unwrap();

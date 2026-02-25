@@ -146,6 +146,43 @@ async fn example_batch() -> Result<()> {
 }
 ```
 
+### Authentication
+
+If your Objectstore instance enforces authorization, you must configure authentication
+via [`ClientBuilder::token`]. It accepts either:
+
+- A **[`TokenGenerator`]** — for internal services that have access to an EdDSA keypair.
+  The generator signs a fresh JWT for each request, scoped to the specific usecase
+  and scope being accessed.
+- A **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
+  Use this for external services that receive a token from another source.
+
+```rust,ignore
+use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
+
+// Option 1: Internal service with a keypair
+let client = Client::builder("http://localhost:8888/")
+    .token(
+        TokenGenerator::new(SecretKey {
+            secret_key: "<private key>".into(),
+            kid: "my-service".into(),
+        })?
+    )
+    .build()?;
+
+// Option 2: External service with a pre-signed JWT
+// Use TokenGenerator::sign() to obtain a static token from an internal
+// service, then pass it to the external consumer:
+let scope = Usecase::new("my_app").for_project(42, 1337);
+let token = TokenGenerator::new(SecretKey {
+    secret_key: "<private key>".into(),
+    kid: "my-service".into(),
+})?.sign(&scope)?;
+
+let client = Client::builder("http://localhost:8888/")
+    .token(token)
+    .build()?;
+```
 ## Configuration
 
 In production, store the [`Client`] and [`Usecase`] in a `static` and reuse them.
@@ -161,7 +198,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         // .propagate_traces(true) // default: false
         // .timeout(Duration::from_secs(5)) // default: no read timeout (connect: 100ms)
         // .configure_reqwest(|builder| { ... }) // customize the reqwest::ClientBuilder
-        // .token_generator(token_generator) // for authorized Objectstore instances
+        // .token(token_generator) // see Authentication section
         .build()
         .expect("Objectstore client to build successfully")
 });

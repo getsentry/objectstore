@@ -1,8 +1,15 @@
-use thiserror::Error;
+//! Error types for service and backend operations.
+//!
+//! [`Error`] covers I/O, serialization, HTTP, metadata, authentication,
+//! and backend-specific failures. [`Result`] is the corresponding alias.
+
+use std::any::Any;
+
+use thiserror::Error as ThisError;
 
 /// Error type for service operations.
-#[derive(Debug, Error)]
-pub enum ServiceError {
+#[derive(Debug, ThisError)]
+pub enum Error {
     /// IO errors related to payload streaming or file operations.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
@@ -38,6 +45,21 @@ pub enum ServiceError {
     #[error("GCP authentication error: {0}")]
     GcpAuth(#[from] gcp_auth::Error),
 
+    /// A spawned service task panicked.
+    #[error("service task failed: {0}")]
+    Panic(String),
+
+    /// A spawned service task was dropped before it could deliver its result.
+    ///
+    /// This is an unexpected condition that can occur when the runtime drops the task for unknown
+    /// reasons.
+    #[error("task dropped")]
+    Dropped,
+
+    /// The service has reached its concurrency limit and cannot accept more operations.
+    #[error("concurrency limit reached")]
+    AtCapacity,
+
     /// Any other error stemming from one of the storage backends, which might be specific to that
     /// backend or to a certain operation.
     #[error("storage backend error: {context}")]
@@ -50,15 +72,35 @@ pub enum ServiceError {
     },
 }
 
-impl ServiceError {
-    /// Creates a [`ServiceError::Reqwest`] from a reqwest error with context.
+impl Error {
+    /// Creates an [`Error::Panic`] from a panic payload, extracting the message.
+    pub fn panic(payload: Box<dyn Any + Send>) -> Self {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_owned()
+        };
+        Self::Panic(msg)
+    }
+
+    /// Creates an [`Error::Reqwest`] from a reqwest error with context.
     pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
         Self::Reqwest {
             context: context.into(),
             cause,
         }
     }
+
+    /// Creates an [`Error::Generic`] with a context string and no cause.
+    pub fn generic(context: impl Into<String>) -> Self {
+        Self::Generic {
+            context: context.into(),
+            cause: None,
+        }
+    }
 }
 
 /// Result type for service operations.
-pub type ServiceResult<T> = Result<T, ServiceError>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;

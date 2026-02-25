@@ -6,10 +6,60 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config};
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
+use objectstore_server::config::{AuthZ, Config, Http, Service};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
-use objectstore_server::rate_limits::{RateLimits, ThroughputLimits, ThroughputRule};
+use objectstore_server::rate_limits::{
+    BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
+};
 use objectstore_test::server::TestServer;
+
+#[tokio::test]
+async fn test_web_concurrency_limit() -> Result<()> {
+    // Setting max_requests = 0 means every non-exempt request is rejected immediately
+    // with 503, giving us a fully deterministic test without needing concurrent requests.
+    let server = TestServer::with_config(Config {
+        http: Http { max_requests: 0 },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // Regular requests are rejected with 503 Service Unavailable.
+    let response = client
+        .get(server.url("/v1/objects/test/org=1/key"))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503 for regular request at limit"
+    );
+
+    // Health endpoint bypasses the concurrency limit.
+    let response = client.get(server.url("/health")).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "/health must not be subject to the concurrency limit"
+    );
+
+    // Ready endpoint bypasses the concurrency limit.
+    let response = client.get(server.url("/ready")).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "/ready must not be subject to the concurrency limit"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_killswitches() -> Result<()> {
@@ -272,6 +322,295 @@ async fn test_throughput_rule() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_global_bps_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(500),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+    let payload = vec![0xABu8; 4096];
+
+    // Upload a 4KB payload to push the EWMA above the 500 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 500 bps limit.
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait a few EWMA ticks (50ms each) so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request should be rejected with 429
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    // Wait long enough for the EWMA to decay below the limit.
+    // With alpha=0.2, EWMA decays as 0.8^n per tick. Peak ~16384 needs ~16 ticks (800ms)
+    // to drop below 500. Use 2s for CI reliability.
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request should succeed again
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(100_000),
+                usecase_pct: Some(1), // = 1000 bps per usecase
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // Upload a 4KB payload to push the per-usecase EWMA above the 1000 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 1000 bps per-usecase limit but below the 100000 bps global limit.
+    let payload = vec![0xABu8; 4096];
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request to the same usecase should be rejected with 429
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    // A different usecase should succeed (separate EWMA bucket)
+    let response = client
+        .post(server.url("/v1/objects/other/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait for the EWMA to decay below the limit
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request to the original usecase should succeed again
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bandwidth_scope_pct_limit() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(100_000),
+                scope_pct: Some(1), // = 1000 bps per scope
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // Upload a 4KB payload to push the per-scope EWMA above the 1000 bps limit.
+    // A single 4096-byte upload in one 50ms tick produces an EWMA sample of ~16384 bps,
+    // which is well above the 1000 bps per-scope limit but below the 100000 bps global limit.
+    let payload = vec![0xABu8; 4096];
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    // The next request to the same scope should be rejected with 429
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    // A different scope should succeed (separate EWMA bucket)
+    let response = client
+        .post(server.url("/v1/objects/test/org=2/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait for the EWMA to decay below the limit
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // After decay, the request to the original scope should succeed again
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_batch_at_capacity_returns_429() -> Result<()> {
+    // With max_concurrency=0 the service has no permits available, so
+    // BatchExecutor::new() returns AtCapacity and the endpoint responds 429.
+    let server = TestServer::with_config(Config {
+        service: Service { max_concurrency: 0 },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    let key = BASE64_STANDARD.encode("some-key");
+    let body = format!(
+        "--boundary\r\n\
+         x-sn-batch-operation-key: {key}\r\n\
+         x-sn-batch-operation-kind: get\r\n\
+         \r\n\
+         \r\n\
+         --boundary--\r\n"
+    );
+
+    let response = client
+        .post(server.url("/v1/objects:batch/test/org=1/"))
+        .header("content-type", "multipart/form-data; boundary=boundary")
+        .body(body)
+        .send()
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "expected 429 when service has no available permits"
+    );
+
+    Ok(())
+}
+
+// --- KEDA endpoint tests ---
+
+#[tokio::test]
+async fn test_keda() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        rate_limits: RateLimits {
+            throughput: ThroughputLimits {
+                global_rps: Some(1000),
+                ..Default::default()
+            },
+            bandwidth: BandwidthLimits {
+                global_bps: Some(10_000_000),
+                ..Default::default()
+            },
+        },
+        http: Http { max_requests: 0 },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // /keda must bypass the web concurrency limit (max_requests: 0 rejects everything else).
+    let response = client
+        .get(server.url("/v1/objects/test/org=1/key"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    let response = client.get(server.url("/keda")).send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+
+    let body = response.text().await?;
+
+    // One always-present gauge to verify the format.
+    assert!(
+        body.contains("objectstore_bandwidth_ewma "),
+        "missing bandwidth_ewma"
+    );
+
+    // Optional gauges are present when the corresponding limits are configured.
+    assert!(
+        body.contains("objectstore_bandwidth_limit 10000000"),
+        "missing bandwidth_limit"
+    );
+    assert!(
+        body.contains("objectstore_throughput_limit 1000"),
+        "missing throughput_limit"
+    );
+
+    // Counters are present.
+    assert!(
+        body.contains("objectstore_bytes_total "),
+        "missing bytes_total"
+    );
+    assert!(
+        body.contains("objectstore_requests_total "),
+        "missing requests_total"
+    );
 
     Ok(())
 }

@@ -1,8 +1,9 @@
+//! BigTable backend for high-volume, low-latency storage of small objects.
+
 use std::fmt;
 use std::future::Future;
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -10,11 +11,12 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use tokio::runtime::Handle;
 use tonic::Code;
 
+use crate::PayloadStream;
 use crate::backend::common::{
     Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::{PayloadStream, ServiceError, ServiceResult};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -100,7 +102,7 @@ struct RowData {
 }
 
 impl RowData {
-    fn from_cells(cells: Vec<RowCell>) -> ServiceResult<Self> {
+    fn from_cells(cells: Vec<RowCell>) -> Result<Self> {
         let mut metadata = Metadata::default();
         let mut expire_at = None;
         let mut payload = Vec::new();
@@ -113,12 +115,11 @@ impl RowData {
                 }
                 COLUMN_METADATA => {
                     expire_at = micros_to_time(cell.timestamp_micros);
-                    metadata = serde_json::from_slice(&cell.value).map_err(|cause| {
-                        ServiceError::Serde {
+                    metadata =
+                        serde_json::from_slice(&cell.value).map_err(|cause| Error::Serde {
                             context: "failed to deserialize metadata".to_string(),
                             cause,
-                        }
-                    })?;
+                        })?;
                 }
                 _ => {}
             }
@@ -151,7 +152,7 @@ impl BigTableBackend {
         instance_name: &str,
         table_name: &str,
         connections: Option<usize>,
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         let bigtable = if let Some(endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
                 endpoint,
@@ -187,7 +188,7 @@ impl BigTableBackend {
     }
 
     /// Retries a BigTable RPC on transient errors.
-    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> ServiceResult<T>
+    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> Result<T>
     where
         F: Future<Output = Result<T, BigTableError>> + Send,
     {
@@ -199,7 +200,7 @@ impl BigTableBackend {
                 Err(e) => {
                     if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
                         merni::counter!("bigtable.failures": 1, "action" => action);
-                        return Err(ServiceError::Generic {
+                        return Err(Error::Generic {
                             context: format!("Bigtable: `{action}` failed"),
                             cause: Some(Box::new(e)),
                         });
@@ -220,7 +221,7 @@ impl BigTableBackend {
         path: &[u8],
         filter: Option<v2::RowFilter>,
         action: &str,
-    ) -> ServiceResult<Option<RowData>> {
+    ) -> Result<Option<RowData>> {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(v2::RowSet {
@@ -257,7 +258,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         mutations: I,
         action: &str,
-    ) -> ServiceResult<v2::MutateRowResponse>
+    ) -> Result<v2::MutateRowResponse>
     where
         I: IntoIterator<Item = mutation::Mutation>,
     {
@@ -287,7 +288,7 @@ impl BigTableBackend {
         metadata: &Metadata,
         payload: Vec<u8>,
         action: &str,
-    ) -> ServiceResult<v2::MutateRowResponse> {
+    ) -> Result<v2::MutateRowResponse> {
         let now = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
@@ -308,7 +309,7 @@ impl BigTableBackend {
                 family_name: family.to_owned(),
                 column_qualifier: COLUMN_METADATA.to_owned(),
                 timestamp_micros,
-                value: serde_json::to_vec(metadata).map_err(|cause| ServiceError::Serde {
+                value: serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
                     context: "failed to serialize metadata".to_string(),
                     cause,
                 })?,
@@ -330,7 +331,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> ServiceResult<PutResponse> {
+    ) -> Result<PutResponse> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -344,7 +345,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -367,7 +368,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_metadata(&self, id: &ObjectId) -> ServiceResult<MetadataResponse> {
+    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -397,7 +398,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         tracing::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -410,7 +411,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> ServiceResult<DeleteOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
         tracing::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -469,8 +470,8 @@ impl Backend for BigTableBackend {
 /// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
-fn ttl_to_micros(ttl: Duration, from: SystemTime) -> ServiceResult<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| ServiceError::Generic {
+fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
+    let deadline = from.checked_add(ttl).ok_or_else(|| Error::Generic {
         context: format!(
             "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
             humantime::format_rfc3339_seconds(from),
@@ -480,7 +481,7 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> ServiceResult<i64> {
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| ServiceError::Generic {
+        .map_err(|e| Error::Generic {
             context: format!(
                 "unable to get duration since UNIX_EPOCH for SystemTime {}",
                 humantime::format_rfc3339_seconds(deadline)
@@ -488,12 +489,10 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> ServiceResult<i64> {
             cause: Some(Box::new(e)),
         })?
         .as_millis();
-    (millis * 1000)
-        .try_into()
-        .map_err(|e| ServiceError::Generic {
-            context: format!("failed to convert {}ms to i64 microseconds", millis),
-            cause: Some(Box::new(e)),
-        })
+    (millis * 1000).try_into().map_err(|e| Error::Generic {
+        context: format!("failed to convert {}ms to i64 microseconds", millis),
+        cause: Some(Box::new(e)),
+    })
 }
 
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.
@@ -507,10 +506,12 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::id::ObjectContext;
+    use anyhow::Result;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::id::ObjectContext;
+    use crate::stream::{make_stream, read_to_vec};
 
     // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done
     // automatically in CI.
@@ -541,18 +542,6 @@ mod tests {
             None,
         )
         .await
-    }
-
-    fn make_stream(contents: &[u8]) -> PayloadStream {
-        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
-    }
-
-    async fn read_to_vec(mut stream: PayloadStream) -> Result<Vec<u8>> {
-        let mut payload = Vec::new();
-        while let Some(chunk) = stream.try_next().await? {
-            payload.extend(&chunk);
-        }
-        Ok(payload)
     }
 
     fn make_id() -> ObjectId {
@@ -824,6 +813,39 @@ mod tests {
         let (_, stream) = backend.get_object(&id).await?.unwrap();
         let payload = read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .await?;
+
+        // A freshly written object has time_expires ≈ now + 2d, which is well outside
+        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
+        let first = backend.get_metadata(&id).await?.unwrap();
+        let first_expiry = first.time_expires.unwrap();
+
+        let second = backend.get_metadata(&id).await?.unwrap();
+        let second_expiry = second.time_expires.unwrap();
+
+        assert_eq!(
+            first_expiry, second_expiry,
+            "Fresh TTI object should not have its expiry bumped"
+        );
 
         Ok(())
     }

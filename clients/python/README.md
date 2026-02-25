@@ -91,6 +91,39 @@ Arbitrary key-value pairs can be attached to objects and retrieved on download.
 session.put(b"payload", metadata={"source": "upload-service"})
 ```
 
+### Authentication
+
+If your Objectstore instance enforces authorization, you must configure authentication
+via the `token` parameter on `Client`. It accepts either:
+
+- A **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
+  The generator signs a fresh JWT for each request, scoped to the specific usecase
+  and scope being accessed.
+- A **`str`** — a pre-signed JWT, used as-is for every request.
+  Use this for external services that receive a token from another source.
+
+```python
+from objectstore_client import Client, Usecase
+from objectstore_client.auth import TokenGenerator
+
+# Option 1: Internal service with a keypair
+client = Client(
+    "http://localhost:8888",
+    token=TokenGenerator(kid="my-service", secret_key="<private key>"),
+)
+
+# Option 2: External service with a pre-signed JWT
+# Use TokenGenerator.sign_for_scope() to obtain a static token from an
+# internal service, then pass it to the external consumer:
+from objectstore_client.scope import Scope
+
+token = TokenGenerator(
+    kid="my-service", secret_key="<private key>",
+).sign_for_scope("my_app", Scope(org=42, project=1337))
+
+client = Client("http://localhost:8888", token=token)
+```
+
 ## Configuration
 
 In production, store the `Client` and `Usecase` at module level and reuse them.
@@ -106,7 +139,7 @@ client = Client(
     timeout_ms=None,         # default: no read timeout (connect: 100ms)
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)
     # metrics_backend=...,   # default: no-op
-    # token_generator=...,   # for authorized Objectstore instances
+    # token=...,             # see Authentication section
 )
 
 attachments = Usecase("attachments")

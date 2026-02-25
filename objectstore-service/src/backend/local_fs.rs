@@ -1,3 +1,5 @@
+//! Local filesystem backend for development and testing.
+
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -8,9 +10,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::PayloadStream;
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::{PayloadStream, ServiceError, ServiceResult};
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -35,7 +38,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> ServiceResult<PutResponse> {
+    ) -> Result<PutResponse> {
         let path = self.path.join(id.as_storage_path().to_string());
         tracing::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
@@ -49,11 +52,10 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json =
-            serde_json::to_string(metadata).map_err(|cause| ServiceError::Serde {
-                context: "failed to serialize metadata".to_string(),
-                cause,
-            })?;
+        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
+            context: "failed to serialize metadata".to_string(),
+            cause,
+        })?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
@@ -68,7 +70,7 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> ServiceResult<GetResponse> {
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         tracing::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -83,20 +85,23 @@ impl Backend for LocalFsBackend {
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
-        let metadata: Metadata =
-            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| {
-                ServiceError::Serde {
-                    context: "failed to deserialize metadata".to_string(),
-                    cause,
-                }
+        let file_len = reader.get_ref().metadata().await?.len();
+        let mut metadata: Metadata =
+            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
+                context: "failed to deserialize metadata".to_string(),
+                cause,
             })?;
+        let payload_size = file_len
+            .checked_sub(metadata_line.len() as u64)
+            .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
+        metadata.size = Some(payload_size as usize);
 
         let stream = ReaderStream::new(reader);
         Ok(Some((metadata, stream.boxed())))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_object(&self, id: &ObjectId) -> ServiceResult<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         tracing::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let result = tokio::fs::remove_file(path).await;
@@ -116,15 +121,11 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
     use objectstore_types::metadata::{Compression, ExpirationPolicy};
-
-    use crate::id::ObjectContext;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-
-    fn make_stream(contents: &[u8]) -> PayloadStream {
-        tokio_stream::once(Ok(contents.to_vec().into())).boxed()
-    }
+    use crate::id::ObjectContext;
+    use crate::stream::make_stream;
 
     #[tokio::test]
     async fn stores_metadata() {
@@ -155,7 +156,13 @@ mod tests {
         let (read_metadata, stream) = backend.get_object(&id).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(read_metadata, metadata);
+        assert_eq!(
+            read_metadata,
+            Metadata {
+                size: Some(file_contents.len()),
+                ..metadata
+            }
+        );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
     }
 
@@ -182,7 +189,13 @@ mod tests {
             .unwrap();
 
         let read_metadata = backend.get_metadata(&id).await.unwrap().unwrap();
-        assert_eq!(read_metadata, metadata);
+        assert_eq!(
+            read_metadata,
+            Metadata {
+                size: Some(7),
+                ..metadata
+            }
+        );
     }
 
     #[tokio::test]

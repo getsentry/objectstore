@@ -1,4 +1,4 @@
-from objectstore_client.auth import Permission, TokenGenerator
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.client import (
     Client,
     GetResponse,
@@ -27,6 +27,7 @@ __all__ = [
     "Permission",
     "TimeToIdle",
     "TimeToLive",
+    "TokenProvider",
     "TokenGenerator",
     "MetricsBackend",
     "NoOpMetricsBackend",

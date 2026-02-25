@@ -1,7 +1,6 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::{
-    DeleteResponse, GetResponse, InsertResponse, MetadataResponse, PayloadStream, StorageService,
-};
+use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 
@@ -52,12 +51,21 @@ impl AuthAwareService {
         Ok(())
     }
 
+    /// Checks whether the request is authorized for the given permission on the given context.
+    ///
+    /// Returns `Ok(())` if authorized, or otherwise an error indicating the reason.
+    /// Equivalent to the internal `assert_authorized` check but exposed for callers
+    /// that validate operations individually before delegating to a lower-level service.
+    pub fn check_permission(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
+        self.assert_authorized(perm, context)
+    }
+
     /// Auth-aware wrapper around [`StorageService::insert_object`].
     pub async fn insert_object(
         &self,
         context: ObjectContext,
         key: Option<String>,
-        metadata: &Metadata,
+        metadata: Metadata,
         stream: PayloadStream,
     ) -> ApiResult<InsertResponse> {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
@@ -68,19 +76,19 @@ impl AuthAwareService {
     }
 
     /// Auth-aware wrapper around [`StorageService::get_metadata`].
-    pub async fn get_metadata(&self, id: &ObjectId) -> ApiResult<MetadataResponse> {
+    pub async fn get_metadata(&self, id: ObjectId) -> ApiResult<MetadataResponse> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
         Ok(self.service.get_metadata(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
-    pub async fn get_object(&self, id: &ObjectId) -> ApiResult<GetResponse> {
+    pub async fn get_object(&self, id: ObjectId) -> ApiResult<GetResponse> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
         Ok(self.service.get_object(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
-    pub async fn delete_object(&self, id: &ObjectId) -> ApiResult<DeleteResponse> {
+    pub async fn delete_object(&self, id: ObjectId) -> ApiResult<DeleteResponse> {
         self.assert_authorized(Permission::ObjectDelete, id.context())?;
         Ok(self.service.delete_object(id).await?)
     }
