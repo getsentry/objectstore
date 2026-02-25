@@ -217,13 +217,15 @@ impl StorageService {
     /// Starts background processes for the storage service.
     ///
     /// Currently spawns a task that emits the `service.concurrency.in_use`
-    /// gauge once per second.
+    /// and `service.concurrency.limit` gauges once per second.
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
+        let limit = concurrency.total_permits();
         tokio::spawn(async move {
             concurrency
                 .run_emitter(|permits| async move {
                     merni::gauge!("service.concurrency.in_use": permits);
+                    merni::gauge!("service.concurrency.limit": limit);
                 })
                 .await;
         });

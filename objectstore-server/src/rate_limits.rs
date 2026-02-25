@@ -269,10 +269,11 @@ impl BandwidthRateLimiter {
         let global = Arc::clone(&self.global);
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
+        let global_limit = self.config.global_bps;
         // NB: This task has no shutdown mechanism — the rate limiter is only created once.
         // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
-            Self::estimator(global, usecases, scopes).await;
+            Self::estimator(global, usecases, scopes, global_limit).await;
         });
     }
 
@@ -284,6 +285,7 @@ impl BandwidthRateLimiter {
         global: Arc<EwmaEstimator>,
         usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
         scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
+        global_limit: Option<u64>,
     ) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
@@ -302,6 +304,9 @@ impl BandwidthRateLimiter {
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
             merni::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
+            if let Some(limit) = global_limit {
+                merni::gauge!("server.bandwidth.limit"@b: limit);
+            }
 
             // Per-usecase
             {
@@ -448,6 +453,7 @@ impl ThroughputRateLimiter {
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
         let global_estimator = Arc::clone(&self.global_estimator);
+        let global_limit = self.config.global_rps;
         // NB: This task has no shutdown mechanism — the rate limiter is only created once.
         // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
@@ -459,6 +465,9 @@ impl ThroughputRateLimiter {
                 interval.tick().await;
                 global_estimator.update_ewma(&mut global_ewma, to_rps);
                 merni::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
+                if let Some(limit) = global_limit {
+                    merni::gauge!("server.rate_limiter.throughput.limit": u64::from(limit));
+                }
                 merni::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
                 merni::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
             }
