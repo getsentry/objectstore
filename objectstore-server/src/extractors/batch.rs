@@ -83,18 +83,20 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
         .transpose()?;
 
     let operation = match kind.as_str() {
-        "get" | "delete" => {
-            let key = key.ok_or_else(|| {
+        "get" => Operation::Get(Get {
+            key: key.ok_or_else(|| {
                 BatchError::BadRequest(format!(
                     "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
                 ))
-            })?;
-            if kind == "get" {
-                Operation::Get(Get { key })
-            } else {
-                Operation::Delete(Delete { key })
-            }
-        }
+            })?,
+        }),
+        "delete" => Operation::Delete(Delete {
+            key: key.ok_or_else(|| {
+                BatchError::BadRequest(format!(
+                    "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                ))
+            })?,
+        }),
         "insert" => {
             let metadata = Metadata::from_headers(field.headers(), "")?;
             let payload = field.bytes().await?;
