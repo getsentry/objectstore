@@ -133,6 +133,12 @@ impl TieredStorage {
             }
         };
 
+        merni::counter!(
+            "put.count": 1,
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_ty
+        );
         merni::distribution!(
             "put.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
@@ -162,6 +168,12 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
+        merni::counter!(
+            "head.count": 1,
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
         merni::distribution!(
             "head.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
@@ -185,6 +197,12 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
+        merni::counter!(
+            "get.count": 1,
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
         merni::distribution!(
             "get.latency.pre-response"@s: start.elapsed(),
             "usecase" => id.usecase(),
@@ -225,6 +243,12 @@ impl TieredStorage {
             self.high_volume_backend.delete_object(id).await?;
         }
 
+        merni::counter!(
+            "delete.count": 1,
+            "usecase" => id.usecase(),
+            "backend_choice" => backend_choice,
+            "backend_type" => backend_type
+        );
         merni::distribution!(
             "delete.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),

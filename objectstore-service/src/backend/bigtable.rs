@@ -154,6 +154,7 @@ impl BigTableBackend {
         connections: Option<usize>,
     ) -> anyhow::Result<Self> {
         let bigtable = if let Some(endpoint) = endpoint {
+            tracing::info!("Initializing Bigtable client with emulator");
             BigTableConnection::new_with_emulator(
                 endpoint,
                 project_id,
@@ -166,6 +167,7 @@ impl BigTableBackend {
             // TODO on connections: Idle connections are automatically closed in "a few minutes".
             // We need to make sure that on longer idle periods the channels are re-opened.
             let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
+            tracing::info!("Initializing Bigtable client with {connections} connections");
 
             BigTableConnection::new_with_token_provider(
                 project_id,
