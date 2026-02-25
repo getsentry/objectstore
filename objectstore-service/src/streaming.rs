@@ -52,7 +52,7 @@ use crate::tiered::TieredStorage;
 /// An insert operation: stores an object at the given key.
 #[derive(Debug)]
 pub struct Insert {
-    /// The key to store the object under. When `None`, the server generates a key.
+    /// The key to store the object under. When `None`, the service generates a key.
     pub key: Option<ObjectKey>,
     /// Metadata for the object.
     pub metadata: Metadata,
@@ -87,8 +87,6 @@ pub enum Operation {
 
 impl Operation {
     /// Returns the key for this operation, if one was provided.
-    ///
-    /// Insert operations may omit the key (server-generated), so this returns `Option`.
     pub fn key(&self) -> Option<&ObjectKey> {
         match self {
             Operation::Insert(op) => op.key.as_ref(),
