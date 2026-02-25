@@ -203,6 +203,7 @@ let client = Client::builder("http://localhost:8888/")
     .token(token)
     .build()?;
 ```
+
 ## Configuration
 
 In production, store the [`Client`] and [`Usecase`] in a `static` and reuse them.
