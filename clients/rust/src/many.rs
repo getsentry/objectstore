@@ -214,7 +214,10 @@ impl OperationResult {
             (None, None) => {
                 let body = field.bytes().await?;
                 let message = String::from_utf8_lossy(&body).into_owned();
-                return Err(Error::OperationError { status, message });
+                return Ok((
+                    index,
+                    OperationResult::Error(Error::OperationError { status, message }),
+                ));
             }
             _ => {
                 // One header present but not the other is malformed
