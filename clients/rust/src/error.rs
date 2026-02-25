@@ -32,7 +32,7 @@ pub enum Error {
     #[error("{0}")]
     MalformedResponse(String),
     /// Error that indicates failure of an individual operation in a `many` request.
-    #[error("operation failed (HTTP status code {}): {message}")]
+    #[error("operation failed (HTTP status code {status}): {message}")]
     OperationFailure {
         /// The HTTP status code corresponding to the status of the operation.
         status: u16,
