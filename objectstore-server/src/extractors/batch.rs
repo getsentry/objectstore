@@ -1,3 +1,8 @@
+//! Axum extractor for batch operation streams.
+//!
+//! Provides [`BatchOperationStream`], which parses a multipart request body into a
+//! lazy stream of [`Operation`](objectstore_service::streaming::Operation)s.
+
 use std::fmt::Debug;
 
 use axum::extract::{

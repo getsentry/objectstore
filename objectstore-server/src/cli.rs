@@ -1,3 +1,8 @@
+//! Command-line interface for the objectstore server.
+//!
+//! This module defines the CLI argument structure and dispatches to the
+//! appropriate command implementation. The main entry point is [`execute`].
+
 use std::fs::File;
 use std::path::PathBuf;
 use std::thread;

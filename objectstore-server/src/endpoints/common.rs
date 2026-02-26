@@ -63,6 +63,7 @@ impl ApiErrorResponse {
 }
 
 impl ApiError {
+    /// Returns the HTTP status code appropriate for this error variant.
     pub fn status(&self) -> StatusCode {
         match &self {
             ApiError::Client(_) => StatusCode::BAD_REQUEST,

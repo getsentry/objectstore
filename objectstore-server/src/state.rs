@@ -1,3 +1,8 @@
+//! Shared server state passed to all HTTP request handlers.
+//!
+//! [`Services`] is constructed once during startup by [`Services::spawn`] and then shared
+//! across all request handlers as [`ServiceState`] (an `Arc<Services>`).
+
 use std::sync::Arc;
 use std::time::Duration;
 

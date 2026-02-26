@@ -1,3 +1,5 @@
+//! Tracing initialization for tests.
+
 use tracing_subscriber::EnvFilter;
 
 const CRATE_NAMES: &[&str] = &["objectstore", "objectstore_service", "objectstore_types"];
