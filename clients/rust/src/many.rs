@@ -108,15 +108,7 @@ impl BatchOperation {
     async fn into_part(self) -> crate::Result<Part> {
         match self {
             BatchOperation::Get { key, .. } => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
-                    HeaderValue::from_static("get"),
-                );
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                    key_to_header_value(&key),
-                );
+                let headers = operation_headers("get", Some(&key));
                 Ok(Part::text("").headers(headers))
             }
             BatchOperation::Insert {
@@ -124,41 +116,36 @@ impl BatchOperation {
                 metadata,
                 body,
             } => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
-                    HeaderValue::from_static("insert"),
-                );
-                if let Some(key) = &key {
-                    headers.insert(
-                        HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                        key_to_header_value(key),
-                    );
-                }
+                let mut headers = operation_headers("insert", key.as_deref());
                 headers.extend(metadata.to_headers("")?);
 
                 let body = put::maybe_compress(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
-                    HeaderValue::from_static("delete"),
-                );
-                headers.insert(
-                    HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-                    key_to_header_value(&key),
-                );
+                let headers = operation_headers("delete", Some(&key));
                 Ok(Part::text("").headers(headers))
             }
         }
     }
 }
 
-fn key_to_header_value(key: &str) -> HeaderValue {
-    let encoded = percent_encoding::percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
-    HeaderValue::try_from(encoded).expect("percent-encoded string is always a valid header value")
+fn operation_headers(operation: &str, key: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
+        HeaderValue::from_str(operation).expect("operation kind is always a valid header value"),
+    );
+    if let Some(key) = key {
+        let encoded =
+            percent_encoding::percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
+        headers.insert(
+            HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
+            HeaderValue::try_from(encoded)
+                .expect("percent-encoded string is always a valid header value"),
+        );
+    }
+    headers
 }
 
 /// The result of an individual operation.
