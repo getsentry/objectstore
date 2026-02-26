@@ -141,16 +141,25 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let mut multipart = Multipart::from_request(request, state).await?;
 
-        let requests = async_stream::try_stream! {
+        let requests = async_stream::stream! {
             let mut count = 0;
-            while let Some(field) = multipart.next_field().await? {
+            loop {
+                let field = match multipart.next_field().await {
+                    Ok(Some(field)) => field,
+                    Ok(None) => break,
+                    Err(e) => {
+                        yield Err(BatchError::from(e));
+                        break;
+                    }
+                };
                 if count >= MAX_OPERATIONS {
-                    Err(BatchError::LimitExceeded(format!(
+                    yield Err(BatchError::LimitExceeded(format!(
                         "exceeded {MAX_OPERATIONS} operations per batch request"
-                    )))?;
+                    )));
+                    break;
                 }
                 count += 1;
-                yield try_operation_from_field(field).await?;
+                yield try_operation_from_field(field).await;
             }
         }
         .boxed();
@@ -281,33 +290,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_without_key_header_fails() {
+    async fn test_individual_errors_with_isolation() {
+        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let valid_key = percent_encode(b"valid", NON_ALPHANUMERIC);
         let body = format!(
             "--boundary\r\n\
              {HEADER_BATCH_OPERATION_KIND}: get\r\n\
              \r\n\
              \r\n\
-             --boundary--\r\n",
-        );
-
-        let request = Request::builder()
-            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
-            .body(Body::from(body))
-            .unwrap();
-
-        let batch_request = BatchOperationStream::from_request(request, &())
-            .await
-            .unwrap();
-
-        let operations: Vec<_> = batch_request.0.collect().await;
-        assert_eq!(operations.len(), 1);
-        assert!(matches!(&operations[0], Err(BatchError::BadRequest(_))));
-    }
-
-    #[tokio::test]
-    async fn test_delete_without_key_header_fails() {
-        let body = format!(
-            "--boundary\r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: get\r\n\
+             \r\n\
+             \r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
+             \r\n\
+             \r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n\
+             {large_payload}\r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
              {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
              \r\n\
              \r\n\
@@ -324,8 +331,24 @@ mod tests {
             .unwrap();
 
         let operations: Vec<_> = batch_request.0.collect().await;
-        assert_eq!(operations.len(), 1);
+        assert_eq!(operations.len(), 5);
+
+        // get without key → BadRequest
         assert!(matches!(&operations[0], Err(BatchError::BadRequest(_))));
+        // valid get
+        assert!(matches!(
+            &operations[1].as_ref().unwrap(),
+            Operation::Get(g) if g.key == "valid"
+        ));
+        // delete without key → BadRequest
+        assert!(matches!(&operations[2], Err(BatchError::BadRequest(_))));
+        // oversized insert → LimitExceeded
+        assert!(matches!(&operations[3], Err(BatchError::LimitExceeded(_))));
+        // valid delete still succeeds after prior errors
+        assert!(matches!(
+            &operations[4].as_ref().unwrap(),
+            Operation::Delete(d) if d.key == "valid"
+        ));
     }
 
     #[tokio::test]
@@ -358,33 +381,5 @@ mod tests {
             &operations[MAX_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
         );
-    }
-
-    #[tokio::test]
-    async fn test_operation_body_size_limit_enforced() {
-        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
-        let key = percent_encode(b"test", NON_ALPHANUMERIC).to_string();
-        let body = format!(
-            "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
-             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
-             Content-Type: application/octet-stream\r\n\
-             \r\n\
-             {large_payload}\r\n\
-             --boundary--\r\n",
-        );
-
-        let request = Request::builder()
-            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
-            .body(Body::from(body))
-            .unwrap();
-
-        let batch_request = BatchOperationStream::from_request(request, &())
-            .await
-            .unwrap();
-        let operations: Vec<_> = batch_request.0.collect().await;
-
-        assert_eq!(operations.len(), 1);
-        assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));
     }
 }
