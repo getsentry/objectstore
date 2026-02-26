@@ -58,6 +58,7 @@ const ENV_PREFIX: &str = "OS__";
 pub struct ConfigSecret(String);
 
 impl ConfigSecret {
+    /// Returns the secret value as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }

@@ -1,3 +1,5 @@
+//! Axum extractor for bandwidth-metered request bodies.
+
 use std::convert::Infallible;
 use std::io;
 

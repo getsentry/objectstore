@@ -1,3 +1,9 @@
+//! Initialization of metrics, error reporting, and distributed tracing.
+//!
+//! Call [`init_metrics`], [`init_sentry`], and [`init_tracing`] during server
+//! startup in the order they appear. Sentry must be initialized before the Tokio
+//! runtime is created so it can instrument async tasks from the start.
+
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
@@ -9,6 +15,11 @@ use crate::config::{Config, LogFormat};
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 
+/// Initializes the Datadog metrics reporter, if a Datadog API key is configured.
+///
+/// Returns `None` when `config.metrics.datadog_key` is not set, in which case metrics
+/// are no-ops. The returned [`merni::DatadogFlusher`] must be flushed before shutdown
+/// to ensure in-flight metrics are delivered.
 pub fn init_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
     let Some(ref api_key) = config.metrics.datadog_key else {
         return Ok(None);
@@ -21,6 +32,11 @@ pub fn init_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlu
     builder.try_init().map(Some)
 }
 
+/// Initializes the Sentry error-reporting client, if a DSN is configured.
+///
+/// Returns `None` when `config.sentry.dsn` is not set. The returned
+/// [`sentry::ClientInitGuard`] must be kept alive for the duration of the process;
+/// dropping it flushes the event queue and shuts down the Sentry client.
 pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
     let dsn = config.dsn.as_ref()?;
@@ -58,6 +74,11 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     Some(guard)
 }
 
+/// Initializes the global tracing subscriber with structured logging and optional Sentry integration.
+///
+/// Reads `RUST_LOG` for filter directives; falls back to `INFO`-level logging with `TRACE`-level
+/// for internal objectstore crates. Log format (`pretty`, `simplified`, or `json`) is determined
+/// by `config.logging.format`, defaulting to pretty when a terminal is attached.
 pub fn init_tracing(config: &Config) {
     // Same as the default filter, except it converts warnings into events
     // and also sends everything at or above INFO as logs instead of breadcrumbs.
