@@ -58,16 +58,6 @@ impl App {
         }
     }
 
-    /// Returns the inner router, consuming the `App`.
-    ///
-    /// This is useful when additional middleware layers need to be applied before serving,
-    /// such as in test harnesses. The caller is responsible for setting up
-    /// [`into_make_service_with_connect_info`](axum::ServiceExt::into_make_service_with_connect_info)
-    /// and serving the router.
-    pub fn into_router(self) -> axum::Router {
-        self.router
-    }
-
     /// Enables or disables graceful shutdown for the server.
     ///
     /// By default, graceful shutdown is disabled.
