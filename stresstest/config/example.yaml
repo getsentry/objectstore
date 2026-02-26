@@ -28,3 +28,14 @@ workloads:
     file_sizes:
       p50: 5 KiB
       p99: 20 KiB
+  - name: reprocessing
+    mode: batch
+    concurrency: 4
+    organizations: 100
+    file_sizes:
+      p50: 10 KiB
+      p99: 50 KiB
+    actions:
+      writes: 5
+      reads: 3
+      deletes: 1

@@ -27,6 +27,22 @@ pub enum WorkloadMode {
     ///
     /// Actions are used to determine the ops per second for each operation.
     Throughput,
+
+    /// The workload uses the batch (`many()`) API to send multiple operations per HTTP request.
+    ///
+    /// Actions are used to determine the number of writes, reads and deletes per batch call.
+    #[serde(rename = "batch")]
+    Many,
+}
+
+impl fmt::Display for WorkloadMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkloadMode::Weighted => write!(f, "Weighted"),
+            WorkloadMode::Throughput => write!(f, "Throughput"),
+            WorkloadMode::Many => write!(f, "Batch"),
+        }
+    }
 }
 
 /// A builder for creating a [`Workload`].
@@ -242,7 +258,45 @@ impl Workload {
         match self.mode {
             WorkloadMode::Weighted => Some(self.next_action_weighted()),
             WorkloadMode::Throughput => self.next_action_throughput(),
+            WorkloadMode::Many => {
+                unreachable!("Many mode should use next_many_actions() instead")
+            }
         }
+    }
+
+    /// Returns a batch of actions based on the configured weights.
+    ///
+    /// In `Many` mode, weights represent the exact count of each operation type per batch call.
+    /// Reads and deletes that can't be satisfied (no existing files) are silently skipped.
+    pub(crate) fn next_many_actions(&mut self) -> Vec<Action> {
+        let num_writes = self.action_distribution.weight(0).unwrap();
+        let num_reads = self.action_distribution.weight(1).unwrap();
+        let num_deletes = self.action_distribution.weight(2).unwrap();
+
+        let mut actions = Vec::with_capacity(num_writes + num_reads + num_deletes);
+
+        for _ in 0..num_writes {
+            let seed = self.rng.next_u64();
+            actions.push(Action::Write(InternalId(seed), self.get_payload(seed)));
+        }
+
+        for _ in 0..num_reads {
+            if let Some((internal, external)) = self.sample_readback() {
+                actions.push(Action::Read(
+                    internal,
+                    external,
+                    self.get_payload(internal.0),
+                ));
+            }
+        }
+
+        for _ in 0..num_deletes {
+            if let Some((_internal, external)) = self.sample_readback() {
+                actions.push(Action::Delete(external));
+            }
+        }
+
+        actions
     }
 
     pub(crate) fn next_organization_id(&mut self) -> u64 {

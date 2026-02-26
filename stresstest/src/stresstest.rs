@@ -4,18 +4,21 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use anyhow::{Error, Result};
 
 use bytesize::ByteSize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use objectstore_client::{ExpirationPolicy, Usecase};
+use objectstore_client::{ExpirationPolicy, OperationResult, Usecase};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
+use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
-use crate::workload::{Action, Workload, WorkloadMode};
+use crate::workload::{Action, ExternalId, InternalId, Workload, WorkloadMode};
 
 /// Stresstest runner that can execute multiple workloads concurrently against a remote.
 ///
@@ -131,7 +134,7 @@ impl Stresstest {
 
             println!();
             println!(
-                "{} {} (mode: {:?}, concurrency: {})",
+                "{} {} (mode: {}, concurrency: {})",
                 "## Workload".bold(),
                 workload.name.bold().blue(),
                 workload.mode,
@@ -233,7 +236,7 @@ async fn run_workload(
 ) -> (Workload, WorkloadMetrics) {
     // In throughput mode, allow for a high concurrency value.
     let concurrency = match workload.mode {
-        WorkloadMode::Weighted => workload.concurrency,
+        WorkloadMode::Weighted | WorkloadMode::Many => workload.concurrency,
         WorkloadMode::Throughput => 100,
     };
 
@@ -247,6 +250,8 @@ async fn run_workload(
     let sleep = tokio::time::sleep_until(deadline);
     tokio::pin!(sleep);
 
+    let is_many = matches!(workload.lock().unwrap().mode, WorkloadMode::Many);
+
     loop {
         if deadline.elapsed() > Duration::ZERO {
             break;
@@ -257,72 +262,27 @@ async fn run_workload(
                 let remote = Arc::clone(&remote);
                 let metrics = Arc::clone(&metrics);
 
-                let action = loop {
-                    if let Some(action) = workload.lock().unwrap().next_action() {
-                        break action;
-                    }
-
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                };
-
-
-                let task = async move {
-                    let start = Instant::now();
-                    match action {
-                        Action::Write(internal_id, payload) => {
-                            let file_size = payload.len;
-                            let organization_id = workload.lock().unwrap().next_organization_id();
-
-                            let mut usecase = Usecase::new(&workload.lock().unwrap().name);
-                            if let Some(ttl) = ttl {
-                                usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
-                            }
-
-                            match remote.write(&usecase, organization_id, payload).await {
-                                Ok(object_key) => {
-                                    let external_id = (usecase, organization_id, object_key);
-                                    workload.lock().unwrap().push_file(internal_id, external_id);
-                                    let mut metrics = metrics.lock().unwrap();
-                                    metrics.write_timing.add(start.elapsed().as_secs_f64());
-                                    metrics.file_sizes.add(file_size as f64);
-                                    metrics.bytes_written += file_size;
-                                }
-                                Err(err) => {
-                                    print_error("writing object", &err);
-                                    let mut metrics = metrics.lock().unwrap();
-                                    metrics.write_failures += 1;
-                                }
-                            }
+                if is_many {
+                    let task = async move {
+                        run_many_batch(&workload, &remote, &metrics, ttl).await;
+                        drop(permit);
+                    };
+                    tokio::spawn(task);
+                } else {
+                    let action = loop {
+                        if let Some(action) = workload.lock().unwrap().next_action() {
+                            break action;
                         }
-                        Action::Read(internal_id, external_id, payload) => {
-                            let file_size = payload.len;
-                            let (usecase, organization_id, object_key) = &external_id;
-                            match remote.read(usecase, *organization_id, object_key, payload).await {
-                                Ok(_) => {
-                                    workload.lock().unwrap().push_file(internal_id, external_id);
-                                    let mut metrics = metrics.lock().unwrap();
-                                    metrics.read_timing.add(start.elapsed().as_secs_f64());
-                                    metrics.bytes_read += file_size;
-                                }
-                                Err(err) => {
-                                    print_error("reading object", &err);
-                                    let mut metrics = metrics.lock().unwrap();
-                                    metrics.read_failures += 1;
-                                }
-                            }
-                        }
-                        Action::Delete(external_id) => {
-                            let (usecase, organization_id, object_key) = &external_id;
-                            if let Err(err) = remote.delete(usecase, *organization_id, object_key).await {
-                                print_error("deleting object", &err);
-                            }
-                            let mut metrics = metrics.lock().unwrap();
-                            metrics.delete_timing.add(start.elapsed().as_secs_f64());
-                        }
-                    }
-                    drop(permit);
-                };
-                tokio::spawn(task);
+
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    };
+
+                    let task = async move {
+                        run_single_action(&workload, &remote, &metrics, action, ttl).await;
+                        drop(permit);
+                    };
+                    tokio::spawn(task);
+                }
             }
             _ = &mut sleep => {
                 break;
@@ -345,6 +305,174 @@ async fn run_workload(
         .unwrap();
 
     (workload, metrics)
+}
+
+async fn run_single_action(
+    workload: &Arc<Mutex<Workload>>,
+    remote: &Arc<HttpRemote>,
+    metrics: &Arc<Mutex<WorkloadMetrics>>,
+    action: Action,
+    ttl: Option<Duration>,
+) {
+    let start = Instant::now();
+    match action {
+        Action::Write(internal_id, payload) => {
+            let file_size = payload.len;
+            let organization_id = workload.lock().unwrap().next_organization_id();
+
+            let mut usecase = Usecase::new(&workload.lock().unwrap().name);
+            if let Some(ttl) = ttl {
+                usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
+            }
+
+            match remote.write(&usecase, organization_id, payload).await {
+                Ok(object_key) => {
+                    let external_id = (usecase, organization_id, object_key);
+                    workload.lock().unwrap().push_file(internal_id, external_id);
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.write_timing.add(start.elapsed().as_secs_f64());
+                    metrics.file_sizes.add(file_size as f64);
+                    metrics.bytes_written += file_size;
+                }
+                Err(err) => {
+                    print_error("writing object", &err);
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.write_failures += 1;
+                }
+            }
+        }
+        Action::Read(internal_id, external_id, payload) => {
+            let file_size = payload.len;
+            let (usecase, organization_id, object_key) = &external_id;
+            match remote
+                .read(usecase, *organization_id, object_key, payload)
+                .await
+            {
+                Ok(_) => {
+                    workload.lock().unwrap().push_file(internal_id, external_id);
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.read_timing.add(start.elapsed().as_secs_f64());
+                    metrics.bytes_read += file_size;
+                }
+                Err(err) => {
+                    print_error("reading object", &err);
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.read_failures += 1;
+                }
+            }
+        }
+        Action::Delete(external_id) => {
+            let (usecase, organization_id, object_key) = &external_id;
+            if let Err(err) = remote.delete(usecase, *organization_id, object_key).await {
+                print_error("deleting object", &err);
+            }
+            let mut metrics = metrics.lock().unwrap();
+            metrics.delete_timing.add(start.elapsed().as_secs_f64());
+        }
+    }
+}
+
+async fn run_many_batch(
+    workload: &Arc<Mutex<Workload>>,
+    remote: &Arc<HttpRemote>,
+    metrics: &Arc<Mutex<WorkloadMetrics>>,
+    ttl: Option<Duration>,
+) {
+    let (actions, organization_id, usecase, session) = {
+        let mut wl = workload.lock().unwrap();
+        let actions = wl.next_many_actions();
+        if actions.is_empty() {
+            return;
+        }
+        // Always use org 0 so all batches share the same scope. Reads/deletes
+        // pull from `existing_files` which must live under the same org/usecase.
+        let organization_id = 0;
+        let mut usecase = Usecase::new(&wl.name);
+        if let Some(ttl) = ttl {
+            usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
+        }
+        let session = remote.session(&usecase, organization_id);
+        (actions, organization_id, usecase, session)
+    };
+
+    // Track writes and reads by key so we can correlate results.
+    let mut write_tracking: HashMap<String, (InternalId, u64)> = HashMap::new();
+    let mut read_tracking: HashMap<String, (InternalId, ExternalId)> = HashMap::new();
+
+    let mut builder = session.many();
+    for action in actions {
+        match action {
+            Action::Write(internal_id, payload) => {
+                let file_size = payload.len;
+                let key = internal_id.to_string();
+                write_tracking.insert(key.clone(), (internal_id, file_size));
+                let stream = ReaderStream::new(payload).boxed();
+                builder = builder.push(session.put_stream(stream).compression(None).key(key));
+            }
+            Action::Read(internal_id, external_id, _payload) => {
+                let (_, _, ref object_key) = external_id;
+                let key = object_key.clone();
+                read_tracking.insert(key.clone(), (internal_id, external_id));
+                builder = builder.push(session.get(&key));
+            }
+            Action::Delete(external_id) => {
+                let (_, _, ref object_key) = external_id;
+                builder = builder.push(session.delete(object_key));
+            }
+        }
+    }
+
+    let start = Instant::now();
+    let mut results = builder.send();
+
+    while let Some(result) = results.next().await {
+        let elapsed = start.elapsed().as_secs_f64();
+        match result {
+            OperationResult::Put(key, Ok(_response)) => {
+                if let Some((internal_id, file_size)) = write_tracking.remove(&key) {
+                    let external_id = (usecase.clone(), organization_id, key);
+                    workload.lock().unwrap().push_file(internal_id, external_id);
+                    let mut m = metrics.lock().unwrap();
+                    m.write_timing.add(elapsed);
+                    m.file_sizes.add(file_size as f64);
+                    m.bytes_written += file_size;
+                }
+            }
+            OperationResult::Put(_key, Err(err)) => {
+                print_error("writing object (batch)", &err.into());
+                metrics.lock().unwrap().write_failures += 1;
+            }
+            OperationResult::Get(key, Ok(Some(_response))) => {
+                if let Some((internal_id, external_id)) = read_tracking.remove(&key) {
+                    let file_size = 0; // We don't know the size from the batch response easily
+                    workload.lock().unwrap().push_file(internal_id, external_id);
+                    let mut m = metrics.lock().unwrap();
+                    m.read_timing.add(elapsed);
+                    m.bytes_read += file_size;
+                }
+            }
+            OperationResult::Get(_key, Ok(None)) => {
+                print_error(
+                    "reading object (batch)",
+                    &anyhow::anyhow!("object not found"),
+                );
+                metrics.lock().unwrap().read_failures += 1;
+            }
+            OperationResult::Get(_key, Err(err)) => {
+                print_error("reading object (batch)", &err.into());
+                metrics.lock().unwrap().read_failures += 1;
+            }
+            OperationResult::Delete(_key, Ok(())) => {
+                metrics.lock().unwrap().delete_timing.add(elapsed);
+            }
+            OperationResult::Delete(_key, Err(err)) => {
+                print_error("deleting object (batch)", &err.into());
+            }
+            OperationResult::Error(err) => {
+                print_error("batch operation", &err.into());
+            }
+        }
+    }
 }
 
 fn print_error(message: &str, error: &Error) {
