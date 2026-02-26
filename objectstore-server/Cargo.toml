@@ -14,7 +14,7 @@ publish = false
 anyhow = { workspace = true }
 argh = "0.1.13"
 async-stream = "0.3.6"
-axum = { version = "0.8.4", features = ["multipart"] }
+axum = { workspace = true, features = ["multipart"] }
 percent-encoding = { workspace = true }
 axum-extra = "0.10.1"
 bytes = { workspace = true }

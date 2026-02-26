@@ -2409,6 +2409,7 @@ dependencies = [
 name = "objectstore-test"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "objectstore-server",
  "objectstore-types",
  "tempfile",

@@ -15,11 +15,14 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axum::extract::Request;
 use objectstore_server::config::{AuthZVerificationKey, Config, Storage};
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
 use objectstore_types::auth::Permission;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 // Re-export `config` module so that e2e/integration tests can fully customize the server.
@@ -51,6 +54,7 @@ pub static TEST_EDDSA_PUBKEY: LazyLock<String> =
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
+    request_count: Arc<AtomicUsize>,
     _long_term_tempdir: TempDir,
     _high_volume_tempdir: TempDir,
 }
@@ -89,14 +93,28 @@ impl TestServer {
         let state = Services::spawn(config).await.unwrap();
         let app = App::new(state);
 
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let counter = request_count.clone();
+        let router = app.into_router().layer(axum::middleware::from_fn(
+            move |req: Request, next: axum::middleware::Next| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    next.run(req).await
+                }
+            },
+        ));
+
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            app.serve(listener).await.unwrap();
+            let service = router.into_make_service_with_connect_info::<SocketAddr>();
+            axum::serve(listener, service).await.unwrap();
         });
 
         Self {
             handle,
             socket,
+            request_count,
             _long_term_tempdir: long_term_tempdir,
             _high_volume_tempdir: high_volume_tempdir,
         }
@@ -105,6 +123,11 @@ impl TestServer {
     /// Spawns a new test server with default configuration.
     pub async fn new() -> Self {
         Self::with_config(Config::default()).await
+    }
+
+    /// Returns the total number of HTTP requests received by the server.
+    pub fn request_count(&self) -> usize {
+        self.request_count.load(Ordering::Relaxed)
     }
 
     /// Returns a full URL pointing to the given path.
