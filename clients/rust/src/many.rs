@@ -8,15 +8,15 @@ use async_stream::stream;
 use futures_util::{Stream, StreamExt as _};
 use multer::Field;
 use objectstore_types::metadata::Metadata;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
+use percent_encoding::NON_ALPHANUMERIC;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
-use crate::get::maybe_decompress;
-use crate::put::{PutBody, maybe_compress};
+use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse, Session,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse, Session, get,
+    put,
 };
 
 const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
@@ -24,6 +24,7 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
+// TODO: guard agains too large operations (parts) and whole requests
 /// Maximum number of operations per batch request (server limit).
 const MAX_BATCH_SIZE: usize = 1000;
 
@@ -136,7 +137,7 @@ impl BatchOperation {
                 }
                 headers.extend(metadata.to_headers("")?);
 
-                let body = maybe_compress(body, metadata.compression);
+                let body = put::maybe_compress(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -156,7 +157,7 @@ impl BatchOperation {
 }
 
 fn key_to_header_value(key: &str) -> HeaderValue {
-    let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
+    let encoded = percent_encoding::percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
     HeaderValue::try_from(encoded).expect("percent-encoded string is always a valid header value")
 }
 
@@ -249,7 +250,11 @@ impl OperationResult {
             .and_then(|v| {
                 v.to_str()
                     .ok()
-                    .and_then(|encoded| percent_decode_str(encoded).decode_utf8().ok())
+                    .and_then(|encoded| {
+                        percent_encoding::percent_decode_str(encoded)
+                            .decode_utf8()
+                            .ok()
+                    })
                     .map(|s| s.into_owned())
             })
             .or_else(|| ctx.key().map(str::to_owned));
@@ -295,7 +300,7 @@ impl OperationResult {
 
                     let stream =
                         futures_util::stream::once(async move { Ok::<_, io::Error>(body) }).boxed();
-                    let stream = maybe_decompress(stream, &mut metadata, *decompress);
+                    let stream = get::maybe_decompress(stream, &mut metadata, *decompress);
 
                     OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
                 }
