@@ -149,14 +149,14 @@ where
                     Ok(None) => break,
                     Err(e) => {
                         yield Err(BatchError::from(e));
-                        break;
+                        continue;
                     }
                 };
                 if count >= MAX_OPERATIONS {
                     yield Err(BatchError::LimitExceeded(format!(
                         "exceeded {MAX_OPERATIONS} operations per batch request"
                     )));
-                    break;
+                    continue;
                 }
                 count += 1;
                 yield try_operation_from_field(field).await;
