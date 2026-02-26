@@ -377,9 +377,9 @@ mod tests {
         let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
-        matches!(
+        assert!(matches!(
             &operations[MAX_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
-        );
+        ));
     }
 }
