@@ -7,7 +7,6 @@ use axum::extract::{
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
-use percent_encoding::percent_decode_str;
 use thiserror::Error;
 
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
@@ -71,7 +70,7 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
                     "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
                 ))
             })?;
-            percent_decode_str(s)
+            percent_encoding::percent_decode_str(s)
                 .decode_utf8()
                 .map(|decoded| decoded.into_owned())
                 .map_err(|_| {
@@ -178,7 +177,7 @@ mod tests {
     use futures::StreamExt;
     use objectstore_service::streaming::Operation;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
-    use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+    use percent_encoding::NON_ALPHANUMERIC;
 
     #[tokio::test]
     async fn test_valid_request_works() {
@@ -292,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_individual_errors_with_isolation() {
         let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
-        let valid_key = percent_encode(b"valid", NON_ALPHANUMERIC);
+        let valid_key = percent_encoding::percent_encode(b"valid", NON_ALPHANUMERIC);
         let body = format!(
             "--boundary\r\n\
              {HEADER_BATCH_OPERATION_KIND}: get\r\n\
@@ -355,7 +354,9 @@ mod tests {
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
         for i in 0..(MAX_OPERATIONS + 1) {
-            let key = percent_encode(format!("test{i}").as_bytes(), NON_ALPHANUMERIC).to_string();
+            let key =
+                percent_encoding::percent_encode(format!("test{i}").as_bytes(), NON_ALPHANUMERIC)
+                    .to_string();
             body.push_str(&format!(
                 "--boundary\r\n\
                  {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
