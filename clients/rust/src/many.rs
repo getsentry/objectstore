@@ -15,8 +15,8 @@ use reqwest::multipart::Part;
 use crate::error::Error;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, PutBuilder, PutResponse, Session, get,
-    put,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
+    Session, get, put,
 };
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
@@ -54,16 +54,16 @@ impl Session {
 #[derive(Debug)]
 enum BatchOperation {
     Get {
-        key: String,
+        key: ObjectKey,
         decompress: bool,
     },
     Insert {
-        key: Option<String>,
+        key: Option<ObjectKey>,
         metadata: Metadata,
         body: PutBody,
     },
     Delete {
-        key: String,
+        key: ObjectKey,
     },
 }
 
@@ -167,11 +167,11 @@ pub enum OperationResult {
     /// The result of a get operation.
     ///
     /// Returns `Ok(None)` if the object was not found.
-    Get(String, Result<Option<GetResponse>, Error>),
+    Get(ObjectKey, Result<Option<GetResponse>, Error>),
     /// The result of a put operation.
-    Put(String, Result<PutResponse, Error>),
+    Put(ObjectKey, Result<PutResponse, Error>),
     /// The result of a delete operation.
-    Delete(String, Result<DeleteResponse, Error>),
+    Delete(ObjectKey, Result<DeleteResponse, Error>),
     /// An error occurred while parsing or correlating a response part.
     ///
     /// This makes it impossible to attribute the error to a specific operation.
@@ -182,9 +182,9 @@ pub enum OperationResult {
 
 /// Context for an operation, used to map a response part to a proper `OperationResult`.
 enum OperationContext {
-    Get { key: String, decompress: bool },
-    Insert { key: Option<String> },
-    Delete { key: String },
+    Get { key: ObjectKey, decompress: bool },
+    Insert { key: Option<ObjectKey> },
+    Delete { key: ObjectKey },
 }
 
 impl From<&BatchOperation> for OperationContext {

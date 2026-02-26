@@ -13,13 +13,13 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
-use crate::{ClientStream, Session};
+use crate::{ClientStream, ObjectKey, Session};
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
 pub struct PutResponse {
     /// The key of the object, as stored.
-    pub key: String,
+    pub key: ObjectKey,
 }
 
 pub(crate) enum PutBody {
@@ -74,7 +74,7 @@ impl Session {
 pub struct PutBuilder {
     pub(crate) session: Session,
     pub(crate) metadata: Metadata,
-    pub(crate) key: Option<String>,
+    pub(crate) key: Option<ObjectKey>,
     pub(crate) body: PutBody,
 }
 
@@ -83,7 +83,7 @@ impl PutBuilder {
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
     /// server will automatically assign a random key, which is then returned from this request.
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
     }

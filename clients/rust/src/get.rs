@@ -7,7 +7,7 @@ use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::{ClientStream, Session};
+use crate::{ClientStream, ObjectKey, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
 ///
@@ -57,7 +57,7 @@ impl Session {
 #[derive(Debug)]
 pub struct GetBuilder {
     pub(crate) session: Session,
-    pub(crate) key: String,
+    pub(crate) key: ObjectKey,
     pub(crate) decompress: bool,
 }
 
