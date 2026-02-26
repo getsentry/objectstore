@@ -430,7 +430,7 @@ async fn send_batch(
             ));
             let result = match context_map.get(&idx) {
                 Some(ctx) => {
-                    let key = ctx.key().unwrap_or_default().to_owned();
+                    let key = ctx.key().unwrap_or("<unknown>").to_owned();
                     match ctx {
                         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
                         OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
@@ -474,7 +474,7 @@ impl ManyBuilder {
                         let shared = std::sync::Arc::new(e);
                         for ctx in contexts {
                             let error = Error::Batch(shared.clone());
-                            let key = ctx.key().unwrap_or_default().to_owned();
+                            let key = ctx.key().unwrap_or("<unknown>").to_owned();
                             yield match ctx {
                                 OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
                                 OperationContext::Insert { .. } => {
