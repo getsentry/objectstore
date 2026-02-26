@@ -184,6 +184,19 @@ enum OperationContext {
     Delete { key: String },
 }
 
+impl From<&BatchOperation> for OperationContext {
+    fn from(op: &BatchOperation) -> Self {
+        match op {
+            BatchOperation::Get { key, decompress } => OperationContext::Get {
+                key: key.clone(),
+                decompress: *decompress,
+            },
+            BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
+            BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+        }
+    }
+}
+
 impl OperationContext {
     fn key(&self) -> Option<&str> {
         match self {
@@ -372,17 +385,7 @@ async fn send_batch(
     let context_map: HashMap<usize, OperationContext> = operations
         .iter()
         .enumerate()
-        .map(|(idx, op)| {
-            let ctx = match op {
-                BatchOperation::Get { key, decompress } => OperationContext::Get {
-                    key: key.clone(),
-                    decompress: *decompress,
-                },
-                BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
-                BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
-            };
-            (idx, ctx)
-        })
+        .map(|(idx, op)| (idx, OperationContext::from(op)))
         .collect();
     let num_operations = operations.len();
 
@@ -452,19 +455,8 @@ impl ManyBuilder {
 
                 // Extract operation context before send_batch consumes the chunk,
                 // so we can create typed error results if the batch fails.
-                let contexts: Vec<_> = chunk
-                    .iter()
-                    .map(|op| match op {
-                        BatchOperation::Get { key, .. } => OperationContext::Get {
-                            key: key.clone(),
-                            decompress: false, // not used for error reporting
-                        },
-                        BatchOperation::Insert { key, .. } => {
-                            OperationContext::Insert { key: key.clone() }
-                        }
-                        BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
-                    })
-                    .collect();
+                let contexts: Vec<_> =
+                    chunk.iter().map(OperationContext::from).collect();
 
                 match send_batch(&session, chunk).await {
                     Ok(results) => {
