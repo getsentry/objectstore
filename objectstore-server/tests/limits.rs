@@ -12,7 +12,6 @@ use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
 };
 use objectstore_test::server::TestServer;
-use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 #[tokio::test]
 async fn test_web_concurrency_limit() -> Result<()> {
@@ -517,15 +516,13 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    let key = percent_encode(b"some-key", NON_ALPHANUMERIC).to_string();
-    let body = format!(
-        "--boundary\r\n\
-         x-sn-batch-operation-key: {key}\r\n\
+    let body = "\
+        --boundary\r\n\
+         x-sn-batch-operation-key: some-key\r\n\
          x-sn-batch-operation-kind: get\r\n\
          \r\n\
          \r\n\
-         --boundary--\r\n"
-    );
+         --boundary--\r\n";
 
     let response = client
         .post(server.url("/v1/objects:batch/test/org=1/"))

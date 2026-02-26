@@ -211,10 +211,10 @@ mod tests {
              \r\n\
              \r\n\
              --boundary--\r\n",
-            key0 = percent_encode(b"test0", NON_ALPHANUMERIC),
-            key1 = percent_encode(b"test1", NON_ALPHANUMERIC),
-            key2 = percent_encode(b"test2", NON_ALPHANUMERIC),
-            key3 = percent_encode(b"test3", NON_ALPHANUMERIC),
+            key0 = "test%2F0", // "test/0" percent-encoded
+            key1 = "test1",
+            key2 = "test2",
+            key3 = "test3",
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
         );
@@ -234,7 +234,7 @@ mod tests {
         let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
-        assert_eq!(get_op.key, "test0");
+        assert_eq!(get_op.key, "test/0");
 
         let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
