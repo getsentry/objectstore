@@ -28,21 +28,28 @@ use tempfile::TempDir;
 // Re-export `config` module so that e2e/integration tests can fully customize the server.
 pub use objectstore_server::config;
 
+/// Key ID (`kid`) for the EdDSA key pair used by the test server.
 pub const TEST_EDDSA_KID: &str = "test_kid";
 
+/// Filesystem path to the test Ed25519 private key PEM file.
 pub static TEST_EDDSA_PRIVKEY_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     [env!("CARGO_MANIFEST_DIR"), "config", "ed25519.private.pem"]
         .iter()
         .collect::<PathBuf>()
 });
+
+/// PEM-encoded Ed25519 private key used to sign JWTs in tests.
 pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
     LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
 
+/// Filesystem path to the test Ed25519 public key PEM file.
 pub static TEST_EDDSA_PUBKEY_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     [env!("CARGO_MANIFEST_DIR"), "config", "ed25519.public.pem"]
         .iter()
         .collect::<PathBuf>()
 });
+
+/// PEM-encoded Ed25519 public key registered with the test server for JWT verification.
 pub static TEST_EDDSA_PUBKEY: LazyLock<String> =
     LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PUBKEY_PATH).unwrap());
 

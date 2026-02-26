@@ -1,3 +1,5 @@
+//! Axum request extractors for objectstore endpoints.
+
 pub mod batch;
 pub mod body;
 mod downstream_service;

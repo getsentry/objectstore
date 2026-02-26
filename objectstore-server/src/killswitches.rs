@@ -1,3 +1,12 @@
+//! Runtime killswitches for disabling access to specific object contexts.
+//!
+//! A [`Killswitch`] matches requests by usecase, scope values, and optionally a downstream
+//! service glob pattern. When any configured killswitch matches an incoming request, the server
+//! rejects it immediately without forwarding to the storage backend.
+//!
+//! Killswitches are part of [`crate::config::Config`] and take effect on the next request after
+//! a configuration reload — no server restart is required.
+
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 

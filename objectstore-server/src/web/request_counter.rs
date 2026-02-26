@@ -52,9 +52,11 @@ impl RequestCounter {
     ///
     /// Runs forever; intended to be spawned as a background task.
     pub async fn run_emitter(self) {
+        let limit = self.limit;
         self.counter
-            .run_emitter(EMITTER_INTERVAL, |count| async move {
+            .run_emitter(EMITTER_INTERVAL, move |count| async move {
                 merni::gauge!("server.requests.in_flight": count);
+                merni::gauge!("server.requests.limit": limit);
             })
             .await;
     }

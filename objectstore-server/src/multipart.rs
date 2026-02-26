@@ -36,7 +36,16 @@ impl Part {
     }
 }
 
+/// Converts a stream of [`Part`]s into a streaming `multipart/form-data` HTTP response.
+///
+/// Implemented for any `Stream<Item = T>` where `T: Into<Part>`. The boundary is
+/// formatted as `os-boundary-<hex>` using the provided `u128` value.
 pub trait IntoMultipartResponse {
+    /// Consumes `self` and returns a streaming `multipart/form-data` response.
+    ///
+    /// The `boundary` parameter is formatted as `os-boundary-<hex>` and embedded in the
+    /// `Content-Type` header. Each item yielded by the stream becomes one part, separated
+    /// by that boundary. A closing boundary is appended after the last item.
     fn into_multipart_response(self, boundary: u128) -> Response;
 }
 

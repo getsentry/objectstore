@@ -17,6 +17,10 @@ pub fn is_internal_route(route: &str) -> bool {
     matches!(route, "/health" | "/ready" | "/keda")
 }
 
+/// Returns a router with all objectstore HTTP endpoints mounted.
+///
+/// Mounts health and KEDA endpoints at the root and all object/batch
+/// endpoints under `/v1/`.
 pub fn routes() -> Router<ServiceState> {
     let routes_v1 = Router::new()
         .merge(objects::router())

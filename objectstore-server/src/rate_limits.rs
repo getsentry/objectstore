@@ -1,3 +1,13 @@
+//! Admission-based rate limiting for throughput and bandwidth.
+//!
+//! This module provides [`RateLimiter`], which enforces configurable limits at three
+//! levels of granularity — global, per-usecase, and per-scope — for both request
+//! throughput (requests/s) and upload/download bandwidth (bytes/s).
+//!
+//! Throughput is enforced using token buckets; bandwidth is estimated with an
+//! exponentially weighted moving average (EWMA) updated by a background task every
+//! 50 ms. All rate-limit checks are synchronous and non-blocking.
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -21,6 +31,10 @@ pub struct RateLimits {
     pub bandwidth: BandwidthLimits,
 }
 
+/// Request throughput limits applied at global, per-usecase, and per-scope granularity.
+///
+/// All limits are optional. When a limit is `None`, that level of limiting is not enforced.
+/// Per-usecase and per-scope limits are expressed as a percentage of the global limit.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputLimits {
     /// The overall maximum number of requests per second per service instance.
@@ -52,6 +66,11 @@ pub struct ThroughputLimits {
     pub rules: Vec<ThroughputRule>,
 }
 
+/// An override rule that applies a specific throughput limit to matching request contexts.
+///
+/// A rule matches when all specified fields match the request context. Fields not set match
+/// any value. When multiple rules match, each is enforced independently via its own token
+/// bucket — all matching rules must admit the request.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputRule {
     /// Optional usecase to match.
@@ -98,6 +117,10 @@ impl ThroughputRule {
     }
 }
 
+/// Bandwidth limits applied at global, per-usecase, and per-scope granularity.
+///
+/// Bandwidth is measured as bytes transferred per second (upload + download combined)
+/// and estimated using an EWMA updated every 50 ms. All limits are optional.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct BandwidthLimits {
     /// The overall maximum bandwidth (in bytes per second) per service instance.
@@ -116,6 +139,15 @@ pub struct BandwidthLimits {
     pub scope_pct: Option<u8>,
 }
 
+/// Combined rate limiter that enforces both bandwidth and throughput limits.
+///
+/// Checks are synchronous and non-blocking. Bandwidth is checked before
+/// throughput so that rejected requests are never counted toward the admitted
+/// throughput EWMA. See [`check`](RateLimiter::check) for details.
+///
+/// Call [`start`](RateLimiter::start) after construction to launch the background
+/// estimation tasks. Without it, bandwidth EWMAs remain at zero and bandwidth
+/// limits are never triggered.
 #[derive(Debug)]
 pub struct RateLimiter {
     bandwidth: BandwidthRateLimiter,
@@ -123,6 +155,9 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// Creates a new rate limiter from the given configuration.
+    ///
+    /// Background estimation tasks are not started until [`start`](RateLimiter::start) is called.
     pub fn new(config: RateLimits) -> Self {
         Self {
             bandwidth: BandwidthRateLimiter::new(config.bandwidth),
@@ -269,10 +304,11 @@ impl BandwidthRateLimiter {
         let global = Arc::clone(&self.global);
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
+        let global_limit = self.config.global_bps;
         // NB: This task has no shutdown mechanism — the rate limiter is only created once.
         // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
-            Self::estimator(global, usecases, scopes).await;
+            Self::estimator(global, usecases, scopes, global_limit).await;
         });
     }
 
@@ -284,6 +320,7 @@ impl BandwidthRateLimiter {
         global: Arc<EwmaEstimator>,
         usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
         scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
+        global_limit: Option<u64>,
     ) {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
@@ -302,6 +339,9 @@ impl BandwidthRateLimiter {
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
             merni::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
+            if let Some(limit) = global_limit {
+                merni::gauge!("server.bandwidth.limit"@b: limit);
+            }
 
             // Per-usecase
             {
@@ -448,6 +488,7 @@ impl ThroughputRateLimiter {
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
         let global_estimator = Arc::clone(&self.global_estimator);
+        let global_limit = self.config.global_rps;
         // NB: This task has no shutdown mechanism — the rate limiter is only created once.
         // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
@@ -459,6 +500,9 @@ impl ThroughputRateLimiter {
                 interval.tick().await;
                 global_estimator.update_ewma(&mut global_ewma, to_rps);
                 merni::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
+                if let Some(limit) = global_limit {
+                    merni::gauge!("server.rate_limiter.throughput.limit": u64::from(limit));
+                }
                 merni::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
                 merni::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
             }
