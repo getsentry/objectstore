@@ -92,8 +92,10 @@ impl GetBuilder {
     }
 }
 
-/// Wraps a stream in a zstd decompression layer if the metadata indicates zstd compression
-/// and `decompress` is `true`. Clears `metadata.compression` when decompression is applied.
+/// Wraps a stream in a zstd decompression layer.
+///
+/// Decompresses if the metadata indicates zstd compression and `decompress` is `true`.
+/// Clears `metadata.compression` when decompression is applied.
 pub(crate) fn maybe_decompress(
     stream: ClientStream,
     metadata: &mut Metadata,

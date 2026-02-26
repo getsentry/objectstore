@@ -19,9 +19,9 @@ use crate::{
     put,
 };
 
-const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
+const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 // TODO: guard agains too large operations (parts) and whole requests
@@ -164,15 +164,18 @@ fn key_to_header_value(key: &str) -> HeaderValue {
 /// The result of an individual operation.
 #[derive(Debug)]
 pub enum OperationResult {
-    /// The result of a get operation. Returns `Ok(None)` if the object was not found.
+    /// The result of a get operation.
+    ///
+    /// Returns `Ok(None)` if the object was not found.
     Get(String, Result<Option<GetResponse>, Error>),
     /// The result of a put operation.
     Put(String, Result<PutResponse, Error>),
     /// The result of a delete operation.
     Delete(String, Result<DeleteResponse, Error>),
-    /// An error occurred while parsing or correlating a response part, making it impossible
-    /// to attribute the error to a specific operation.
-    /// This can happen if the response contains malformed or missing headers, references
+    /// An error occurred while parsing or correlating a response part.
+    ///
+    /// This makes it impossible to attribute the error to a specific operation.
+    /// It can happen if the response contains malformed or missing headers, references
     /// unknown operation indices, or if a network error occurs while reading a response part.
     Error(Error),
 }
@@ -345,8 +348,10 @@ impl Stream for OperationResults {
 }
 
 impl OperationResults {
-    /// Drains the remaining stream, returning an error containing an iterator of all individual
-    /// errors for the operations that failed, if any.
+    /// Drains the stream and collects any per-operation errors.
+    ///
+    /// Returns an error containing an iterator of all individual errors for the operations
+    /// that failed, if any.
     pub async fn error_for_failures(
         mut self,
     ) -> crate::Result<(), impl Iterator<Item = crate::Error>> {
@@ -443,6 +448,7 @@ async fn send_batch(
 
 impl ManyBuilder {
     /// Executes all enqueued operations, returning a stream over their results.
+    ///
     /// The results are not guaranteed to be in the order they were originally enqueued in.
     pub fn send(self) -> OperationResults {
         let session = self.session;

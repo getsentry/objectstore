@@ -418,8 +418,9 @@ mod tests {
 
     // --- Service-level concurrent execution and capacity tests ---
 
-    /// A backend that pauses on `put_object` and signals via a channel, then
-    /// waits for a shared `Notify` before completing.
+    /// A backend that pauses on `put_object` for testing concurrency.
+    ///
+    /// Signals via a channel, then waits for a shared `Notify` before completing.
     struct GatedBackend {
         inner: InMemoryBackend,
         paused_tx: tokio::sync::mpsc::Sender<()>,
