@@ -864,4 +864,36 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_compressed_payload_roundtrip() -> Result<()> {
+        use objectstore_types::metadata::Compression;
+
+        let backend = create_test_backend().await?;
+
+        let plaintext = b"hello, world (but compressed with zstd)";
+        let compressed = zstd::encode_all(&plaintext[..], 3)?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Zstd),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, make_stream(&compressed))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = read_to_vec(stream).await?;
+
+        assert_eq!(meta.compression, Some(Compression::Zstd));
+        assert_eq!(
+            payload, compressed,
+            "Payload should be returned still compressed, not auto-decompressed"
+        );
+
+        Ok(())
+    }
 }
