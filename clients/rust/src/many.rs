@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use async_stream::stream;
 use futures_util::{Stream, StreamExt as _};
 use multer::Field;
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{Compression, Metadata};
 use percent_encoding::NON_ALPHANUMERIC;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
@@ -56,6 +56,7 @@ enum BatchOperation {
     Get {
         key: ObjectKey,
         decompress: bool,
+        accept_encoding: Vec<Compression>,
     },
     Insert {
         key: Option<ObjectKey>,
@@ -72,9 +73,14 @@ impl From<GetBuilder> for BatchOperation {
         let GetBuilder {
             key,
             decompress,
+            accept_encoding,
             session: _session,
         } = value;
-        BatchOperation::Get { key, decompress }
+        BatchOperation::Get {
+            key,
+            decompress,
+            accept_encoding,
+        }
     }
 }
 
@@ -169,17 +175,30 @@ pub enum OperationResult {
 
 /// Context for an operation, used to map a response part to a proper `OperationResult`.
 enum OperationContext {
-    Get { key: ObjectKey, decompress: bool },
-    Insert { key: Option<ObjectKey> },
-    Delete { key: ObjectKey },
+    Get {
+        key: ObjectKey,
+        decompress: bool,
+        accept_encoding: Vec<Compression>,
+    },
+    Insert {
+        key: Option<ObjectKey>,
+    },
+    Delete {
+        key: ObjectKey,
+    },
 }
 
 impl From<&BatchOperation> for OperationContext {
     fn from(op: &BatchOperation) -> Self {
         match op {
-            BatchOperation::Get { key, decompress } => OperationContext::Get {
+            BatchOperation::Get {
+                key,
+                decompress,
+                accept_encoding,
+            } => OperationContext::Get {
                 key: key.clone(),
                 decompress: *decompress,
+                accept_encoding: accept_encoding.clone(),
             },
             BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
             BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
@@ -295,7 +314,11 @@ impl OperationResult {
         }
 
         let result = match ctx {
-            OperationContext::Get { decompress, .. } => {
+            OperationContext::Get {
+                decompress,
+                accept_encoding,
+                ..
+            } => {
                 if status == 404 {
                     OperationResult::Get(key, Ok(None))
                 } else {
@@ -303,7 +326,8 @@ impl OperationResult {
 
                     let stream =
                         futures_util::stream::once(async move { Ok::<_, io::Error>(body) }).boxed();
-                    let stream = get::maybe_decompress(stream, &mut metadata, *decompress);
+                    let stream =
+                        get::maybe_decompress(stream, &mut metadata, *decompress, accept_encoding);
 
                     OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
                 }
