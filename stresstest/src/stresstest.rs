@@ -129,8 +129,10 @@ impl Stresstest {
         bar.finish_and_clear();
 
         let mut total_metrics = WorkloadMetrics::default();
+        let mut max_elapsed = Duration::ZERO;
         let workloads = finished_tasks.into_iter().map(|task| {
-            let (workload, metrics) = task.unwrap();
+            let (workload, metrics, elapsed) = task.unwrap();
+            max_elapsed = max_elapsed.max(elapsed);
 
             println!();
             println!(
@@ -140,7 +142,7 @@ impl Stresstest {
                 workload.mode,
                 workload.concurrency.bold()
             );
-            print_metrics(&metrics, duration);
+            print_metrics(&metrics, elapsed);
 
             total_metrics.file_sizes.merge(&metrics.file_sizes).unwrap();
             total_metrics.bytes_written += metrics.bytes_written;
@@ -166,7 +168,7 @@ impl Stresstest {
         let workloads: Vec<_> = workloads.collect();
         println!();
         println!("{}", "## TOTALS".bold());
-        print_metrics(&total_metrics, duration);
+        print_metrics(&total_metrics, max_elapsed);
         println!();
 
         if !cleanup {
@@ -233,7 +235,7 @@ async fn run_workload(
     workload: Workload,
     duration: Duration,
     ttl: Option<Duration>,
-) -> (Workload, WorkloadMetrics) {
+) -> (Workload, WorkloadMetrics, Duration) {
     // In throughput mode, allow for a high concurrency value.
     let concurrency = match workload.mode {
         WorkloadMode::Weighted | WorkloadMode::Many => workload.concurrency,
@@ -241,6 +243,7 @@ async fn run_workload(
     };
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
+    let start = Instant::now();
     let deadline = tokio::time::Instant::now() + duration;
 
     let workload = Arc::new(Mutex::new(workload));
@@ -290,13 +293,13 @@ async fn run_workload(
         }
     }
 
+    // by acquiring *all* the semaphores, we essentially wait for all outstanding tasks to finish
+    let _permits = semaphore.acquire_many(concurrency as u32).await;
+
     let metrics: WorkloadMetrics = {
         let mut metrics = metrics.lock().unwrap();
         std::mem::take(&mut metrics)
     };
-
-    // by acquiring *all* the semaphores, we essentially wait for all outstanding tasks to finish
-    let _permits = semaphore.acquire_many(concurrency as u32).await;
 
     let workload = Arc::try_unwrap(workload)
         .map_err(|_| ())
@@ -304,7 +307,9 @@ async fn run_workload(
         .into_inner()
         .unwrap();
 
-    (workload, metrics)
+    let elapsed = start.elapsed();
+
+    (workload, metrics, elapsed)
 }
 
 async fn run_single_action(
