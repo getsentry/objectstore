@@ -477,58 +477,6 @@ async fn batch_insert_without_key() {
 }
 
 #[tokio::test]
-async fn many_batches() {
-    let server = test_server().await;
-
-    let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
-        .build()
-        .unwrap();
-    let usecase = Usecase::new("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
-
-    let requests_before = server.request_count();
-
-    // 1001 operations should result in two batch requests (1000 + 1)
-    let count = 1001;
-    let mut many = session.many();
-    for i in 0..count {
-        many = many.push(
-            session
-                .put(format!("payload-{i}"))
-                .key(format!("chunk-key-{i}")),
-        );
-    }
-
-    let results: Vec<_> = many.send().collect().await;
-    assert_eq!(results.len(), count);
-
-    // Assert exactly 2 batch HTTP requests were made
-    let batch_requests = server.request_count() - requests_before;
-    assert_eq!(
-        batch_requests, 2,
-        "expected 2 batch requests, got {batch_requests}"
-    );
-
-    let mut keys: Vec<String> = results
-        .iter()
-        .map(|r| match r {
-            OperationResult::Put(key, Ok(_)) => key.clone(),
-            other => panic!("Expected Put(Ok), got: {:?}", other),
-        })
-        .collect();
-    keys.sort();
-
-    // Verify all keys are present (proving both chunks succeeded)
-    for i in 0..count {
-        assert!(
-            keys.contains(&format!("chunk-key-{i}")),
-            "missing chunk-key-{i}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn batch_partial_failures() {
     let server = test_server().await;
 

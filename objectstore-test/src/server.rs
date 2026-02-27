@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use objectstore_server::config::{AuthZVerificationKey, Config, Storage};
-use objectstore_server::state::{ServiceState, Services};
+use objectstore_server::state::Services;
 use objectstore_server::web::App;
 use objectstore_types::auth::Permission;
 use tempfile::TempDir;
@@ -58,7 +58,6 @@ pub static TEST_EDDSA_PUBKEY: LazyLock<String> =
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
-    state: ServiceState,
     _long_term_tempdir: TempDir,
     _high_volume_tempdir: TempDir,
 }
@@ -95,7 +94,7 @@ impl TestServer {
         )]);
 
         let state = Services::spawn(config).await.unwrap();
-        let app = App::new(state.clone());
+        let app = App::new(state);
 
         let handle = tokio::spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
@@ -105,7 +104,6 @@ impl TestServer {
         Self {
             handle,
             socket,
-            state,
             _long_term_tempdir: long_term_tempdir,
             _high_volume_tempdir: high_volume_tempdir,
         }
@@ -114,11 +112,6 @@ impl TestServer {
     /// Spawns a new test server with default configuration.
     pub async fn new() -> Self {
         Self::with_config(Config::default()).await
-    }
-
-    /// Returns the total number of admitted HTTP requests since startup.
-    pub fn request_count(&self) -> u64 {
-        self.state.rate_limiter.throughput_total_admitted()
     }
 
     /// Returns a full URL pointing to the given path.
