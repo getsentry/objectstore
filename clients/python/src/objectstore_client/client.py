@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
@@ -336,13 +336,23 @@ class Session:
                 metric_emitter.record_compressed_size(body.tell(), compression)
             return res["key"]
 
-    def get(self, key: str, decompress: bool = True) -> GetResponse:
+    def get(
+        self,
+        key: str,
+        decompress: bool = True,
+        accept_encoding: Sequence[str] | None = None,
+    ) -> GetResponse:
         """
         This fetches the blob with the given `key`, returning an `IO` stream that
         can be read.
 
         By default, content that was uploaded compressed will be automatically
-        decompressed, unless `decompress=True` is passed.
+        decompressed, unless `decompress=False` is passed.
+
+        If `accept_encoding` is provided, any compression algorithm listed there
+        will be passed through compressed instead of decompressed, even when
+        `decompress=True`. For example, passing `accept_encoding=["zstd"]` returns
+        the raw zstd-compressed bytes when the stored object is zstd-compressed.
         """
 
         headers = self._make_headers()
@@ -361,7 +371,8 @@ class Session:
         stream = cast(IO[bytes], response)
         metadata = Metadata.from_headers(response.headers)
 
-        if metadata.compression and decompress:
+        encoding_accepted = metadata.compression in (accept_encoding or ())
+        if metadata.compression and decompress and not encoding_accepted:
             if metadata.compression != "zstd":
                 raise NotImplementedError(
                     "Transparent decoding of anything but `zstd` is not implemented yet"

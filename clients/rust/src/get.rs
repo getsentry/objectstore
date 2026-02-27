@@ -49,6 +49,7 @@ impl Session {
             session: self.clone(),
             key: key.to_owned(),
             decompress: true,
+            accept_encoding: vec![],
         }
     }
 }
@@ -59,6 +60,7 @@ pub struct GetBuilder {
     pub(crate) session: Session,
     pub(crate) key: ObjectKey,
     pub(crate) decompress: bool,
+    pub(crate) accept_encoding: Vec<Compression>,
 }
 
 impl GetBuilder {
@@ -68,6 +70,17 @@ impl GetBuilder {
     /// By default, automatic decompression is enabled.
     pub fn decompress(mut self, decompress: bool) -> Self {
         self.decompress = decompress;
+        self
+    }
+
+    /// Specifies compression encodings the caller can handle natively.
+    ///
+    /// When the stored object's compression matches one of these, the payload
+    /// is returned still compressed and `metadata.compression` is preserved.
+    /// An empty list (the default) means the client does not accept any
+    /// compressed encoding, so automatic decompression applies as usual.
+    pub fn accept_encoding(mut self, encodings: impl IntoIterator<Item = Compression>) -> Self {
+        self.accept_encoding = encodings.into_iter().collect();
         self
     }
 
@@ -86,7 +99,12 @@ impl GetBuilder {
         let mut metadata = Metadata::from_headers(response.headers(), "")?;
 
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
-        let stream = maybe_decompress(stream, &mut metadata, self.decompress);
+        let stream = maybe_decompress(
+            stream,
+            &mut metadata,
+            self.decompress,
+            &self.accept_encoding,
+        );
 
         Ok(Some(GetResponse { metadata, stream }))
     }
@@ -94,18 +112,122 @@ impl GetBuilder {
 
 /// Wraps a stream in a zstd decompression layer.
 ///
-/// Decompresses if the metadata indicates zstd compression and `decompress` is `true`.
-/// Clears `metadata.compression` when decompression is applied.
+/// Decompresses if the metadata indicates zstd compression, `decompress` is `true`,
+/// and the stored encoding is not listed in `accept_encoding`. When the stored encoding
+/// is in `accept_encoding`, the payload is returned compressed and `metadata.compression`
+/// is preserved. Clears `metadata.compression` when decompression is applied.
 pub(crate) fn maybe_decompress(
     stream: ClientStream,
     metadata: &mut Metadata,
     decompress: bool,
+    accept_encoding: &[Compression],
 ) -> ClientStream {
-    match (metadata.compression, decompress) {
+    let encoding_accepted = metadata
+        .compression
+        .is_some_and(|c| accept_encoding.contains(&c));
+    match (metadata.compression, decompress && !encoding_accepted) {
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
             ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
         }
         _ => stream,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::{StreamExt as _, TryStreamExt as _};
+    use objectstore_types::metadata::{Compression, Metadata};
+
+    use super::maybe_decompress;
+    use crate::ClientStream;
+
+    fn compressed_zstd_stream(data: &[u8]) -> ClientStream {
+        let mut encoder = zstd::Encoder::new(vec![], 0).unwrap();
+        std::io::copy(&mut std::io::Cursor::new(data), &mut encoder).unwrap();
+        let compressed = encoder.finish().unwrap();
+        futures_util::stream::once(async move {
+            Ok::<_, std::io::Error>(bytes::Bytes::from(compressed))
+        })
+        .boxed()
+    }
+
+    fn raw_stream(data: &[u8]) -> ClientStream {
+        let bytes = bytes::Bytes::copy_from_slice(data);
+        futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) }).boxed()
+    }
+
+    async fn collect(stream: ClientStream) -> Vec<u8> {
+        let chunks: bytes::BytesMut = stream.try_collect().await.unwrap();
+        chunks.to_vec()
+    }
+
+    fn zstd_metadata() -> Metadata {
+        Metadata {
+            compression: Some(Compression::Zstd),
+            ..Default::default()
+        }
+    }
+
+    fn no_compression_metadata() -> Metadata {
+        Metadata::default()
+    }
+
+    #[tokio::test]
+    async fn empty_accept_decompress_true_decompresses() {
+        let payload = b"hello world";
+        let stream = compressed_zstd_stream(payload);
+        let mut metadata = zstd_metadata();
+
+        let out = maybe_decompress(stream, &mut metadata, true, &[]);
+        assert_eq!(collect(out).await, payload);
+        assert_eq!(metadata.compression, None);
+    }
+
+    #[tokio::test]
+    async fn empty_accept_decompress_false_returns_compressed() {
+        let payload = b"hello world";
+        let compressed_bytes = collect(compressed_zstd_stream(payload)).await;
+        let stream = compressed_zstd_stream(payload);
+
+        let mut metadata = zstd_metadata();
+        let out = maybe_decompress(stream, &mut metadata, false, &[]);
+        assert_eq!(collect(out).await, compressed_bytes);
+        assert_eq!(metadata.compression, Some(Compression::Zstd));
+    }
+
+    #[tokio::test]
+    async fn zstd_accept_decompress_true_skips_decompression() {
+        let payload = b"hello world";
+        let compressed_bytes = collect(compressed_zstd_stream(payload)).await;
+        let stream = compressed_zstd_stream(payload);
+
+        let mut metadata = zstd_metadata();
+        let out = maybe_decompress(stream, &mut metadata, true, &[Compression::Zstd]);
+        assert_eq!(collect(out).await, compressed_bytes);
+        assert_eq!(metadata.compression, Some(Compression::Zstd));
+    }
+
+    #[tokio::test]
+    async fn zstd_accept_decompress_false_returns_compressed() {
+        let payload = b"hello world";
+        let compressed_bytes = collect(compressed_zstd_stream(payload)).await;
+        let stream = compressed_zstd_stream(payload);
+
+        let mut metadata = zstd_metadata();
+        let out = maybe_decompress(stream, &mut metadata, false, &[Compression::Zstd]);
+        assert_eq!(collect(out).await, compressed_bytes);
+        assert_eq!(metadata.compression, Some(Compression::Zstd));
+    }
+
+    #[tokio::test]
+    async fn no_compression_returns_raw_regardless_of_accept() {
+        let payload = b"hello world";
+        let stream = raw_stream(payload);
+
+        let mut metadata = no_compression_metadata();
+        let out = maybe_decompress(stream, &mut metadata, true, &[Compression::Zstd]);
+        assert_eq!(collect(out).await, payload);
+        assert_eq!(metadata.compression, None);
     }
 }

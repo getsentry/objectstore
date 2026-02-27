@@ -102,6 +102,22 @@ session.put(already_compressed_data)
     .send().await?;
 ```
 
+To receive a compressed payload without decompressing it — for example, when forwarding
+to a system that accepts zstd natively — use `accept_encoding` on the get request:
+
+```rust,ignore
+use objectstore_client::Compression;
+
+// Returns zstd-compressed bytes; metadata.compression is preserved.
+let response = session.get(key)
+    .accept_encoding([Compression::Zstd])
+    .send().await?
+    .expect("object to exist");
+
+assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+let compressed_bytes = response.payload().await?;
+```
+
 ### Custom Metadata
 
 Arbitrary key-value pairs can be attached to objects and retrieved on download.
