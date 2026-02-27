@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0
+
+### New Features ✨
+
+- (clients) Add accept_encoding to Rust and Python get methods by @jan-auer in [#344](https://github.com/getsentry/objectstore/pull/344)
+
 ## 0.0.19
 
 ### New Features ✨
