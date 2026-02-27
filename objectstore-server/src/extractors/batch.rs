@@ -9,8 +9,6 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
@@ -68,31 +66,41 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
         })?
         .to_lowercase();
 
-    let key_header = field
+    let key = field
         .headers()
         .get(HEADER_BATCH_OPERATION_KEY)
-        .ok_or_else(|| {
-            BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KEY} header"))
-        })?
-        .to_str()
-        .map_err(|_| {
-            BatchError::BadRequest(format!(
-                "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
-            ))
-        })?;
-    let key_bytes = BASE64_STANDARD.decode(key_header).map_err(|_| {
-        BatchError::BadRequest(format!(
-            "unable to base64 decode {HEADER_BATCH_OPERATION_KEY} header value"
-        ))
-    })?;
-    let key = String::from_utf8(key_bytes).map_err(|_| {
-        BatchError::BadRequest(format!(
-            "{HEADER_BATCH_OPERATION_KEY} header value is not valid UTF-8"
-        ))
-    })?;
+        .map(|v| {
+            let s = v.to_str().map_err(|_| {
+                BatchError::BadRequest(format!(
+                    "unable to convert {HEADER_BATCH_OPERATION_KEY} header value to string"
+                ))
+            })?;
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8()
+                .map(|decoded| decoded.into_owned())
+                .map_err(|_| {
+                    BatchError::BadRequest(format!(
+                        "unable to percent-decode {HEADER_BATCH_OPERATION_KEY} header value"
+                    ))
+                })
+        })
+        .transpose()?;
 
     let operation = match kind.as_str() {
-        "get" => Operation::Get(Get { key }),
+        "get" => Operation::Get(Get {
+            key: key.ok_or_else(|| {
+                BatchError::BadRequest(format!(
+                    "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                ))
+            })?,
+        }),
+        "delete" => Operation::Delete(Delete {
+            key: key.ok_or_else(|| {
+                BatchError::BadRequest(format!(
+                    "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                ))
+            })?,
+        }),
         "insert" => {
             let metadata = Metadata::from_headers(field.headers(), "")?;
             let payload = field.bytes().await?;
@@ -107,7 +115,6 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
                 payload,
             })
         }
-        "delete" => Operation::Delete(Delete { key }),
         _ => {
             return Err(BatchError::BadRequest(format!(
                 "invalid operation kind: {kind}"
@@ -138,16 +145,25 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let mut multipart = Multipart::from_request(request, state).await?;
 
-        let requests = async_stream::try_stream! {
+        let requests = async_stream::stream! {
             let mut count = 0;
-            while let Some(field) = multipart.next_field().await? {
+            loop {
+                let field = match multipart.next_field().await {
+                    Ok(Some(field)) => field,
+                    Ok(None) => break,
+                    Err(e) => {
+                        yield Err(BatchError::from(e));
+                        continue;
+                    }
+                };
                 if count >= MAX_OPERATIONS {
-                    Err(BatchError::LimitExceeded(format!(
+                    yield Err(BatchError::LimitExceeded(format!(
                         "exceeded {MAX_OPERATIONS} operations per batch request"
-                    )))?;
+                    )));
+                    continue;
                 }
                 count += 1;
-                yield try_operation_from_field(field).await?;
+                yield try_operation_from_field(field).await;
             }
         }
         .boxed();
@@ -166,6 +182,7 @@ mod tests {
     use futures::StreamExt;
     use objectstore_service::streaming::Operation;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
+    use percent_encoding::NON_ALPHANUMERIC;
 
     #[tokio::test]
     async fn test_valid_request_works() {
@@ -198,10 +215,10 @@ mod tests {
              \r\n\
              \r\n\
              --boundary--\r\n",
-            key0 = BASE64_STANDARD.encode("test0"),
-            key1 = BASE64_STANDARD.encode("test1"),
-            key2 = BASE64_STANDARD.encode("test2"),
-            key3 = BASE64_STANDARD.encode("test3"),
+            key0 = "test%2F0", // "test/0" percent-encoded
+            key1 = "test1",
+            key2 = "test2",
+            key3 = "test3",
             insert1 = String::from_utf8_lossy(insert1_data),
             insert2 = String::from_utf8_lossy(insert2_data),
         );
@@ -221,12 +238,12 @@ mod tests {
         let Operation::Get(get_op) = &operations[0].as_ref().unwrap() else {
             panic!("expected get operation");
         };
-        assert_eq!(get_op.key, "test0");
+        assert_eq!(get_op.key, "test/0");
 
         let Operation::Insert(insert_op1) = &operations[1].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op1.key, "test1");
+        assert_eq!(insert_op1.key.as_deref(), Some("test1"));
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.metadata.origin, None);
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
@@ -234,7 +251,7 @@ mod tests {
         let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
             panic!("expected insert operation");
         };
-        assert_eq!(insert_op2.key, "test2");
+        assert_eq!(insert_op2.key.as_deref(), Some("test2"));
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.metadata.origin.as_deref(), Some("203.0.113.42"));
@@ -247,10 +264,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_insert_without_key_header() {
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n\
+             keyless payload\r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 1);
+
+        let Operation::Insert(insert_op) = &operations[0].as_ref().unwrap() else {
+            panic!("expected insert operation");
+        };
+        assert!(insert_op.key.is_none());
+        assert_eq!(insert_op.payload.as_ref(), b"keyless payload");
+    }
+
+    #[tokio::test]
+    async fn test_individual_errors_with_isolation() {
+        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let valid_key = percent_encoding::percent_encode(b"valid", NON_ALPHANUMERIC);
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: get\r\n\
+             \r\n\
+             \r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: get\r\n\
+             \r\n\
+             \r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
+             \r\n\
+             \r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n\
+             {large_payload}\r\n\
+             --boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {valid_key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: delete\r\n\
+             \r\n\
+             \r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 5);
+
+        // get without key → BadRequest
+        assert!(matches!(&operations[0], Err(BatchError::BadRequest(_))));
+        // valid get
+        assert!(matches!(
+            &operations[1].as_ref().unwrap(),
+            Operation::Get(g) if g.key == "valid"
+        ));
+        // delete without key → BadRequest
+        assert!(matches!(&operations[2], Err(BatchError::BadRequest(_))));
+        // oversized insert → LimitExceeded
+        assert!(matches!(&operations[3], Err(BatchError::LimitExceeded(_))));
+        // valid delete still succeeds after prior errors
+        assert!(matches!(
+            &operations[4].as_ref().unwrap(),
+            Operation::Delete(d) if d.key == "valid"
+        ));
+    }
+
+    #[tokio::test]
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
         for i in 0..(MAX_OPERATIONS + 1) {
-            let key = BASE64_STANDARD.encode(format!("test{i}"));
+            let key =
+                percent_encoding::percent_encode(format!("test{i}").as_bytes(), NON_ALPHANUMERIC)
+                    .to_string();
             body.push_str(&format!(
                 "--boundary\r\n\
                  {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
@@ -272,37 +383,9 @@ mod tests {
         let operations: Vec<_> = batch_request.0.collect().await;
 
         assert_eq!(operations.len(), MAX_OPERATIONS + 1);
-        matches!(
+        assert!(matches!(
             &operations[MAX_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
-        );
-    }
-
-    #[tokio::test]
-    async fn test_operation_body_size_limit_enforced() {
-        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
-        let key = BASE64_STANDARD.encode("test");
-        let body = format!(
-            "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
-             {HEADER_BATCH_OPERATION_KIND}: insert\r\n\
-             Content-Type: application/octet-stream\r\n\
-             \r\n\
-             {large_payload}\r\n\
-             --boundary--\r\n",
-        );
-
-        let request = Request::builder()
-            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
-            .body(Body::from(body))
-            .unwrap();
-
-        let batch_request = BatchOperationStream::from_request(request, &())
-            .await
-            .unwrap();
-        let operations: Vec<_> = batch_request.0.collect().await;
-
-        assert_eq!(operations.len(), 1);
-        assert!(matches!(&operations[0], Err(BatchError::LimitExceeded(_))));
+        ));
     }
 }

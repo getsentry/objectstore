@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Errors that can happen within the objectstore-client
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -23,6 +25,23 @@ pub enum Error {
     #[error("{message}")]
     InvalidUrl {
         /// The URL error message.
+        message: String,
+    },
+    /// Error when parsing a multipart response.
+    #[error(transparent)]
+    Multipart(#[from] multer::Error),
+    /// Error when the server returned a malformed response.
+    #[error("{0}")]
+    MalformedResponse(String),
+    /// Error that indicates that an entire batch request failed.
+    #[error("batch request failed: {0}")]
+    Batch(Arc<Error>),
+    /// Error that indicates failure of an individual operation in a batch request.
+    #[error("operation failed with HTTP status code {status}: {message}")]
+    OperationFailure {
+        /// The HTTP status code corresponding to the status of the operation.
+        status: u16,
+        /// The error message.
         message: String,
     },
 }

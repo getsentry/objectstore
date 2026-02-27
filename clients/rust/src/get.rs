@@ -3,13 +3,11 @@ use std::{fmt, io};
 use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::metadata::Compression;
-
-use crate::{ClientStream, Session};
+use crate::{ClientStream, ObjectKey, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
 ///
@@ -58,9 +56,9 @@ impl Session {
 /// A [`get`](Session::get) request builder.
 #[derive(Debug)]
 pub struct GetBuilder {
-    session: Session,
-    key: String,
-    decompress: bool,
+    pub(crate) session: Session,
+    pub(crate) key: ObjectKey,
+    pub(crate) decompress: bool,
 }
 
 impl GetBuilder {
@@ -87,15 +85,27 @@ impl GetBuilder {
 
         let mut metadata = Metadata::from_headers(response.headers(), "")?;
 
-        let stream = response.bytes_stream().map_err(io::Error::other);
-        let stream = match (metadata.compression, self.decompress) {
-            (Some(Compression::Zstd), true) => {
-                metadata.compression = None;
-                ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
-            }
-            _ => stream.boxed(),
-        };
+        let stream = response.bytes_stream().map_err(io::Error::other).boxed();
+        let stream = maybe_decompress(stream, &mut metadata, self.decompress);
 
         Ok(Some(GetResponse { metadata, stream }))
+    }
+}
+
+/// Wraps a stream in a zstd decompression layer.
+///
+/// Decompresses if the metadata indicates zstd compression and `decompress` is `true`.
+/// Clears `metadata.compression` when decompression is applied.
+pub(crate) fn maybe_decompress(
+    stream: ClientStream,
+    metadata: &mut Metadata,
+    decompress: bool,
+) -> ClientStream {
+    match (metadata.compression, decompress) {
+        (Some(Compression::Zstd), true) => {
+            metadata.compression = None;
+            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
+        }
+        _ => stream,
     }
 }

@@ -130,6 +130,7 @@ pub enum InvalidScopeError {
     #[error("invalid character '{0}'")]
     InvalidChar(char),
     /// Placeholder error variant for use in `objectstore_client::auth::TokenGenerator`.
+    ///
     /// This should never be encountered in practice.
     #[error("unexpected error, please report a bug")]
     Unreachable,

@@ -6,8 +6,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
 use objectstore_server::config::{AuthZ, Config, Http, Service};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
@@ -518,15 +516,13 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    let key = BASE64_STANDARD.encode("some-key");
-    let body = format!(
-        "--boundary\r\n\
-         x-sn-batch-operation-key: {key}\r\n\
+    let body = "\
+        --boundary\r\n\
+         x-sn-batch-operation-key: some-key\r\n\
          x-sn-batch-operation-kind: get\r\n\
          \r\n\
          \r\n\
-         --boundary--\r\n"
-    );
+         --boundary--\r\n";
 
     let response = client
         .post(server.url("/v1/objects:batch/test/org=1/"))

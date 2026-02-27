@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
+use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_client::{Client, Error, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{
+    Client, Error, OperationResult, Permission, SecretKey, TokenGenerator, Usecase,
+};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
-use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -327,4 +329,227 @@ async fn stores_with_static_token() {
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
     let received = response.payload().await.unwrap();
     assert_eq!(received, body);
+}
+
+#[tokio::test]
+async fn batch_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // First batch: 4 PUT operations
+    // key-2 uses default compression (zstd), others are uncompressed
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("first object").compression(None).key("key-1"))
+        .push(session.put("second object").key("key-2"))
+        .push(session.put("third object").compression(None).key("key-3"))
+        .push(session.put("fourth object").compression(None).key("key-4"))
+        .send()
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 4);
+    let mut keys: Vec<String> = results
+        .iter()
+        .map(|r| match r {
+            OperationResult::Put(key, Ok(_)) => key.clone(),
+            other => panic!("Expected Put result, got: {:?}", other),
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
+
+    // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
+    let results: Vec<_> = session
+        .many()
+        .push(session.get("key-1"))
+        .push(session.get("key-2"))
+        .push(session.delete("key-3"))
+        .push(
+            session
+                .put("overridden fourth object")
+                .compression(None)
+                .key("key-4"),
+        )
+        .send()
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 4);
+
+    // Results may come back in any order due to concurrent execution, so collect into a map by key
+    let mut gets = BTreeMap::new();
+    let mut deletes = HashSet::new();
+    let mut puts = HashSet::new();
+    for result in results {
+        match result {
+            OperationResult::Get(key, inner) => {
+                gets.insert(key, inner);
+            }
+            OperationResult::Delete(key, Ok(())) => {
+                deletes.insert(key);
+            }
+            OperationResult::Put(key, Ok(_)) => {
+                puts.insert(key);
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+    }
+
+    // GET key-1 (uncompressed)
+    let get1 = gets
+        .remove("key-1")
+        .expect("missing get key-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(get1.metadata.compression, None);
+    assert!(get1.metadata.time_created.is_some());
+    assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
+
+    // GET key-2 (automatic decompression)
+    let get2 = gets
+        .remove("key-2")
+        .expect("missing get key-2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(get2.metadata.compression, None);
+    assert!(get2.metadata.time_created.is_some());
+    assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
+
+    // DELETE key-3
+    assert!(deletes.contains("key-3"), "missing delete for key-3");
+
+    // PUT key-4 (override)
+    assert!(puts.contains("key-4"), "missing put for key-4");
+
+    // Verify the overridden object has the new content
+    let response = session.get("key-4").send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "overridden fourth object");
+
+    // Verify the deleted object is gone
+    let response = session.get("key-3").send().await.unwrap();
+    assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn batch_insert_without_key() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // Insert without specifying a key — the server should generate one
+    let results: Vec<_> = session
+        .many()
+        .push(session.put("keyless object").compression(None))
+        .send()
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 1);
+
+    let server_key = match &results[0] {
+        OperationResult::Put(key, Ok(_)) => key.clone(),
+        other => panic!("Expected Put result, got: {:?}", other),
+    };
+
+    // The server should have assigned a non-empty key
+    assert!(
+        !server_key.is_empty(),
+        "server-assigned key must not be empty"
+    );
+
+    // Verify we can retrieve the object using the server-assigned key
+    let response = session.get(&server_key).send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload, "keyless object");
+}
+
+#[tokio::test]
+async fn batch_partial_failures() {
+    let server = test_server().await;
+
+    // Use a read-only token so writes/deletes fail with 403
+    let read_only_token = test_token_generator().permissions(&[Permission::ObjectRead]);
+
+    let client = Client::builder(server.url("/"))
+        .token(read_only_token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let results: Vec<_> = session
+        .many()
+        .push(session.get("nonexistent-key-1"))
+        .push(session.put("should fail").key("write-key"))
+        .push(session.delete("delete-key"))
+        .push(session.get("nonexistent-key-2"))
+        .push(session.get("nonexistent-key-3"))
+        .send()
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 5);
+
+    // Collect results into maps by key for order-independent assertions
+    let mut gets = BTreeMap::new();
+    let mut puts = BTreeMap::new();
+    let mut deletes = BTreeMap::new();
+    for result in results {
+        match result {
+            OperationResult::Get(key, inner) => {
+                gets.insert(key, inner);
+            }
+            OperationResult::Put(key, inner) => {
+                puts.insert(key, inner);
+            }
+            OperationResult::Delete(key, inner) => {
+                deletes.insert(key, inner);
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+    }
+
+    // GET before failures should succeed (read is permitted)
+    let get_result = gets
+        .remove("nonexistent-key-1")
+        .expect("missing get result");
+    assert!(matches!(get_result, Ok(None)));
+
+    // PUT should fail with 403 (no write permission)
+    let put_result = puts.remove("write-key").expect("missing put result");
+    match put_result {
+        Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
+        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+    }
+
+    // DELETE should fail with 403 (no delete permission)
+    let delete_result = deletes.remove("delete-key").expect("missing delete result");
+    match delete_result {
+        Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
+        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+    }
+
+    // GETs after the failures should still succeed
+    let get_result = gets
+        .remove("nonexistent-key-2")
+        .expect("missing get result for key-2");
+    assert!(matches!(get_result, Ok(None)));
+
+    let get_result = gets
+        .remove("nonexistent-key-3")
+        .expect("missing get result for key-3");
+    assert!(matches!(get_result, Ok(None)));
 }
