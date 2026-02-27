@@ -3,7 +3,7 @@ name: Build Python client
 on:
   push:
     branches:
-      - release/**
+      - release-library/**
 
 permissions:
   contents: read
