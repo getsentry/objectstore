@@ -78,10 +78,17 @@ pub trait Backend: Debug + Send + Sync + 'static {
 }
 
 /// Creates a reqwest client with required defaults.
+///
+/// Automatic decompression is disabled because backends store pre-compressed
+/// payloads and manage `Content-Encoding` themselves.
 pub fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)
+        .no_zstd()
+        .no_brotli()
+        .no_gzip()
+        .no_deflate()
         .build()
         .expect("Client::new()")
 }

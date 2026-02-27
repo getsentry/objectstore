@@ -224,7 +224,7 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
 impl S3CompatibleBackend<NoToken> {
     pub fn without_token(endpoint: &str, bucket: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: common::reqwest_client(),
             endpoint: endpoint.into(),
             bucket: bucket.into(),
             token_provider: None,

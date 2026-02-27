@@ -2400,6 +2400,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
