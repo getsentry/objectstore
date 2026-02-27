@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.19
+
+### New Features ✨
+
+- (rust-client) Implement many API using batch endpoint by @lcian in [#277](https://github.com/getsentry/objectstore/pull/277)
+
 ## 0.0.18
 
 ### New Features ✨
