@@ -1,5 +1,6 @@
 changelogPolicy: auto
 preReleaseCommand: ../scripts/bump-version-clients.sh
+releaseBranchPrefix: release-library
 
 targets:
   - name: github
