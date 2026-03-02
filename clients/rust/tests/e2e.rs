@@ -620,3 +620,44 @@ async fn batch_put_files() {
     let payload = response.payload().await.unwrap();
     assert_eq!(payload.as_ref(), large_body.as_slice());
 }
+
+#[tokio::test]
+async fn put_file_with_compression() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("compressed.txt");
+    let body = "hello compressed file!";
+    std::fs::write(&path, body).unwrap();
+
+    // Default compression is zstd
+    let stored_id = session.put_file(path).send().await.unwrap().key;
+
+    // When requesting raw, the stored object should be zstd-compressed
+    let response = session
+        .get(&stored_id)
+        .decompress(false)
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+
+    let compressed = response.payload().await.unwrap();
+    let decompressed = zstd::bulk::decompress(&compressed, 1024).unwrap();
+    assert_eq!(decompressed, body.as_bytes());
+
+    // Default get decompresses transparently
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, None);
+
+    let received = response.payload().await.unwrap();
+    assert_eq!(received, body);
+}
