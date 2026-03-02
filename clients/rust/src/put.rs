@@ -1,6 +1,6 @@
 use std::fmt;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
@@ -77,8 +77,9 @@ impl Session {
     /// It's therefore possible for the file to be moved or changed in the meantime.
     /// If you want to avoid this possibility, use one of the other functions to supply
     /// a payload directly instead.
-    pub fn put_file(&self, file: PathBuf) -> PutBuilder {
-        self.put_body(PutBody::File(file))
+    pub fn put_file(&self, path: impl AsRef<Path>) -> PutBuilder {
+        let path = path.as_ref().to_owned();
+        self.put_body(PutBody::File(path))
     }
 }
 
