@@ -14,6 +14,7 @@ from objectstore_client.metadata import (
     TimeToLive,
 )
 from objectstore_client.metrics import MetricsBackend, NoOpMetricsBackend
+from objectstore_client.utils import parse_accept_encoding
 
 __all__ = [
     "Client",
@@ -31,4 +32,5 @@ __all__ = [
     "TokenGenerator",
     "MetricsBackend",
     "NoOpMetricsBackend",
+    "parse_accept_encoding",
 ]

@@ -371,7 +371,9 @@ class Session:
         stream = cast(IO[bytes], response)
         metadata = Metadata.from_headers(response.headers)
 
-        encoding_accepted = metadata.compression in (accept_encoding or ())
+        encoding_accepted = accept_encoding is not None and (
+            "*" in accept_encoding or metadata.compression in accept_encoding
+        )
         if metadata.compression and decompress and not encoding_accepted:
             if metadata.compression != "zstd":
                 raise NotImplementedError(
