@@ -24,12 +24,13 @@ const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
-// TODO: guard agains too large operations (parts) and whole requests
-/// Maximum number of operations to send per batch request.
-const MAX_BATCH_SIZE: usize = 1000;
+/// Maximum number of operations to send in a batch request.
+const MAX_BATCH_OPS: usize = 1000;
 
-/// Maximum size of a PUT body to send in a batch request.
-const MAX_BATCH_BODY_SIZE: u32 = 1024 * 1024; // 1 MB
+/// Maximum amount of bytes to send as a part's body in a batch request.
+const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
+
+// TODO: add limit and logic for whole batch request body size
 
 /// A builder that can be used to enqueue multiple operations.
 ///
@@ -55,6 +56,7 @@ impl Session {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum BatchOperation {
     Get {
         key: ObjectKey,
@@ -128,7 +130,7 @@ impl BatchOperation {
                 let mut headers = operation_headers("insert", key.as_deref());
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::maybe_compress(body, metadata.compression).await?;
+                let body = put::maybe_compress(body, metadata.compression);
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -474,7 +476,7 @@ impl ManyBuilder {
 
                 // If the body size would exceed the server-side limit, execute the operation as a
                 // single-object request instead of adding it to the batch.
-                while !operations.is_empty() && batch.len() < MAX_BATCH_SIZE {
+                while !operations.is_empty() && batch.len() < MAX_BATCH_OPS {
                     let operation = operations.pop().unwrap();
                     match operation {
                         BatchOperation::Insert {
@@ -482,7 +484,7 @@ impl ManyBuilder {
                             metadata,
                             body: PutBody::File(file),
                         } => {
-                            let meta = match tokio::fs::metadata(&file).await {
+                            let meta = match file.metadata().await {
                                 Ok(meta) => meta,
                                 Err(err) => {
                                     let key = key.unwrap_or_else(|| "<unknown>".to_owned());
@@ -492,7 +494,7 @@ impl ManyBuilder {
                             };
 
                             let size = meta.len();
-                            if size <= MAX_BATCH_BODY_SIZE as u64 {
+                            if size <= MAX_BATCH_PART_SIZE as u64 {
                                 batch.push(BatchOperation::Insert {
                                     key,
                                     metadata,

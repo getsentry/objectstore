@@ -585,7 +585,8 @@ async fn batch_put_files() {
         let path = dir.path().join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
-        many = many.push(session.put_file(path).compression(None).key(*name));
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        many = many.push(session.put_file(file).compression(None).key(*name));
     }
 
     let large_path = dir.path().join("large");
@@ -593,7 +594,8 @@ async fn batch_put_files() {
         .unwrap()
         .write_all(&large_body)
         .unwrap();
-    many = many.push(session.put_file(large_path).compression(None).key("large"));
+    let large_file = tokio::fs::File::open(&large_path).await.unwrap();
+    many = many.push(session.put_file(large_file).compression(None).key("large"));
 
     let results: Vec<_> = many.send().collect().await;
 
@@ -638,7 +640,8 @@ async fn put_file_with_compression() {
     std::fs::write(&path, body).unwrap();
 
     // Default compression is zstd
-    let stored_id = session.put_file(path).send().await.unwrap().key;
+    let file = tokio::fs::File::open(&path).await.unwrap();
+    let stored_id = session.put_file(file).send().await.unwrap().key;
 
     // When requesting raw, the stored object should be zstd-compressed
     let response = session
