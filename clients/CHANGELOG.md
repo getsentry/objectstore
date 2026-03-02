@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+### New Features ✨
+
+- (clients/python) Add parse_accept_encoding and fix wildcard handling by @jan-auer in [#347](https://github.com/getsentry/objectstore/pull/347)
+
+### Internal Changes 🔧
+
+- Separate release-library branch prefix for client releases by @jan-auer in [#345](https://github.com/getsentry/objectstore/pull/345)
+
 ## 0.1.0
 
 ### New Features ✨
