@@ -1,10 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt as _;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -487,11 +483,15 @@ impl ManyBuilder {
                             metadata,
                             body: PutBody::File(file),
                         } => {
-                            let meta = tokio::fs::metadata(&file).await.unwrap();
-                            #[cfg(unix)]
-                            let size = meta.size();
-                            #[cfg(windows)]
-                            let size = meta.file_size();
+                            let meta = match tokio::fs::metadata(&file).await {
+                                Ok(meta) => meta,
+                                Err(err) => {
+                                    yield OperationResult::Error(err.into());
+                                    continue;
+                                }
+                            };
+
+                            let size = meta.len();
                             if size <= MAX_BATCH_BODY_SIZE as u64 {
                                 batch.push(BatchOperation::Insert {
                                     key,
@@ -500,6 +500,7 @@ impl ManyBuilder {
                                 });
                                 continue;
                             }
+                            let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
                             let put = PutBuilder {
                                 session: session.clone(),
                                 metadata,
@@ -509,13 +510,17 @@ impl ManyBuilder {
                             let res = put.send().await;
                             let res = match res {
                                 Ok(ref inner) => OperationResult::Put(inner.key.clone(), res),
-                                Err(err) => OperationResult::Error(err),
+                                Err(err) => OperationResult::Put(error_key, Err(err)),
                             };
                             yield res;
                         }
                         // TODO: similar handling for other `PutBody` variants
                         _ => batch.push(operation),
                     }
+                }
+
+                if batch.is_empty() {
+                    continue;
                 }
 
                 // Extract operation context before send_batch consumes the chunk,
