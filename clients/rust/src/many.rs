@@ -504,10 +504,11 @@ impl ManyBuilder {
                                 body: PutBody::File(file),
                             };
                             let res = put.send().await;
-                            match res {
+                            let res = match res {
                                 Ok(ref inner) => OperationResult::Put(inner.key.clone(), res),
                                 Err(err) => OperationResult::Error(err),
                             };
+                            yield res;
                         }
                         // TODO: similar handling for other `PutBody` variants
                         _ => batch.push(operation),
