@@ -8,7 +8,8 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
-use tokio::io::AsyncRead;
+use tokio::fs::File;
+use tokio::io::{AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
@@ -25,6 +26,7 @@ pub struct PutResponse {
 pub(crate) enum PutBody {
     Buffer(Bytes),
     Stream(ClientStream),
+    File(File),
 }
 
 impl fmt::Debug for PutBody {
@@ -66,6 +68,16 @@ impl Session {
     {
         let stream = ReaderStream::new(body).boxed();
         self.put_body(PutBody::Stream(stream))
+    }
+
+    /// Creates or replaces an object using the contents of a file.
+    ///
+    /// The file is attempted to be read when the request is sent.
+    /// It's therefore possible for the file to be moved or changed in the meantime.
+    /// If you want to avoid this possibility, use one of the other functions to supply
+    /// a payload directly instead.
+    pub fn put_file(&self, file: File) -> PutBuilder {
+        self.put_body(PutBody::File(file))
     }
 }
 
@@ -169,9 +181,18 @@ pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) ->
             let stream = ReaderStream::new(encoder);
             Body::wrap_stream(stream)
         }
+        (Some(Compression::Zstd), PutBody::File(file)) => {
+            let reader = BufReader::new(file);
+            let encoder = ZstdEncoder::new(reader);
+            let stream = ReaderStream::new(encoder);
+            Body::wrap_stream(stream)
+        }
         (None, PutBody::Buffer(bytes)) => bytes.into(),
         (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
-        // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
+        (None, PutBody::File(file)) => {
+            let stream = ReaderStream::new(file).boxed();
+            Body::wrap_stream(stream)
+        } // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
     }
 }
 

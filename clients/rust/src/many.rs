@@ -24,9 +24,13 @@ const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
-// TODO: guard agains too large operations (parts) and whole requests
-/// Maximum number of operations per batch request (server limit).
-const MAX_BATCH_SIZE: usize = 1000;
+/// Maximum number of operations to send in a batch request.
+const MAX_BATCH_OPS: usize = 1000;
+
+/// Maximum amount of bytes to send as a part's body in a batch request.
+const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
+
+// TODO: add limit and logic for whole batch request body size
 
 /// A builder that can be used to enqueue multiple operations.
 ///
@@ -52,6 +56,7 @@ impl Session {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum BatchOperation {
     Get {
         key: ObjectKey,
@@ -458,7 +463,7 @@ async fn send_batch(
 }
 
 impl ManyBuilder {
-    /// Executes all enqueued operations, returning a stream over their results.
+    /// Consumes this builder, returning a lazy stream over all the enqueued operations' results.
     ///
     /// The results are not guaranteed to be in the order they were originally enqueued in.
     pub fn send(self) -> OperationResults {
@@ -467,15 +472,65 @@ impl ManyBuilder {
 
         let inner = stream! {
             while !operations.is_empty() {
-                let chunk_size = operations.len().min(MAX_BATCH_SIZE);
-                let chunk: Vec<_> = operations.drain(..chunk_size).collect();
+                let mut batch: Vec<BatchOperation> = vec![];
+
+                // If the body size would exceed the server-side limit, execute the operation as a
+                // single-object request instead of adding it to the batch.
+                while !operations.is_empty() && batch.len() < MAX_BATCH_OPS {
+                    let operation = operations.pop().unwrap();
+                    match operation {
+                        BatchOperation::Insert {
+                            key,
+                            metadata,
+                            body: PutBody::File(file),
+                        } => {
+                            let meta = match file.metadata().await {
+                                Ok(meta) => meta,
+                                Err(err) => {
+                                    let key = key.unwrap_or_else(|| "<unknown>".to_owned());
+                                    yield OperationResult::Put(key, Err(err.into()));
+                                    continue;
+                                }
+                            };
+
+                            let size = meta.len();
+                            if size <= MAX_BATCH_PART_SIZE as u64 {
+                                batch.push(BatchOperation::Insert {
+                                    key,
+                                    metadata,
+                                    body: PutBody::File(file),
+                                });
+                                continue;
+                            }
+                            let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
+                            let put = PutBuilder {
+                                session: session.clone(),
+                                metadata,
+                                key,
+                                body: PutBody::File(file),
+                            };
+                            let res = put.send().await;
+                            let res = match res {
+                                Ok(ref inner) => OperationResult::Put(inner.key.clone(), res),
+                                Err(err) => OperationResult::Put(error_key, Err(err)),
+                            };
+                            yield res;
+                        }
+                        // TODO: similar handling for other `PutBody` variants
+                        _ => batch.push(operation),
+                    }
+                }
+
+                if batch.is_empty() {
+                    continue;
+                }
 
                 // Extract operation context before send_batch consumes the chunk,
                 // so we can create typed error results if the batch fails.
                 let contexts: Vec<_> =
-                    chunk.iter().map(OperationContext::from).collect();
+                    batch.iter().map(OperationContext::from).collect();
 
-                match send_batch(&session, chunk).await {
+                match send_batch(&session, batch).await {
                     Ok(results) => {
                         for result in results {
                             yield result;

@@ -25,7 +25,7 @@ sentry-core = { version = ">=0.41", features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 # See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211
-tokio = "1.45.0"
+tokio = { version = "1.45.0", default-features = false, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
 
@@ -34,6 +34,7 @@ futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
 serde = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 zstd = "0.13.3"
 
