@@ -475,6 +475,9 @@ impl ManyBuilder {
         let inner = stream! {
             while !operations.is_empty() {
                 let mut batch: Vec<BatchOperation> = vec![];
+
+                // If the body size would exceed the server-side limit, execute the operation as a
+                // single-object request instead of adding it to the batch.
                 while let Some(operation) = operations.pop()
                     && batch.len() < MAX_BATCH_SIZE
                 {
