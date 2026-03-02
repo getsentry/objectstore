@@ -474,9 +474,8 @@ impl ManyBuilder {
 
                 // If the body size would exceed the server-side limit, execute the operation as a
                 // single-object request instead of adding it to the batch.
-                while let Some(operation) = operations.pop()
-                    && batch.len() < MAX_BATCH_SIZE
-                {
+                while !operations.is_empty() && batch.len() < MAX_BATCH_SIZE {
+                    let operation = operations.pop().unwrap();
                     match operation {
                         BatchOperation::Insert {
                             key,
