@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
-use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -482,8 +485,10 @@ impl ManyBuilder {
                             body: PutBody::File(file),
                         } => {
                             let meta = tokio::fs::metadata(&file).await.unwrap();
-                            // TODO: Windows counterpart
+                            #[cfg(unix)]
                             let size = meta.size();
+                            #[cfg(windows)]
+                            let size = meta.file_size();
                             if size <= MAX_BATCH_BODY_SIZE as u64 {
                                 batch.push(BatchOperation::Insert {
                                     key,

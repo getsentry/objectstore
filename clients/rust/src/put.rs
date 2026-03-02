@@ -1,6 +1,6 @@
 use std::fmt;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
@@ -172,7 +172,7 @@ pub(crate) async fn maybe_compress(
     body: PutBody,
     compression: Option<Compression>,
 ) -> Result<Body> {
-    Ok(match (compression, body) {
+    let res = match (compression, body) {
         (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
             let cursor = Cursor::new(bytes);
             let encoder = ZstdEncoder::new(cursor);
@@ -199,7 +199,8 @@ pub(crate) async fn maybe_compress(
             let stream = ReaderStream::new(file).boxed();
             Body::wrap_stream(stream)
         } // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
-    })
+    };
+    Ok(res)
 }
 
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
