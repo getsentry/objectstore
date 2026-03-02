@@ -485,7 +485,8 @@ impl ManyBuilder {
                             let meta = match tokio::fs::metadata(&file).await {
                                 Ok(meta) => meta,
                                 Err(err) => {
-                                    yield OperationResult::Error(err.into());
+                                    let key = key.unwrap_or_else(|| "<unknown>".to_owned());
+                                    yield OperationResult::Put(key, Err(err.into()));
                                     continue;
                                 }
                             };
