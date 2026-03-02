@@ -199,14 +199,14 @@ impl BigTableBackend {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        merni::counter!("bigtable.failures": 1, "action" => action);
+                        objectstore_metrics::counter!("bigtable.failures": 1, "action" => action);
                         return Err(Error::Generic {
                             context: format!("Bigtable: `{action}` failed"),
                             cause: Some(Box::new(e)),
                         });
                     }
                     retry_count += 1;
-                    merni::counter!("bigtable.retries": 1, "action" => action);
+                    objectstore_metrics::counter!("bigtable.retries": 1, "action" => action);
                     tracing::warn!(retry_count, action, "Retrying request");
                 }
             }

@@ -28,9 +28,9 @@ http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
-merni = { workspace = true }
 mimalloc = { workspace = true }
 num_cpus = "1.17.0"
+objectstore-metrics = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }

@@ -29,7 +29,7 @@ pub async fn limit_web_concurrency(
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
     if !is_internal_route(route) && counter.count() >= counter.limit() {
-        merni::counter!("web.concurrency.rejected": 1);
+        objectstore_metrics::counter!("web.concurrency.rejected": 1);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
@@ -115,7 +115,7 @@ struct EmitMetricsGuard<'a> {
 
 impl<'a> EmitMetricsGuard<'a> {
     fn new(route: &'a str, method: &Method) -> Self {
-        merni::counter!(
+        objectstore_metrics::counter!(
             "server.requests": 1,
             "route" => route,
             "method" => method.as_str()
@@ -136,7 +136,7 @@ impl<'a> EmitMetricsGuard<'a> {
 
 impl Drop for EmitMetricsGuard<'_> {
     fn drop(&mut self) {
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "server.requests.duration"@s: self.start.elapsed(),
             "route" => self.route,
             "method" => self.method,

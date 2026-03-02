@@ -338,9 +338,9 @@ impl BandwidthRateLimiter {
 
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
-            merni::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
+            objectstore_metrics::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
             if let Some(limit) = global_limit {
-                merni::gauge!("server.bandwidth.limit"@b: limit);
+                objectstore_metrics::gauge!("server.bandwidth.limit"@b: limit);
             }
 
             // Per-usecase
@@ -361,8 +361,8 @@ impl BandwidthRateLimiter {
                 }
             }
 
-            merni::gauge!("server.rate_limiter.bandwidth.scope_map_size": scopes.len());
-            merni::gauge!("server.rate_limiter.bandwidth.usecase_map_size": usecases.len());
+            objectstore_metrics::gauge!("server.rate_limiter.bandwidth.scope_map_size": scopes.len());
+            objectstore_metrics::gauge!("server.rate_limiter.bandwidth.usecase_map_size": usecases.len());
         }
     }
 
@@ -499,12 +499,12 @@ impl ThroughputRateLimiter {
             loop {
                 interval.tick().await;
                 global_estimator.update_ewma(&mut global_ewma, to_rps);
-                merni::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
+                objectstore_metrics::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
                 if let Some(limit) = global_limit {
-                    merni::gauge!("server.rate_limiter.throughput.limit": u64::from(limit));
+                    objectstore_metrics::gauge!("server.rate_limiter.throughput.limit": u64::from(limit));
                 }
-                merni::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
-                merni::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
+                objectstore_metrics::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
+                objectstore_metrics::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
             }
         });
     }
