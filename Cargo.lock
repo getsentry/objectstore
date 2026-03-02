@@ -2324,6 +2324,7 @@ dependencies = [
  "reqwest 0.13.1",
  "sentry-core",
  "serde",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",

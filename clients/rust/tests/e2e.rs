@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::io::Write as _;
 use std::sync::LazyLock;
 
 use futures_util::StreamExt as _;
@@ -552,4 +553,70 @@ async fn batch_partial_failures() {
         .remove("nonexistent-key-3")
         .expect("missing get result for key-3");
     assert!(matches!(get_result, Ok(None)));
+}
+
+#[tokio::test]
+async fn batch_put_files() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a few small files (under 1 MB batch limit).
+    let small_bodies: Vec<(&str, Vec<u8>)> = vec![
+        ("small-1", b"hello from file 1".to_vec()),
+        ("small-2", b"hello from file 2".to_vec()),
+        ("small-3", b"hello from file 3".to_vec()),
+    ];
+
+    // Create a large file that exceeds the 1 MB batch body size limit.
+    // This should be routed to a single PUT request instead of being batched.
+    let large_body: Vec<u8> = vec![0xAB; 2 * 1024 * 1024]; // 2 MB
+
+    let mut many = session.many();
+
+    for (name, content) in &small_bodies {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
+        many = many.push(session.put_file(path).compression(None).key(*name));
+    }
+
+    let large_path = dir.path().join("large");
+    std::fs::File::create(&large_path)
+        .unwrap()
+        .write_all(&large_body)
+        .unwrap();
+    many = many.push(session.put_file(large_path).compression(None).key("large"));
+
+    let results: Vec<_> = many.send().collect().await;
+
+    assert_eq!(results.len(), 4);
+
+    let mut keys: Vec<String> = results
+        .iter()
+        .map(|r| match r {
+            OperationResult::Put(key, Ok(_)) => key.clone(),
+            other => panic!("Expected successful Put result, got: {:?}", other),
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["large", "small-1", "small-2", "small-3"]);
+
+    // Verify all objects are retrievable with the correct content.
+    for (name, expected) in &small_bodies {
+        let response = session.get(name).send().await.unwrap().unwrap();
+        let payload = response.payload().await.unwrap();
+        assert_eq!(payload.as_ref(), expected.as_slice(), "mismatch for {name}");
+    }
+
+    let response = session.get("large").send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload.as_ref(), large_body.as_slice());
 }
