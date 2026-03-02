@@ -7,6 +7,37 @@ import filetype  # type: ignore[import-untyped]
 from zstandard import ZstdCompressionReader
 
 
+def parse_accept_encoding(header: str) -> list[str]:
+    """Parse an Accept-Encoding header value for use in objectstore GET requests.
+
+    Returns a list of encoding names, normalized to lowercase and stripped of q-values,
+    per RFC 7231. Encodings explicitly rejected via ``q=0`` are excluded.
+
+    Note: ``identity;q=0`` is not supported and will be silently ignored (i.e., treated
+    as acceptable), since objectstore always serves an identity fallback.
+    """
+    result = []
+    for part in header.split(","):
+        segments = part.split(";")
+        name = segments[0].strip().lower()
+        if not name:
+            continue
+        if any(_is_q_zero(s) for s in segments[1:]):
+            continue
+        result.append(name)
+    return result
+
+
+def _is_q_zero(segment: str) -> bool:
+    s = segment.strip().lower()
+    if not s.startswith("q="):
+        return False
+    try:
+        return float(s[2:]) == 0.0
+    except ValueError:
+        return False
+
+
 def guess_mime_type(contents: bytes | IO[bytes]) -> str | None:
     """
     Guesses the MIME type from the given contents.
