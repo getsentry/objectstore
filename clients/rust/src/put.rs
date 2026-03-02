@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
@@ -8,12 +9,13 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
-use tokio::io::AsyncRead;
+use tokio::fs::File;
+use tokio::io::{AsyncRead, BufStream};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
-use crate::{ClientStream, ObjectKey, Session};
+use crate::{ClientStream, ObjectKey, Result, Session};
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -25,6 +27,7 @@ pub struct PutResponse {
 pub(crate) enum PutBody {
     Buffer(Bytes),
     Stream(ClientStream),
+    File(PathBuf),
 }
 
 impl fmt::Debug for PutBody {
@@ -66,6 +69,16 @@ impl Session {
     {
         let stream = ReaderStream::new(body).boxed();
         self.put_body(PutBody::Stream(stream))
+    }
+
+    /// Creates or replaces an object using the contents of a file.
+    ///
+    /// The file is attempted to be read when the request is sent.
+    /// It's therefore possible for the file to be moved or changed in the meantime.
+    /// If you want to avoid this possibility, use one of the other functions to supply
+    /// a payload directly instead.
+    pub fn put_file(&self, file: PathBuf) -> PutBuilder {
+        self.put_body(PutBody::File(file))
     }
 }
 
@@ -155,8 +168,11 @@ impl PutBuilder {
 }
 
 /// Compresses the body if compression is specified.
-pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) -> Body {
-    match (compression, body) {
+pub(crate) async fn maybe_compress(
+    body: PutBody,
+    compression: Option<Compression>,
+) -> Result<Body> {
+    Ok(match (compression, body) {
         (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
             let cursor = Cursor::new(bytes);
             let encoder = ZstdEncoder::new(cursor);
@@ -169,10 +185,21 @@ pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) ->
             let stream = ReaderStream::new(encoder);
             Body::wrap_stream(stream)
         }
+        (Some(Compression::Zstd), PutBody::File(path)) => {
+            let file = File::open(path).await?;
+            let stream = BufStream::new(file);
+            let encoder = ZstdEncoder::new(stream);
+            let stream = ReaderStream::new(encoder);
+            Body::wrap_stream(stream)
+        }
         (None, PutBody::Buffer(bytes)) => bytes.into(),
         (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
-        // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
-    }
+        (None, PutBody::File(path)) => {
+            let file = File::open(path).await?;
+            let stream = ReaderStream::new(file).boxed();
+            Body::wrap_stream(stream)
+        } // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
+    })
 }
 
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
@@ -190,7 +217,7 @@ impl PutBuilder {
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
 
-        let body = maybe_compress(self.body, self.metadata.compression);
+        let body = maybe_compress(self.body, self.metadata.compression).await?;
 
         builder = builder.headers(self.metadata.to_headers("")?);
 

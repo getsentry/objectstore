@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -25,8 +26,11 @@ const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 // TODO: guard agains too large operations (parts) and whole requests
-/// Maximum number of operations per batch request (server limit).
+/// Maximum number of operations to send per batch request.
 const MAX_BATCH_SIZE: usize = 1000;
+
+/// Maximum size of a PUT body to send in a batch request.
+const MAX_BATCH_BODY_SIZE: u32 = 1024 * 1024; // 1 MB
 
 /// A builder that can be used to enqueue multiple operations.
 ///
@@ -125,7 +129,7 @@ impl BatchOperation {
                 let mut headers = operation_headers("insert", key.as_deref());
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::maybe_compress(body, metadata.compression);
+                let body = put::maybe_compress(body, metadata.compression).await?;
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -458,7 +462,7 @@ async fn send_batch(
 }
 
 impl ManyBuilder {
-    /// Executes all enqueued operations, returning a stream over their results.
+    /// Consumes this builder, returning a lazy stream over all the enqueued operations' results.
     ///
     /// The results are not guaranteed to be in the order they were originally enqueued in.
     pub fn send(self) -> OperationResults {
@@ -467,15 +471,50 @@ impl ManyBuilder {
 
         let inner = stream! {
             while !operations.is_empty() {
-                let chunk_size = operations.len().min(MAX_BATCH_SIZE);
-                let chunk: Vec<_> = operations.drain(..chunk_size).collect();
+                let mut batch: Vec<BatchOperation> = vec![];
+                while let Some(operation) = operations.pop()
+                    && batch.len() < MAX_BATCH_SIZE
+                {
+                    match operation {
+                        BatchOperation::Insert {
+                            key,
+                            metadata,
+                            body: PutBody::File(file),
+                        } => {
+                            let meta = tokio::fs::metadata(&file).await.unwrap();
+                            // TODO: Windows counterpart
+                            let size = meta.size();
+                            if size <= MAX_BATCH_BODY_SIZE as u64 {
+                                batch.push(BatchOperation::Insert {
+                                    key,
+                                    metadata,
+                                    body: PutBody::File(file),
+                                });
+                                continue;
+                            }
+                            let put = PutBuilder {
+                                session: session.clone(),
+                                metadata,
+                                key,
+                                body: PutBody::File(file),
+                            };
+                            let res = put.send().await;
+                            match res {
+                                Ok(ref inner) => OperationResult::Put(inner.key.clone(), res),
+                                Err(err) => OperationResult::Error(err),
+                            };
+                        }
+                        // TODO: similar handling for other `PutBody` variants
+                        _ => batch.push(operation),
+                    }
+                }
 
                 // Extract operation context before send_batch consumes the chunk,
                 // so we can create typed error results if the batch fails.
                 let contexts: Vec<_> =
-                    chunk.iter().map(OperationContext::from).collect();
+                    batch.iter().map(OperationContext::from).collect();
 
-                match send_batch(&session, chunk).await {
+                match send_batch(&session, batch).await {
                     Ok(results) => {
                         for result in results {
                             yield result;
