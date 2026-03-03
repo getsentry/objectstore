@@ -1,11 +1,11 @@
 //! Rejection reason classification and metrics emission.
 //!
 //! [`RejectionReason`] classifies why a request was rejected, providing a single
-//! point for emitting the `server.rejected` counter metric with a `reason` tag.
+//! point for emitting the `server.requests.rejected` counter metric with a `reason` tag.
 
 /// Classifies the reason a request was rejected by the server.
 ///
-/// Used to emit a unified `server.rejected` counter tagged with `reason`,
+/// Used to emit a unified `server.requests.rejected` counter tagged with `reason`,
 /// providing visibility into each rejection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectionReason {
@@ -39,8 +39,8 @@ impl RejectionReason {
         }
     }
 
-    /// Emits a `server.rejected` counter tagged with this rejection reason.
+    /// Emits a `server.requests.rejected` counter tagged with this rejection reason.
     pub fn emit(&self) {
-        objectstore_metrics::counter!("server.rejected": 1, "reason" => self.as_str());
+        objectstore_metrics::counter!("server.requests.rejected": 1, "reason" => self.as_str());
     }
 }
