@@ -111,16 +111,17 @@ pub fn init_tracing(config: &Config) {
 
     let env_filter = match EnvFilter::try_from_default_env() {
         Ok(env_filter) => env_filter,
-        // INFO by default. Use stricter levels for noisy crates. Use looser levels
-        // for internal crates and essential dependencies.
-        Err(_) => EnvFilter::new(
-            "INFO,\
+        // Use stricter levels for noisy crates. Use looser levels for internal crates and
+        // essential dependencies.
+        Err(_) => EnvFilter::new(format!(
+            "{},\
             tower_http=DEBUG,\
             objectstore=TRACE,\
             objectstore_service=TRACE,\
             objectstore_types=TRACE,\
             ",
-        ),
+            config.logging.level,
+        )),
     };
 
     tracing_subscriber::registry()
