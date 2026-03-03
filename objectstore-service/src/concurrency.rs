@@ -150,7 +150,7 @@ where
     G: Send + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
 {
-    merni::counter!("service.task.start": 1, "operation" => operation);
+    objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -160,7 +160,7 @@ where
             .await
             .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "service.task.duration"@s: start.elapsed(),
             "operation" => operation,
             "outcome" => if result.is_ok() { "success" } else { "error" }

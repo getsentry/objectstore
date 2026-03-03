@@ -114,9 +114,9 @@ pub fn execute() -> Result<()> {
     observability::init_tracing(&config);
     tracing::debug!(?config);
 
-    let metrics_guard = observability::init_metrics(&config)?;
+    objectstore_metrics::init(&config.metrics)?;
 
-    let result = runtime.block_on(async move {
+    runtime.block_on(async move {
         match args.command {
             Command::Run(RunCommand {}) => web::server(config).await,
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
@@ -126,14 +126,5 @@ pub fn execute() -> Result<()> {
                 unreachable!()
             }
         }
-    });
-
-    // Flush metrics unconditionally before shutdown, even on error.
-    runtime.block_on(async {
-        if let Some(metrics_guard) = metrics_guard {
-            metrics_guard.flush(None).await.ok();
-        }
-    });
-
-    result
+    })
 }

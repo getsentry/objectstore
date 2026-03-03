@@ -47,7 +47,7 @@ impl TieredStorage {
         mut stream: PayloadStream,
     ) -> Result<InsertResponse> {
         if metadata.origin.is_none() {
-            merni::counter!(
+            objectstore_metrics::counter!(
                 "put.origin_missing": 1,
                 "usecase" => context.usecase.as_str()
             );
@@ -133,13 +133,13 @@ impl TieredStorage {
             }
         };
 
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "put.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
             "backend_type" => backend_ty
         );
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "put.size"@b: stored_size,
             "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
@@ -162,7 +162,7 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "head.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
@@ -185,7 +185,7 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "get.latency.pre-response"@s: start.elapsed(),
             "usecase" => id.usecase(),
             "backend_choice" => backend_choice,
@@ -194,7 +194,7 @@ impl TieredStorage {
 
         if let Some((metadata, _stream)) = &result {
             if let Some(size) = metadata.size {
-                merni::distribution!(
+                objectstore_metrics::distribution!(
                     "get.size"@b: size,
                     "usecase" => id.usecase(),
                     "backend_choice" => backend_choice,
@@ -225,7 +225,7 @@ impl TieredStorage {
             self.high_volume_backend.delete_object(id).await?;
         }
 
-        merni::distribution!(
+        objectstore_metrics::distribution!(
             "delete.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
             "backend_choice" => backend_choice,

@@ -349,7 +349,7 @@ impl GcsBackend {
                 Ok(res) => return Ok(res),
                 Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
-                    merni::counter!("gcs.retries": 1, "action" => action);
+                    objectstore_metrics::counter!("gcs.retries": 1, "action" => action);
                     tracing::debug!(
                         retry_count,
                         action,
@@ -358,7 +358,7 @@ impl GcsBackend {
                     );
                 }
                 Err(e) => {
-                    merni::counter!("gcs.failures": 1, "action" => action);
+                    objectstore_metrics::counter!("gcs.failures": 1, "action" => action);
                     return Err(e);
                 }
             }
