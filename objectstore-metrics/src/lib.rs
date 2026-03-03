@@ -9,10 +9,17 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! objectstore_metrics::counter!("server.start": 1);
-//! objectstore_metrics::gauge!("server.requests.in_flight": count);
-//! objectstore_metrics::distribution!("server.requests.duration"@s: elapsed, "route" => route);
+//! ```rust
+//! use std::time::Duration;
+//! use objectstore_metrics::{counter, distribution, gauge};
+//!
+//! let count = 42_u64;
+//! let elapsed = Duration::from_secs(1);
+//! let route = "api/v1";
+//!
+//! counter!("server.start": 1);
+//! gauge!("server.requests.in_flight": count);
+//! distribution!("server.requests.duration"@s: elapsed, "route" => route);
 //! ```
 //!
 //! # Unit annotations
@@ -184,10 +191,12 @@ pub use mock::with_capturing_test_client;
 ///
 /// # Syntax
 ///
-/// ```ignore
-/// counter!("name": value);
-/// counter!("name": value, "tag" => tag_value);
-/// counter!("name": value, "tag1" => val1, "tag2" => val2);
+/// ```rust
+/// use objectstore_metrics::counter;
+///
+/// counter!("name": 1u64);
+/// counter!("name": 1u64, "tag" => "value");
+/// counter!("name": 1u64, "tag1" => "val1", "tag2" => "val2");
 /// ```
 #[macro_export]
 macro_rules! counter {
@@ -204,10 +213,12 @@ macro_rules! counter {
 ///
 /// # Syntax
 ///
-/// ```ignore
-/// gauge!("name": value);
-/// gauge!("name"@b: value);
-/// gauge!("name": value, "tag" => tag_value);
+/// ```rust
+/// use objectstore_metrics::gauge;
+///
+/// gauge!("name": 1.0_f64);
+/// gauge!("name"@b: 1024_u64);
+/// gauge!("name": 1.0_f64, "tag" => "value");
 /// ```
 ///
 /// The `@b` unit annotation converts via `as f64` (identity for byte counts).
@@ -233,11 +244,14 @@ macro_rules! gauge {
 ///
 /// # Syntax
 ///
-/// ```ignore
-/// distribution!("name": value);
-/// distribution!("name"@s: duration);
-/// distribution!("name"@b: bytes);
-/// distribution!("name"@s: duration, "tag" => tag_value);
+/// ```rust
+/// use std::time::Duration;
+/// use objectstore_metrics::distribution;
+///
+/// distribution!("name": 1.0_f64);
+/// distribution!("name"@s: Duration::from_secs(1));
+/// distribution!("name"@b: 1024_u64);
+/// distribution!("name"@s: Duration::from_secs(1), "tag" => "value");
 /// ```
 ///
 /// - `@s` converts a [`Duration`](std::time::Duration) to seconds via `.as_secs_f64()`.
