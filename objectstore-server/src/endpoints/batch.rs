@@ -69,7 +69,7 @@ async fn batch(
         Err(e) => return ApiError::Service(e).into_response(),
     };
 
-    merni::gauge!("service.batch.window": batch.window());
+    objectstore_metrics::gauge!("service.batch.window": batch.window());
 
     // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
     let parsed = requests.0.map(|r| r.map_err(ApiError::from)).enumerate();

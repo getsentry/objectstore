@@ -129,15 +129,15 @@ async fn track_runtime_metrics(interval: Duration) {
         ticker.tick().await;
         tracing::trace!("Capturing runtime metrics");
 
-        merni::gauge!("runtime.num_workers": metrics.num_workers());
-        merni::gauge!("runtime.num_alive_tasks": metrics.num_alive_tasks());
-        merni::gauge!("runtime.global_queue_depth": metrics.global_queue_depth());
-        merni::gauge!("runtime.num_blocking_threads": metrics.num_blocking_threads());
-        merni::gauge!("runtime.num_idle_blocking_threads": metrics.num_idle_blocking_threads());
-        merni::gauge!("runtime.blocking_queue_depth": metrics.blocking_queue_depth());
+        objectstore_metrics::gauge!("runtime.num_workers": metrics.num_workers());
+        objectstore_metrics::gauge!("runtime.num_alive_tasks": metrics.num_alive_tasks());
+        objectstore_metrics::gauge!("runtime.global_queue_depth": metrics.global_queue_depth());
+        objectstore_metrics::gauge!("runtime.num_blocking_threads": metrics.num_blocking_threads());
+        objectstore_metrics::gauge!("runtime.num_idle_blocking_threads": metrics.num_idle_blocking_threads());
+        objectstore_metrics::gauge!("runtime.blocking_queue_depth": metrics.blocking_queue_depth());
 
         let registered_fds = metrics.io_driver_fd_registered_count();
         let deregistered_fds = metrics.io_driver_fd_deregistered_count();
-        merni::gauge!("runtime.num_io_driver_fds": registered_fds - deregistered_fds);
+        objectstore_metrics::gauge!("runtime.num_io_driver_fds": registered_fds - deregistered_fds);
     }
 }

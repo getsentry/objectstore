@@ -41,6 +41,6 @@ impl RejectionReason {
 
     /// Emits a `server.rejected` counter tagged with this rejection reason.
     pub fn emit(&self) {
-        merni::counter!("server.rejected": 1, "reason" => self.as_str());
+        objectstore_metrics::counter!("server.rejected": 1, "reason" => self.as_str());
     }
 }
