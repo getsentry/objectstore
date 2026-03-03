@@ -71,12 +71,11 @@ pub struct MetricsConfig {
 
     /// Global prefix prepended to every metric name.
     ///
-    /// The prefix is prepended as-is, so include a trailing dot if desired
-    /// (e.g. `"objectstore."`).
+    /// The prefix is prepended to every metric name, with a `.` separator added automatically.
     ///
     /// # Default
     ///
-    /// `"objectstore."`
+    /// `"objectstore"`
     ///
     /// # Environment Variable
     ///
@@ -126,14 +125,14 @@ pub struct MetricsConfig {
 }
 
 fn default_prefix() -> String {
-    "objectstore.".to_owned()
+    "objectstore".to_owned()
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             host: None,
-            prefix: default_prefix(),
+            prefix: "objectstore".to_owned(),
             buffer_size: None,
             tags: BTreeMap::new(),
         }
