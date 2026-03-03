@@ -10,6 +10,7 @@ use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
 use crate::extractors::downstream_service::DownstreamService;
+use crate::rejection::RejectionReason;
 use crate::state::ServiceState;
 
 #[derive(Debug)]
@@ -19,8 +20,20 @@ pub enum ObjectRejection {
     RateLimited,
 }
 
+impl ObjectRejection {
+    /// Returns the [`RejectionReason`] for this rejection, used to emit rejection metrics.
+    pub fn rejection_reason(&self) -> RejectionReason {
+        match self {
+            ObjectRejection::Path(_) => RejectionReason::BadRequest,
+            ObjectRejection::Killswitched => RejectionReason::Killswitch,
+            ObjectRejection::RateLimited => RejectionReason::RateLimit,
+        }
+    }
+}
+
 impl IntoResponse for ObjectRejection {
     fn into_response(self) -> Response {
+        self.rejection_reason().emit();
         match self {
             ObjectRejection::Path(rejection) => rejection.into_response(),
             ObjectRejection::Killswitched => (

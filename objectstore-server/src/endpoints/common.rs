@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
+use crate::rejection::RejectionReason;
 
 /// Error type for API operations.
 #[derive(Debug, Error)]
@@ -100,8 +101,47 @@ impl ApiError {
     }
 }
 
+impl ApiError {
+    /// Returns the [`RejectionReason`] for this error, used to emit rejection metrics.
+    pub fn rejection_reason(&self) -> RejectionReason {
+        match self {
+            ApiError::Client(_) => RejectionReason::BadRequest,
+
+            ApiError::Auth(AuthError::BadRequest(_)) => RejectionReason::BadRequest,
+            ApiError::Auth(
+                AuthError::ValidationFailure(_)
+                | AuthError::VerificationFailure
+                | AuthError::NotPermitted,
+            ) => RejectionReason::Auth,
+            ApiError::Auth(AuthError::InternalError(_)) => RejectionReason::Internal,
+
+            ApiError::Batch(
+                BatchError::BadRequest(_)
+                | BatchError::Multipart(_)
+                | BatchError::Metadata(_)
+                | BatchError::LimitExceeded(_),
+            ) => RejectionReason::BadRequest,
+            ApiError::Batch(BatchError::RateLimited) => RejectionReason::RateLimit,
+            ApiError::Batch(BatchError::ResponseSerialization { .. }) => RejectionReason::Internal,
+
+            ApiError::Service(ServiceError::Metadata(_)) => RejectionReason::BadRequest,
+            ApiError::Service(ServiceError::AtCapacity) => RejectionReason::TaskConcurrency,
+            ApiError::Service(
+                ServiceError::Io(_)
+                | ServiceError::Serde { .. }
+                | ServiceError::Reqwest { .. }
+                | ServiceError::GcpAuth(_)
+                | ServiceError::Panic(_)
+                | ServiceError::Dropped
+                | ServiceError::Generic { .. },
+            ) => RejectionReason::Internal,
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.rejection_reason().emit();
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()
     }

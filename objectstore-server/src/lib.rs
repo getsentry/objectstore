@@ -13,5 +13,6 @@ pub mod killswitches;
 pub mod multipart;
 pub mod observability;
 pub mod rate_limits;
+pub mod rejection;
 pub mod state;
 pub mod web;

@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints::is_internal_route;
+use crate::rejection::RejectionReason;
 use crate::web::RequestCounter;
 
 /// The value for the `Server` HTTP header.
@@ -29,7 +30,7 @@ pub async fn limit_web_concurrency(
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
     if !is_internal_route(route) && counter.count() >= counter.limit() {
-        merni::counter!("web.concurrency.rejected": 1);
+        RejectionReason::WebConcurrency.emit();
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
