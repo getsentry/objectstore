@@ -269,6 +269,7 @@ fn create_success_part(
 }
 
 fn create_error_part(idx: usize, error: &ApiError) -> Part {
+    error.rejection_reason().emit();
     let mut headers = HeaderMap::new();
     insert_index_header(&mut headers, idx);
     insert_status_header(&mut headers, error.status());

@@ -9,12 +9,14 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
+use axum::response::{IntoResponse, Response};
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
+use crate::rejection::RejectionReason;
 
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
@@ -124,6 +126,26 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
     Ok(operation)
 }
 
+/// Rejection type for [`BatchOperationStream`].
+///
+/// Wraps [`MultipartRejection`] so that invalid multipart requests (e.g. missing
+/// `Content-Type` boundary) emit a `server.rejected` metric before responding.
+#[derive(Debug)]
+pub struct BatchStreamRejection(MultipartRejection);
+
+impl From<MultipartRejection> for BatchStreamRejection {
+    fn from(r: MultipartRejection) -> Self {
+        Self(r)
+    }
+}
+
+impl IntoResponse for BatchStreamRejection {
+    fn into_response(self) -> Response {
+        RejectionReason::BadRequest.emit();
+        self.0.into_response()
+    }
+}
+
 /// A lazily-parsed stream of batch operations extracted from a multipart request body.
 pub struct BatchOperationStream(pub BoxStream<'static, Result<Operation, BatchError>>);
 
@@ -140,7 +162,7 @@ impl<S> FromRequest<S> for BatchOperationStream
 where
     S: Send + Sync,
 {
-    type Rejection = MultipartRejection;
+    type Rejection = BatchStreamRejection;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let mut multipart = Multipart::from_request(request, state).await?;
