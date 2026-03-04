@@ -44,6 +44,9 @@ jobs:
         with:
           key: ${{ github.job }}
 
+      - name: Print version
+        run: cargo -vV
+
       - name: Build Binary
         run: |
           cargo build --release --target=${{ matrix.target }} --bin objectstore
