@@ -8,7 +8,6 @@ use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell}
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
-use tokio::runtime::Handle;
 use tonic::Code;
 
 use crate::PayloadStream;
@@ -163,15 +162,11 @@ impl BigTableBackend {
             )?
         } else {
             let token_provider = gcp_auth::provider().await?;
-            // TODO on connections: Idle connections are automatically closed in "a few minutes".
-            // We need to make sure that on longer idle periods the channels are re-opened.
-            let connections = connections.unwrap_or(2 * Handle::current().metrics().num_workers());
-
             BigTableConnection::new_with_token_provider(
                 project_id,
                 instance_name,
-                false, // is_read_only
-                connections,
+                false,                    // is_read_only
+                connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
                 Some(CONNECT_TIMEOUT),
                 token_provider.clone(),
             )?

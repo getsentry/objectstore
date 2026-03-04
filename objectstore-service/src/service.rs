@@ -66,7 +66,7 @@ pub enum StorageConfig<'a> {
         table_name: &'a str,
         /// The number of concurrent connections to BigTable.
         ///
-        /// Defaults to 2x the number of worker threads.
+        /// Defaults to 1.
         connections: Option<usize>,
     },
 }
