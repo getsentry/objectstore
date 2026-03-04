@@ -295,7 +295,7 @@ pub enum Storage {
         ///
         /// # Default
         ///
-        /// `None` (infers connection count based on CPU count)
+        /// `None` (defaults to 1)
         ///
         /// # Environment Variables
         ///
