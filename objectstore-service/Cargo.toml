@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", branch = "main" }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "48cd2b86d9116f70b0ffdb89ea4e0d6a22560880" }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 gcp_auth = "0.12.3"
