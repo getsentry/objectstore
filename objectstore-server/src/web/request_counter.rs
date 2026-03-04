@@ -55,8 +55,8 @@ impl RequestCounter {
         let limit = self.limit;
         self.counter
             .run_emitter(EMITTER_INTERVAL, move |count| async move {
-                merni::gauge!("server.requests.in_flight": count);
-                merni::gauge!("server.requests.limit": limit);
+                objectstore_metrics::gauge!("server.requests.in_flight": count);
+                objectstore_metrics::gauge!("server.requests.limit": limit);
             })
             .await;
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+### New Features ✨
+
+- (rust-client) Add file variant with more reliable batching by @lcian in [#346](https://github.com/getsentry/objectstore/pull/346)
+
 ## 0.1.1
 
 ### New Features ✨

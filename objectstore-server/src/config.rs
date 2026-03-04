@@ -665,52 +665,7 @@ impl Default for Logging {
     }
 }
 
-/// Metrics configuration.
-///
-/// Configures submission of internal metrics to Datadog.
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct Metrics {
-    /// Datadog [API key] for metrics.
-    ///
-    /// When provided, enables metrics reporting to Datadog. Metrics include request counts,
-    /// latencies, storage operations, and more. The key is kept secret and redacted from logs.
-    ///
-    /// # Default
-    ///
-    /// `None` (Datadog metrics disabled)
-    ///
-    /// # Environment Variable
-    ///
-    /// `OS__METRICS__DATADOG_KEY`
-    ///
-    /// [API key]: https://docs.datadoghq.com/account_management/api-app-keys/#api-keys
-    pub datadog_key: Option<SecretBox<ConfigSecret>>,
-
-    /// Global tags applied to all metrics.
-    ///
-    /// Key-value pairs that are attached to every metric sent to Datadog. Useful for
-    /// identifying the environment, region, or other deployment-specific information.
-    ///
-    /// # Default
-    ///
-    /// Empty (no tags)
-    ///
-    /// # Environment Variables
-    ///
-    /// Each tag is set individually:
-    /// - `OS__METRICS__TAGS__FOO=foo`
-    /// - `OS__METRICS__TAGS__BAR=bar`
-    ///
-    /// # YAML Example
-    ///
-    /// ```yaml
-    /// metrics:
-    ///   tags:
-    ///     foo: foo
-    ///     bar: bar
-    /// ```
-    pub tags: BTreeMap<String, String>,
-}
+// Metrics configuration is defined in `objectstore_metrics::MetricsConfig`.
 
 /// A key that may be used to verify a request's `Authorization` header and its
 /// associated permissions. May contain multiple key versions to facilitate rotation.
@@ -860,9 +815,9 @@ pub struct Config {
 
     /// Internal metrics configuration.
     ///
-    /// Optional configuration for submitting internal metrics to Datadog. See [`Metrics`] for
-    /// configuration options.
-    pub metrics: Metrics,
+    /// Configures submission of internal metrics to a DogStatsD-compatible endpoint.
+    /// See [`objectstore_metrics::MetricsConfig`] for configuration options.
+    pub metrics: objectstore_metrics::MetricsConfig,
 
     /// Content-based authorization configuration.
     ///
@@ -982,7 +937,7 @@ impl Default for Config {
             runtime: Runtime::default(),
             logging: Logging::default(),
             sentry: Sentry::default(),
-            metrics: Metrics::default(),
+            metrics: objectstore_metrics::MetricsConfig::default(),
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),

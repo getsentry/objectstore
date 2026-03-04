@@ -1,21 +1,17 @@
 [package]
-name = "objectstore-types"
+name = "objectstore-metrics"
 authors = ["Sentry <oss@sentry.io>"]
-description = "Shared types for the Objectstore client and server"
+description = "Metrics macros and DogStatsD initialization for Objectstore"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../LICENSE.md"
-version = "0.1.2"
+version = "0.1.0"
 edition = "2024"
-publish = true
+publish = false
 
 [dependencies]
-http = { workspace = true }
-humantime = { workspace = true }
-mediatype = "0.21.0"
+metrics = "0.24.3"
+metrics-exporter-dogstatsd = "0.9.6"
 serde = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-insta = "1"
-serde_json = "1"
+tracing = { workspace = true }

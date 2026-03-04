@@ -1,8 +1,8 @@
-//! Initialization of metrics, error reporting, and distributed tracing.
+//! Initialization of error reporting and distributed tracing.
 //!
-//! Call [`init_metrics`], [`init_sentry`], and [`init_tracing`] during server
-//! startup in the order they appear. Sentry must be initialized before the Tokio
-//! runtime is created so it can instrument async tasks from the start.
+//! Call [`init_sentry`] and [`init_tracing`] during server startup.
+//! Sentry must be initialized before the Tokio runtime is created so it can
+//! instrument async tasks from the start.
 
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
@@ -14,23 +14,6 @@ use crate::config::{Config, LogFormat};
 
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
-
-/// Initializes the Datadog metrics reporter, if a Datadog API key is configured.
-///
-/// Returns `None` when `config.metrics.datadog_key` is not set, in which case metrics
-/// are no-ops. The returned [`merni::DatadogFlusher`] must be flushed before shutdown
-/// to ensure in-flight metrics are delivered.
-pub fn init_metrics(config: &Config) -> std::io::Result<Option<merni::DatadogFlusher>> {
-    let Some(ref api_key) = config.metrics.datadog_key else {
-        return Ok(None);
-    };
-
-    let mut builder = merni::datadog(api_key.expose_secret().as_str()).prefix("objectstore.");
-    for (k, v) in &config.metrics.tags {
-        builder = builder.global_tag(k, v);
-    }
-    builder.try_init().map(Some)
-}
 
 /// Initializes the Sentry error-reporting client, if a DSN is configured.
 ///

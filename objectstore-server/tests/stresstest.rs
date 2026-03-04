@@ -41,8 +41,8 @@ async fn test_basic() {
             tempdir.path().display().to_string(),
         )
         .env("OS__LOGGING__LEVEL", "warn");
-    if let Ok(datadog_key) = std::env::var("DD_API_KEY") {
-        cmd.env("OS__METRICS__DATADOG_KEY", datadog_key);
+    if let Ok(statsd_host) = std::env::var("STATSD_HOST") {
+        cmd.env("OS__METRICS__HOST", statsd_host);
     }
     let child = cmd
         .stdout(Stdio::inherit())
