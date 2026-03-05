@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
             let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+            let bytes_per_sec = ops_per_sec * object_size as f64;
             let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
             let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
             let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
@@ -132,10 +133,11 @@ async fn main() -> anyhow::Result<()> {
             let failed = stats_failures.load(Ordering::Relaxed);
 
             eprint!(
-                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
+                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn | {}/s] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
                 ops.bold(),
                 ops_per_sec.bold(),
                 ops_per_sec_per_conn.bold(),
+                format_throughput(bytes_per_sec).bold(),
                 format_ms(avg).bold(),
                 format_ms(p50),
                 format_ms(p95),
@@ -226,16 +228,18 @@ async fn main() -> anyhow::Result<()> {
         let elapsed = bench_start.elapsed();
         let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
         let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+        let bytes_per_sec = ops_per_sec * object_size as f64;
         let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
         let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
         let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
         let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
         let max = Duration::from_secs_f64(guard.max().unwrap());
         eprintln!(
-            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
+            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {}/s | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
             ops.bold(),
             ops_per_sec.bold(),
             ops_per_sec_per_conn.bold(),
+            format_throughput(bytes_per_sec).bold(),
             format_ms(avg).bold(),
             format_ms(p50),
             format_ms(p95),
@@ -250,4 +254,17 @@ async fn main() -> anyhow::Result<()> {
 /// Formats a [`Duration`] as milliseconds with two decimal places.
 fn format_ms(d: Duration) -> String {
     format!("{:.2}ms", d.as_secs_f64() * 1000.0)
+}
+
+/// Formats a byte rate using SI decimal prefixes (kB/s, MB/s, GB/s).
+fn format_throughput(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1e9 {
+        format!("{:.2} GB/s", bytes_per_sec / 1e9)
+    } else if bytes_per_sec >= 1e6 {
+        format!("{:.2} MB/s", bytes_per_sec / 1e6)
+    } else if bytes_per_sec >= 1e3 {
+        format!("{:.2} kB/s", bytes_per_sec / 1e3)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
 }
