@@ -21,7 +21,7 @@ use yansi::Paint;
 use objectstore_service::backend::bigtable::BigTableBackend;
 use objectstore_service::backend::common::Backend;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::scope::{Scope, Scopes};
 
 /// Benchmark tool for the Bigtable storage backend.
@@ -39,9 +39,21 @@ struct Args {
     #[argh(option, short = 'p', default = "1")]
     pool: usize,
 
-    /// bigtable emulator address (default: localhost:8086)
-    #[argh(option, short = 'a', default = "String::from(\"localhost:8086\")")]
-    addr: String,
+    /// bigtable emulator address; omit to connect to real GCP Bigtable
+    #[argh(option, short = 'a')]
+    addr: Option<String>,
+
+    /// GCP project ID (default: testing)
+    #[argh(option, default = "String::from(\"testing\")")]
+    project: String,
+
+    /// bigtable instance name (default: objectstore)
+    #[argh(option, default = "String::from(\"objectstore\")")]
+    instance: String,
+
+    /// bigtable table name (default: objectstore)
+    #[argh(option, default = "String::from(\"objectstore\")")]
+    table: String,
 }
 
 #[global_allocator]
@@ -52,20 +64,26 @@ async fn main() -> anyhow::Result<()> {
     let args: Args = argh::from_env();
     let object_size = args.size.as_u64() as usize;
 
-    eprintln!(
-        "connecting to Bigtable emulator ({}), pool size {}",
-        args.addr, args.pool
-    );
+    match &args.addr {
+        Some(addr) => eprintln!(
+            "connecting to Bigtable emulator ({addr}), pool size {}",
+            args.pool
+        ),
+        None => eprintln!(
+            "connecting to GCP Bigtable ({}/{}), pool size {}",
+            args.project, args.instance, args.pool
+        ),
+    }
 
     let backend = BigTableBackend::new(
-        Some(&args.addr),
-        "testing",
-        "objectstore",
-        "objectstore",
+        args.addr.as_deref(),
+        &args.project,
+        &args.instance,
+        &args.table,
         Some(args.pool),
     )
     .await
-    .context("failed to connect to Bigtable emulator")?;
+    .context("failed to connect to Bigtable")?;
 
     let backend = Arc::new(backend);
 
@@ -138,7 +156,10 @@ async fn main() -> anyhow::Result<()> {
                 Scope::create("org", "bench").unwrap(), // INVARIANT: valid scope name
             ]),
         };
-        let metadata = Metadata::default();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            ..Metadata::default()
+        };
 
         loop {
             if worker_shutdown.is_cancelled() {
