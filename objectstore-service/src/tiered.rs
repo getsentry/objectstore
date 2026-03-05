@@ -26,6 +26,16 @@ enum BackendChoice {
     LongTerm,
 }
 
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BackendChoice::HighVolume => "high_volume",
+            BackendChoice::LongTerm => "long_term",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Two-tier storage that routes objects by size.
 ///
 /// Objects smaller than 1 MiB go to the high-volume backend; larger objects go
@@ -65,6 +75,12 @@ impl TieredStorage {
                 break;
             }
         }
+
+        objectstore_metrics::distribution!(
+            "put.first_chunk.latency"@s: start.elapsed(),
+            "usecase" => context.usecase.as_str(),
+            "backend_choice" => backend,
+        );
 
         let has_key = key.is_some();
         let id = ObjectId::optional(context, key);
