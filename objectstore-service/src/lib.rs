@@ -2,7 +2,8 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-mod backend;
+#[allow(missing_docs, private_interfaces)]
+pub mod backend;
 mod concurrency;
 pub mod error;
 mod gcp_auth;

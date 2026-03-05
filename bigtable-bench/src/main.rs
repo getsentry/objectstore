@@ -1,0 +1,228 @@
+//! Benchmark tool for writing objects directly to the Bigtable backend.
+//!
+//! Bypasses the HTTP layer and writes directly via the `BigTableBackend`,
+//! printing live latency percentiles every second. Intended for use with the
+//! Bigtable emulator (`devservices up --mode=full`).
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use argh::FromArgs;
+use bytesize::ByteSize;
+use futures_util::StreamExt;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use sketches_ddsketch::DDSketch;
+use tokio::sync::Semaphore;
+use yansi::Paint;
+
+use objectstore_service::backend::bigtable::BigTableBackend;
+use objectstore_service::backend::common::Backend;
+use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_types::metadata::Metadata;
+use objectstore_types::scope::{Scope, Scopes};
+
+/// Benchmark tool for the Bigtable storage backend.
+#[derive(Debug, FromArgs)]
+struct Args {
+    /// number of concurrent put requests (default: 10)
+    #[argh(option, short = 'c', default = "10")]
+    concurrency: usize,
+
+    /// object size, e.g. "50KB" or "4096" (default: 50KB)
+    #[argh(option, short = 's', default = "ByteSize::kb(50)")]
+    size: ByteSize,
+
+    /// bigtable gRPC connection pool size (default: 1)
+    #[argh(option, short = 'p', default = "1")]
+    pool: usize,
+
+    /// bigtable emulator address (default: localhost:8086)
+    #[argh(option, short = 'a', default = "String::from(\"localhost:8086\")")]
+    addr: String,
+}
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args: Args = argh::from_env();
+    let object_size = args.size.as_u64() as usize;
+
+    eprintln!(
+        "connecting to Bigtable emulator ({}), pool size {}",
+        args.addr, args.pool
+    );
+
+    let backend = BigTableBackend::new(
+        Some(&args.addr),
+        "testing",
+        "objectstore",
+        "objectstore",
+        Some(args.pool),
+    )
+    .await
+    .context("failed to connect to Bigtable emulator")?;
+
+    let backend = Arc::new(backend);
+
+    eprintln!(
+        "starting benchmark: concurrency={}, object_size={}",
+        args.concurrency, args.size,
+    );
+
+    let semaphore = Arc::new(Semaphore::new(args.concurrency));
+    let sketch = Arc::new(Mutex::new(DDSketch::default()));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let concurrency = args.concurrency;
+    let bench_start = Instant::now();
+
+    // Stats printer task.
+    let stats_sketch = Arc::clone(&sketch);
+    let stats_failures = Arc::clone(&failures);
+    let stats_shutdown = shutdown.clone();
+    let stats_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let start = Instant::now();
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = stats_shutdown.cancelled() => break,
+            }
+            let elapsed = start.elapsed();
+            let guard = stats_sketch.lock().unwrap(); // INVARIANT: no panic inside lock
+            let ops = guard.count();
+            if ops == 0 {
+                continue;
+            }
+            let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
+            let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+            let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
+            let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
+            let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
+            let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
+            let max = Duration::from_secs_f64(guard.max().unwrap());
+            drop(guard);
+            let failed = stats_failures.load(Ordering::Relaxed);
+
+            eprint!(
+                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
+                ops.bold(),
+                ops_per_sec.bold(),
+                ops_per_sec_per_conn.bold(),
+                format_ms(avg).bold(),
+                format_ms(p50),
+                format_ms(p95),
+                format_ms(p99),
+                format_ms(max),
+            );
+            if failed > 0 {
+                eprint!("\n\x1b[2Kfailed: {}\x1b[1A", failed.red().bold());
+            }
+            eprint!("\r");
+        }
+    });
+
+    // Worker loop — spawns tasks up to the semaphore limit until ctrl+c.
+    let worker_shutdown = shutdown.clone();
+    let worker_sketch = Arc::clone(&sketch);
+    let worker_failures = Arc::clone(&failures);
+    let worker_handle = tokio::spawn(async move {
+        let context = ObjectContext {
+            usecase: "bench".into(),
+            scopes: Scopes::from_iter([
+                Scope::create("org", "bench").unwrap(), // INVARIANT: valid scope name
+            ]),
+        };
+        let metadata = Metadata::default();
+
+        loop {
+            if worker_shutdown.is_cancelled() {
+                break;
+            }
+
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break, // semaphore closed
+            };
+
+            let backend = Arc::clone(&backend);
+            let sketch = Arc::clone(&worker_sketch);
+            let failures = Arc::clone(&worker_failures);
+            let context = context.clone();
+            let metadata = metadata.clone();
+
+            tokio::spawn(async move {
+                let _permit = permit;
+
+                let mut rng = SmallRng::from_os_rng();
+                let mut buf = vec![0u8; object_size];
+                rng.fill(&mut buf[..]);
+
+                let id = ObjectId::random(context);
+                let stream = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(buf))
+                })
+                .boxed();
+
+                let start = Instant::now();
+                let result = backend.put_object(&id, &metadata, stream).await;
+                let elapsed = start.elapsed();
+
+                if result.is_err() {
+                    failures.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    sketch.lock().unwrap().add(elapsed.as_secs_f64()); // INVARIANT: no panic inside lock
+                }
+            });
+        }
+    });
+
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for ctrl+c")?;
+
+    shutdown.cancel();
+
+    let _ = stats_handle.await;
+    let _ = worker_handle.await;
+
+    // Clear the two-line live stats display before printing the final summary.
+    eprint!("\r\x1b[2K\n\x1b[2K\x1b[1A\r");
+
+    // Print final summary.
+    let guard = sketch.lock().unwrap(); // INVARIANT: no panic inside lock
+    let ops = guard.count();
+    if ops > 0 {
+        let elapsed = bench_start.elapsed();
+        let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
+        let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+        let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
+        let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
+        let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
+        let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
+        let max = Duration::from_secs_f64(guard.max().unwrap());
+        eprintln!(
+            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
+            ops.bold(),
+            ops_per_sec.bold(),
+            ops_per_sec_per_conn.bold(),
+            format_ms(avg).bold(),
+            format_ms(p50),
+            format_ms(p95),
+            format_ms(p99),
+            format_ms(max),
+        );
+    }
+
+    Ok(())
+}
+
+/// Formats a [`Duration`] as milliseconds with two decimal places.
+fn format_ms(d: Duration) -> String {
+    format!("{:.2}ms", d.as_secs_f64() * 1000.0)
+}
