@@ -42,7 +42,7 @@ async fn test_basic() {
         )
         .env("OS__LOGGING__LEVEL", "warn");
     if let Ok(statsd_host) = std::env::var("STATSD_HOST") {
-        cmd.env("OS__METRICS__HOST", statsd_host);
+        cmd.env("OS__METRICS__ADDR", statsd_host);
     }
     let child = cmd
         .stdout(Stdio::inherit())
