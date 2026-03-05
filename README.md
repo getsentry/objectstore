@@ -19,6 +19,8 @@ The platform is split into the following core components:
   more information.
 - `objectstore-types`: Shared type definitions for the client and server,
   including metadata, scopes, expiration, and permissions.
+- `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
+  across service components.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
 
