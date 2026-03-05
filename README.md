@@ -225,10 +225,10 @@ To run linters manually, use:
 
 ```sh
 # Check and fix formatting
-cargo fmt
+cargo fmt --all
 
 # Lint all features
-cargo clippy --workspace --all-features
+cargo clippy --workspace --all-targets --all-features
 ```
 
 ### Development Server
@@ -250,7 +250,7 @@ export OS__LONG_TERM_STORAGE__PATH=data/long-term
 cargo run -- run
 ```
 
-You can copy and save additional config files into next to the examples in
+You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.
 
 ### Tests
