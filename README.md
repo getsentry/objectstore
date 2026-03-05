@@ -13,10 +13,17 @@ The platform is split into the following core components:
 
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
   functionality from the internal services. This crate creates the `objectstore`
-  binary.
-- `objectstore-service`: The core object storage logic.
+  binary. See the [server architecture docs] for more information.
+- `objectstore-service`: The core object storage logic, including backend
+  implementations and storage policies. See the [service architecture docs] for
+  more information.
+- `objectstore-types`: Shared type definitions for the client and server,
+  including metadata, scopes, expiration, and permissions.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
+
+[server architecture docs]: https://getsentry.github.io/objectstore/rust/objectstore_server/index.html
+[service architecture docs]: https://getsentry.github.io/objectstore/rust/objectstore_service/index.html
 
 Additionally, it contains a number of utilities:
 
