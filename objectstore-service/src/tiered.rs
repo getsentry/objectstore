@@ -26,6 +26,16 @@ enum BackendChoice {
     LongTerm,
 }
 
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BackendChoice::HighVolume => "high-volume",
+            BackendChoice::LongTerm => "long-term",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Two-tier storage that routes objects by size.
 ///
 /// Objects smaller than 1 MiB go to the high-volume backend; larger objects go
@@ -66,6 +76,12 @@ impl TieredStorage {
             }
         }
 
+        objectstore_metrics::distribution!(
+            "put.first_chunk.latency"@s: start.elapsed(),
+            "usecase" => context.usecase.as_str(),
+            "backend_choice" => backend,
+        );
+
         let has_key = key.is_some();
         let id = ObjectId::optional(context, key);
 
@@ -78,7 +94,7 @@ impl TieredStorage {
             }
         };
 
-        let (backend_choice, backend_ty, stored_size) = match backend {
+        let (backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
                 let stored_size = first_chunk.len() as u64;
                 let stream = futures_util::stream::once(async { Ok(first_chunk.into()) }).boxed();
@@ -86,7 +102,7 @@ impl TieredStorage {
                 self.high_volume_backend
                     .put_object(&id, metadata, stream)
                     .await?;
-                ("high-volume", self.high_volume_backend.name(), stored_size)
+                (self.high_volume_backend.name(), stored_size)
             }
             BackendChoice::LongTerm => {
                 let stored_size = Arc::new(AtomicU64::new(0));
@@ -126,7 +142,6 @@ impl TieredStorage {
                 redirect_result?;
 
                 (
-                    "long-term",
                     self.long_term_backend.name(),
                     stored_size.load(Ordering::Acquire),
                 )
@@ -136,13 +151,13 @@ impl TieredStorage {
         objectstore_metrics::distribution!(
             "put.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
+            "backend_choice" => backend,
             "backend_type" => backend_ty
         );
         objectstore_metrics::distribution!(
             "put.size"@b: stored_size,
             "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
+            "backend_choice" => backend,
             "backend_type" => backend_ty
         );
 
