@@ -29,8 +29,8 @@ enum BackendChoice {
 impl std::fmt::Display for BackendChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            BackendChoice::HighVolume => "high_volume",
-            BackendChoice::LongTerm => "long_term",
+            BackendChoice::HighVolume => "high-volume",
+            BackendChoice::LongTerm => "long-term",
         };
         f.write_str(s)
     }
