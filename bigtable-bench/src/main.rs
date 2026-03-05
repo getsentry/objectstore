@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
             let failed = stats_failures.load(Ordering::Relaxed);
 
             eprint!(
-                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn | {}/s] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
+                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn | {}] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
                 ops.bold(),
                 ops_per_sec.bold(),
                 ops_per_sec_per_conn.bold(),
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
         let max = Duration::from_secs_f64(guard.max().unwrap());
         eprintln!(
-            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {}/s | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
+            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {} | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
             ops.bold(),
             ops_per_sec.bold(),
             ops_per_sec_per_conn.bold(),
