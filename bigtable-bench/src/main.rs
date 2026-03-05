@@ -61,6 +61,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok(); // INVARIANT: no other code installs a provider before main()
+
     let args: Args = argh::from_env();
     let object_size = args.size.as_u64() as usize;
 
