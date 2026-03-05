@@ -1103,6 +1103,18 @@ mod tests {
     }
 
     #[test]
+    fn metrics_addr_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__METRICS__ADDR", "127.0.0.1:8125");
+
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.metrics.addr.as_deref(), Some("127.0.0.1:8125"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn configure_auth_with_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("OS__AUTH__ENFORCE", "true");
