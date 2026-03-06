@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints::is_internal_route;
+use crate::extractors::downstream_service::DownstreamService;
 use crate::web::RequestCounter;
 
 /// The value for the `Server` HTTP header.
@@ -29,7 +30,11 @@ pub async fn limit_web_concurrency(
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
     if !is_internal_route(route) && counter.count() >= counter.limit() {
-        objectstore_metrics::counter!("web.concurrency.rejected": 1);
+        let service = request.extract_parts::<DownstreamService>().await.unwrap();
+        objectstore_metrics::counter!(
+            "web.concurrency.rejected": 1,
+            "service" => service.as_str().unwrap_or("unknown"),
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
@@ -89,9 +94,10 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
+    let service = request.extract_parts::<DownstreamService>().await.unwrap();
 
     let should_emit = !is_internal_route(route);
-    let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method()));
+    let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service));
 
     let response = next.run(request).await;
 
@@ -109,21 +115,24 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
 struct EmitMetricsGuard<'a> {
     route: &'a str,
     method: Method,
+    service: DownstreamService,
     start: Instant,
     status: Option<StatusCode>,
 }
 
 impl<'a> EmitMetricsGuard<'a> {
-    fn new(route: &'a str, method: &Method) -> Self {
+    fn new(route: &'a str, method: &Method, service: DownstreamService) -> Self {
         objectstore_metrics::counter!(
             "server.requests": 1,
             "route" => route,
-            "method" => method.as_str()
+            "method" => method.as_str(),
+            "service" => service.as_str().unwrap_or("unknown"),
         );
 
         Self {
             route,
             method: method.clone(),
+            service,
             start: Instant::now(),
             status: None,
         }
@@ -142,7 +151,8 @@ impl Drop for EmitMetricsGuard<'_> {
             "method" => self.method,
             "status" => self.status
                 .map(|s| s.as_u16())
-                .unwrap_or(499)
+                .unwrap_or(499),
+            "service" => self.service.as_str().unwrap_or("unknown"),
         );
     }
 }

@@ -1,7 +1,7 @@
+//! Downstream service extractor from the `x-downstream-service` request header.
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-
-use crate::state::ServiceState;
 
 /// Header used to identify the downstream service making the request, for use in killswitches and
 /// logging.
@@ -22,13 +22,10 @@ impl DownstreamService {
     }
 }
 
-impl FromRequestParts<ServiceState> for DownstreamService {
+impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &ServiceState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let service = parts
             .headers
             .get(HEADER_SERVICE)
