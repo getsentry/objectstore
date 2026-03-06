@@ -2580,6 +2580,7 @@ dependencies = [
  "async-trait",
  "bigtable_rs",
  "bytes",
+ "chrono",
  "futures",
  "futures-util",
  "gcp_auth",

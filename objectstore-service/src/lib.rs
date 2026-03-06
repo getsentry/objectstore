@@ -10,6 +10,7 @@ pub mod service;
 pub mod stream;
 pub mod streaming;
 mod tiered;
+mod token;
 
 pub use service::{StorageConfig, StorageService};
 pub use stream::PayloadStream;

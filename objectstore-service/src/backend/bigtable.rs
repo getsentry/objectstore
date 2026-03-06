@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
@@ -17,11 +18,14 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::stream::ChunkedBytes;
+use crate::token::PrefetchingTokenProvider;
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+/// Permission scopes required for accessing GCS.
+const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"];
 
 /// How often to retry failed requests.
 const REQUEST_RETRY_COUNT: usize = 2;
@@ -162,14 +166,14 @@ impl BigTableBackend {
                 Some(CONNECT_TIMEOUT),
             )?
         } else {
-            let token_provider = gcp_auth::provider().await?;
+            let token_provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
             BigTableConnection::new_with_token_provider(
                 project_id,
                 instance_name,
                 false,                    // is_read_only
                 connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
                 Some(CONNECT_TIMEOUT),
-                token_provider.clone(),
+                Arc::new(token_provider),
             )?
         };
 
