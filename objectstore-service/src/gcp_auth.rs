@@ -398,10 +398,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn broadcasts_error_when_expired() {
-        // Token with 25s expiry. Sleep = 25 - 20 = 5s.
-        // After 5s, refresh fires and fails. Token has ~20s left (above threshold).
-        // After retry backoff (1s), at ~6s total, token has ~19s left — still above.
-        // We need to advance further so token has <10s remaining when refresh fails.
         let initial = make_token(Duration::from_secs(25));
 
         let mock = MockTokenProvider::new(vec![Ok(initial), Err(make_error())]);
@@ -410,22 +406,23 @@ mod tests {
             .await
             .expect("constructor should succeed");
 
-        // Advance past the first refresh attempt (5s) + first retry backoff (1s).
-        // At this point the first refresh failed, error was swallowed (token valid).
-        // The retry also fails ("no more mock responses") and token has ~19s left.
-        // We need to keep advancing until the token is near expiry.
+        // Advance 6s: sleep(5s) fires, first refresh fails (error swallowed, token valid),
+        // retry backoff (1s) elapses, second refresh fails ("no more mock responses",
+        // also swallowed — token still valid at ~19s remaining).
         tokio::time::advance(Duration::from_secs(6)).await;
         tokio::task::yield_now().await;
 
-        // Now advance to within WAIT_THRESHOLD of expiry.
-        // At 6s, token has ~19s left. Each retry takes RETRY_BACKOFF (1s).
-        // After 9 more retries (9s), we're at 15s, token has ~10s left.
-        // The next retry at 16s has token at ~9s < 10s threshold, so error broadcasts.
+        // Advance 10 × 1s to drain time until the token has <WAIT_THRESHOLD remaining.
+        // Each step wakes a RETRY_BACKOFF sleep, fires another failing refresh, and swallows it.
         for _ in 0..10 {
             tokio::time::advance(RETRY_BACKOFF + Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
         }
 
+        // Token now has ~9s remaining (<WAIT_THRESHOLD), so token() blocks on rx.changed().
+        // Tokio auto-advances time to service the sleeping background task, which keeps
+        // retrying until the token fully expires at t=25s, at which point the error is
+        // broadcast and rx.changed() resolves.
         let result = provider.token(&["scope"]).await;
         assert!(result.is_err());
     }

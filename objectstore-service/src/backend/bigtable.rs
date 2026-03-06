@@ -24,7 +24,7 @@ use crate::stream::ChunkedBytes;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
-/// Permission scopes required for accessing GCS.
+/// Permission scopes required for accessing the BigTable data API.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"];
 
 /// How often to retry failed requests.
