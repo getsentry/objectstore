@@ -147,20 +147,21 @@ impl gcp_auth::TokenProvider for PrefetchingTokenProvider {
         }
 
         let mut rx = self.rx.clone();
-        let cached = rx.borrow_and_update().clone()?;
+        loop {
+            let cached = rx.borrow_and_update().clone()?;
 
-        let remaining = cached.deadline.saturating_duration_since(Instant::now());
-        if remaining > WAIT_THRESHOLD {
-            return Ok(cached.token);
+            let remaining = cached.deadline.saturating_duration_since(Instant::now());
+            if remaining > WAIT_THRESHOLD {
+                return Ok(cached.token);
+            }
+
+            // A refresh is in progress; wait for the next update and re-validate.
+            tracing::debug!("token near expiry, waiting for refresh");
+            if rx.changed().await.is_err() {
+                // Background task was aborted; return whatever is in the channel now.
+                return rx.borrow().clone().map(|c| c.token).map_err(From::from);
+            }
         }
-
-        // Assume a refresh is already in progress and wait for it to complete.
-        tracing::debug!("token near expiry, waiting for refresh");
-        let _ = rx.changed().await;
-        rx.borrow()
-            .clone()
-            .map(|c| c.token)
-            .map_err(gcp_auth::Error::from)
     }
 
     /// Delegates to the inner provider.
