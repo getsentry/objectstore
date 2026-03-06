@@ -203,7 +203,12 @@ impl BigTableBackend {
                     }
                     retry_count += 1;
                     objectstore_metrics::counter!("bigtable.retries": 1, "action" => action);
-                    tracing::warn!(retry_count, action, "Retrying request");
+                    tracing::warn!(
+                        retry_count,
+                        action,
+                        error = &e as &dyn std::error::Error,
+                        "Retrying request"
+                    );
                 }
             }
         }

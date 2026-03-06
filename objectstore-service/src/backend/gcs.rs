@@ -350,7 +350,7 @@ impl GcsBackend {
                 Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
                     objectstore_metrics::counter!("gcs.retries": 1, "action" => action);
-                    tracing::debug!(
+                    tracing::warn!(
                         retry_count,
                         action,
                         error = e as &dyn std::error::Error,

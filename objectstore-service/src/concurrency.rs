@@ -160,6 +160,14 @@ where
             .await
             .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
+        if let Err(ref e) = result {
+            tracing::error!(
+                operation,
+                error = e as &dyn std::error::Error,
+                "Task failed"
+            );
+        }
+
         objectstore_metrics::distribution!(
             "service.task.duration"@s: start.elapsed(),
             "operation" => operation,
