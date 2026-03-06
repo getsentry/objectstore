@@ -3,12 +3,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
+use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
+use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 
 /// Default endpoint used to access the GCS JSON API.
@@ -270,7 +271,7 @@ pub struct GcsBackend {
     client: reqwest::Client,
     endpoint: Url,
     bucket: String,
-    token_provider: Option<Arc<dyn gcp_auth::TokenProvider>>,
+    token_provider: Option<PrefetchingTokenProvider>,
 }
 
 impl GcsBackend {
@@ -278,7 +279,10 @@ impl GcsBackend {
     pub async fn new(endpoint: Option<&str>, bucket: &str) -> anyhow::Result<Self> {
         let (endpoint, token_provider) = match endpoint {
             Some(emulator_host) => (emulator_host, None),
-            None => (DEFAULT_ENDPOINT, Some(gcp_auth::provider().await?)),
+            None => {
+                let provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
+                (DEFAULT_ENDPOINT, Some(provider))
+            }
         };
 
         Ok(Self {

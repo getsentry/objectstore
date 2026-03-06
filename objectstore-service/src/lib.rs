@@ -5,6 +5,7 @@
 mod backend;
 mod concurrency;
 pub mod error;
+mod gcp_auth;
 pub mod id;
 pub mod service;
 pub mod stream;
