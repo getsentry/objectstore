@@ -195,6 +195,11 @@ impl BigTableBackend {
                 Err(e) => {
                     if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
                         objectstore_metrics::counter!("bigtable.failures": 1, "action" => action);
+                        tracing::error!(
+                            action,
+                            error = &e as &dyn std::error::Error,
+                            "Request failed"
+                        );
                         return Err(Error::Generic {
                             context: format!("Bigtable: `{action}` failed"),
                             cause: Some(Box::new(e)),
@@ -202,7 +207,12 @@ impl BigTableBackend {
                     }
                     retry_count += 1;
                     objectstore_metrics::counter!("bigtable.retries": 1, "action" => action);
-                    tracing::warn!(retry_count, action, "Retrying request");
+                    tracing::warn!(
+                        retry_count,
+                        action,
+                        error = &e as &dyn std::error::Error,
+                        "Retrying request"
+                    );
                 }
             }
         }
