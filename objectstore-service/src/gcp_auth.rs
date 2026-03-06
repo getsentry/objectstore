@@ -15,9 +15,9 @@ use tokio::time::Instant;
 
 /// How far ahead of expiry to start refreshing.
 ///
-/// IMPORTANT: This must be lower than the implementation-defined 30s that gcp_auth uses as a safety
+/// IMPORTANT: This must be lower than the implementation-defined 20s that gcp_auth uses as a safety
 /// margin when determining token expiry. Otherwise, we will end up in a refresh loop.
-const REFRESH_AHEAD: Duration = Duration::from_secs(20);
+const REFRESH_AHEAD: Duration = Duration::from_secs(19);
 
 /// When a token has less than this remaining, callers wait for the next refresh.
 const WAIT_THRESHOLD: Duration = Duration::from_secs(10);
