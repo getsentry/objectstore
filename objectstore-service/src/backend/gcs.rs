@@ -18,8 +18,8 @@ use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
+use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::token::PrefetchingTokenProvider;
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";

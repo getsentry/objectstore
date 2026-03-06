@@ -16,9 +16,9 @@ use crate::backend::common::{
     Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
+use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::stream::ChunkedBytes;
-use crate::token::PrefetchingTokenProvider;
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
