@@ -359,11 +359,6 @@ impl GcsBackend {
                 }
                 Err(e) => {
                     objectstore_metrics::counter!("gcs.failures": 1, "action" => action);
-                    tracing::error!(
-                        action,
-                        error = &e as &dyn std::error::Error,
-                        "Request failed"
-                    );
                     return Err(e);
                 }
             }
