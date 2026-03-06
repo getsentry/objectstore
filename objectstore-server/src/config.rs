@@ -975,6 +975,7 @@ impl Config {
 }
 
 #[cfg(test)]
+#[expect(clippy::result_large_err, reason = "figment::Error is inherently large")]
 mod tests {
     use std::io::Write;
 
