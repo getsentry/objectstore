@@ -16,6 +16,7 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::stream::ChunkedBytes;
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -340,12 +341,13 @@ impl Backend for BigTableBackend {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let mut payload = Vec::new();
+        let mut payload = ChunkedBytes::new(0);
         while let Some(chunk) = stream.try_next().await? {
-            payload.extend_from_slice(&chunk);
+            payload.push(chunk);
         }
 
-        self.put_row(path, metadata, payload, "put").await?;
+        self.put_row(path, metadata, payload.into_bytes().into(), "put")
+            .await?;
         Ok(())
     }
 

@@ -13,10 +13,19 @@ The platform is split into the following core components:
 
 - `objectstore-server`: An `HTTP` server that exposes blob storage and calls
   functionality from the internal services. This crate creates the `objectstore`
-  binary.
-- `objectstore-service`: The core object storage logic.
+  binary. See the [server architecture docs] for more information.
+- `objectstore-service`: The core object storage logic, including backend
+  implementations and storage policies. See the [service architecture docs] for
+  more information.
+- `objectstore-types`: Shared type definitions for the client and server,
+  including metadata, scopes, expiration, and permissions.
+- `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
+  across service components.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
+
+[server architecture docs]: https://getsentry.github.io/objectstore/rust/objectstore_server/index.html
+[service architecture docs]: https://getsentry.github.io/objectstore/rust/objectstore_service/index.html
 
 Additionally, it contains a number of utilities:
 
@@ -216,10 +225,10 @@ To run linters manually, use:
 
 ```sh
 # Check and fix formatting
-cargo fmt
+cargo fmt --all
 
 # Lint all features
-cargo clippy --workspace --all-features
+cargo clippy --workspace --all-targets --all-features
 ```
 
 ### Development Server
@@ -241,7 +250,7 @@ export OS__LONG_TERM_STORAGE__PATH=data/long-term
 cargo run -- run
 ```
 
-You can copy and save additional config files into next to the examples in
+You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.
 
 ### Tests

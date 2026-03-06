@@ -51,21 +51,24 @@ pub enum Error {
 
 /// Configuration for the DogStatsD metrics exporter.
 ///
-/// When `host` is `None`, metrics are no-ops (the global recorder is never installed).
+/// When `addr` is `None`, metrics are no-ops (the global recorder is never installed).
 ///
 /// # Environment Variables
 ///
-/// - `OS__METRICS__HOST` — StatsD address (e.g. `127.0.0.1:8125` or `unixgram:///tmp/statsd.sock`)
+/// - `OS__METRICS__ADDR` — StatsD address (e.g. `127.0.0.1:8125` or `unixgram:///tmp/statsd.sock`)
 /// - `OS__METRICS__PREFIX` — global metric name prefix
 /// - `OS__METRICS__BUFFER_SIZE` — maximum payload length in bytes
 /// - `OS__METRICS__TAGS__KEY=value` — per-key global tags
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MetricsConfig {
-    /// DogStatsD host address.
+    /// Remote address to forward metrics to.
     ///
     /// When `None`, metrics are disabled (the global recorder is not installed and all
-    /// metric calls are no-ops). Accepts UDP addresses like `127.0.0.1:8125` or Unix
-    /// sockets like `unixgram:///tmp/statsd.sock`.
+    /// metric calls are no-ops).
+    ///
+    /// For UDP, the address must be in the format `<host>:<port>` (e.g. `127.0.0.1:8125`).
+    /// For Unix domain sockets, use the format `<scheme>://<path>`, where the scheme is
+    /// either `unix` (stream, `SOCK_STREAM`) or `unixgram` (datagram, `SOCK_DGRAM`).
     ///
     /// # Default
     ///
@@ -73,8 +76,8 @@ pub struct MetricsConfig {
     ///
     /// # Environment Variable
     ///
-    /// `OS__METRICS__HOST`
-    pub host: Option<String>,
+    /// `OS__METRICS__ADDR`
+    pub addr: Option<String>,
 
     /// Global prefix prepended to every metric name.
     ///
@@ -138,7 +141,7 @@ fn default_prefix() -> String {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            host: None,
+            addr: None,
             prefix: "objectstore".to_owned(),
             buffer_size: None,
             tags: BTreeMap::new(),
@@ -148,14 +151,14 @@ impl Default for MetricsConfig {
 
 /// Initializes the global DogStatsD metrics exporter.
 ///
-/// Returns `Ok(())` immediately when `config.host` is `None` — in that case the
+/// Returns `Ok(())` immediately when `config.addr` is `None` — in that case the
 /// global recorder is never installed and all `metrics` calls are no-ops.
 pub fn init(config: &MetricsConfig) -> Result<(), Error> {
-    let Some(ref host) = config.host else {
+    let Some(ref addr) = config.addr else {
         return Ok(());
     };
 
-    tracing::info!("reporting metrics to statsd at {host}");
+    tracing::info!("reporting metrics to statsd at {addr}");
 
     let global_labels: Vec<metrics::Label> = config
         .tags
@@ -164,7 +167,7 @@ pub fn init(config: &MetricsConfig) -> Result<(), Error> {
         .collect();
 
     let mut builder = DogStatsDBuilder::default()
-        .with_remote_address(host)?
+        .with_remote_address(addr)?
         .with_telemetry(true)
         .with_aggregation_mode(AggregationMode::Aggressive)
         .send_histograms_as_distributions(true)

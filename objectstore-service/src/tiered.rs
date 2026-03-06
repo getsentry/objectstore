@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use bytes::BytesMut;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
@@ -17,6 +16,7 @@ use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use crate::stream::SizedPeek;
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -24,6 +24,16 @@ const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 enum BackendChoice {
     HighVolume,
     LongTerm,
+}
+
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BackendChoice::HighVolume => "high-volume",
+            BackendChoice::LongTerm => "long-term",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Two-tier storage that routes objects by size.
@@ -44,7 +54,7 @@ impl TieredStorage {
         context: ObjectContext,
         key: Option<String>,
         metadata: &Metadata,
-        mut stream: PayloadStream,
+        stream: PayloadStream,
     ) -> Result<InsertResponse> {
         if metadata.origin.is_none() {
             objectstore_metrics::counter!(
@@ -55,16 +65,18 @@ impl TieredStorage {
 
         let start = Instant::now();
 
-        let mut first_chunk = BytesMut::new();
-        let mut backend = BackendChoice::HighVolume;
-        while let Some(chunk) = stream.try_next().await? {
-            first_chunk.extend_from_slice(&chunk);
+        let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
+        let mut backend = if peeked.is_exhausted() {
+            BackendChoice::HighVolume
+        } else {
+            BackendChoice::LongTerm
+        };
 
-            if first_chunk.len() > BACKEND_SIZE_THRESHOLD {
-                backend = BackendChoice::LongTerm;
-                break;
-            }
-        }
+        objectstore_metrics::distribution!(
+            "put.first_chunk.latency"@s: start.elapsed(),
+            "usecase" => context.usecase.as_str(),
+            "backend_choice" => backend,
+        );
 
         let has_key = key.is_some();
         let id = ObjectId::optional(context, key);
@@ -78,20 +90,20 @@ impl TieredStorage {
             }
         };
 
-        let (backend_choice, backend_ty, stored_size) = match backend {
+        let (backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
-                let stored_size = first_chunk.len() as u64;
-                let stream = futures_util::stream::once(async { Ok(first_chunk.into()) }).boxed();
+                let stored_size = peeked.len() as u64;
+                let stream = peeked.into_stream().boxed();
 
                 self.high_volume_backend
                     .put_object(&id, metadata, stream)
                     .await?;
-                ("high-volume", self.high_volume_backend.name(), stored_size)
+                (self.high_volume_backend.name(), stored_size)
             }
             BackendChoice::LongTerm => {
                 let stored_size = Arc::new(AtomicU64::new(0));
-                let stream = futures_util::stream::once(async { Ok(first_chunk.into()) })
-                    .chain(stream)
+                let stream = peeked
+                    .into_stream()
                     .inspect({
                         let stored_size = Arc::clone(&stored_size);
                         move |res| {
@@ -126,7 +138,6 @@ impl TieredStorage {
                 redirect_result?;
 
                 (
-                    "long-term",
                     self.long_term_backend.name(),
                     stored_size.load(Ordering::Acquire),
                 )
@@ -136,13 +147,13 @@ impl TieredStorage {
         objectstore_metrics::distribution!(
             "put.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
+            "backend_choice" => backend,
             "backend_type" => backend_ty
         );
         objectstore_metrics::distribution!(
             "put.size"@b: stored_size,
             "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
+            "backend_choice" => backend,
             "backend_type" => backend_ty
         );
 
@@ -652,5 +663,47 @@ mod tests {
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload.len());
         assert!(!metadata.is_tombstone());
+    }
+
+    // --- Multi-chunk streaming tests ---
+
+    #[tokio::test]
+    async fn multi_chunk_large_object_chains_buffered_and_remaining() {
+        let (storage, _hv, lt) = make_tiered_storage();
+
+        // Deliver a 2 MiB payload across multiple chunks that individually
+        // fit under the threshold but collectively exceed it.
+        let chunk_size = 512 * 1024; // 512 KiB per chunk
+        let chunk_count = 4; // 4 × 512 KiB = 2 MiB total
+        let chunks: Vec<std::io::Result<bytes::Bytes>> = (0..chunk_count)
+            .map(|i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size])))
+            .collect();
+        let stream = futures_util::stream::iter(chunks).boxed();
+
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("multi-chunk".into()),
+                &Default::default(),
+                stream,
+            )
+            .await
+            .unwrap();
+
+        // Should have been routed to long-term (over 1 MiB).
+        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
+        assert!(!lt_meta.is_tombstone());
+        assert_eq!(lt_bytes.len(), chunk_size * chunk_count);
+
+        // Verify data integrity — each chunk's fill byte should appear in order.
+        for i in 0..chunk_count {
+            let offset = i * chunk_size;
+            assert!(
+                lt_bytes[offset..offset + chunk_size]
+                    .iter()
+                    .all(|&b| b == i as u8),
+                "data mismatch in chunk {i}"
+            );
+        }
     }
 }

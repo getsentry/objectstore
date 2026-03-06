@@ -975,6 +975,10 @@ impl Config {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Error is inherently large"
+)]
 mod tests {
     use std::io::Write;
 
@@ -1097,6 +1101,18 @@ mod tests {
             };
             // Env should overwrite the yaml config
             assert_eq!(endpoint, "http://localhost:9001");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn metrics_addr_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__METRICS__ADDR", "127.0.0.1:8125");
+
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.metrics.addr.as_deref(), Some("127.0.0.1:8125"));
 
             Ok(())
         });
