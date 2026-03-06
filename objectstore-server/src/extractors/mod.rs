@@ -2,7 +2,7 @@
 
 pub mod batch;
 pub mod body;
-mod downstream_service;
+pub mod downstream_service;
 mod id;
 mod service;
 
