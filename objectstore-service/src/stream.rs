@@ -165,12 +165,10 @@ where
     /// Consumes self and returns a stream that yields the buffered prefix first,
     /// then any remaining data from the original stream.
     pub fn into_stream(self) -> impl Stream<Item = io::Result<Bytes>> {
-        let leading: Vec<io::Result<Bytes>> =
-            [self.buffer.into_bytes(), self.pending.unwrap_or_default()]
-                .into_iter()
-                .filter(|b| !b.is_empty())
-                .map(Ok)
-                .collect();
+        let leading = [self.buffer.into_bytes(), self.pending.unwrap_or_default()]
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(Ok);
 
         let tail = futures_util::stream::iter(self.stream).flatten();
         futures_util::stream::iter(leading).chain(tail)
