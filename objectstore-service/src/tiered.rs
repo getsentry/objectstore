@@ -269,7 +269,6 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::stream::make_stream;
@@ -281,14 +280,49 @@ mod tests {
         }
     }
 
+    const SMALL: &[u8] = &[0xAA; 100];
+    const LARGE_SIZE: usize = 2 * 1024 * 1024;
+
+    fn large_payload() -> Vec<u8> {
+        vec![0xBB; LARGE_SIZE]
+    }
+
+    fn make_tiered_from(hv: &InMemoryBackend, lt: &InMemoryBackend) -> TieredStorage {
+        TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(lt.clone()),
+        }
+    }
+
     fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        (storage, hv, lt)
+        (make_tiered_from(&hv, &lt), hv, lt)
+    }
+
+    async fn insert_small(storage: &TieredStorage, key: &str) -> ObjectId {
+        storage
+            .insert_object(
+                make_context(),
+                Some(key.into()),
+                &Default::default(),
+                make_stream(SMALL),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn insert_large(storage: &TieredStorage, key: &str) -> ObjectId {
+        let payload = large_payload();
+        storage
+            .insert_object(
+                make_context(),
+                Some(key.into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+            .unwrap()
     }
 
     fn simulated_error(msg: &str) -> Error {
@@ -312,6 +346,27 @@ mod tests {
     // `assert_consistent` wraps it and additionally verifies OrphanTombstone
     // reads return None.
 
+    /// Core invariant check on the three booleans that characterize tiered state.
+    fn check_invariants_core(
+        hv_present: bool,
+        hv_tombstone: bool,
+        lt_present: bool,
+        key: &str,
+    ) -> std::result::Result<(), String> {
+        match (hv_present, hv_tombstone, lt_present) {
+            (false, _, false) => Ok(()),    // Empty
+            (true, false, false) => Ok(()), // Small
+            (true, true, true) => Ok(()),   // Large
+            (true, true, false) => Ok(()),  // OrphanTombstone (async check in assert_consistent)
+            (false, _, true) => Err(format!(
+                "OrphanLT: data in LT for key {key:?} but nothing in HV"
+            )),
+            (true, false, true) => Err(format!(
+                "DualData: non-tombstone in HV AND data in LT for key {key:?}"
+            )),
+        }
+    }
+
     /// Checks the three consistency invariants. Returns `Err(msg)` on violation.
     fn check_invariants(
         hv: &InMemoryBackend,
@@ -319,26 +374,10 @@ mod tests {
         id: &ObjectId,
     ) -> std::result::Result<(), String> {
         let hv_entry = hv.get_stored(id);
-        let lt_entry = lt.get_stored(id);
-
         let hv_present = hv_entry.is_some();
         let hv_tombstone = hv_entry.as_ref().is_some_and(|(m, _)| m.is_tombstone());
-        let lt_present = lt_entry.is_some();
-
-        match (hv_present, hv_tombstone, lt_present) {
-            (false, _, false) => Ok(()),    // Empty
-            (true, false, false) => Ok(()), // Small
-            (true, true, true) => Ok(()),   // Large
-            (true, true, false) => Ok(()),  // OrphanTombstone (async check in assert_consistent)
-            (false, _, true) => Err(format!(
-                "OrphanLT: data in LT for key {:?} but nothing in HV",
-                id.key()
-            )),
-            (true, false, true) => Err(format!(
-                "DualData: non-tombstone in HV AND data in LT for key {:?}",
-                id.key()
-            )),
-        }
+        let lt_present = lt.get_stored(id).is_some();
+        check_invariants_core(hv_present, hv_tombstone, lt_present, id.key())
     }
 
     /// Panics if invariants are violated. For OrphanTombstone, additionally
@@ -379,6 +418,13 @@ mod tests {
         Get,
         GetMetadata,
         Delete,
+    }
+
+    /// Which side of the tiered storage should fail.
+    #[derive(Debug, Clone, Copy)]
+    enum FailSide {
+        Hv,
+        Lt,
     }
 
     /// A backend that delegates to an inner `InMemoryBackend` but fails on a
@@ -432,6 +478,24 @@ mod tests {
                 return Err(simulated_error("selective-fail: delete_object"));
             }
             self.inner.delete_object(id).await
+        }
+    }
+
+    fn make_failing_storage(
+        hv: &InMemoryBackend,
+        lt: &InMemoryBackend,
+        fail_side: FailSide,
+        fail_on: FailOn,
+    ) -> TieredStorage {
+        match fail_side {
+            FailSide::Hv => TieredStorage {
+                high_volume_backend: Box::new(SelectiveFailBackend::new(hv.clone(), fail_on)),
+                long_term_backend: Box::new(lt.clone()),
+            },
+            FailSide::Lt => TieredStorage {
+                high_volume_backend: Box::new(hv.clone()),
+                long_term_backend: Box::new(SelectiveFailBackend::new(lt.clone(), fail_on)),
+            },
         }
     }
 
@@ -539,17 +603,7 @@ mod tests {
     #[tokio::test]
     async fn small_object_goes_to_high_volume() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0u8; 100]; // 100 bytes, well under 1 MiB
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("small".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_small(&storage, "small").await;
 
         assert!(hv.contains(&id), "expected in high-volume");
         assert!(!lt.contains(&id), "leaked to long-term");
@@ -559,21 +613,11 @@ mod tests {
     #[tokio::test]
     async fn large_object_goes_to_long_term_with_tombstone() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("large".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_large(&storage, "large").await;
 
         // Real payload should be in long-term
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert_eq!(lt_bytes.len(), payload.len());
+        assert_eq!(lt_bytes.len(), LARGE_SIZE);
         assert!(!lt_meta.is_tombstone());
 
         // A redirect tombstone should exist in high-volume
@@ -588,37 +632,18 @@ mod tests {
         let (storage, hv, lt) = make_tiered_storage();
 
         // First: insert a large object -> creates tombstone in hv, payload in lt
-        let large_payload = vec![0xABu8; 2 * 1024 * 1024];
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                make_stream(&large_payload),
-            )
-            .await
-            .unwrap();
-
+        let id = insert_large(&storage, "reinsert-key").await;
         let (hv_meta, _) = hv.get_stored(&id).unwrap();
         assert!(hv_meta.is_tombstone());
 
         // Now re-insert a SMALL payload with the same key. The service should
         // detect the existing tombstone and route to long-term anyway.
-        let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
-        storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                make_stream(&small_payload),
-            )
-            .await
-            .unwrap();
+        insert_small(&storage, "reinsert-key").await;
 
         // The small object should be in long-term (not high-volume)
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
         assert!(!lt_meta.is_tombstone());
-        assert_eq!(lt_bytes.len(), small_payload.len());
+        assert_eq!(lt_bytes.len(), SMALL.len());
 
         // The tombstone in hv should still be present
         let (hv_meta, _) = hv.get_stored(&id).unwrap();
@@ -637,7 +662,7 @@ mod tests {
             origin: Some("10.0.0.1".into()),
             ..Default::default()
         };
-        let payload = vec![0u8; 2 * 1024 * 1024]; // force long-term
+        let payload = large_payload();
 
         let id = storage
             .insert_object(
@@ -666,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn reads_follow_tombstone_redirect() {
         let (storage, _hv, _lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+        let payload = large_payload();
 
         let metadata_in = Metadata {
             content_type: "image/png".into(),
@@ -685,7 +710,7 @@ mod tests {
         // get_object should transparently follow the tombstone
         let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
+        assert_eq!(body.len(), LARGE_SIZE);
         assert!(!metadata.is_tombstone());
 
         // get_metadata should also follow the tombstone
@@ -697,17 +722,7 @@ mod tests {
     #[tokio::test]
     async fn delete_cleans_up_both_backends() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("delete-both".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_large(&storage, "delete-both").await;
 
         storage.delete_object(&id).await.unwrap();
 
@@ -719,17 +734,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_tombstone_returns_none() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("orphan-tombstone".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_large(&storage, "orphan-tombstone").await;
 
         // Remove the long-term object, leaving an orphan tombstone in hv
         lt.remove(&id);
@@ -780,72 +785,34 @@ mod tests {
     #[tokio::test]
     async fn overwrite_small_with_large_no_prior_tombstone() {
         let (storage, hv, lt) = make_tiered_storage();
-        let small_payload = vec![0xAAu8; 100];
-        let large_payload = vec![0xBBu8; 2 * 1024 * 1024];
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("overwrite-key".into()),
-                &Default::default(),
-                make_stream(&small_payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_small(&storage, "overwrite-key").await;
 
         let (hv_meta, hv_bytes) = hv.get_stored(&id).unwrap();
         assert!(!hv_meta.is_tombstone());
-        assert_eq!(hv_bytes.len(), small_payload.len());
+        assert_eq!(hv_bytes.len(), SMALL.len());
         assert!(!lt.contains(&id));
 
-        storage
-            .insert_object(
-                make_context(),
-                Some("overwrite-key".into()),
-                &Default::default(),
-                make_stream(&large_payload),
-            )
-            .await
-            .unwrap();
+        insert_large(&storage, "overwrite-key").await;
 
         let (hv_meta, _) = hv.get_stored(&id).unwrap();
         assert!(hv_meta.is_tombstone());
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
         assert!(!lt_meta.is_tombstone());
-        assert_eq!(lt_bytes.len(), large_payload.len());
+        assert_eq!(lt_bytes.len(), LARGE_SIZE);
         assert_consistent(&storage, &hv, &lt, &id).await;
     }
 
     #[tokio::test]
     async fn overwrite_large_with_small_after_delete() {
         let (storage, hv, lt) = make_tiered_storage();
-        let large_payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let small_payload = vec![0xBBu8; 100];
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-small".into()),
-                &Default::default(),
-                make_stream(&large_payload),
-            )
-            .await
-            .unwrap();
+        let id = insert_large(&storage, "reinsert-small").await;
         storage.delete_object(&id).await.unwrap();
 
-        storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-small".into()),
-                &Default::default(),
-                make_stream(&small_payload),
-            )
-            .await
-            .unwrap();
+        insert_small(&storage, "reinsert-small").await;
 
         let (hv_meta, hv_bytes) = hv.get_stored(&id).unwrap();
         assert!(!hv_meta.is_tombstone());
-        assert_eq!(hv_bytes.len(), small_payload.len());
+        assert_eq!(hv_bytes.len(), SMALL.len());
         assert!(!lt.contains(&id));
         assert_consistent(&storage, &hv, &lt, &id).await;
     }
@@ -853,15 +820,7 @@ mod tests {
     #[tokio::test]
     async fn delete_small_only_object() {
         let (storage, hv, lt) = make_tiered_storage();
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("delete-small".into()),
-                &Default::default(),
-                make_stream(&vec![0xCCu8; 512]),
-            )
-            .await
-            .unwrap();
+        let id = insert_small(&storage, "delete-small").await;
 
         storage.delete_object(&id).await.unwrap();
 
@@ -919,15 +878,11 @@ mod tests {
     /// an unreachable orphan in long-term storage.
     #[tokio::test]
     async fn no_orphan_when_tombstone_write_fails() {
-        let lt = InMemoryBackend::new("lt");
         let hv = InMemoryBackend::new("hv");
-        let hv_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(hv, FailOn::Put));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
+        let lt = InMemoryBackend::new("lt");
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Put);
 
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
+        let payload = large_payload();
         let result = storage
             .insert_object(
                 make_context(),
@@ -946,34 +901,21 @@ mod tests {
     #[tokio::test]
     async fn tombstone_preserved_when_long_term_delete_fails() {
         let hv = InMemoryBackend::new("hv");
-        let lt_inner = InMemoryBackend::new("lt");
-        let lt: BoxedBackend = Box::new(SelectiveFailBackend::new(lt_inner, FailOn::Delete));
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: lt,
-        };
+        let lt = InMemoryBackend::new("lt");
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "fail-delete").await;
 
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("fail-delete".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Lt, FailOn::Delete);
         let result = storage.delete_object(&id).await;
         assert!(result.is_err());
 
         let (hv_meta, _) = hv.get_stored(&id).expect("tombstone removed");
         assert!(hv_meta.is_tombstone());
 
-        // The object should still be reachable through the service
-        let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
+        // The object should still be reachable through the setup storage
+        let (metadata, stream) = setup.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
+        assert_eq!(body.len(), LARGE_SIZE);
         assert!(!metadata.is_tombstone());
     }
 
@@ -985,44 +927,23 @@ mod tests {
     async fn insert_large_hv_metadata_check_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "meta-fail").await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
 
-        // Pre-populate a large object so there's a tombstone + LT data.
-        let pre_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = pre_storage
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::GetMetadata);
+        let payload = large_payload();
+        let result = storage
             .insert_object(
                 make_context(),
                 Some("meta-fail".into()),
                 &Default::default(),
                 make_stream(&payload),
             )
-            .await
-            .unwrap();
-        assert_consistent(&pre_storage, &hv, &lt, &id).await;
-
-        // Now create a storage with HV that fails on get_metadata.
-        let hv_fail: BoxedBackend =
-            Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::GetMetadata));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
-        let new_payload = vec![0xBBu8; 2 * 1024 * 1024];
-        let result = storage
-            .insert_object(
-                make_context(),
-                Some("meta-fail".into()),
-                &Default::default(),
-                make_stream(&new_payload),
-            )
             .await;
 
         assert!(result.is_err());
-        assert_consistent(&pre_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     /// LT.put_object fails before the tombstone write during large insert.
@@ -1031,13 +952,9 @@ mod tests {
     async fn insert_large_lt_put_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-        let lt_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(lt.clone(), FailOn::Put));
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: lt_fail,
-        };
+        let storage = make_failing_storage(&hv, &lt, FailSide::Lt, FailOn::Put);
 
-        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let payload = large_payload();
         let result = storage
             .insert_object(
                 make_context(),
@@ -1048,7 +965,6 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        // Nothing should have been written to either backend.
         assert!(hv.is_empty());
         assert!(lt.is_empty());
     }
@@ -1060,19 +976,14 @@ mod tests {
     async fn insert_small_hv_put_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-        let hv_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::Put));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Put);
 
-        let payload = vec![0u8; 100]; // small
         let result = storage
             .insert_object(
                 make_context(),
                 Some("small-put-fail".into()),
                 &Default::default(),
-                make_stream(&payload),
+                make_stream(SMALL),
             )
             .await;
 
@@ -1088,33 +999,13 @@ mod tests {
     async fn get_large_hv_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "get-hv-fail").await;
 
-        // Insert a large object normally first.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("get-hv-fail".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
-        // Now read with a failing HV.
-        let hv_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::Get));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Get);
         let result = storage.get_object(&id).await;
         assert!(result.is_err());
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     /// HV returns tombstone successfully but LT.get_object fails.
@@ -1122,33 +1013,13 @@ mod tests {
     async fn get_large_lt_fails_after_tombstone() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "get-lt-fail").await;
 
-        // Insert a large object normally first.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("get-lt-fail".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
-        // Now read with a failing LT.
-        let lt_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(lt.clone(), FailOn::Get));
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: lt_fail,
-        };
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Lt, FailOn::Get);
         let result = storage.get_object(&id).await;
         assert!(result.is_err());
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     // --- Get small: outage tests ---
@@ -1158,33 +1029,13 @@ mod tests {
     async fn get_small_hv_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_small(&setup, "get-small-fail").await;
 
-        // Insert a small object normally first.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0u8; 100];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("get-small-fail".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
-        // Now read with a failing HV.
-        let hv_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::Get));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Get);
         let result = storage.get_object(&id).await;
         assert!(result.is_err());
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     // --- Delete large: outage tests ---
@@ -1195,38 +1046,17 @@ mod tests {
     async fn delete_large_hv_delete_non_tombstone_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-
-        // Insert a large object normally first.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("del-large-fail".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "del-large-fail").await;
 
         // delete_non_tombstone calls get_metadata then delete_object.
         // Failing get_metadata prevents the delete path from proceeding.
-        let hv_fail: BoxedBackend =
-            Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::GetMetadata));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::GetMetadata);
         let result = storage.delete_object(&id).await;
         assert!(result.is_err());
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
 
-        // Data should still be reachable.
-        let get_result = setup_storage.get_object(&id).await.unwrap();
+        let get_result = setup.get_object(&id).await.unwrap();
         assert!(get_result.is_some());
     }
 
@@ -1238,36 +1068,16 @@ mod tests {
     async fn delete_small_hv_delete_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-
-        // Insert a small object normally first.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0u8; 100];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("del-small-fail".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_small(&setup, "del-small-fail").await;
 
         // delete_non_tombstone calls get_metadata (succeeds), then delete_object (fails).
-        let hv_fail: BoxedBackend = Box::new(SelectiveFailBackend::new(hv.clone(), FailOn::Delete));
-        let storage = TieredStorage {
-            high_volume_backend: hv_fail,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
+        let storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Delete);
         let result = storage.delete_object(&id).await;
         assert!(result.is_err());
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
 
-        // Data should still be reachable.
-        let get_result = setup_storage.get_object(&id).await.unwrap();
+        let get_result = setup.get_object(&id).await.unwrap();
         assert!(get_result.is_some());
     }
 
@@ -1290,7 +1100,7 @@ mod tests {
             long_term_backend: Box::new(lt),
         };
 
-        let payload = vec![0xEEu8; 2 * 1024 * 1024];
+        let payload = large_payload();
         let result = storage
             .insert_object(
                 make_context(),
@@ -1321,30 +1131,11 @@ mod tests {
     async fn delete_tombstone_cleanup_failure_leaves_orphan_tombstone() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-
-        let payload = vec![0xFFu8; 2 * 1024 * 1024];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("orphan-tombstone-delete".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "orphan-tombstone-delete").await;
 
         // HV delete always fails → tombstone cleanup will fail.
-        let hv_fail = SelectiveFailBackend::new(hv.clone(), FailOn::Delete);
-        let delete_storage = TieredStorage {
-            high_volume_backend: Box::new(hv_fail),
-            long_term_backend: Box::new(lt.clone()),
-        };
-
+        let delete_storage = make_failing_storage(&hv, &lt, FailSide::Hv, FailOn::Delete);
         let result = delete_storage.delete_object(&id).await;
         assert!(result.is_err());
 
@@ -1353,7 +1144,7 @@ mod tests {
         assert!(hv_meta.is_tombstone(), "tombstone should survive");
 
         // OrphanTombstone is accepted: assert_consistent verifies reads return None.
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     // ==========================================
@@ -1377,7 +1168,7 @@ mod tests {
         };
 
         let id = ObjectId::new(make_context(), "pod-kill-insert".into());
-        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let payload = large_payload();
 
         // Start the insert; it will block at the HV put (tombstone write).
         let insert_handle = tokio::spawn(async move {
@@ -1414,23 +1205,9 @@ mod tests {
     async fn pod_kill_during_delete_large_after_lt_delete() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-
-        // First, insert a large object normally.
-        let setup_storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = setup_storage
-            .insert_object(
-                make_context(),
-                Some("pod-kill-delete".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        let setup = make_tiered_from(&hv, &lt);
+        let id = insert_large(&setup, "pod-kill-delete").await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
 
         // Now set up a storage where HV blocks on delete_object (tombstone cleanup).
         let never_signal = Arc::new(Notify::new());
@@ -1455,7 +1232,7 @@ mod tests {
         // After cancellation: tombstone in HV, nothing in LT -> OrphanTombstone.
         assert!(hv.contains(&id), "HV should still have the tombstone");
         assert!(!lt.contains(&id), "LT data should have been deleted");
-        assert_consistent(&setup_storage, &hv, &lt, &id).await;
+        assert_consistent(&setup, &hv, &lt, &id).await;
     }
 
     // ==========================================
@@ -1468,22 +1245,8 @@ mod tests {
     async fn race_concurrent_delete_delete_is_safe() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-
-        // Insert a large object.
-        let storage = Arc::new(TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        });
-        let payload = vec![0xAAu8; 2 * 1024 * 1024];
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("race-delete".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
+        let storage = Arc::new(make_tiered_from(&hv, &lt));
+        let id = insert_large(&storage, "race-delete").await;
 
         // Spawn two concurrent deletes.
         let storage1 = Arc::clone(&storage);
@@ -1517,17 +1280,13 @@ mod tests {
         use bytes::{Bytes, BytesMut};
         use futures_util::{StreamExt, TryStreamExt};
         use objectstore_types::metadata::Metadata;
-        use objectstore_types::scope::{Scope, Scopes};
         use tokio::sync::Notify;
 
         use super::*;
-        use crate::stream::make_stream;
 
         type Store = HashMap<ObjectId, (Metadata, Bytes)>;
 
-        /// Checks consistency invariants against raw stores (parallel to
-        /// `check_invariants` which takes `InMemoryBackend`).
-        fn check_invariants_raw(
+        fn check_store_invariants(
             hv_store: &Store,
             lt_store: &Store,
             id: &ObjectId,
@@ -1536,21 +1295,7 @@ mod tests {
             let hv_present = hv_entry.is_some();
             let hv_tombstone = hv_entry.is_some_and(|(m, _)| m.is_tombstone());
             let lt_present = lt_store.contains_key(id);
-
-            match (hv_present, hv_tombstone, lt_present) {
-                (false, _, false) => Ok(()),
-                (true, false, false) => Ok(()),
-                (true, true, true) => Ok(()),
-                (true, true, false) => Ok(()),
-                (false, _, true) => Err(format!(
-                    "OrphanLT: data in LT for key {:?} but nothing in HV",
-                    id.key()
-                )),
-                (true, false, true) => Err(format!(
-                    "DualData: non-tombstone in HV AND data in LT for key {:?}",
-                    id.key()
-                )),
-            }
+            check_invariants_core(hv_present, hv_tombstone, lt_present, id.key())
         }
 
         /// A backend backed by a shared HashMap with Notify-based sync hooks
@@ -1567,7 +1312,7 @@ mod tests {
         }
 
         impl SyncBackend {
-            fn plain(name: &'static str, store: Arc<Mutex<Store>>) -> Self {
+            fn new(name: &'static str, store: Arc<Mutex<Store>>) -> Self {
                 Self {
                     name,
                     store,
@@ -1577,6 +1322,33 @@ mod tests {
                     delete_wait: None,
                     delete_signal: None,
                 }
+            }
+
+            fn on_put(mut self, wait: Arc<Notify>, signal: Arc<Notify>) -> Self {
+                self.put_wait = Some(wait);
+                self.put_signal = Some(signal);
+                self
+            }
+
+            fn on_put_wait(mut self, wait: Arc<Notify>) -> Self {
+                self.put_wait = Some(wait);
+                self
+            }
+
+            fn on_get_metadata_signal(mut self, signal: Arc<Notify>) -> Self {
+                self.get_metadata_signal = Some(signal);
+                self
+            }
+
+            fn on_delete(mut self, wait: Arc<Notify>, signal: Arc<Notify>) -> Self {
+                self.delete_wait = Some(wait);
+                self.delete_signal = Some(signal);
+                self
+            }
+
+            fn on_delete_wait(mut self, wait: Arc<Notify>) -> Self {
+                self.delete_wait = Some(wait);
+                self
             }
         }
 
@@ -1643,13 +1415,6 @@ mod tests {
             }
         }
 
-        fn make_context() -> ObjectContext {
-            ObjectContext {
-                usecase: "race-test".into(),
-                scopes: Scopes::from_iter([Scope::create("test", "concurrent").unwrap()]),
-            }
-        }
-
         /// Race 1: Concurrent insert(large) + insert(small) → OrphanLT.
         ///
         /// ```text
@@ -1671,58 +1436,53 @@ mod tests {
 
             // A: HV put waits for B's metadata check, then signals when done.
             let storage_a = TieredStorage {
-                high_volume_backend: Box::new(SyncBackend {
-                    name: "hv-a",
-                    store: Arc::clone(&shared_hv_store),
-                    put_wait: Some(Arc::clone(&b_metadata_checked)),
-                    put_signal: Some(Arc::clone(&a_tombstone_written)),
-                    get_metadata_signal: None,
-                    delete_wait: None,
-                    delete_signal: None,
-                }),
-                long_term_backend: Box::new(SyncBackend::plain(
-                    "lt-a",
-                    Arc::clone(&shared_lt_store),
-                )),
+                high_volume_backend: Box::new(
+                    SyncBackend::new("hv-a", Arc::clone(&shared_hv_store)).on_put(
+                        Arc::clone(&b_metadata_checked),
+                        Arc::clone(&a_tombstone_written),
+                    ),
+                ),
+                long_term_backend: Box::new(SyncBackend::new("lt-a", Arc::clone(&shared_lt_store))),
             };
 
             // B: HV get_metadata signals when done; HV put waits for A's tombstone.
             let storage_b = TieredStorage {
-                high_volume_backend: Box::new(SyncBackend {
-                    name: "hv-b",
-                    store: Arc::clone(&shared_hv_store),
-                    put_wait: Some(Arc::clone(&a_tombstone_written)),
-                    put_signal: None,
-                    get_metadata_signal: Some(Arc::clone(&b_metadata_checked)),
-                    delete_wait: None,
-                    delete_signal: None,
-                }),
-                long_term_backend: Box::new(SyncBackend::plain(
-                    "lt-b",
-                    Arc::clone(&shared_lt_store),
-                )),
+                high_volume_backend: Box::new(
+                    SyncBackend::new("hv-b", Arc::clone(&shared_hv_store))
+                        .on_put_wait(Arc::clone(&a_tombstone_written))
+                        .on_get_metadata_signal(Arc::clone(&b_metadata_checked)),
+                ),
+                long_term_backend: Box::new(SyncBackend::new("lt-b", Arc::clone(&shared_lt_store))),
             };
 
             let context = make_context();
             let key = "race-insert-insert";
-            let large_payload = vec![0xAAu8; 2 * 1024 * 1024];
-            let small_payload = vec![0xBBu8; 100];
+            let large_payload = super::large_payload();
+            let small_payload = SMALL;
 
             let task_a = {
                 let ctx = context.clone();
-                let p = large_payload.clone();
                 tokio::spawn(async move {
                     storage_a
-                        .insert_object(ctx, Some(key.into()), &Default::default(), make_stream(&p))
+                        .insert_object(
+                            ctx,
+                            Some(key.into()),
+                            &Default::default(),
+                            make_stream(&large_payload),
+                        )
                         .await
                 })
             };
             let task_b = {
                 let ctx = context.clone();
-                let p = small_payload.clone();
                 tokio::spawn(async move {
                     storage_b
-                        .insert_object(ctx, Some(key.into()), &Default::default(), make_stream(&p))
+                        .insert_object(
+                            ctx,
+                            Some(key.into()),
+                            &Default::default(),
+                            make_stream(small_payload),
+                        )
                         .await
                 })
             };
@@ -1735,7 +1495,7 @@ mod tests {
             let id = ObjectId::new(context, key.into());
             let hv_store = shared_hv_store.lock().unwrap();
             let lt_store = shared_lt_store.lock().unwrap();
-            let violation = check_invariants_raw(&hv_store, &lt_store, &id);
+            let violation = check_store_invariants(&hv_store, &lt_store, &id);
             assert!(
                 violation.unwrap_err().contains("DualData"),
                 "concurrent insert+insert must violate consistency"
@@ -1774,10 +1534,7 @@ mod tests {
                     .insert(id.clone(), (tombstone_meta, Bytes::new()));
                 shared_lt_store.lock().unwrap().insert(
                     id.clone(),
-                    (
-                        Metadata::default(),
-                        Bytes::from(vec![0xFFu8; 2 * 1024 * 1024]),
-                    ),
+                    (Metadata::default(), Bytes::from(super::large_payload())),
                 );
             }
 
@@ -1788,58 +1545,40 @@ mod tests {
             // A (delete): LT delete waits for B's metadata check, signals when done.
             //             HV delete waits for B's LT write.
             let storage_a = TieredStorage {
-                high_volume_backend: Box::new(SyncBackend {
-                    name: "hv-a",
-                    store: Arc::clone(&shared_hv_store),
-                    put_wait: None,
-                    put_signal: None,
-                    get_metadata_signal: None,
-                    delete_wait: Some(Arc::clone(&b_wrote_lt)),
-                    delete_signal: None,
-                }),
-                long_term_backend: Box::new(SyncBackend {
-                    name: "lt-a",
-                    store: Arc::clone(&shared_lt_store),
-                    put_wait: None,
-                    put_signal: None,
-                    get_metadata_signal: None,
-                    delete_wait: Some(Arc::clone(&b_checked_metadata)),
-                    delete_signal: Some(Arc::clone(&a_deleted_lt)),
-                }),
+                high_volume_backend: Box::new(
+                    SyncBackend::new("hv-a", Arc::clone(&shared_hv_store))
+                        .on_delete_wait(Arc::clone(&b_wrote_lt)),
+                ),
+                long_term_backend: Box::new(
+                    SyncBackend::new("lt-a", Arc::clone(&shared_lt_store))
+                        .on_delete(Arc::clone(&b_checked_metadata), Arc::clone(&a_deleted_lt)),
+                ),
             };
 
             // B (insert): HV get_metadata signals when done.
             //             LT put waits for A's LT delete, signals when done.
             let storage_b = TieredStorage {
-                high_volume_backend: Box::new(SyncBackend {
-                    name: "hv-b",
-                    store: Arc::clone(&shared_hv_store),
-                    put_wait: None,
-                    put_signal: None,
-                    get_metadata_signal: Some(Arc::clone(&b_checked_metadata)),
-                    delete_wait: None,
-                    delete_signal: None,
-                }),
-                long_term_backend: Box::new(SyncBackend {
-                    name: "lt-b",
-                    store: Arc::clone(&shared_lt_store),
-                    put_wait: Some(Arc::clone(&a_deleted_lt)),
-                    put_signal: Some(Arc::clone(&b_wrote_lt)),
-                    get_metadata_signal: None,
-                    delete_wait: None,
-                    delete_signal: None,
-                }),
+                high_volume_backend: Box::new(
+                    SyncBackend::new("hv-b", Arc::clone(&shared_hv_store))
+                        .on_get_metadata_signal(Arc::clone(&b_checked_metadata)),
+                ),
+                long_term_backend: Box::new(
+                    SyncBackend::new("lt-b", Arc::clone(&shared_lt_store))
+                        .on_put(Arc::clone(&a_deleted_lt), Arc::clone(&b_wrote_lt)),
+                ),
             };
-
-            let new_payload = vec![0xCCu8; 100];
 
             let task_a = tokio::spawn(async move { storage_a.delete_object(&id).await });
             let task_b = {
                 let ctx = context.clone();
-                let p = new_payload.clone();
                 tokio::spawn(async move {
                     storage_b
-                        .insert_object(ctx, Some(key.into()), &Default::default(), make_stream(&p))
+                        .insert_object(
+                            ctx,
+                            Some(key.into()),
+                            &Default::default(),
+                            make_stream(SMALL),
+                        )
                         .await
                 })
             };
@@ -1852,7 +1591,7 @@ mod tests {
             let id = ObjectId::new(make_context(), key.into());
             let hv_store = shared_hv_store.lock().unwrap();
             let lt_store = shared_lt_store.lock().unwrap();
-            let violation = check_invariants_raw(&hv_store, &lt_store, &id);
+            let violation = check_store_invariants(&hv_store, &lt_store, &id);
             assert!(
                 violation.unwrap_err().contains("OrphanLT"),
                 "concurrent insert+delete must produce OrphanLT"
