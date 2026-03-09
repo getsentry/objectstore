@@ -38,6 +38,7 @@ uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 futures = { workspace = true }
+proptest = "1.6"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true }
