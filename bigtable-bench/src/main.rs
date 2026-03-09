@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     let failures = Arc::new(AtomicUsize::new(0));
     let shutdown = tokio_util::sync::CancellationToken::new();
     let concurrency = args.concurrency;
+    let pool_size = args.pool;
     let bench_start = Instant::now();
 
     // Stats printer task.
@@ -122,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
-            let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+            let ops_per_sec_per_conn = ops_per_sec / pool_size as f64;
             let bytes_per_sec = ops_per_sec * object_size as f64;
             let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
             let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
@@ -133,11 +134,15 @@ async fn main() -> anyhow::Result<()> {
             let failed = stats_failures.load(Ordering::Relaxed);
 
             eprint!(
-                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn | {}] avg: {}  p50: {}  p95: {}  p99: {}  max: {}   ",
+                "\x1b[2K[{} ops | {:.0} ops/s | {:.2} ops/s/conn | {} | {}]",
                 ops.bold(),
                 ops_per_sec.bold(),
                 ops_per_sec_per_conn.bold(),
                 format_throughput(bytes_per_sec).bold(),
+                format_elapsed(elapsed).bold(),
+            );
+            eprint!(
+                "\n\x1b[2K  avg: {}   p50: {}   p95: {}   p99: {}   max: {}",
                 format_ms(avg).bold(),
                 format_ms(p50),
                 format_ms(p95),
@@ -145,9 +150,10 @@ async fn main() -> anyhow::Result<()> {
                 format_ms(max),
             );
             if failed > 0 {
-                eprint!("\n\x1b[2Kfailed: {}\x1b[1A", failed.red().bold());
+                eprint!("\n\x1b[2K  failed: {}\r\x1b[2A", failed.red().bold());
+            } else {
+                eprint!("\n\x1b[2K\r\x1b[2A");
             }
-            eprint!("\r");
         }
     });
 
@@ -218,8 +224,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = stats_handle.await;
     let _ = worker_handle.await;
 
-    // Clear the two-line live stats display before printing the final summary.
-    eprint!("\r\x1b[2K\n\x1b[2K\x1b[1A\r");
+    // Clear the three-line live stats display before printing the final summary.
+    eprint!("\r\x1b[2K\n\x1b[2K\n\x1b[2K\x1b[2A\r");
 
     // Print final summary.
     let guard = sketch.lock().unwrap(); // INVARIANT: no panic inside lock
@@ -227,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
     if ops > 0 {
         let elapsed = bench_start.elapsed();
         let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
-        let ops_per_sec_per_conn = ops_per_sec / concurrency as f64;
+        let ops_per_sec_per_conn = ops_per_sec / pool_size as f64;
         let bytes_per_sec = ops_per_sec * object_size as f64;
         let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
         let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
@@ -235,11 +241,12 @@ async fn main() -> anyhow::Result<()> {
         let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
         let max = Duration::from_secs_f64(guard.max().unwrap());
         eprintln!(
-            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {} | avg: {}  p50: {}  p95: {}  p99: {}  max: {}",
+            "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {} | {}\n  avg: {}   p50: {}   p95: {}   p99: {}   max: {}",
             ops.bold(),
             ops_per_sec.bold(),
             ops_per_sec_per_conn.bold(),
             format_throughput(bytes_per_sec).bold(),
+            format_elapsed(elapsed).bold(),
             format_ms(avg).bold(),
             format_ms(p50),
             format_ms(p95),
@@ -254,6 +261,12 @@ async fn main() -> anyhow::Result<()> {
 /// Formats a [`Duration`] as milliseconds with two decimal places.
 fn format_ms(d: Duration) -> String {
     format!("{:.2}ms", d.as_secs_f64() * 1000.0)
+}
+
+/// Formats a [`Duration`] as `M:SS`.
+fn format_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// Formats a byte rate using SI decimal prefixes (kB/s, MB/s, GB/s).
