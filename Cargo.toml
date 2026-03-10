@@ -53,4 +53,4 @@ tokio-util = "0.7.15"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 uuid = { version = "1.17.0", features = ["v4"] }
-sentry-options = "1.0.0"
+sentry-options = "1.0.1"
