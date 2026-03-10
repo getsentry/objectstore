@@ -82,7 +82,6 @@ async fn batch(
             if state.rate_limiter.check(&context) {
                 Ok(())
             } else {
-                tracing::debug!("Batch operation rejected due to rate limits");
                 Err(ApiError::from(BatchError::RateLimited))
             }
         }
