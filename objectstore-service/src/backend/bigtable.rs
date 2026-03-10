@@ -14,6 +14,7 @@ use tonic::Code;
 use crate::PayloadStream;
 use crate::backend::common::{
     Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    WriteOutcome,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -96,6 +97,28 @@ fn column_filter(column: &[u8]) -> v2::RowFilter {
         filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
             [b"^", column, b"$"].concat(),
         )),
+    }
+}
+
+/// Creates a predicate filter that matches rows containing a redirect tombstone.
+///
+/// Checks the metadata column for the `is_redirect_tombstone` marker. We cannot
+/// use payload-column presence because `put_row` always writes a `p` cell — even
+/// for tombstones (with empty bytes).
+fn tombstone_predicate() -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_METADATA),
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                        // RE2 full-match anchored to the JSON start. The field ordering of
+                        // Metadata ensures `is_redirect_tombstone` is serialized first.
+                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
+                    )),
+                },
+            ],
+        })),
     }
 }
 
@@ -351,6 +374,86 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn put_non_tombstone(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        mut stream: PayloadStream,
+    ) -> Result<WriteOutcome> {
+        tracing::debug!("Conditional write to Bigtable backend");
+
+        // Buffer the payload before the conditional RPC so the operation
+        // appears atomic: if the predicate is false we write, otherwise we
+        // discard the buffered bytes and return Tombstone.
+        let mut payload = ChunkedBytes::new(0);
+        while let Some(chunk) = stream.try_next().await? {
+            payload.push(chunk);
+        }
+
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        // Build the write mutations the same way put_row does.
+        let now = SystemTime::now();
+        let (family, timestamp_micros) = match metadata.expiration_policy {
+            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
+            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
+            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+        };
+        let metadata_bytes = serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
+            context: "failed to serialize metadata".to_string(),
+            cause,
+        })?;
+        let write_mutations = vec![
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::DeleteFromRow(
+                    mutation::DeleteFromRow {},
+                )),
+            },
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                    timestamp_micros,
+                    value: payload.into_bytes().into(),
+                })),
+            },
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_METADATA.to_owned(),
+                    timestamp_micros,
+                    value: metadata_bytes,
+                })),
+            },
+        ];
+
+        let request = v2::CheckAndMutateRowRequest {
+            table_name: self.table_path.clone(),
+            row_key: path,
+            predicate_filter: Some(tombstone_predicate()),
+            true_mutations: vec![], // Tombstone matched → reject (no write).
+            false_mutations: write_mutations, // Not a tombstone → write.
+            ..Default::default()
+        };
+
+        let is_tombstone = self
+            .with_retry("put_non_tombstone", || async {
+                self.bigtable
+                    .client()
+                    .check_and_mutate_row(request.clone())
+                    .await
+            })
+            .await?
+            .predicate_matched;
+
+        Ok(if is_tombstone {
+            WriteOutcome::Tombstone
+        } else {
+            WriteOutcome::Written
+        })
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
@@ -434,20 +537,7 @@ impl Backend for BigTableBackend {
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
-            predicate_filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-                    filters: vec![
-                        column_filter(COLUMN_METADATA),
-                        v2::RowFilter {
-                            filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                                // RE2 full-match anchored to the JSON start. The field ordering of
-                                // Metadata ensures `is_redirect_tombstone` is serialized first.
-                                b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
-                            )),
-                        },
-                    ],
-                })),
-            }),
+            predicate_filter: Some(tombstone_predicate()),
             true_mutations: vec![], // Tombstone matched → leave intact (no mutations).
             false_mutations: vec![delete_mutation], // Not a tombstone → delete the row.
             ..Default::default()

@@ -156,6 +156,22 @@ where
             stream: None,
         })
     }
+
+    /// Consumes self and returns all bytes as a single [`Bytes`].
+    ///
+    /// If the peek limit was exceeded, drains the remaining stream before
+    /// returning. Always correct regardless of [`is_exhausted`](Self::is_exhausted).
+    pub async fn into_bytes(mut self) -> io::Result<Bytes> {
+        if let Some(pending) = self.pending.take() {
+            self.buffer.push(pending);
+        }
+        if let Some(mut stream) = self.stream.take() {
+            while let Some(chunk) = stream.try_next().await? {
+                self.buffer.push(chunk);
+            }
+        }
+        Ok(self.buffer.into_bytes())
+    }
 }
 
 impl<S> SizedPeek<S>

@@ -70,6 +70,16 @@ backend; objects exceeding it go to the long-term backend.
 
 See [`StorageConfig`] for available backend implementations.
 
+## Redirect Tombstones
+
+For large objects, the high-volume backend stores a **redirect tombstone** — a
+zero-payload marker whose metadata has `is_redirect_tombstone: true`. This
+allows reads to check only the high-volume backend and follow the tombstone to
+long-term storage, without scanning both backends on every read.
+
+See [`StorageService`] for write ordering, consistency guarantees, and known
+gaps.
+
 # Metadata and Payload
 
 Every object consists of structured **metadata** and a binary **payload**.

@@ -107,16 +107,26 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 ///
 /// The tombstone system maintains consistency through operation ordering rather
 /// than distributed locks. The invariant is: a redirect tombstone is always the
-/// **last thing written** and the **last thing removed**.
+/// **first thing written** and the **last thing removed**.
 ///
-/// - On **write**, the real object is persisted before the tombstone. If the
-///   tombstone write fails, the real object is rolled back.
+/// - On **write**, the tombstone is written to the high-volume backend before
+///   the real object is written to long-term storage. If the tombstone write
+///   fails, nothing is written. If the data write fails, a *headless tombstone*
+///   remains: the tombstone exists in HV but no data in LT. This is an accepted
+///   state — reads return `None`, deletes remove it, and re-inserts overwrite it.
+///   For small objects, `put_non_tombstone` is used instead: it atomically
+///   rejects the write if a tombstone is already present, routing the data to
+///   long-term storage instead.
 /// - On **delete**, the real object is removed before the tombstone. If the
 ///   long-term delete fails, the tombstone remains and the data stays reachable.
 ///
 /// This ensures that at every intermediate step, either the data is fully
-/// reachable (tombstone points to data) or fully absent — never an orphan in
-/// either direction.
+/// reachable (tombstone points to data), a headless tombstone is present (safe,
+/// recoverable), or the object is fully absent.
+///
+/// There is one known gap: a concurrent insert and delete can race to produce
+/// an **orphaned long-term object** — data in LT with no tombstone in HV. This
+/// will be addressed in the future.
 ///
 /// See the individual methods for per-operation tombstone behavior.
 ///
@@ -263,18 +273,18 @@ impl StorageService {
     /// # Run-to-completion
     ///
     /// Once called, the operation runs to completion even if the returned future
-    /// is dropped (e.g., on client disconnect). This guarantees that partially
-    /// written objects are never left without their redirect tombstone.
+    /// is dropped (e.g., on client disconnect). For large objects this ensures
+    /// that once the redirect tombstone is written to the high-volume backend,
+    /// the subsequent long-term data write is not abandoned mid-flight.
     ///
     /// # Tombstone handling
     ///
-    /// If the object has a caller-provided key and a redirect tombstone already
-    /// exists at that key, the new write is routed to the long-term backend
-    /// (preserving the existing tombstone as a redirect to the new data).
-    ///
-    /// For long-term writes, the real object is persisted first, then the
-    /// tombstone. If the tombstone write fails, the real object is rolled back
-    /// to avoid orphans.
+    /// For large objects the redirect tombstone is written to the high-volume
+    /// backend first, then the data to the long-term backend. For small objects,
+    /// `put_non_tombstone` is used: if a tombstone is already present at the
+    /// key, the data is routed to the long-term backend instead (preserving the
+    /// existing tombstone). See [`StorageService`] for the full consistency
+    /// model.
     pub async fn insert_object(
         &self,
         context: ObjectContext,
@@ -672,12 +682,12 @@ mod tests {
         // the task can finish writing.
         lt.resume.notify_one();
 
-        // Wait for the tombstone write to the high-volume backend, which is the
-        // last step of the long-term insert path.
-        let on_put = Arc::clone(&hv.on_put);
+        // Wait for the long-term data write to complete — this is the final step
+        // of the insert, so once it fires both the tombstone and the data are present.
+        let on_put = Arc::clone(&lt.on_put);
         tokio::time::timeout(Duration::from_secs(5), on_put.notified())
             .await
-            .expect("timed out waiting for tombstone write");
+            .expect("timed out waiting for long-term write");
 
         // Verify the object was fully written despite the caller being dropped.
         let id = ObjectId::new(make_context(), "completion-test".into());

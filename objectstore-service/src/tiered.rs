@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
-use crate::backend::common::{BoxedBackend, DeleteOutcome};
+use crate::backend::common::{BoxedBackend, DeleteOutcome, WriteOutcome};
 use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
@@ -21,6 +21,7 @@ use crate::stream::SizedPeek;
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
+#[derive(Clone, Copy)]
 enum BackendChoice {
     HighVolume,
     LongTerm,
@@ -66,7 +67,7 @@ impl TieredStorage {
         let start = Instant::now();
 
         let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
-        let mut backend = if peeked.is_exhausted() {
+        let initial_backend = if peeked.is_exhausted() {
             BackendChoice::HighVolume
         } else {
             BackendChoice::LongTerm
@@ -75,34 +76,54 @@ impl TieredStorage {
         objectstore_metrics::distribution!(
             "put.first_chunk.latency"@s: start.elapsed(),
             "usecase" => context.usecase.as_str(),
-            "backend_choice" => backend,
+            "backend_choice" => initial_backend,
         );
 
-        let has_key = key.is_some();
         let id = ObjectId::optional(context, key);
 
-        // There might currently be a tombstone at the given path from a previously stored object.
-        if has_key {
-            let metadata = self.high_volume_backend.get_metadata(&id).await?;
-            if metadata.is_some_and(|m| m.is_tombstone()) {
-                // Write the object to the other backend and keep the tombstone in place
-                backend = BackendChoice::LongTerm;
-            }
-        };
-
-        let (backend_ty, stored_size) = match backend {
+        let (final_backend_choice, backend_ty, stored_size) = match initial_backend {
             BackendChoice::HighVolume => {
+                // All data fits in the peek buffer. Extract the bytes so they can
+                // be re-streamed to long-term storage if HV rejects with a tombstone.
                 let stored_size = peeked.len() as u64;
-                let stream = peeked.into_stream().boxed();
+                let bytes = peeked.into_bytes().await?;
 
-                self.high_volume_backend
-                    .put_object(&id, metadata, stream)
+                let outcome = self
+                    .high_volume_backend
+                    .put_non_tombstone(
+                        &id,
+                        metadata,
+                        futures_util::stream::once(std::future::ready(Ok(bytes.clone()))).boxed(),
+                    )
                     .await?;
-                (self.high_volume_backend.name(), stored_size)
+
+                match outcome {
+                    WriteOutcome::Written => (
+                        BackendChoice::HighVolume,
+                        self.high_volume_backend.name(),
+                        stored_size,
+                    ),
+                    WriteOutcome::Tombstone => {
+                        // A tombstone already exists in HV; write the data directly to
+                        // long-term storage. No need to write the tombstone again.
+                        self.long_term_backend
+                            .put_object(
+                                &id,
+                                metadata,
+                                futures_util::stream::once(std::future::ready(Ok(bytes))).boxed(),
+                            )
+                            .await?;
+                        (
+                            BackendChoice::LongTerm,
+                            self.long_term_backend.name(),
+                            stored_size,
+                        )
+                    }
+                }
             }
             BackendChoice::LongTerm => {
                 let stored_size = Arc::new(AtomicU64::new(0));
-                let stream = peeked
+                let lt_stream = peeked
                     .into_stream()
                     .inspect({
                         let stored_size = Arc::clone(&stored_size);
@@ -114,30 +135,30 @@ impl TieredStorage {
                     })
                     .boxed();
 
-                // first write the object
-                self.long_term_backend
-                    .put_object(&id, metadata, stream)
-                    .await?;
-
+                // Write the tombstone to HV first. If this fails, no data is written
+                // to either backend — the operation fails cleanly with no orphan.
                 let redirect_metadata = Metadata {
                     is_redirect_tombstone: Some(true),
                     expiration_policy: metadata.expiration_policy,
                     ..Default::default()
                 };
-                let redirect_stream = futures_util::stream::empty().boxed();
-                let redirect_request =
-                    self.high_volume_backend
-                        .put_object(&id, &redirect_metadata, redirect_stream);
+                self.high_volume_backend
+                    .put_object(
+                        &id,
+                        &redirect_metadata,
+                        futures_util::stream::empty().boxed(),
+                    )
+                    .await?;
 
-                // then we write the tombstone
-                let redirect_result = redirect_request.await;
-                if redirect_result.is_err() {
-                    // and clean up on any kind of error
-                    self.long_term_backend.delete_object(&id).await?;
-                }
-                redirect_result?;
+                // Write data to long-term storage. On failure, an OrphanHV
+                // remains — tombstone in HV, no data in LT. Reads return None;
+                // deletes and re-inserts clean it up.
+                self.long_term_backend
+                    .put_object(&id, metadata, lt_stream)
+                    .await?;
 
                 (
+                    BackendChoice::LongTerm,
                     self.long_term_backend.name(),
                     stored_size.load(Ordering::Acquire),
                 )
@@ -147,13 +168,13 @@ impl TieredStorage {
         objectstore_metrics::distribution!(
             "put.latency"@s: start.elapsed(),
             "usecase" => id.usecase(),
-            "backend_choice" => backend,
+            "backend_choice" => final_backend_choice,
             "backend_type" => backend_ty
         );
         objectstore_metrics::distribution!(
             "put.size"@b: stored_size,
             "usecase" => id.usecase(),
-            "backend_choice" => backend,
+            "backend_choice" => final_backend_choice,
             "backend_type" => backend_ty
         );
 
@@ -267,7 +288,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::common::BoxedBackend;
+    
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::stream::make_stream;
@@ -329,7 +350,7 @@ mod tests {
         assert_eq!(body.as_ref(), b"auto-keyed");
     }
 
-    // --- Size-based routing tests ---
+    // --- Routing ---
 
     #[tokio::test]
     async fn small_object_goes_to_high_volume() {
@@ -365,54 +386,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Real payload should be in long-term
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
         assert_eq!(lt_bytes.len(), payload.len());
         assert!(!lt_meta.is_tombstone());
 
-        // A redirect tombstone should exist in high-volume
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(hv_meta.is_tombstone());
-    }
-
-    #[tokio::test]
-    async fn reinsert_with_existing_tombstone_routes_to_long_term() {
-        let (storage, hv, lt) = make_tiered_storage();
-
-        // First: insert a large object → creates tombstone in hv, payload in lt
-        let large_payload = vec![0xABu8; 2 * 1024 * 1024];
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                make_stream(&large_payload),
-            )
-            .await
-            .unwrap();
-
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(hv_meta.is_tombstone());
-
-        // Now re-insert a SMALL payload with the same key. The service should
-        // detect the existing tombstone and route to long-term anyway.
-        let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
-        storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                make_stream(&small_payload),
-            )
-            .await
-            .unwrap();
-
-        // The small object should be in long-term (not high-volume)
-        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert!(!lt_meta.is_tombstone());
-        assert_eq!(lt_bytes.len(), small_payload.len());
-
-        // The tombstone in hv should still be present
         let (hv_meta, _) = hv.get_stored(&id).unwrap();
         assert!(hv_meta.is_tombstone());
     }
@@ -439,56 +416,203 @@ mod tests {
             .await
             .unwrap();
 
-        // The tombstone in hv should have ONLY expiration_policy copied
+        // Tombstone in HV should have only expiration_policy copied.
         let (tombstone, _) = hv.get_stored(&id).unwrap();
         assert!(tombstone.is_tombstone());
         assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
         assert_eq!(tombstone.content_type, Metadata::default().content_type);
         assert!(tombstone.origin.is_none());
 
-        // The long-term object should have the full metadata
+        // Long-term object should have the full metadata.
         let (lt_meta, _) = lt.get_stored(&id).unwrap();
         assert!(!lt_meta.is_tombstone());
         assert_eq!(lt_meta.content_type, "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
     }
 
-    // --- Tombstone redirect tests ---
-
+    /// A small object with a pre-existing tombstone at the same key is detected
+    /// atomically by `put_non_tombstone` and routed to long-term storage.
     #[tokio::test]
-    async fn reads_follow_tombstone_redirect() {
-        let (storage, _hv, _lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+    async fn reinsert_small_with_existing_tombstone_routes_to_long_term() {
+        let (storage, hv, lt) = make_tiered_storage();
 
-        let metadata_in = Metadata {
-            content_type: "image/png".into(),
-            ..Default::default()
-        };
+        // Establish a tombstone via a large insert.
         let id = storage
             .insert_object(
                 make_context(),
-                Some("redirect-read".into()),
-                &metadata_in,
-                make_stream(&payload),
+                Some("reinsert-key".into()),
+                &Default::default(),
+                make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
             )
             .await
             .unwrap();
 
-        // get_object should transparently follow the tombstone
-        let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
-        assert!(!metadata.is_tombstone());
+        let (hv_meta, _) = hv.get_stored(&id).unwrap();
+        assert!(hv_meta.is_tombstone());
 
-        // get_metadata should also follow the tombstone
-        let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
-        assert!(!metadata.is_tombstone());
-        assert_eq!(metadata.content_type, "image/png");
+        // Re-insert a small payload at the same key.
+        let small_payload = vec![0xCDu8; 100];
+        storage
+            .insert_object(
+                make_context(),
+                Some("reinsert-key".into()),
+                &Default::default(),
+                make_stream(&small_payload),
+            )
+            .await
+            .unwrap();
+
+        // Small object goes to LT; tombstone in HV is preserved.
+        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
+        assert!(!lt_meta.is_tombstone());
+        assert_eq!(lt_bytes.len(), small_payload.len());
+        let (hv_meta, _) = hv.get_stored(&id).unwrap();
+        assert!(hv_meta.is_tombstone());
     }
 
-    // --- Tombstone inconsistency tests ---
+    /// A small object at a key is overwritten by a large one: the large insert
+    /// replaces the small HV entry with a tombstone and writes data to LT.
+    #[tokio::test]
+    async fn overwrite_small_with_large_no_prior_tombstone() {
+        let (storage, hv, lt) = make_tiered_storage();
 
-    /// A backend where put_object always fails, but reads/deletes work normally.
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("overwrite-key".into()),
+                &Default::default(),
+                make_stream(&[0xAAu8; 100]),
+            )
+            .await
+            .unwrap();
+
+        assert!(hv.contains(&id));
+        assert!(!lt.contains(&id));
+
+        let large_payload = vec![0xBBu8; 2 * 1024 * 1024];
+        storage
+            .insert_object(
+                make_context(),
+                Some("overwrite-key".into()),
+                &Default::default(),
+                make_stream(&large_payload),
+            )
+            .await
+            .unwrap();
+
+        let (hv_meta, _) = hv.get_stored(&id).unwrap();
+        assert!(
+            hv_meta.is_tombstone(),
+            "HV must have tombstone after large overwrite"
+        );
+        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
+        assert!(!lt_meta.is_tombstone());
+        assert_eq!(lt_bytes.len(), large_payload.len());
+    }
+
+    /// After a large object is fully deleted, a small re-insert at the same key
+    /// goes directly to HV (no tombstone present).
+    #[tokio::test]
+    async fn overwrite_large_with_small_after_delete() {
+        let (storage, hv, lt) = make_tiered_storage();
+
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("cycle-key".into()),
+                &Default::default(),
+                make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+            )
+            .await
+            .unwrap();
+
+        storage.delete_object(&id).await.unwrap();
+        assert!(!hv.contains(&id));
+        assert!(!lt.contains(&id));
+
+        let small_payload = vec![0xCDu8; 100];
+        storage
+            .insert_object(
+                make_context(),
+                Some("cycle-key".into()),
+                &Default::default(),
+                make_stream(&small_payload),
+            )
+            .await
+            .unwrap();
+
+        let (hv_meta, hv_bytes) = hv.get_stored(&id).unwrap();
+        assert!(
+            !hv_meta.is_tombstone(),
+            "small object must be in HV, not a tombstone"
+        );
+        assert_eq!(hv_bytes.len(), small_payload.len());
+        assert!(!lt.contains(&id));
+    }
+
+    // --- Multi-chunk streaming ---
+
+    #[tokio::test]
+    async fn multi_chunk_large_object_chains_buffered_and_remaining() {
+        let (storage, _hv, lt) = make_tiered_storage();
+
+        // Deliver a 2 MiB payload across multiple chunks that individually
+        // fit under the threshold but collectively exceed it.
+        let chunk_size = 512 * 1024; // 512 KiB per chunk
+        let chunk_count = 4; // 4 × 512 KiB = 2 MiB total
+        let chunks: Vec<std::io::Result<bytes::Bytes>> = (0..chunk_count)
+            .map(|i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size])))
+            .collect();
+        let stream = futures_util::stream::iter(chunks).boxed();
+
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("multi-chunk".into()),
+                &Default::default(),
+                stream,
+            )
+            .await
+            .unwrap();
+
+        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
+        assert!(!lt_meta.is_tombstone());
+        assert_eq!(lt_bytes.len(), chunk_size * chunk_count);
+
+        for i in 0..chunk_count {
+            let offset = i * chunk_size;
+            assert!(
+                lt_bytes[offset..offset + chunk_size]
+                    .iter()
+                    .all(|&b| b == i as u8),
+                "data mismatch in chunk {i}"
+            );
+        }
+    }
+
+    // --- Tombstone consistency ---
+    //
+    // These tests verify the invariant: every object in long-term storage must be
+    // reachable via a redirect tombstone in the high-volume backend, and every
+    // tombstone must either point to existing LT data or be safely recoverable.
+    //
+    // Operation  Scenario                                   Outcome                    Test
+    // ---------  -----------------------------------------  -------------------------  ----
+    // read       tombstone present, LT data present         consistent                 reads_follow_tombstone_redirect
+    // read       tombstone present, LT data absent          headless tombstone         orphan_hv_returns_none
+    // insert     HV put_non_tombstone fails (small)         consistent                 insert_small_hv_put_fails
+    // insert     HV tombstone write fails (large)           consistent                 insert_large_hv_tombstone_write_fails
+    // insert     LT data write fails after HV tombstone     headless tombstone         insert_large_lt_put_fails_leaves_orphan_hv
+    // insert     pod kill after HV tombstone, before LT     headless tombstone         pod_kill_during_insert_large_after_hv_tombstone
+    // delete     clean delete                               consistent                 delete_cleans_up_both_backends
+    // delete     LT delete fails                            consistent                 tombstone_preserved_when_long_term_delete_fails
+    // insert×2   concurrent large inserts (HV-first)        consistent                 race_concurrent_insert_insert_no_orphan
+    // insert×2   small insert during large LT write         consistent                 race_small_insert_during_large_lt_write
+    // insert+delete concurrent insert and delete race       ORPHAN VIOLATION           race_concurrent_insert_delete_causes_orphan_lt
+
+    // Mock backends used by the consistency tests.
+
+    /// A backend where `put_object` always fails; reads and deletes delegate normally.
     #[derive(Debug)]
     struct FailingPutBackend(InMemoryBackend);
 
@@ -506,7 +630,7 @@ mod tests {
         ) -> Result<()> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
-                "simulated tombstone write failure",
+                "simulated put failure",
             )))
         }
 
@@ -519,87 +643,7 @@ mod tests {
         }
     }
 
-    /// If the tombstone write to the high-volume backend fails after the long-term
-    /// write succeeds, the long-term object must be cleaned up so we never leave
-    /// an unreachable orphan in long-term storage.
-    #[tokio::test]
-    async fn no_orphan_when_tombstone_write_fails() {
-        let lt = InMemoryBackend::new("lt");
-        let hv: BoxedBackend = Box::new(FailingPutBackend(InMemoryBackend::new("hv")));
-        let storage = TieredStorage {
-            high_volume_backend: hv,
-            long_term_backend: Box::new(lt.clone()),
-        };
-
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
-        let result = storage
-            .insert_object(
-                make_context(),
-                Some("orphan-test".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(lt.is_empty(), "long-term object not cleaned up");
-    }
-
-    /// If a tombstone exists in high-volume but the corresponding object is
-    /// missing from long-term storage (e.g. due to a race condition or partial
-    /// cleanup), reads should gracefully return None rather than error.
-    #[tokio::test]
-    async fn orphan_tombstone_returns_none() {
-        let (storage, _hv, lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("orphan-tombstone".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
-        // Remove the long-term object, leaving an orphan tombstone in hv
-        lt.remove(&id);
-
-        assert!(
-            storage.get_object(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_object"
-        );
-        assert!(
-            storage.get_metadata(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_metadata"
-        );
-    }
-
-    // --- Delete tests ---
-
-    #[tokio::test]
-    async fn delete_cleans_up_both_backends() {
-        let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
-
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("delete-both".into()),
-                &Default::default(),
-                make_stream(&payload),
-            )
-            .await
-            .unwrap();
-
-        storage.delete_object(&id).await.unwrap();
-
-        assert!(!hv.contains(&id), "tombstone not cleaned up");
-        assert!(!lt.contains(&id), "object not cleaned up");
-    }
-
-    /// A backend wrapper that delegates everything except `delete_object`, which always fails.
+    /// A backend where `delete_object` always fails; reads and puts delegate normally.
     #[derive(Debug)]
     struct FailingDeleteBackend(InMemoryBackend);
 
@@ -625,85 +669,452 @@ mod tests {
         async fn delete_object(&self, _id: &ObjectId) -> Result<()> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
-                "simulated long-term delete failure",
+                "simulated delete failure",
             )))
         }
     }
 
-    /// When the long-term delete fails, the tombstone must be preserved so the
-    /// object remains reachable and no data is orphaned.
-    #[tokio::test]
-    async fn tombstone_preserved_when_long_term_delete_fails() {
-        let hv = InMemoryBackend::new("hv");
-        let lt: BoxedBackend = Box::new(FailingDeleteBackend(InMemoryBackend::new("lt")));
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: lt,
-        };
+    /// A backend that notifies when `put_object` starts and waits to be resumed,
+    /// allowing tests to observe and control intermediate write state.
+    #[derive(Debug)]
+    struct SyncBackend {
+        inner: InMemoryBackend,
+        put_started: std::sync::Arc<tokio::sync::Notify>,
+        put_resume: std::sync::Arc<tokio::sync::Notify>,
+    }
 
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
+    #[async_trait::async_trait]
+    impl crate::backend::common::Backend for SyncBackend {
+        fn name(&self) -> &'static str {
+            "sync"
+        }
+
+        async fn put_object(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: PayloadStream,
+        ) -> Result<()> {
+            self.put_started.notify_one();
+            self.put_resume.notified().await;
+            self.inner.put_object(id, metadata, stream).await
+        }
+
+        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+            self.inner.get_object(id).await
+        }
+
+        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+            self.inner.delete_object(id).await
+        }
+    }
+
+    // Reads
+
+    #[tokio::test]
+    async fn reads_follow_tombstone_redirect() {
+        let (storage, _hv, _lt) = make_tiered_storage();
+        let metadata_in = Metadata {
+            content_type: "image/png".into(),
+            ..Default::default()
+        };
+        let payload = vec![0xCDu8; 2 * 1024 * 1024];
         let id = storage
             .insert_object(
                 make_context(),
-                Some("fail-delete".into()),
-                &Default::default(),
+                Some("redirect-read".into()),
+                &metadata_in,
                 make_stream(&payload),
             )
             .await
             .unwrap();
 
-        let result = storage.delete_object(&id).await;
-        assert!(result.is_err());
-
-        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone removed");
-        assert!(hv_meta.is_tombstone());
-
-        // The object should still be reachable through the service
         let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload.len());
         assert!(!metadata.is_tombstone());
+
+        let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
+        assert!(!metadata.is_tombstone());
+        assert_eq!(metadata.content_type, "image/png");
     }
 
-    // --- Multi-chunk streaming tests ---
-
+    /// An OrphanHV (tombstone in HV, no corresponding data in LT) is a
+    /// recoverable state: reads return None rather than an error.
     #[tokio::test]
-    async fn multi_chunk_large_object_chains_buffered_and_remaining() {
+    async fn orphan_hv_returns_none() {
         let (storage, _hv, lt) = make_tiered_storage();
-
-        // Deliver a 2 MiB payload across multiple chunks that individually
-        // fit under the threshold but collectively exceed it.
-        let chunk_size = 512 * 1024; // 512 KiB per chunk
-        let chunk_count = 4; // 4 × 512 KiB = 2 MiB total
-        let chunks: Vec<std::io::Result<bytes::Bytes>> = (0..chunk_count)
-            .map(|i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size])))
-            .collect();
-        let stream = futures_util::stream::iter(chunks).boxed();
-
         let id = storage
             .insert_object(
                 make_context(),
-                Some("multi-chunk".into()),
+                Some("orphan-tombstone".into()),
                 &Default::default(),
-                stream,
+                make_stream(&vec![0xCDu8; 2 * 1024 * 1024]),
             )
             .await
             .unwrap();
 
-        // Should have been routed to long-term (over 1 MiB).
-        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert!(!lt_meta.is_tombstone());
-        assert_eq!(lt_bytes.len(), chunk_size * chunk_count);
+        lt.remove(&id); // simulate missing LT data
 
-        // Verify data integrity — each chunk's fill byte should appear in order.
-        for i in 0..chunk_count {
-            let offset = i * chunk_size;
-            assert!(
-                lt_bytes[offset..offset + chunk_size]
-                    .iter()
-                    .all(|&b| b == i as u8),
-                "data mismatch in chunk {i}"
-            );
-        }
+        assert!(storage.get_object(&id).await.unwrap().is_none());
+        assert!(storage.get_metadata(&id).await.unwrap().is_none());
+    }
+
+    // Insert failures — clean
+
+    /// Small-object write via `put_non_tombstone`: if HV fails, the insert fails
+    /// cleanly with nothing written to either backend.
+    #[tokio::test]
+    async fn insert_small_hv_put_fails() {
+        let lt = InMemoryBackend::new("lt");
+        let storage = TieredStorage {
+            high_volume_backend: Box::new(FailingPutBackend(InMemoryBackend::new("hv"))),
+            long_term_backend: Box::new(lt.clone()),
+        };
+
+        let result = storage
+            .insert_object(
+                make_context(),
+                Some("small-fail".into()),
+                &Default::default(),
+                make_stream(b"tiny"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(lt.is_empty());
+    }
+
+    /// Large-object HV-first: if the tombstone write fails, the insert fails cleanly
+    /// with nothing written to either backend.
+    #[tokio::test]
+    async fn insert_large_hv_tombstone_write_fails() {
+        let lt = InMemoryBackend::new("lt");
+        let storage = TieredStorage {
+            high_volume_backend: Box::new(FailingPutBackend(InMemoryBackend::new("hv"))),
+            long_term_backend: Box::new(lt.clone()),
+        };
+
+        let result = storage
+            .insert_object(
+                make_context(),
+                Some("hv-fail-test".into()),
+                &Default::default(),
+                make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(lt.is_empty());
+    }
+
+    // Insert failures — note: OrphanHV possible
+
+    /// When the LT data write fails after the HV tombstone is written, an
+    /// OrphanHV is left: tombstone in HV, no data in LT. Reads return None,
+    /// deletes remove the tombstone, and re-inserts overwrite it.
+    #[tokio::test]
+    async fn insert_large_lt_put_fails_leaves_orphan_hv() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt-inner");
+        let storage = TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(FailingPutBackend(lt_inner.clone())),
+        };
+
+        let result = storage
+            .insert_object(
+                make_context(),
+                Some("lt-fail-test".into()),
+                &Default::default(),
+                make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+            )
+            .await;
+
+        assert!(result.is_err());
+        // OrphanHV: tombstone in HV, no data in LT.
+        let id = ObjectId::new(make_context(), "lt-fail-test".into());
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must be in HV");
+        assert!(hv_meta.is_tombstone());
+        assert!(lt_inner.is_empty());
+    }
+
+    /// If the process is killed after the HV tombstone is written but before the LT
+    /// write completes, an OrphanHV is left: tombstone in HV, no data in LT.
+    /// Reads return None; deletes and re-inserts recover the key.
+    #[tokio::test]
+    async fn pod_kill_during_insert_large_after_hv_tombstone() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let put_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let put_resume = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let storage = std::sync::Arc::new(TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(SyncBackend {
+                inner: lt_inner.clone(),
+                put_started: std::sync::Arc::clone(&put_started),
+                put_resume: std::sync::Arc::clone(&put_resume),
+            }),
+        });
+
+        let id = ObjectId::new(make_context(), "pod-kill-key".into());
+        let storage_task = std::sync::Arc::clone(&storage);
+        let insert_task = tokio::spawn(async move {
+            storage_task
+                .insert_object(
+                    make_context(),
+                    Some("pod-kill-key".into()),
+                    &Default::default(),
+                    make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+                )
+                .await
+        });
+
+        // Wait until the HV tombstone is written and the LT put is blocked.
+        put_started.notified().await;
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must exist");
+        assert!(hv_meta.is_tombstone());
+
+        // Simulate pod kill.
+        insert_task.abort();
+        put_resume.notify_one(); // unblock backend to avoid deadlock
+        let _ = insert_task.await;
+
+        // OrphanHV: tombstone in HV, no data in LT.
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must survive pod kill");
+        assert!(hv_meta.is_tombstone());
+        assert!(lt_inner.is_empty());
+        assert!(storage.get_object(&id).await.unwrap().is_none());
+    }
+
+    // Delete
+
+    #[tokio::test]
+    async fn delete_cleans_up_both_backends() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("delete-both".into()),
+                &Default::default(),
+                make_stream(&vec![0u8; 2 * 1024 * 1024]),
+            )
+            .await
+            .unwrap();
+
+        storage.delete_object(&id).await.unwrap();
+
+        assert!(!hv.contains(&id));
+        assert!(!lt.contains(&id));
+    }
+
+    /// When the LT delete fails, the tombstone is preserved so the object remains
+    /// reachable — no data is orphaned.
+    #[tokio::test]
+    async fn tombstone_preserved_when_long_term_delete_fails() {
+        let hv = InMemoryBackend::new("hv");
+        let storage = TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(FailingDeleteBackend(InMemoryBackend::new("lt"))),
+        };
+
+        let id = storage
+            .insert_object(
+                make_context(),
+                Some("fail-delete".into()),
+                &Default::default(),
+                make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+            )
+            .await
+            .unwrap();
+
+        assert!(storage.delete_object(&id).await.is_err());
+
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must be preserved");
+        assert!(hv_meta.is_tombstone());
+
+        let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = stream.try_collect().await.unwrap();
+        assert_eq!(body.len(), 2 * 1024 * 1024);
+        assert!(!metadata.is_tombstone());
+    }
+
+    // Concurrent insert + insert — clean
+
+    /// Two concurrent large inserts at the same key: both write (or overwrite) the
+    /// tombstone in HV, both write to LT — last write wins, tombstone stays, no
+    /// orphan.
+    #[tokio::test]
+    async fn race_concurrent_insert_insert_no_orphan() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let storage = std::sync::Arc::new(storage);
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+
+        let s1 = std::sync::Arc::clone(&storage);
+        let p1 = payload.clone();
+        let t1 = tokio::spawn(async move {
+            s1.insert_object(
+                make_context(),
+                Some("race-key".into()),
+                &Default::default(),
+                make_stream(&p1),
+            )
+            .await
+        });
+
+        let s2 = std::sync::Arc::clone(&storage);
+        let t2 = tokio::spawn(async move {
+            s2.insert_object(
+                make_context(),
+                Some("race-key".into()),
+                &Default::default(),
+                make_stream(&payload),
+            )
+            .await
+        });
+
+        t1.await.unwrap().unwrap();
+        t2.await.unwrap().unwrap();
+
+        let id = ObjectId::new(make_context(), "race-key".into());
+        let (hv_meta, _) = hv.get_stored(&id).expect("HV must have tombstone");
+        assert!(hv_meta.is_tombstone());
+        assert!(lt.contains(&id));
+        assert!(storage.get_object(&id).await.unwrap().is_some());
+    }
+
+    /// A small insert that arrives while a large insert's LT write is in progress
+    /// sees the HV tombstone via `put_non_tombstone` and routes its payload to LT.
+    /// Both writes complete consistently.
+    ///
+    /// Interleaving:
+    /// 1. Large insert writes tombstone to HV, blocks in LT.
+    /// 2. Small insert: `put_non_tombstone` sees tombstone → routes payload to LT.
+    /// 3. Both LT writes complete → tombstone in HV, data in LT.
+    #[tokio::test]
+    async fn race_small_insert_during_large_lt_write() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let put_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let put_resume = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let storage = std::sync::Arc::new(TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(SyncBackend {
+                inner: lt_inner.clone(),
+                put_started: std::sync::Arc::clone(&put_started),
+                put_resume: std::sync::Arc::clone(&put_resume),
+            }),
+        });
+
+        let id = ObjectId::new(make_context(), "concurrent-key".into());
+
+        // Start large insert: HV tombstone is written immediately, LT write blocks.
+        let storage_large = std::sync::Arc::clone(&storage);
+        let large_task = tokio::spawn(async move {
+            storage_large
+                .insert_object(
+                    make_context(),
+                    Some("concurrent-key".into()),
+                    &Default::default(),
+                    make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+                )
+                .await
+        });
+
+        // Wait until large insert is blocked in LT (tombstone already in HV).
+        put_started.notified().await;
+
+        // Small insert arrives. put_non_tombstone sees the tombstone → routes to LT.
+        // LT is still SyncBackend, so this write blocks too.
+        let storage_small = std::sync::Arc::clone(&storage);
+        let small_task = tokio::spawn(async move {
+            storage_small
+                .insert_object(
+                    make_context(),
+                    Some("concurrent-key".into()),
+                    &Default::default(),
+                    make_stream(b"small payload"),
+                )
+                .await
+        });
+
+        // Wait until small insert is also blocked in LT.
+        put_started.notified().await;
+
+        // Both tasks are waiting on put_resume. Yield to ensure both have reached
+        // the await point, then wake them together.
+        tokio::task::yield_now().await;
+        put_resume.notify_waiters();
+
+        large_task.await.unwrap().unwrap();
+        small_task.await.unwrap().unwrap();
+
+        // Both writes completed consistently: tombstone in HV, data in LT.
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must be in HV");
+        assert!(hv_meta.is_tombstone());
+        assert!(lt_inner.contains(&id));
+        assert!(storage.get_object(&id).await.unwrap().is_some());
+    }
+
+    // Concurrent insert + delete — VIOLATION: OrphanLT
+
+    /// Known gap: a concurrent insert and delete can race to leave an OrphanLT.
+    ///
+    /// Interleaving (HV-first):
+    /// 1. Insert writes tombstone to HV.
+    /// 2. Delete sees tombstone → deletes LT (empty) → deletes HV tombstone.
+    /// 3. Insert writes data to LT (tombstone already gone).
+    ///
+    /// Result: LT has data with no tombstone in HV — unreachable via the service.
+    /// Requires per-key serialization to fix; out of scope.
+    #[tokio::test]
+    async fn race_concurrent_insert_delete_causes_orphan_lt() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let put_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let put_resume = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let storage = std::sync::Arc::new(TieredStorage {
+            high_volume_backend: Box::new(hv.clone()),
+            long_term_backend: Box::new(SyncBackend {
+                inner: lt_inner.clone(),
+                put_started: std::sync::Arc::clone(&put_started),
+                put_resume: std::sync::Arc::clone(&put_resume),
+            }),
+        });
+
+        let id = ObjectId::new(make_context(), "race-del-key".into());
+
+        let storage_insert = std::sync::Arc::clone(&storage);
+        let insert_task = tokio::spawn(async move {
+            storage_insert
+                .insert_object(
+                    make_context(),
+                    Some("race-del-key".into()),
+                    &Default::default(),
+                    make_stream(&vec![0xABu8; 2 * 1024 * 1024]),
+                )
+                .await
+        });
+
+        // Wait until the HV tombstone is written and the LT put is blocked.
+        put_started.notified().await;
+        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone must exist");
+        assert!(hv_meta.is_tombstone());
+
+        // Delete runs concurrently: sees tombstone → deletes LT (empty) → removes tombstone.
+        storage.delete_object(&id).await.unwrap();
+        assert!(!hv.contains(&id));
+
+        // Resume insert: LT write completes after the tombstone is gone.
+        put_resume.notify_one();
+        insert_task.await.unwrap().unwrap();
+
+        // OrphanLT: data in LT, no tombstone in HV → unreachable.
+        assert!(lt_inner.contains(&id));
+        assert!(!hv.contains(&id));
+        assert!(storage.get_object(&id).await.unwrap().is_none());
     }
 }
