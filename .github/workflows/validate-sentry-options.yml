@@ -5,6 +5,9 @@ on:
     paths:
       - 'sentry-options/schemas/**'
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@1.0.1
