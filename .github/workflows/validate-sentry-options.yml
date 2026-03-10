@@ -7,7 +7,7 @@ on:
 
 jobs:
   validate:
-    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@f3f76cb9d1ee1ea5202cb986ce8a943a9e6212d9
+    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@1.0.1
     secrets: inherit
     with:
       schemas-path: sentry-options/schemas
