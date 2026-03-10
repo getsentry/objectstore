@@ -288,7 +288,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    
+
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::stream::make_stream;

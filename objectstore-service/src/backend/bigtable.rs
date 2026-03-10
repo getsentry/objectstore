@@ -310,22 +310,22 @@ impl BigTableBackend {
         Ok(response.into_inner())
     }
 
-    async fn put_row(
-        &self,
-        path: Vec<u8>,
-        metadata: &Metadata,
-        payload: Vec<u8>,
-        action: &str,
-    ) -> Result<v2::MutateRowResponse> {
+    /// Builds the three mutations that write an object: delete the existing row,
+    /// set the payload cell, set the metadata cell.
+    ///
+    /// Used by both `put_row` (unconditional write) and `put_non_tombstone`
+    /// (conditional write via `CheckAndMutateRowRequest`).
+    ///
+    /// NB: We explicitly delete the row before writing to clear stale metadata
+    /// on overwrite.
+    fn write_mutations(metadata: &Metadata, payload: Vec<u8>) -> Result<[mutation::Mutation; 3]> {
         let now = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {
             ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
             ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
             ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
         };
-
-        let mutations = [
-            // NB: We explicitly delete the row to clear metadata on overwrite.
+        Ok([
             mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
             mutation::Mutation::SetCell(mutation::SetCell {
                 family_name: family.to_owned(),
@@ -342,8 +342,18 @@ impl BigTableBackend {
                     cause,
                 })?,
             }),
-        ];
-        self.mutate(path, mutations, action).await
+        ])
+    }
+
+    async fn put_row(
+        &self,
+        path: Vec<u8>,
+        metadata: &Metadata,
+        payload: Vec<u8>,
+        action: &str,
+    ) -> Result<v2::MutateRowResponse> {
+        self.mutate(path, Self::write_mutations(metadata, payload)?, action)
+            .await
     }
 }
 
@@ -391,41 +401,11 @@ impl Backend for BigTableBackend {
         }
 
         let path = id.as_storage_path().to_string().into_bytes();
-
-        // Build the write mutations the same way put_row does.
-        let now = SystemTime::now();
-        let (family, timestamp_micros) = match metadata.expiration_policy {
-            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
-        };
-        let metadata_bytes = serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata".to_string(),
-            cause,
-        })?;
-        let write_mutations = vec![
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::DeleteFromRow(
-                    mutation::DeleteFromRow {},
-                )),
-            },
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: family.to_owned(),
-                    column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                    timestamp_micros,
-                    value: payload.into_bytes().into(),
-                })),
-            },
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: family.to_owned(),
-                    column_qualifier: COLUMN_METADATA.to_owned(),
-                    timestamp_micros,
-                    value: metadata_bytes,
-                })),
-            },
-        ];
+        let write_mutations: Vec<v2::Mutation> =
+            Self::write_mutations(metadata, payload.into_bytes().into())?
+                .into_iter()
+                .map(|m| v2::Mutation { mutation: Some(m) })
+                .collect();
 
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
