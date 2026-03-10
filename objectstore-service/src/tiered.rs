@@ -1743,4 +1743,332 @@ mod tests {
             }
         }
     }
+
+    // ==========================================
+    // Concurrent chaos fuzz testing
+    // ==========================================
+
+    mod chaos_fuzz {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use objectstore_types::metadata::Metadata;
+        use objectstore_types::scope::{Scope, Scopes};
+
+        use super::*;
+
+        const KEY_NAMES: &[&str] = &["key-a", "key-b", "key-c"];
+        const LARGE_SIZE: usize = super::BACKEND_SIZE_THRESHOLD + 1024;
+
+        fn make_context() -> ObjectContext {
+            ObjectContext {
+                usecase: "chaos".into(),
+                scopes: Scopes::from_iter([Scope::create("test", "chaos").unwrap()]),
+            }
+        }
+
+        // -- ChaosConfig + ChaosBackend --
+
+        #[derive(Debug, Clone)]
+        struct ChaosConfig {
+            put_error_pct: u8,
+            get_error_pct: u8,
+            get_metadata_error_pct: u8,
+            delete_error_pct: u8,
+        }
+
+        #[derive(Debug)]
+        struct ChaosBackend {
+            inner: InMemoryBackend,
+            config: ChaosConfig,
+            call_counter: AtomicU64,
+        }
+
+        impl ChaosBackend {
+            fn new(inner: InMemoryBackend, config: ChaosConfig) -> Self {
+                Self {
+                    inner,
+                    config,
+                    call_counter: AtomicU64::new(0),
+                }
+            }
+
+            fn should_fail(&self, error_pct: u8) -> bool {
+                if error_pct == 0 {
+                    return false;
+                }
+                let count = self.call_counter.fetch_add(1, Ordering::Relaxed);
+                let roll = (count.wrapping_mul(6_364_136_223_846_793_005)) % 100;
+                roll < error_pct as u64
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::backend::common::Backend for ChaosBackend {
+            fn name(&self) -> &'static str {
+                "chaos"
+            }
+
+            async fn put_object(
+                &self,
+                id: &ObjectId,
+                metadata: &Metadata,
+                stream: PayloadStream,
+            ) -> crate::error::Result<()> {
+                if self.should_fail(self.config.put_error_pct) {
+                    return Err(simulated_error("chaos: put_object"));
+                }
+                // Yield before the actual write to create interleaving
+                // windows between the multi-step TieredStorage operations.
+                tokio::task::yield_now().await;
+                self.inner.put_object(id, metadata, stream).await
+            }
+
+            async fn get_object(
+                &self,
+                id: &ObjectId,
+            ) -> crate::error::Result<Option<(Metadata, PayloadStream)>> {
+                if self.should_fail(self.config.get_error_pct) {
+                    return Err(simulated_error("chaos: get_object"));
+                }
+                tokio::task::yield_now().await;
+                self.inner.get_object(id).await
+            }
+
+            async fn get_metadata(&self, id: &ObjectId) -> crate::error::Result<Option<Metadata>> {
+                if self.should_fail(self.config.get_metadata_error_pct) {
+                    return Err(simulated_error("chaos: get_metadata"));
+                }
+                tokio::task::yield_now().await;
+                self.inner.get_metadata(id).await
+            }
+
+            async fn delete_object(&self, id: &ObjectId) -> crate::error::Result<()> {
+                if self.should_fail(self.config.delete_error_pct) {
+                    return Err(simulated_error("chaos: delete_object"));
+                }
+                tokio::task::yield_now().await;
+                self.inner.delete_object(id).await
+            }
+        }
+
+        /// Which write operation to perform concurrently.
+        #[derive(Clone, Copy)]
+        enum WriteOp {
+            InsertSmall,
+            InsertLarge,
+            Delete,
+        }
+
+        /// Runs `rounds` independent rounds, each spawning concurrent writes
+        /// to the *same* key, and returns a tally of invariant violations.
+        ///
+        /// All ops target a single key to maximize the chance of interleaving
+        /// between the multi-step backend calls inside `TieredStorage`.
+        async fn run_chaos_rounds(
+            rounds: usize,
+            ops: &[WriteOp],
+            hv_config: ChaosConfig,
+            lt_config: ChaosConfig,
+        ) -> HashMap<&'static str, u32> {
+            let mut violations: HashMap<&'static str, u32> = HashMap::new();
+            let key = KEY_NAMES[0];
+
+            for _ in 0..rounds {
+                let hv = InMemoryBackend::new("chaos-hv");
+                let lt = InMemoryBackend::new("chaos-lt");
+
+                let storage = Arc::new(TieredStorage {
+                    high_volume_backend: Box::new(ChaosBackend::new(hv.clone(), hv_config.clone())),
+                    long_term_backend: Box::new(ChaosBackend::new(lt.clone(), lt_config.clone())),
+                });
+
+                let context = make_context();
+
+                let handles: Vec<_> = ops
+                    .iter()
+                    .map(|&op| {
+                        let storage = Arc::clone(&storage);
+                        let ctx = context.clone();
+                        tokio::spawn(async move {
+                            match op {
+                                WriteOp::InsertSmall => {
+                                    let _ = storage
+                                        .insert_object(
+                                            ctx,
+                                            Some(key.into()),
+                                            &Default::default(),
+                                            make_stream(SMALL),
+                                        )
+                                        .await;
+                                }
+                                WriteOp::InsertLarge => {
+                                    let payload = vec![0xBB; LARGE_SIZE];
+                                    let _ = storage
+                                        .insert_object(
+                                            ctx,
+                                            Some(key.into()),
+                                            &Default::default(),
+                                            make_stream(&payload),
+                                        )
+                                        .await;
+                                }
+                                WriteOp::Delete => {
+                                    let id = ObjectId::new(ctx, key.into());
+                                    let _ = storage.delete_object(&id).await;
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                let results = futures_util::future::join_all(handles).await;
+                for (i, result) in results.iter().enumerate() {
+                    assert!(
+                        result.is_ok(),
+                        "Task {i} panicked: {:?}",
+                        result.as_ref().unwrap_err()
+                    );
+                }
+
+                let id = ObjectId::new(context, key.into());
+                if let Err(msg) = check_invariants(&hv, &lt, &id) {
+                    let label = if msg.contains("OrphanLT") {
+                        "OrphanLT"
+                    } else if msg.contains("DualData") {
+                        "DualData"
+                    } else {
+                        "Unknown"
+                    };
+                    *violations.entry(label).or_default() += 1;
+                }
+            }
+
+            violations
+        }
+
+        /// No-error config: yield points only, no injected failures.
+        fn no_error_config() -> ChaosConfig {
+            ChaosConfig {
+                put_error_pct: 0,
+                get_error_pct: 0,
+                get_metadata_error_pct: 0,
+                delete_error_pct: 0,
+            }
+        }
+
+        const ROUNDS: usize = 2000;
+
+        /// Concurrent insert(large) + insert(small) on the same key.
+        ///
+        /// The race window: A peeks and picks LongTerm, B peeks and picks
+        /// HighVolume. B checks HV metadata (no tombstone yet). A writes LT
+        /// + tombstone to HV. B overwrites HV with small data, destroying
+        /// the tombstone → DualData.
+        ///
+        /// TODO(consistency): Prevent via per-key serialization or conditional
+        /// writes. Flip to `assert!(!violations.contains_key(...))` when fixed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_insert_large_insert_small() {
+            use WriteOp::*;
+            let violations = run_chaos_rounds(
+                ROUNDS,
+                &[
+                    InsertLarge,
+                    InsertSmall,
+                    InsertLarge,
+                    InsertSmall,
+                    InsertLarge,
+                    InsertSmall,
+                ],
+                no_error_config(),
+                no_error_config(),
+            )
+            .await;
+
+            println!("insert_large+insert_small: {violations:?}");
+            assert!(
+                violations.contains_key("DualData") || violations.contains_key("OrphanLT"),
+                "Expected consistency violations from concurrent large+small insert"
+            );
+        }
+
+        /// Concurrent insert(small) + delete on a key that starts in Large
+        /// state (pre-seeded by a preceding insert(large)).
+        ///
+        /// The race window: delete sees the tombstone and deletes LT data.
+        /// Meanwhile insert checks HV metadata, sees the tombstone, and
+        /// routes to LT. Delete then removes the HV tombstone. Result:
+        /// new data in LT with nothing in HV → OrphanLT.
+        ///
+        /// TODO(consistency): Prevent via per-key serialization or conditional
+        /// writes. Flip to `assert!(!violations.contains_key(...))` when fixed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_insert_delete_from_large_state() {
+            use WriteOp::*;
+            let violations = run_chaos_rounds(
+                ROUNDS,
+                // First op seeds Large state; remaining ops race.
+                &[InsertLarge, InsertSmall, Delete, InsertSmall, Delete],
+                no_error_config(),
+                no_error_config(),
+            )
+            .await;
+
+            println!("insert+delete from large: {violations:?}");
+            assert!(
+                violations.contains_key("OrphanLT") || violations.contains_key("DualData"),
+                "Expected consistency violations from concurrent insert+delete"
+            );
+        }
+
+        /// Concurrent large inserts with targeted error injection to trigger
+        /// the double-failure cleanup path.
+        ///
+        /// The HV put (tombstone write) sometimes fails. When it does, the
+        /// cleanup tries to delete the already-written LT data — but that
+        /// also sometimes fails → OrphanLT.
+        ///
+        /// TODO(consistency): Fix insert cleanup to handle double failure.
+        /// Flip to `assert!(!violations.contains_key(...))` when fixed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_inserts_with_tombstone_write_errors() {
+            use WriteOp::*;
+            // HV: put errors (tombstone write fails), no other errors.
+            let hv_config = ChaosConfig {
+                put_error_pct: 25,
+                get_error_pct: 0,
+                get_metadata_error_pct: 0,
+                delete_error_pct: 0,
+            };
+            // LT: delete errors (cleanup fails), no other errors.
+            let lt_config = ChaosConfig {
+                put_error_pct: 0,
+                get_error_pct: 0,
+                get_metadata_error_pct: 0,
+                delete_error_pct: 25,
+            };
+            let violations = run_chaos_rounds(
+                ROUNDS,
+                &[
+                    InsertLarge,
+                    InsertSmall,
+                    InsertLarge,
+                    InsertSmall,
+                    InsertLarge,
+                    InsertSmall,
+                ],
+                hv_config,
+                lt_config,
+            )
+            .await;
+
+            println!("inserts with tombstone errors: {violations:?}");
+            assert!(
+                violations.contains_key("OrphanLT") || violations.contains_key("DualData"),
+                "Expected consistency violations from tombstone write + cleanup failures"
+            );
+        }
+    }
 }
