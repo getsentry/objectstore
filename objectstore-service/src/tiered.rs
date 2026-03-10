@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
 use crate::PayloadStream;
-use crate::backend::common::{BoxedBackend, DeleteOutcome, WriteOutcome};
+use crate::backend::common::{BoxedBackend, ConditionalOutcome};
 use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
@@ -98,12 +98,12 @@ impl TieredStorage {
                     .await?;
 
                 match outcome {
-                    WriteOutcome::Written => (
+                    ConditionalOutcome::Executed => (
                         BackendChoice::HighVolume,
                         self.high_volume_backend.name(),
                         stored_size,
                     ),
-                    WriteOutcome::Tombstone => {
+                    ConditionalOutcome::Tombstone => {
                         // A tombstone already exists in HV; write the data directly to
                         // long-term storage. No need to write the tombstone again.
                         self.long_term_backend
@@ -247,7 +247,7 @@ impl TieredStorage {
         let mut backend_type = self.high_volume_backend.name();
 
         let outcome = self.high_volume_backend.delete_non_tombstone(id).await?;
-        if outcome == DeleteOutcome::Tombstone {
+        if outcome == ConditionalOutcome::Tombstone {
             backend_choice = "long-term";
             backend_type = self.long_term_backend.name();
             // Delete the long-term object first, then clean up the tombstone.

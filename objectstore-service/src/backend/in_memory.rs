@@ -12,7 +12,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::Metadata;
 
-use super::common::{DeleteResponse, GetResponse, PutResponse, WriteOutcome};
+use super::common::{ConditionalOutcome, DeleteResponse, GetResponse, PutResponse};
 use crate::PayloadStream;
 use crate::error::Result;
 use crate::id::ObjectId;
@@ -81,18 +81,18 @@ impl super::common::Backend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: PayloadStream,
-    ) -> Result<WriteOutcome> {
+    ) -> Result<ConditionalOutcome> {
         // Buffer the payload before acquiring the lock so the lock is held
         // only for the check-and-write, making the operation atomic.
         let payload: BytesMut = stream.try_collect().await?;
         let mut store = self.store.lock().unwrap();
         if store.get(id).is_some_and(|(m, _)| m.is_tombstone()) {
-            return Ok(WriteOutcome::Tombstone);
+            return Ok(ConditionalOutcome::Tombstone);
         }
         let mut metadata = metadata.clone();
         metadata.size = Some(payload.len());
         store.insert(id.clone(), (metadata, payload.freeze()));
-        Ok(WriteOutcome::Written)
+        Ok(ConditionalOutcome::Executed)
     }
 
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {

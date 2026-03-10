@@ -13,8 +13,7 @@ use tonic::Code;
 
 use crate::PayloadStream;
 use crate::backend::common::{
-    Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
-    WriteOutcome,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -389,7 +388,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: PayloadStream,
-    ) -> Result<WriteOutcome> {
+    ) -> Result<ConditionalOutcome> {
         tracing::debug!("Conditional write to Bigtable backend");
 
         // Buffer the payload before the conditional RPC so the operation
@@ -427,9 +426,9 @@ impl Backend for BigTableBackend {
             .predicate_matched;
 
         Ok(if is_tombstone {
-            WriteOutcome::Tombstone
+            ConditionalOutcome::Tombstone
         } else {
-            WriteOutcome::Written
+            ConditionalOutcome::Executed
         })
     }
 
@@ -500,7 +499,7 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
         tracing::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -534,9 +533,9 @@ impl Backend for BigTableBackend {
             .predicate_matched;
 
         if is_tombstone {
-            Ok(DeleteOutcome::Tombstone)
+            Ok(ConditionalOutcome::Tombstone)
         } else {
-            Ok(DeleteOutcome::Deleted)
+            Ok(ConditionalOutcome::Executed)
         }
     }
 }
@@ -938,7 +937,7 @@ mod tests {
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Deleted);
+        assert_eq!(result, ConditionalOutcome::Executed);
 
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
@@ -959,7 +958,7 @@ mod tests {
         backend.put_object(&id, &metadata, make_stream(b"")).await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Tombstone);
+        assert_eq!(result, ConditionalOutcome::Tombstone);
 
         // Tombstone should still exist — delete_non_tombstone leaves it intact.
         let get_result = backend.get_metadata(&id).await?;
@@ -977,7 +976,7 @@ mod tests {
 
         let id = make_id();
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Deleted);
+        assert_eq!(result, ConditionalOutcome::Executed);
 
         Ok(())
     }
