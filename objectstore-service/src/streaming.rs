@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
-use sentry::Hub;
+use sentry::{Hub, TransactionContext};
 
 use crate::PayloadStream;
 use crate::concurrency::ConcurrencyPermit;
@@ -245,11 +245,23 @@ impl StreamExecutor {
                         Err(e) => return (idx, Err(e)),
                     };
 
+                    let hub = Hub::current();
+                    let parent_span = hub.configure_scope(|scope| scope.get_span());
+                    let new_hub = Hub::new_from_top(hub);
+                    let tx_ctx = TransactionContext::continue_from_span(
+                        "StreamExecutor::execute",
+                        op.kind(),
+                        parent_span,
+                    );
+                    let tx = new_hub.start_transaction(tx_ctx);
+
+                    let tx_guard = crate::concurrency::TransactionGuard::new(tx);
+
                     let spawn = crate::concurrency::spawn_metered(
                         op.kind(),
-                        permit,
+                        (permit, tx_guard),
                         async move { execute_operation(tiered, context, op).await },
-                        Hub::current(),
+                        new_hub,
                     );
 
                     (idx, spawn.await.map_err(E::from))

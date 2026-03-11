@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
-use sentry::{Hub, SentryFutureExt, Transaction, TransactionContext};
+use sentry::{Hub, TransactionContext};
 
 use crate::PayloadStream;
 use crate::backend::common::BoxedBackend;
@@ -259,15 +259,7 @@ impl StorageService {
         let ctx = TransactionContext::continue_from_span("StorageService::spawn", operation, span);
         let tx = new_hub.start_transaction(ctx);
 
-        struct TransactionGuard {
-            inner: Option<Transaction>,
-        }
-        impl Drop for TransactionGuard {
-            fn drop(&mut self) {
-                self.inner.take().map(|x| x.finish());
-            }
-        }
-        let tx_guard = TransactionGuard { inner: Some(tx) };
+        let tx_guard = crate::concurrency::TransactionGuard::new(tx);
 
         let to_drop = (permit, tx_guard);
         crate::concurrency::spawn_metered(operation, to_drop, f, new_hub).await

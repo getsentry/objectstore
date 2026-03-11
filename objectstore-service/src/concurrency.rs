@@ -135,6 +135,29 @@ impl Drop for ConcurrencyPermit {
     }
 }
 
+/// RAII guard that finishes a [`sentry::Transaction`] on drop.
+///
+/// Wraps the transaction in an `Option` so it can be consumed in `Drop::drop`,
+/// which only receives `&mut self`.
+pub(crate) struct TransactionGuard {
+    inner: Option<sentry::Transaction>,
+}
+
+impl TransactionGuard {
+    /// Creates a new guard that will finish the given transaction on drop.
+    pub(crate) fn new(tx: sentry::Transaction) -> Self {
+        Self { inner: Some(tx) }
+    }
+}
+
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.inner.take() {
+            tx.finish();
+        }
+    }
+}
+
 /// Spawns a future on a dedicated task with panic isolation and timing metrics.
 ///
 /// The `guard` is moved into the spawned task and dropped after the future
