@@ -173,13 +173,12 @@ async fn main() -> anyhow::Result<()> {
         };
 
         loop {
-            if worker_shutdown.is_cancelled() {
-                break;
-            }
-
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break, // semaphore closed
+            let permit = tokio::select! {
+                () = worker_shutdown.cancelled() => break,
+                p = semaphore.clone().acquire_owned() => match p {
+                    Ok(p) => p,
+                    Err(_) => break, // semaphore closed
+                },
             };
 
             let backend = Arc::clone(&backend);
@@ -229,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
     // Print final summary.
     let guard = sketch.lock().unwrap(); // INVARIANT: no panic inside lock
     let ops = guard.count();
+    let failed = failures.load(Ordering::Relaxed);
     if ops > 0 {
         let elapsed = bench_start.elapsed();
         let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
         let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
         let p99 = Duration::from_secs_f64(guard.quantile(0.99).unwrap().unwrap());
         let max = Duration::from_secs_f64(guard.max().unwrap());
-        eprintln!(
+        eprint!(
             "\nfinal: {} ops | {:.0} ops/s | {:.2} ops/s/conn | {} | {}\n  avg: {}   p50: {}   p95: {}   p99: {}   max: {}",
             ops.bold(),
             ops_per_sec.bold(),
@@ -252,6 +252,13 @@ async fn main() -> anyhow::Result<()> {
             format_ms(p99),
             format_ms(max),
         );
+        if failed > 0 {
+            eprintln!("\n  failed: {}", failed.red().bold());
+        } else {
+            eprintln!();
+        }
+    } else if failed > 0 {
+        eprintln!("\nfinal: {} ops | failed: {}", ops, failed.red().bold());
     }
 
     Ok(())
