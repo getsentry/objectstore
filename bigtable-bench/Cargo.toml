@@ -1,0 +1,26 @@
+[package]
+name = "bigtable-bench"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Benchmark tool for writing objects directly to the Bigtable backend"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+argh = "0.1.13"
+bytes = { workspace = true }
+bytesize = "2.0.1"
+futures-util = { workspace = true }
+mimalloc = { workspace = true }
+objectstore-service = { workspace = true }
+objectstore-types = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+rustls = { version = "0.23", default-features = false }
+sketches-ddsketch = "0.3.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "signal"] }
+tokio-util = { workspace = true }
+yansi = "1.0.1"

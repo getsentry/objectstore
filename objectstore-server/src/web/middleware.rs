@@ -35,6 +35,7 @@ pub async fn limit_web_concurrency(
             "web.concurrency.rejected": 1,
             "service" => service.as_str().unwrap_or("unknown"),
         );
+        tracing::warn!("Request rejected: web concurrency limit reached");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 

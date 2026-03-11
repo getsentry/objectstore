@@ -26,7 +26,7 @@ pub(super) type DeleteResponse = ();
 ///
 /// Returned by [`Backend::put_non_tombstone`] and [`Backend::delete_non_tombstone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConditionalOutcome {
+pub enum ConditionalOutcome {
     /// The operation was executed (no tombstone was present).
     Executed,
     /// A redirect tombstone was found; the operation was skipped.
@@ -36,6 +36,7 @@ pub(crate) enum ConditionalOutcome {
 /// A type-erased [`Backend`] instance.
 pub type BoxedBackend = Box<dyn Backend>;
 
+/// Trait implemented by all storage backends.
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.

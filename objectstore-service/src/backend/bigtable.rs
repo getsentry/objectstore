@@ -42,6 +42,7 @@ const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
 
+/// BigTable storage backend for high-volume, low-latency object storage.
 pub struct BigTableBackend {
     bigtable: BigTableConnection,
 
@@ -172,6 +173,10 @@ impl RowData {
 }
 
 impl BigTableBackend {
+    /// Creates a new [`BigTableBackend`].
+    ///
+    /// Pass an `endpoint` to connect to a local emulator; omit it to use real GCP credentials.
+    /// `connections` controls the gRPC connection pool size (defaults to 1).
     pub async fn new(
         endpoint: Option<&str>,
         project_id: &str,

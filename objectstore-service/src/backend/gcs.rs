@@ -267,6 +267,7 @@ fn is_retryable(error: &Error) -> bool {
     )
 }
 
+/// GCS JSON API backend for long-term storage of large objects.
 pub struct GcsBackend {
     client: reqwest::Client,
     endpoint: Url,

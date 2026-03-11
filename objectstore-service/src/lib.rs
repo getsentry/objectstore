@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-mod backend;
+pub mod backend;
 mod concurrency;
 pub mod error;
 mod gcp_auth;

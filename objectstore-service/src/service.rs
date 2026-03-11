@@ -215,6 +215,7 @@ impl StorageService {
         };
         let reservation = acquire_result.inspect_err(|_| {
             objectstore_metrics::counter!("service.concurrency.rejected": 1);
+            tracing::warn!("Request rejected: service at capacity");
         })?;
 
         Ok(StreamExecutor {
@@ -259,6 +260,7 @@ impl StorageService {
     {
         let permit = self.concurrency.try_acquire().inspect_err(|_| {
             objectstore_metrics::counter!("service.concurrency.rejected": 1);
+            tracing::warn!("Request rejected: service at capacity");
         })?;
 
         crate::concurrency::spawn_metered(operation, permit, f).await

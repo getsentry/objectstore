@@ -65,12 +65,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             .killswitches
             .matches(id.context(), service.as_str())
         {
-            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }
 
         if !state.rate_limiter.check(id.context()) {
-            tracing::debug!("Request rejected due to rate limits");
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -140,12 +138,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             .killswitches
             .matches(&context, service.as_str())
         {
-            tracing::debug!("Request rejected due to killswitches");
             return Err(ObjectRejection::Killswitched);
         }
 
         if !state.rate_limiter.check(&context) {
-            tracing::debug!("Request rejected due to rate limits");
             return Err(ObjectRejection::RateLimited);
         }
 

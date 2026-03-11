@@ -15,12 +15,14 @@ use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
 
+/// Local filesystem backend for development and testing.
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
 }
 
 impl LocalFsBackend {
+    /// Creates a new [`LocalFsBackend`] rooted at the given directory.
     pub fn new(path: &Path) -> Self {
         Self { path: path.into() }
     }
