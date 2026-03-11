@@ -256,10 +256,11 @@ impl StreamExecutor {
                     let tx = new_hub.start_transaction(tx_ctx);
 
                     let tx_guard = crate::concurrency::TransactionGuard::new(tx);
+                    let to_drop = (permit, tx_guard);
 
                     let spawn = crate::concurrency::spawn_metered(
                         op.kind(),
-                        (permit, tx_guard),
+                        to_drop,
                         async move { execute_operation(tiered, context, op).await },
                         new_hub,
                     );

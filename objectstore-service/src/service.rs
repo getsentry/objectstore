@@ -258,7 +258,6 @@ impl StorageService {
         let new_hub = Hub::new_from_top(hub);
         let ctx = TransactionContext::continue_from_span("StorageService::spawn", operation, span);
         let tx = new_hub.start_transaction(ctx);
-
         let tx_guard = crate::concurrency::TransactionGuard::new(tx);
 
         let to_drop = (permit, tx_guard);
