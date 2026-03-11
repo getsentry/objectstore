@@ -4,7 +4,7 @@ use objectstore_service::{PayloadStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, AuthError};
 use crate::endpoints::common::ApiResult;
 
 /// Wrapper around [`StorageService`] that ensures each operation is authorized.
@@ -32,23 +32,47 @@ use crate::endpoints::common::ApiResult;
 pub struct AuthAwareService {
     service: StorageService,
     context: Option<AuthContext>,
+    enforce: bool,
 }
 
 impl AuthAwareService {
-    /// Creates a new `AuthAwareService` using the given service and auth context.
+    /// Creates a new `AuthAwareService` using the given [`StorageService`], [`AuthContext`], and
+    /// enforcement setting.
     ///
-    /// If no auth context is provided, authorization is disabled and all operations will be
-    /// permitted.
-    pub fn new(service: StorageService, context: Option<AuthContext>) -> Self {
-        Self { service, context }
+    /// If enforcement is enabled, an `AuthContext` must be provided and its checks must succeed
+    /// for an operation to be permitted.
+    ///
+    /// If enforcement is disabled, an `AuthContext` is not required. If one is provided, its
+    /// checks will be run but their results ignored. All operations will be permitted.
+    pub fn new(
+        service: StorageService,
+        context: Option<AuthContext>,
+        enforce: bool,
+    ) -> ApiResult<Self> {
+        if enforce && context.is_none() {
+            let err = AuthError::InternalError("Missing auth context".into());
+            err.log(None, None);
+            Err(err.into())
+        } else {
+            Ok(Self {
+                service,
+                context,
+                enforce,
+            })
+        }
     }
 
     fn assert_authorized(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
-        if let Some(auth) = &self.context {
-            auth.assert_authorized(perm, context)?;
+        let auth_result = match &self.context {
+            Some(auth) => auth.assert_authorized(perm, context),
+            None => Ok(()),
         }
+        .inspect_err(|err| err.log(Some(perm), Some(context.usecase.as_str())));
 
-        Ok(())
+        match self.enforce {
+            true => Ok(auth_result?),
+            false => Ok(()),
+        }
     }
 
     /// Checks whether the request is authorized for the given permission on the given context.

@@ -145,7 +145,6 @@ impl AuthContext {
         context: &ObjectContext,
     ) -> Result<(), AuthError> {
         if !self.permissions.contains(&perm) || self.usecase != context.usecase {
-            tracing::debug!(?self, ?perm, ?context, "Authorization failed");
             return Err(AuthError::NotPermitted);
         }
 
@@ -156,7 +155,6 @@ impl AuthContext {
                 None => false,
             };
             if !authorized {
-                tracing::debug!(?self, ?perm, ?context, "Authorization failed");
                 return Err(AuthError::NotPermitted);
             }
         }

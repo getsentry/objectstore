@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 /// Permissions that control whether different operations are authorized.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, Copy)]
 pub enum Permission {
     /// Read / download objects (serialized as `"object.read"`).
     #[serde(rename = "object.read")]
@@ -31,5 +31,16 @@ impl Permission {
             Permission::ObjectWrite,
             Permission::ObjectDelete,
         ])
+    }
+}
+
+impl std::fmt::Display for Permission {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::ObjectRead => "object.read",
+            Self::ObjectWrite => "object.write",
+            Self::ObjectDelete => "object.delete",
+        };
+        f.write_str(s)
     }
 }

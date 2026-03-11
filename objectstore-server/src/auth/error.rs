@@ -1,3 +1,4 @@
+use objectstore_types::auth::Permission;
 use thiserror::Error;
 
 /// Error type for different authorization failure scenarios.
@@ -24,4 +25,28 @@ pub enum AuthError {
     /// Indicates that the requested operation is not authorized and auth enforcement is enabled.
     #[error("operation not allowed")]
     NotPermitted,
+}
+
+impl AuthError {
+    /// Return a shortname for the failure reason that can be used to tag metrics.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::InternalError(_) => "internal_error",
+            Self::ValidationFailure(_) => "validation_failure",
+            Self::VerificationFailure => "verification_failure",
+            Self::NotPermitted => "not_permitted",
+        }
+    }
+
+    /// Increment a counter and emit a debug log for this auth failure.
+    pub fn log(&self, permission: Option<Permission>, usecase: Option<&str>) {
+        let code = self.code();
+        objectstore_metrics::counter!(
+            "server.auth.failure": 1,
+            "code" => code,
+        );
+        let msg = self.to_string();
+        tracing::debug!(?permission, ?usecase, ?code, ?msg, "Authorization failure");
+    }
 }
