@@ -179,7 +179,7 @@ where
             let _ = tx.send(result);
             drop(guard);
         }
-        .bind_hub(Hub::current()),
+        .bind_hub(Hub::new_from_top(Hub::current())),
     );
     rx.await.map_err(|_| Error::Dropped)?
 }
