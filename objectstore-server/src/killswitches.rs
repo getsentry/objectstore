@@ -20,8 +20,25 @@ pub struct Killswitches(pub Vec<Killswitch>);
 
 impl Killswitches {
     /// Returns `true` if any of the contained killswitches matches the given context.
+    ///
+    /// On match, emits a `server.request.killswitched` metric counter and a `tracing::warn!` log.
     pub fn matches(&self, context: &ObjectContext, service: Option<&str>) -> bool {
-        self.0.iter().any(|s| s.matches(context, service))
+        let Some(switch) = self.find(context, service) else {
+            return false;
+        };
+
+        objectstore_metrics::counter!("server.request.killswitched": 1);
+        tracing::warn!(killswitch = ?switch, "Request rejected: killswitch active");
+        true
+    }
+
+    /// Returns the first killswitch that matches the given context, or `None` if none match.
+    pub fn find<'a>(
+        &'a self,
+        context: &ObjectContext,
+        service: Option<&str>,
+    ) -> Option<&'a Killswitch> {
+        self.0.iter().find(|s| s.matches(context, service))
     }
 }
 
