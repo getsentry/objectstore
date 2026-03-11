@@ -27,15 +27,19 @@ const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
+/// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {
+    /// Returns the token string.
     fn as_str(&self) -> &str;
 }
 
+/// Provides authentication tokens for S3-compatible requests.
 pub trait TokenProvider: Send + Sync + 'static {
+    /// Returns a fresh token, fetching or refreshing it as needed.
     fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
 }
 
-// this only exists because we have to provide *some* kind of provider
+/// Placeholder [`TokenProvider`] for unauthenticated backends.
 #[derive(Debug)]
 pub struct NoToken;
 
@@ -51,6 +55,7 @@ impl Token for NoToken {
     }
 }
 
+/// S3-compatible storage backend with pluggable authentication.
 pub struct S3CompatibleBackend<T> {
     client: reqwest::Client,
 
@@ -61,8 +66,7 @@ pub struct S3CompatibleBackend<T> {
 }
 
 impl<T> S3CompatibleBackend<T> {
-    /// Creates a new S3 compatible backend bound to the given bucket.
-    #[expect(dead_code)]
+    /// Creates a new S3-compatible backend bound to the given bucket.
     pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
         Self {
             client: common::reqwest_client(),
@@ -222,6 +226,7 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
 }
 
 impl S3CompatibleBackend<NoToken> {
+    /// Creates a new S3-compatible backend that sends unauthenticated requests.
     pub fn without_token(endpoint: &str, bucket: &str) -> Self {
         Self {
             client: common::reqwest_client(),

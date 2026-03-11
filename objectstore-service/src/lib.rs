@@ -2,7 +2,6 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-#[allow(missing_docs, private_interfaces)]
 pub mod backend;
 mod concurrency;
 pub mod error;

@@ -24,7 +24,7 @@ pub(super) type DeleteResponse = ();
 
 /// Response from [`Backend::delete_non_tombstone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeleteOutcome {
+pub enum DeleteOutcome {
     /// The entity was a redirect tombstone; it was left intact.
     Tombstone,
     /// The entity was a regular object (now deleted) or non-existent.
@@ -34,6 +34,7 @@ pub(crate) enum DeleteOutcome {
 /// A type-erased [`Backend`] instance.
 pub type BoxedBackend = Box<dyn Backend>;
 
+/// Trait implemented by all storage backends.
 #[async_trait::async_trait]
 pub trait Backend: Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
