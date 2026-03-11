@@ -14,21 +14,29 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let service = state.service.clone();
-        if !state.config.auth.enforce {
-            return Ok(AuthAwareService::new(service, None));
-        }
-
         let encoded_token = parts
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let context = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
-            .inspect_err(|err| tracing::debug!("Authorization rejected: `{:?}`", err))?;
+        // Attempt to decode / verify the JWT, logging failure
+        let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
+            .inspect_err(|err| err.log(None, None));
 
-        Ok(AuthAwareService::new(service, Some(context)))
+        // If auth enforcement is enabled, `from_encoded_jwt()` must have succeeded.
+        // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
+        // still proceed with `None` if it failed.
+        let auth_context = match state.config.auth.enforce {
+            true => Some(auth_result?),
+            false => auth_result.ok(),
+        };
+
+        AuthAwareService::new(
+            state.service.clone(),
+            auth_context,
+            state.config.auth.enforce,
+        )
     }
 }
 
