@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
+use sentry::{Hub, SentryFutureExt};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
@@ -153,30 +154,33 @@ where
     objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let start = tokio::time::Instant::now();
-        let result = std::panic::AssertUnwindSafe(f)
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|payload| Err(Error::panic(payload)));
+    tokio::spawn(
+        async move {
+            let start = tokio::time::Instant::now();
+            let result = std::panic::AssertUnwindSafe(f)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
-        if let Err(ref e) = result {
-            tracing::error!(
-                operation,
-                error = e as &dyn std::error::Error,
-                "Task failed"
+            if let Err(ref e) = result {
+                tracing::error!(
+                    operation,
+                    error = e as &dyn std::error::Error,
+                    "Task failed"
+                );
+            }
+
+            objectstore_metrics::distribution!(
+                "service.task.duration"@s: start.elapsed(),
+                "operation" => operation,
+                "outcome" => if result.is_ok() { "success" } else { "error" }
             );
+
+            let _ = tx.send(result);
+            drop(guard);
         }
-
-        objectstore_metrics::distribution!(
-            "service.task.duration"@s: start.elapsed(),
-            "operation" => operation,
-            "outcome" => if result.is_ok() { "success" } else { "error" }
-        );
-
-        let _ = tx.send(result);
-        drop(guard);
-    });
+        .bind_hub(Hub::current()),
+    );
     rx.await.map_err(|_| Error::Dropped)?
 }
 

@@ -2589,6 +2589,7 @@ dependencies = [
  "objectstore-metrics",
  "objectstore-types",
  "reqwest 0.12.28",
+ "sentry",
  "serde",
  "serde_json",
  "tempfile",
