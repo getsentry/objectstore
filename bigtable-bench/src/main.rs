@@ -100,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
     let sketch = Arc::new(Mutex::new(DDSketch::default()));
     let failures = Arc::new(AtomicUsize::new(0));
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let concurrency = args.concurrency;
     let pool_size = args.pool;
     let bench_start = Instant::now();
 
