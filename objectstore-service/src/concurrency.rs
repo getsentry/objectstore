@@ -145,11 +145,12 @@ impl Drop for ConcurrencyPermit {
 /// `service.task.duration` (distribution) when the task completes, both tagged
 /// with the given `operation` name. The duration tag includes an `outcome` of
 /// `"success"` or `"error"`.
-pub async fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
+pub async fn spawn_metered<T, G, F, H>(operation: &'static str, guard: G, f: F, hub: H) -> Result<T>
 where
     T: Send + 'static,
     G: Send + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
+    H: Into<Arc<Hub>>,
 {
     objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
 
@@ -179,7 +180,7 @@ where
             let _ = tx.send(result);
             drop(guard);
         }
-        .bind_hub(Hub::new_from_top(Hub::current())),
+        .bind_hub(hub),
     );
     rx.await.map_err(|_| Error::Dropped)?
 }
