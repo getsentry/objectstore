@@ -44,7 +44,7 @@ pub trait TokenProvider: Send + Sync + 'static {
 pub struct NoToken;
 
 impl TokenProvider for NoToken {
-    #[allow(refining_impl_trait_internal)] // otherwise, returning `!` will not implement the required traits
+    #[allow(refining_impl_trait)]
     async fn get_token(&self) -> anyhow::Result<NoToken> {
         unimplemented!()
     }
