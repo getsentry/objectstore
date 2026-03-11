@@ -273,6 +273,10 @@ Similar to the objectstore server, you can find example configuration files in
 the `config` subfolder. Copy and save your own files there, as they will not be
 tracked by git.
 
+To load test the Bigtable backend directly (bypassing the HTTP layer), use the
+`bigtable-bench` tool. See [`bigtable-bench/README.md`](bigtable-bench/README.md)
+for usage and examples.
+
 ## License
 
 Like Sentry, Objectstore is licensed under the FSL. See the `LICENSE.md` file

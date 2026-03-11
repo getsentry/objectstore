@@ -429,6 +429,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bigtable-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argh",
+ "bytes",
+ "bytesize",
+ "futures-util",
+ "mimalloc",
+ "objectstore-service",
+ "objectstore-types",
+ "rand 0.9.2",
+ "rustls",
+ "sketches-ddsketch",
+ "tokio",
+ "tokio-util",
+ "yansi",
+]
+
+[[package]]
 name = "bigtable_rs"
 version = "0.2.19"
 source = "git+https://github.com/getsentry/bigtable_rs.git?rev=48cd2b86d9116f70b0ffdb89ea4e0d6a22560880#48cd2b86d9116f70b0ffdb89ea4e0d6a22560880"
