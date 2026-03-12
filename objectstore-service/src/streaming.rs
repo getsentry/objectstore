@@ -41,7 +41,6 @@ use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
-use sentry::{Hub, TransactionContext};
 
 use crate::PayloadStream;
 use crate::concurrency::ConcurrencyPermit;

@@ -10,7 +10,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
-use sentry::{Hub, TransactionContext};
 
 use crate::PayloadStream;
 use crate::backend::common::BoxedBackend;
