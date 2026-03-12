@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
+use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
@@ -152,31 +153,49 @@ where
 {
     objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
 
+    let hub = Hub::current();
+    let span = hub.configure_scope(|scope| scope.get_span());
+
+    let new_hub = Hub::new_from_top(hub);
+    let transaction = new_hub.start_transaction(TransactionContext::continue_from_span(
+        operation,
+        "tokio.task",
+        span,
+    ));
+
+    let scope_guard = new_hub.push_scope();
+    new_hub.configure_scope(|scope| scope.set_span(Some(transaction.clone().into())));
+
     let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let start = tokio::time::Instant::now();
-        let result = std::panic::AssertUnwindSafe(f)
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|payload| Err(Error::panic(payload)));
+    tokio::spawn(
+        async move {
+            let start = tokio::time::Instant::now();
+            let result = std::panic::AssertUnwindSafe(f)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
-        if let Err(ref e) = result {
-            tracing::error!(
-                operation,
-                error = e as &dyn std::error::Error,
-                "Task failed"
+            if let Err(ref e) = result {
+                tracing::error!(
+                    operation,
+                    error = e as &dyn std::error::Error,
+                    "Task failed"
+                );
+            }
+
+            objectstore_metrics::distribution!(
+                "service.task.duration"@s: start.elapsed(),
+                "operation" => operation,
+                "outcome" => if result.is_ok() { "success" } else { "error" }
             );
+
+            let _ = tx.send(result);
+            drop(guard);
+            transaction.finish();
+            drop(scope_guard);
         }
-
-        objectstore_metrics::distribution!(
-            "service.task.duration"@s: start.elapsed(),
-            "operation" => operation,
-            "outcome" => if result.is_ok() { "success" } else { "error" }
-        );
-
-        let _ = tx.send(result);
-        drop(guard);
-    });
+        .bind_hub(new_hub),
+    );
     rx.await.map_err(|_| Error::Dropped)?
 }
 
