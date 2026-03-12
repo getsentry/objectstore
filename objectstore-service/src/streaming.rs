@@ -255,9 +255,11 @@ impl StreamExecutor {
                     );
                     let tx = new_hub.start_transaction(tx_ctx);
 
-                    let tx_guard = crate::concurrency::TransactionGuard::new(tx);
-                    let to_drop = (permit, tx_guard);
+                    let scope_guard = new_hub.push_scope();
+                    new_hub.configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
+                    let tx_guard = crate::concurrency::TransactionGuard::new(tx.clone());
 
+                    let to_drop = (permit, tx_guard, scope_guard);
                     let spawn = crate::concurrency::spawn_metered(
                         op.kind(),
                         to_drop,
