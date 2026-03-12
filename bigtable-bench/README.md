@@ -17,7 +17,8 @@ cargo run --release -p bigtable-bench -- [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-c` | `10` | Concurrent put requests |
-| `-s` | `50KB` | Object size (e.g. `4096`, `1MB`) |
+| `--p50` | `2KiB` | Median object size (p50) |
+| `--p99` | `385KiB` | 99th-percentile object size (p99) |
 | `-p` | `1` | Bigtable gRPC connection pool size |
 | `-a` | — | Emulator address (omit for real GCP) |
 | `--project` | `testing` | GCP project ID |

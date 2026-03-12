@@ -19,6 +19,7 @@ mimalloc = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
+rand_distr = "0.5.1"
 rustls = { version = "0.23", default-features = false }
 sketches-ddsketch = "0.3.0"
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "signal"] }
