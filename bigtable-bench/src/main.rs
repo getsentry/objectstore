@@ -76,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
     let p99 = args.p99.as_u64() as f64;
     let mu = p50.ln();
     let sigma = (p99.ln() - mu) / 2.3263;
-    let size_distribution = LogNormal::new(mu, sigma)
-        .expect("invalid size distribution parameters"); // INVARIANT: p50 and p99 are positive
+    let size_distribution =
+        LogNormal::new(mu, sigma).expect("invalid size distribution parameters"); // INVARIANT: p50 and p99 are positive
 
     match &args.addr {
         Some(addr) => eprintln!(
@@ -141,8 +141,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
             let ops_per_sec_per_conn = ops_per_sec / pool_size as f64;
-            let bytes_per_sec =
-                stats_bytes.load(Ordering::Relaxed) as f64 / elapsed.as_secs_f64();
+            let bytes_per_sec = stats_bytes.load(Ordering::Relaxed) as f64 / elapsed.as_secs_f64();
             let avg = Duration::from_secs_f64(guard.sum().unwrap() / ops as f64);
             let p50 = Duration::from_secs_f64(guard.quantile(0.5).unwrap().unwrap());
             let p95 = Duration::from_secs_f64(guard.quantile(0.95).unwrap().unwrap());
@@ -213,8 +212,7 @@ async fn main() -> anyhow::Result<()> {
                 let _permit = permit;
 
                 let mut rng = SmallRng::from_os_rng();
-                let object_size =
-                    (size_dist.sample(&mut rng) as u64).min(MAX_OBJECT_SIZE) as usize;
+                let object_size = (size_dist.sample(&mut rng) as u64).min(MAX_OBJECT_SIZE) as usize;
                 let mut buf = vec![0u8; object_size];
                 rng.fill(&mut buf[..]);
 
