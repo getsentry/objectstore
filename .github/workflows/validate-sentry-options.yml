@@ -1,0 +1,16 @@
+name: Validate sentry-options schema
+
+on:
+  pull_request:
+    paths:
+      - 'sentry-options/schemas/**'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@586df8a9214a4bb7d5cf0a39b6bb3887ddab70c6 # v1.0.1
+    secrets: inherit
+    with:
+      schemas-path: sentry-options/schemas
