@@ -1,4 +1,5 @@
-FROM gcr.io/distroless/cc-debian12:nonroot
+ARG IMAGE_TAG=nonroot
+FROM gcr.io/distroless/cc-debian12:${IMAGE_TAG}
 
 ARG BINARY=objectstore
 COPY ${BINARY} /bin/entrypoint
