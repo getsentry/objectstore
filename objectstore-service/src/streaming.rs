@@ -245,27 +245,9 @@ impl StreamExecutor {
                         Err(e) => return (idx, Err(e)),
                     };
 
-                    let hub = Hub::current();
-                    let parent_span = hub.configure_scope(|scope| scope.get_span());
-                    let new_hub = Hub::new_from_top(hub);
-                    let tx_ctx = TransactionContext::continue_from_span(
-                        "StreamExecutor::execute",
-                        op.kind(),
-                        parent_span,
-                    );
-                    let tx = new_hub.start_transaction(tx_ctx);
-
-                    let scope_guard = new_hub.push_scope();
-                    new_hub.configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
-                    let tx_guard = crate::concurrency::TransactionGuard::new(tx.clone());
-
-                    let to_drop = (permit, tx_guard, scope_guard);
-                    let spawn = crate::concurrency::spawn_metered(
-                        op.kind(),
-                        to_drop,
-                        async move { execute_operation(tiered, context, op).await },
-                        new_hub,
-                    );
+                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, async move {
+                        execute_operation(tiered, context, op).await
+                    });
 
                     (idx, spawn.await.map_err(E::from))
                 }

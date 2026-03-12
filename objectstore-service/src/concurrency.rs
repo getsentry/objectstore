@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
-use sentry::{Hub, SentryFutureExt};
+use sentry::{Hub, SentryFutureExt, TransactionContext, protocol::Span};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
@@ -135,29 +135,6 @@ impl Drop for ConcurrencyPermit {
     }
 }
 
-/// RAII guard that finishes a [`sentry::Transaction`] on drop.
-///
-/// Wraps the transaction in an `Option` so it can be consumed in `Drop::drop`,
-/// which only receives `&mut self`.
-pub(crate) struct TransactionGuard {
-    inner: Option<sentry::Transaction>,
-}
-
-impl TransactionGuard {
-    /// Creates a new guard that will finish the given transaction on drop.
-    pub(crate) fn new(tx: sentry::Transaction) -> Self {
-        Self { inner: Some(tx) }
-    }
-}
-
-impl Drop for TransactionGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.inner.take() {
-            tx.finish();
-        }
-    }
-}
-
 /// Spawns a future on a dedicated task with panic isolation and timing metrics.
 ///
 /// The `guard` is moved into the spawned task and dropped after the future
@@ -168,14 +145,26 @@ impl Drop for TransactionGuard {
 /// `service.task.duration` (distribution) when the task completes, both tagged
 /// with the given `operation` name. The duration tag includes an `outcome` of
 /// `"success"` or `"error"`.
-pub async fn spawn_metered<T, G, F, H>(operation: &'static str, guard: G, f: F, hub: H) -> Result<T>
+pub async fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
 where
     T: Send + 'static,
     G: Send + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
-    H: Into<Arc<Hub>>,
 {
     objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
+
+    let hub = Hub::current();
+    let span = hub.configure_scope(|scope| scope.get_span());
+
+    let new_hub = Hub::new_from_top(hub);
+    let transaction = new_hub.start_transaction(TransactionContext::continue_from_span(
+        operation,
+        "tokio.task",
+        span,
+    ));
+
+    let scope_guard = new_hub.push_scope();
+    new_hub.configure_scope(|scope| scope.set_span(Some(transaction.clone().into())));
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(
@@ -202,8 +191,10 @@ where
 
             let _ = tx.send(result);
             drop(guard);
+            transaction.finish();
+            drop(scope_guard);
         }
-        .bind_hub(hub),
+        .bind_hub(new_hub),
     );
     rx.await.map_err(|_| Error::Dropped)?
 }
