@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use argh::FromArgs;
+use bytes::Bytes;
 use bytesize::ByteSize;
 use futures_util::StreamExt;
 use rand::rngs::SmallRng;
@@ -217,10 +218,7 @@ async fn main() -> anyhow::Result<()> {
                 rng.fill(&mut buf[..]);
 
                 let id = ObjectId::random(context);
-                let stream = futures_util::stream::once(async {
-                    Ok::<_, std::io::Error>(bytes::Bytes::from(buf))
-                })
-                .boxed();
+                let stream = futures_util::stream::once(async { Ok(Bytes::from(buf)) }).boxed();
 
                 let start = Instant::now();
                 let result = backend.put_object(&id, &metadata, stream).await;

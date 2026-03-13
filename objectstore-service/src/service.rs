@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 
-use crate::PayloadStream;
 use crate::backend::common::BoxedBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 use crate::tiered::TieredStorage;
 
@@ -282,7 +282,7 @@ impl StorageService {
         context: ObjectContext,
         key: Option<String>,
         metadata: Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<InsertResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
@@ -383,7 +383,7 @@ mod tests {
     use crate::backend::common::Backend as _;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::make_stream;
+    use crate::stream::{ClientStream, make_stream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -558,7 +558,7 @@ mod tests {
             &self,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _stream: PayloadStream,
+            _stream: ClientStream,
         ) -> Result<()> {
             Ok(())
         }
@@ -627,7 +627,7 @@ mod tests {
             &self,
             id: &ObjectId,
             metadata: &Metadata,
-            stream: PayloadStream,
+            stream: ClientStream,
         ) -> Result<()> {
             if self.pause {
                 self.paused.notify_one();

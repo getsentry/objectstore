@@ -8,12 +8,12 @@ use objectstore_types::metadata::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, M
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
-use crate::PayloadStream;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::stream::ClientStream;
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -248,7 +248,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<PutResponse> {
         tracing::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
@@ -257,14 +257,13 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send put request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to put object".to_string(),
-                cause,
+            .and_then(|response| response.error_for_status())
+            .map_err(|cause| match common::unpack_client_error(&cause) {
+                Some(ce) => Error::Client(ce),
+                _ => Error::Reqwest {
+                    context: "S3: failed to put object".to_string(),
+                    cause,
+                },
             })?;
 
         Ok(())

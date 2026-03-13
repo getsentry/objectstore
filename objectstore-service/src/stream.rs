@@ -1,6 +1,9 @@
 //! Payload stream type and zero-copy buffering utilities.
 
+use std::error::Error;
+use std::fmt;
 use std::io;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::BoxStream;
@@ -8,6 +11,45 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 
 /// Type alias for data streams used in service APIs.
 pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
+
+/// Error originating from a client-supplied input stream.
+///
+/// Wraps any error yielded by the incoming HTTP request body, allowing backends
+/// to distinguish a broken client connection (4xx) from a backend I/O failure (5xx).
+#[derive(Clone, Debug)]
+pub struct ClientError(Arc<dyn Error + Send + Sync + 'static>);
+
+impl ClientError {
+    /// Creates a new [`ClientError`] wrapping `err`.
+    pub fn new<E>(err: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self(Arc::new(err))
+    }
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Error for ClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// Required by [`tokio_util::io::StreamReader`] in the local filesystem backend.
+impl From<ClientError> for io::Error {
+    fn from(err: ClientError) -> Self {
+        io::Error::other(err)
+    }
+}
+
+/// Type alias for incoming client-supplied data streams (request bodies for PUT/upload).
+pub type ClientStream = BoxStream<'static, Result<Bytes, ClientError>>;
 
 #[derive(Debug, Default)]
 enum ChunkedBytesState {
@@ -127,16 +169,16 @@ impl<S> SizedPeek<S> {
     }
 }
 
-impl<S> SizedPeek<S>
+impl<S, E> SizedPeek<S>
 where
-    S: Stream<Item = io::Result<Bytes>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
     /// Reads from `stream` into an internal buffer until `limit` bytes are accumulated
     /// or the stream ends.
     ///
     /// Uses strictly-greater-than comparison: a stream of exactly `limit` bytes is
     /// considered exhausted.
-    pub async fn new(mut stream: S, limit: usize) -> io::Result<Self> {
+    pub async fn new(mut stream: S, limit: usize) -> Result<Self, E> {
         let mut buffer = ChunkedBytes::new(limit);
 
         while let Some(chunk) = stream.try_next().await? {
@@ -158,13 +200,13 @@ where
     }
 }
 
-impl<S> SizedPeek<S>
+impl<S, E> SizedPeek<S>
 where
-    S: Stream<Item = io::Result<Bytes>>,
+    S: Stream<Item = Result<Bytes, E>>,
 {
     /// Consumes self and returns a stream that yields the buffered prefix first,
     /// then any remaining data from the original stream.
-    pub fn into_stream(self) -> impl Stream<Item = io::Result<Bytes>> {
+    pub fn into_stream(self) -> impl Stream<Item = Result<Bytes, E>> {
         let leading = [self.buffer.into_bytes(), self.pending.unwrap_or_default()]
             .into_iter()
             .filter(|b| !b.is_empty())
@@ -175,20 +217,22 @@ where
     }
 }
 
-/// Creates a [`PayloadStream`] from a byte slice.
+/// Creates a [`ClientStream`] from a byte slice.
 #[cfg(test)]
-pub fn make_stream(contents: &[u8]) -> PayloadStream {
-    tokio_stream::once(Ok(contents.to_vec().into())).boxed()
+pub fn make_stream(contents: &[u8]) -> ClientStream {
+    tokio_stream::once(Ok::<Bytes, ClientError>(contents.to_vec().into())).boxed()
 }
 
 /// Collects a stream of `Bytes` chunks into a `Vec<u8>`.
 #[cfg(test)]
-pub(crate) async fn read_to_vec<S>(mut stream: S) -> crate::error::Result<Vec<u8>>
+pub(crate) async fn read_to_vec<S, E>(mut stream: S) -> crate::error::Result<Vec<u8>>
 where
-    S: Stream<Item = io::Result<Bytes>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<crate::error::Error>,
 {
     let mut payload = Vec::new();
-    while let Some(chunk) = stream.try_next().await? {
+    while let Some(result) = stream.next().await {
+        let chunk = result.map_err(Into::into)?;
         payload.extend(&chunk);
     }
     Ok(payload)
@@ -263,7 +307,9 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_when_stream_fits() {
-        let s = stream::once(std::future::ready(Ok(Bytes::from_static(b"small payload"))));
+        let s = stream::once(std::future::ready(Ok::<_, io::Error>(Bytes::from_static(
+            b"small payload",
+        ))));
 
         let peeked = SizedPeek::new(s, 1024).await.unwrap();
 
@@ -305,7 +351,7 @@ mod tests {
     async fn into_stream_single_chunk_zero_copy() {
         let original = Bytes::from_static(b"zero-copy roundtrip");
         let ptr = original.as_ptr();
-        let s = stream::once(std::future::ready(Ok(original)));
+        let s = stream::once(std::future::ready(Ok::<_, io::Error>(original)));
 
         let peeked = SizedPeek::new(s, 1024).await.unwrap();
         let out = peeked.into_stream();
@@ -319,7 +365,7 @@ mod tests {
         // A single chunk larger than the limit never enters the buffer.
         let big = Bytes::from(vec![0u8; 2000]);
         let ptr = big.as_ptr();
-        let s = stream::once(std::future::ready(Ok(big)));
+        let s = stream::once(std::future::ready(Ok::<_, io::Error>(big)));
 
         let peeked = SizedPeek::new(s, 1000).await.unwrap();
         assert!(!peeked.is_exhausted());

@@ -10,10 +10,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::PayloadStream;
-use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::stream::ClientStream;
 
 /// Local filesystem backend for development and testing.
 #[derive(Debug)]
@@ -39,7 +39,7 @@ impl Backend for LocalFsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<PutResponse> {
         let path = self.path.join(id.as_storage_path().to_string());
         tracing::debug!(path=%path.display(), "Writing to local_fs backend");
@@ -61,7 +61,13 @@ impl Backend for LocalFsBackend {
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
-        tokio::io::copy(&mut reader, &mut writer).await?;
+        tokio::io::copy(&mut reader, &mut writer)
+            .await
+            .map_err(|e| match common::unpack_client_error(&e) {
+                Some(ce) => Error::Client(ce),
+                None => e.into(),
+            })?;
+
         writer.flush().await?;
         let file = writer.into_inner();
         file.sync_data().await?;
