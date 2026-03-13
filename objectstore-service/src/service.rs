@@ -204,7 +204,7 @@ impl StorageService {
             _ => self.concurrency.try_acquire_many(window),
         };
         let reservation = acquire_result.inspect_err(|_| {
-            objectstore_metrics::counter!("service.concurrency.rejected": 1);
+            objectstore_metrics::count!("service.concurrency.rejected");
             tracing::warn!("Request rejected: service at capacity");
         })?;
 
@@ -225,8 +225,8 @@ impl StorageService {
         tokio::spawn(async move {
             concurrency
                 .run_emitter(|permits| async move {
-                    objectstore_metrics::gauge!("service.concurrency.in_use": permits);
-                    objectstore_metrics::gauge!("service.concurrency.limit": limit);
+                    objectstore_metrics::gauge!("service.concurrency.in_use" = permits);
+                    objectstore_metrics::gauge!("service.concurrency.limit" = limit);
                 })
                 .await;
         });
@@ -249,7 +249,7 @@ impl StorageService {
         F: Future<Output = Result<T>> + Send + 'static,
     {
         let permit = self.concurrency.try_acquire().inspect_err(|_| {
-            objectstore_metrics::counter!("service.concurrency.rejected": 1);
+            objectstore_metrics::count!("service.concurrency.rejected");
             tracing::warn!("Request rejected: service at capacity");
         })?;
 

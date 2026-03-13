@@ -17,7 +17,7 @@ const TCP_LISTEN_BACKLOG: u32 = 1024;
 /// termination is requested.
 pub async fn server(config: Config) -> Result<()> {
     tracing::info!("Starting server");
-    objectstore_metrics::counter!("server.start": 1);
+    objectstore_metrics::count!("server.start");
 
     let listener = listen(&config).context("failed to start TCP listener")?;
     let state = Services::spawn(config).await?;

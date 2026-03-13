@@ -22,6 +22,12 @@ impl DownstreamService {
     }
 }
 
+impl std::fmt::Display for DownstreamService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_deref().unwrap_or("unknown"))
+    }
+}
+
 impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
     type Rejection = std::convert::Infallible;
 

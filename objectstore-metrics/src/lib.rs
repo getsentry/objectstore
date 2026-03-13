@@ -2,8 +2,8 @@
 //!
 //! This crate provides three things:
 //!
-//! 1. [`counter!`], [`gauge!`], and [`distribution!`] macros that preserve
-//!    a concise call-site syntax (`"name": value, "tag" => tag_value`).
+//! 1. [`count!`], [`gauge!`], and [`record!`] macros with rustfmt-friendly
+//!    expression-based syntax.
 //! 2. [`MetricsConfig`] and [`init`] for wiring up a DogStatsD exporter.
 //! 3. [`with_capturing_test_client`] for asserting on emitted metrics in tests.
 //!
@@ -11,22 +11,31 @@
 //!
 //! ```rust
 //! use std::time::Duration;
-//! use objectstore_metrics::{counter, distribution, gauge};
+//! use objectstore_metrics::{count, gauge, record};
 //!
-//! let count = 42_u64;
+//! let stored_size: u64 = 1024;
 //! let elapsed = Duration::from_secs(1);
 //! let route = "api/v1";
 //!
-//! counter!("server.start": 1);
-//! gauge!("server.requests.in_flight": count);
-//! distribution!("server.requests.duration"@s: elapsed, "route" => route);
+//! count!("server.start");
+//! gauge!("server.requests.in_flight" = 42usize);
+//! record!("server.requests.duration" = elapsed, route = route);
 //! ```
 //!
-//! # Unit annotations
+//! # Tag syntax
 //!
-//! - `@s` converts a [`Duration`](std::time::Duration) to seconds via `.as_secs_f64()`.
-//! - `@b` converts the value via `as f64` (identity for byte counts).
-//! - No annotation also converts via `as f64`.
+//! Tags use `ident = expr` syntax. Tag values must implement `Into<SharedString>`
+//! (i.e., `&str`, `String`, or similar). For integer or `Display` types, call
+//! `.to_string()`. Use `.as_str()` methods whenever available to avoid allocation.
+//!
+//! # `AsF64` trait
+//!
+//! [`AsF64`] converts gauge and histogram values to `f64`:
+//!
+//! - Standard numeric primitives (`f32`, `f64`, `i8`–`i32`, `u8`–`u32`) via `Into<f64>`.
+//! - `u64` and `usize` via an `as f64` cast; values above 2^53 lose precision, which is
+//!   acceptable for metric reporting.
+//! - [`Duration`](std::time::Duration) as fractional seconds via `.as_secs_f64()`.
 
 mod mock;
 
@@ -35,9 +44,48 @@ use std::collections::BTreeMap;
 use metrics_exporter_dogstatsd::{AggregationMode, DogStatsDBuilder};
 use serde::{Deserialize, Serialize};
 
+/// Converts a value to `f64` for metric recording.
+///
+/// Implemented for `f64`, `f32`, [`Duration`](std::time::Duration),
+/// `i8`–`i32`, `u8`–`u32`, `u64`, and `usize`.
+///
+/// `Duration` is converted to fractional seconds via `.as_secs_f64()`.
+/// `u64` and `usize` use an `as f64` cast; values above 2^53 lose precision,
+/// which is acceptable for metric reporting.
+#[allow(clippy::wrong_self_convention)]
+pub trait AsF64 {
+    /// Converts this value to its `f64` representation.
+    fn as_f64(self) -> f64;
+}
+
+macro_rules! impl_as_f64 {
+    // Types where Into<f64> is available
+    (into: $($t:ty),* $(,)?) => {$(
+        impl AsF64 for $t {
+            fn as_f64(self) -> f64 { self.into() }
+        }
+    )*};
+    // Types where only `as f64` is available
+    (cast: $($t:ty),* $(,)?) => {$(
+        impl AsF64 for $t {
+            fn as_f64(self) -> f64 { self as f64 }
+        }
+    )*};
+}
+
+impl_as_f64!(into: f32, f64, i8, i16, i32, u8, u16, u32);
+impl_as_f64!(cast: u64, usize);
+
+impl AsF64 for std::time::Duration {
+    fn as_f64(self) -> f64 {
+        self.as_secs_f64()
+    }
+}
+
 /// Re-exports used by macro expansion. Not part of the public API.
 #[doc(hidden)]
 pub mod _macro_support {
+    pub use crate::AsF64;
     pub use metrics;
 }
 
@@ -190,112 +238,108 @@ pub use mock::with_capturing_test_client;
 // Macros
 // ---------------------------------------------------------------------------
 
-/// Emits a counter metric.
+/// Increments a counter metric.
 ///
 /// # Syntax
 ///
 /// ```rust
-/// use objectstore_metrics::counter;
+/// use objectstore_metrics::count;
 ///
-/// counter!("name": 1u64);
-/// counter!("name": 1u64, "tag" => "value");
-/// counter!("name": 1u64, "tag1" => "val1", "tag2" => "val2");
+/// // Shorthand: increments by 1
+/// count!("server.start");
+/// count!("server.requests", route = "/v1/test", method = "GET");
+///
+/// // Explicit increment value
+/// count!("server.requests" += 5);
+/// count!("server.requests" += 5, route = "/v1/test");
 /// ```
+///
+/// Tag keys are identifiers; tag values must implement `Into<SharedString>`
+/// (use `.to_string()` for integers or non-string types).
 #[macro_export]
-macro_rules! counter {
-    ($name:literal : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
+macro_rules! count {
+    // Shorthand: increment by 1
+    ($name:literal $(, $tag:ident = $tv:expr)* $(,)?) => {
         $crate::_macro_support::metrics::counter!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
+            $name $(, stringify!($tag) => $tv)*
+        )
+        .increment(1);
+    };
+    // Explicit increment value
+    ($name:literal += $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
+        $crate::_macro_support::metrics::counter!(
+            $name $(, stringify!($tag) => $tv)*
         )
         .increment($value as u64);
     };
 }
 
-/// Emits a gauge metric.
+/// Sets, increments, or decrements a gauge metric.
 ///
 /// # Syntax
 ///
 /// ```rust
 /// use objectstore_metrics::gauge;
 ///
-/// gauge!("name": 1.0_f64);
-/// gauge!("name"@b: 1024_u64);
-/// gauge!("name": 1.0_f64, "tag" => "value");
+/// gauge!("runtime.num_workers" = 4usize);
+/// gauge!("connections" += 1usize);
+/// gauge!("connections" -= 1usize);
+/// gauge!("runtime.num_workers" = 4usize, pool = "default");
 /// ```
 ///
-/// The `@b` unit annotation converts via `as f64` (identity for byte counts).
+/// Values are converted to `f64` via [`AsF64`]. Supported types
+/// include `f64`, `Duration`, integer primitives, `u64`, and `usize`.
+///
+/// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
 #[macro_export]
 macro_rules! gauge {
-    ($name:literal @b : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
+    // Set
+    ($name:literal = $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
         $crate::_macro_support::metrics::gauge!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
+            $name $(, stringify!($tag) => $tv)*
         )
-        .set($value as f64);
+        .set($crate::_macro_support::AsF64::as_f64($value));
     };
-    ($name:literal : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
+    // Increment
+    ($name:literal += $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
         $crate::_macro_support::metrics::gauge!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
+            $name $(, stringify!($tag) => $tv)*
         )
-        .set($value as f64);
+        .increment($crate::_macro_support::AsF64::as_f64($value));
+    };
+    // Decrement
+    ($name:literal -= $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
+        $crate::_macro_support::metrics::gauge!(
+            $name $(, stringify!($tag) => $tv)*
+        )
+        .decrement($crate::_macro_support::AsF64::as_f64($value));
     };
 }
 
-/// Emits a distribution (histogram) metric.
+/// Records a distribution (histogram) metric.
 ///
 /// # Syntax
 ///
 /// ```rust
 /// use std::time::Duration;
-/// use objectstore_metrics::distribution;
+/// use objectstore_metrics::record;
 ///
-/// distribution!("name": 1.0_f64);
-/// distribution!("name"@s: Duration::from_secs(1));
-/// distribution!("name"@b: 1024_u64);
-/// distribution!("name"@s: Duration::from_secs(1), "tag" => "value");
+/// let elapsed = Duration::from_secs(1);
+/// record!("server.requests.duration" = elapsed);
+/// record!("server.requests.duration" = elapsed, route = "/v1/test");
+/// record!("put.size" = 1024u64, usecase = "default");
 /// ```
 ///
-/// - `@s` converts a [`Duration`](std::time::Duration) to seconds via `.as_secs_f64()`.
-/// - `@b` converts the value via `as f64` (identity for byte counts).
-/// - No annotation converts via `as f64`.
-#[macro_export]
-macro_rules! distribution {
-    ($name:literal @s : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
-        $crate::_macro_support::metrics::histogram!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
-        )
-        .record($value.as_secs_f64());
-    };
-    ($name:literal @b : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
-        $crate::_macro_support::metrics::histogram!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
-        )
-        .record($value as f64);
-    };
-    ($name:literal : $value:expr $(, $tag:literal => $tv:expr)* $(,)?) => {
-        $crate::_macro_support::metrics::histogram!(
-            $name
-            $(, $tag => $crate::__label_value!($tv))*
-        )
-        .record($value as f64);
-    };
-}
-
-/// Converts a tag value expression to a string suitable for a [`metrics::Label`].
+/// Values are converted to `f64` via [`AsF64`]. `Duration` is
+/// converted to fractional seconds automatically.
 ///
-/// This handles `&str`, `String`, integer types, and anything with a `Display` impl
-/// by converting through `format!`. It relies on specialization-free dispatching:
-/// `&str` and `String` pass through, everything else uses `format!`.
-#[doc(hidden)]
+/// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
 #[macro_export]
-macro_rules! __label_value {
-    ($e:expr) => {{
-        // Use a trait-based dispatch that works for &str, String, and Display types.
-        // The metrics crate accepts Into<SharedString> which covers &str, String, etc.
-        $crate::_macro_support::metrics::SharedString::from(format!("{}", $e))
-    }};
+macro_rules! record {
+    ($name:literal = $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
+        $crate::_macro_support::metrics::histogram!(
+            $name $(, stringify!($tag) => $tv)*
+        )
+        .record($crate::_macro_support::AsF64::as_f64($value));
+    };
 }

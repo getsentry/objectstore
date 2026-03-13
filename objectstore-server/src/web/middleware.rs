@@ -31,10 +31,7 @@ pub async fn limit_web_concurrency(
 
     if !is_internal_route(route) && counter.count() >= counter.limit() {
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
-        objectstore_metrics::counter!(
-            "web.concurrency.rejected": 1,
-            "service" => service.as_str().unwrap_or("unknown"),
-        );
+        objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
         tracing::warn!("Request rejected: web concurrency limit reached");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -123,11 +120,11 @@ struct EmitMetricsGuard<'a> {
 
 impl<'a> EmitMetricsGuard<'a> {
     fn new(route: &'a str, method: &Method, service: DownstreamService) -> Self {
-        objectstore_metrics::counter!(
-            "server.requests": 1,
-            "route" => route,
-            "method" => method.as_str(),
-            "service" => service.as_str().unwrap_or("unknown"),
+        objectstore_metrics::count!(
+            "server.requests",
+            route = route.to_owned(),
+            method = method.as_str().to_owned(),
+            service = service.to_string(),
         );
 
         Self {
@@ -146,14 +143,13 @@ impl<'a> EmitMetricsGuard<'a> {
 
 impl Drop for EmitMetricsGuard<'_> {
     fn drop(&mut self) {
-        objectstore_metrics::distribution!(
-            "server.requests.duration"@s: self.start.elapsed(),
-            "route" => self.route,
-            "method" => self.method,
-            "status" => self.status
-                .map(|s| s.as_u16())
-                .unwrap_or(499),
-            "service" => self.service.as_str().unwrap_or("unknown"),
+        let status = self.status.map(|s| s.as_u16()).unwrap_or(499).to_string();
+        objectstore_metrics::record!(
+            "server.requests.duration" = self.start.elapsed(),
+            route = self.route.to_owned(),
+            method = self.method.as_str().to_owned(),
+            status = status,
+            service = self.service.to_string(),
         );
     }
 }
