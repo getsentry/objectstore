@@ -287,7 +287,7 @@ macro_rules! count {
 /// gauge!("runtime.num_workers" = 4usize, pool = "default");
 /// ```
 ///
-/// Values are converted to `f64` via [`AsF64`](crate::AsF64). Supported types
+/// Values are converted to `f64` via [`AsF64`]. Supported types
 /// include `f64`, `Duration`, integer primitives, `u64`, and `usize`.
 ///
 /// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
@@ -330,7 +330,7 @@ macro_rules! gauge {
 /// record!("put.size" = 1024u64, usecase = "default");
 /// ```
 ///
-/// Values are converted to `f64` via [`AsF64`](crate::AsF64). `Duration` is
+/// Values are converted to `f64` via [`AsF64`]. `Duration` is
 /// converted to fractional seconds automatically.
 ///
 /// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
