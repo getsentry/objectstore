@@ -28,7 +28,8 @@ const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 const MAX_BATCH_OPS: usize = 1000;
 
 /// Maximum amount of bytes to send as a part's body in a batch request.
-const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
+/// 1 MB - 10 KB for metadata and the extra scaffolding required for multipart.
+const MAX_BATCH_PART_SIZE: u32 = 1024 * (1024 - 10);
 
 // TODO: add limit and logic for whole batch request body size
 
