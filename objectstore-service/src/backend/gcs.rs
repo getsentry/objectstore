@@ -344,7 +344,7 @@ impl GcsBackend {
     }
 
     /// Retries a GCS request on transient errors.
-    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> Result<T>
+    async fn with_retry<T, F>(&self, action: &'static str, f: impl Fn() -> F) -> Result<T>
     where
         F: Future<Output = Result<T>> + Send,
     {
@@ -354,7 +354,7 @@ impl GcsBackend {
                 Ok(res) => return Ok(res),
                 Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
-                    objectstore_metrics::counter!("gcs.retries": 1, "action" => action);
+                    objectstore_metrics::count!("gcs.retries", action = action);
                     tracing::warn!(
                         retry_count,
                         action,
@@ -363,7 +363,7 @@ impl GcsBackend {
                     );
                 }
                 Err(e) => {
-                    objectstore_metrics::counter!("gcs.failures": 1, "action" => action);
+                    objectstore_metrics::count!("gcs.failures", action = action);
                     return Err(e);
                 }
             }

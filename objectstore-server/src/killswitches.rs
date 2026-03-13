@@ -27,7 +27,7 @@ impl Killswitches {
             return false;
         };
 
-        objectstore_metrics::counter!("server.request.killswitched": 1);
+        objectstore_metrics::count!("server.request.killswitched");
         tracing::warn!(killswitch = ?switch, "Request rejected: killswitch active");
         true
     }

@@ -151,7 +151,7 @@ where
     G: Send + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
 {
-    objectstore_metrics::counter!("service.task.start": 1, "operation" => operation);
+    objectstore_metrics::count!("service.task.start", operation = operation);
 
     let hub = Hub::current();
     let span = hub.configure_scope(|scope| scope.get_span());
@@ -183,10 +183,10 @@ where
                 );
             }
 
-            objectstore_metrics::distribution!(
-                "service.task.duration"@s: start.elapsed(),
-                "operation" => operation,
-                "outcome" => if result.is_ok() { "success" } else { "error" }
+            objectstore_metrics::record!(
+                "service.task.duration" = start.elapsed(),
+                operation = operation,
+                outcome = if result.is_ok() { "success" } else { "error" },
             );
 
             let _ = tx.send(result);

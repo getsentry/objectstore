@@ -193,7 +193,7 @@ impl BigTableBackend {
     }
 
     /// Retries a BigTable RPC on transient errors.
-    async fn with_retry<T, F>(&self, action: &str, f: impl Fn() -> F) -> Result<T>
+    async fn with_retry<T, F>(&self, action: &'static str, f: impl Fn() -> F) -> Result<T>
     where
         F: Future<Output = Result<T, BigTableError>> + Send,
     {
@@ -204,14 +204,14 @@ impl BigTableBackend {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        objectstore_metrics::counter!("bigtable.failures": 1, "action" => action);
+                        objectstore_metrics::count!("bigtable.failures", action = action);
                         return Err(Error::Generic {
                             context: format!("Bigtable: `{action}` failed"),
                             cause: Some(Box::new(e)),
                         });
                     }
                     retry_count += 1;
-                    objectstore_metrics::counter!("bigtable.retries": 1, "action" => action);
+                    objectstore_metrics::count!("bigtable.retries", action = action);
                     tracing::warn!(
                         retry_count,
                         action,
@@ -230,7 +230,7 @@ impl BigTableBackend {
         &self,
         path: &[u8],
         filter: Option<v2::RowFilter>,
-        action: &str,
+        action: &'static str,
     ) -> Result<Option<RowData>> {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
@@ -267,7 +267,7 @@ impl BigTableBackend {
         &self,
         path: Vec<u8>,
         mutations: I,
-        action: &str,
+        action: &'static str,
     ) -> Result<v2::MutateRowResponse>
     where
         I: IntoIterator<Item = mutation::Mutation>,
@@ -297,7 +297,7 @@ impl BigTableBackend {
         path: Vec<u8>,
         metadata: &Metadata,
         payload: Vec<u8>,
-        action: &str,
+        action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
         let now = SystemTime::now();
         let (family, timestamp_micros) = match metadata.expiration_policy {

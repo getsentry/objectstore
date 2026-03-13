@@ -21,18 +21,24 @@ use crate::stream::SizedPeek;
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
+#[derive(Debug)]
 enum BackendChoice {
     HighVolume,
     LongTerm,
 }
 
-impl std::fmt::Display for BackendChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl BackendChoice {
+    fn as_str(&self) -> &'static str {
+        match self {
             BackendChoice::HighVolume => "high-volume",
             BackendChoice::LongTerm => "long-term",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -57,10 +63,7 @@ impl TieredStorage {
         stream: PayloadStream,
     ) -> Result<InsertResponse> {
         if metadata.origin.is_none() {
-            objectstore_metrics::counter!(
-                "put.origin_missing": 1,
-                "usecase" => context.usecase.as_str()
-            );
+            objectstore_metrics::count!("put.origin_missing", usecase = context.usecase.clone());
         }
 
         let start = Instant::now();
@@ -72,10 +75,10 @@ impl TieredStorage {
             BackendChoice::LongTerm
         };
 
-        objectstore_metrics::distribution!(
-            "put.first_chunk.latency"@s: start.elapsed(),
-            "usecase" => context.usecase.as_str(),
-            "backend_choice" => backend,
+        objectstore_metrics::record!(
+            "put.first_chunk.latency" = start.elapsed(),
+            usecase = context.usecase.clone(),
+            backend_choice = backend.as_str(),
         );
 
         let has_key = key.is_some();
@@ -89,6 +92,9 @@ impl TieredStorage {
                 backend = BackendChoice::LongTerm;
             }
         };
+
+        // Capture before `match backend` consumes the value.
+        let backend_choice = backend.as_str();
 
         let (backend_ty, stored_size) = match backend {
             BackendChoice::HighVolume => {
@@ -144,17 +150,18 @@ impl TieredStorage {
             }
         };
 
-        objectstore_metrics::distribution!(
-            "put.latency"@s: start.elapsed(),
-            "usecase" => id.usecase(),
-            "backend_choice" => backend,
-            "backend_type" => backend_ty
+        let usecase = id.usecase().to_owned();
+        objectstore_metrics::record!(
+            "put.latency" = start.elapsed(),
+            usecase = usecase.clone(),
+            backend_choice = backend_choice,
+            backend_type = backend_ty,
         );
-        objectstore_metrics::distribution!(
-            "put.size"@b: stored_size,
-            "usecase" => id.usecase(),
-            "backend_choice" => backend,
-            "backend_type" => backend_ty
+        objectstore_metrics::record!(
+            "put.size" = stored_size,
+            usecase = usecase,
+            backend_choice = backend_choice,
+            backend_type = backend_ty,
         );
 
         Ok(id)
@@ -173,11 +180,11 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
-        objectstore_metrics::distribution!(
-            "head.latency"@s: start.elapsed(),
-            "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
-            "backend_type" => backend_type
+        objectstore_metrics::record!(
+            "head.latency" = start.elapsed(),
+            usecase = id.usecase().to_owned(),
+            backend_choice = backend_choice,
+            backend_type = backend_type,
         );
 
         Ok(result)
@@ -196,20 +203,20 @@ impl TieredStorage {
             backend_type = self.long_term_backend.name();
         }
 
-        objectstore_metrics::distribution!(
-            "get.latency.pre-response"@s: start.elapsed(),
-            "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
-            "backend_type" => backend_type
+        objectstore_metrics::record!(
+            "get.latency.pre-response" = start.elapsed(),
+            usecase = id.usecase().to_owned(),
+            backend_choice = backend_choice,
+            backend_type = backend_type,
         );
 
         if let Some((metadata, _stream)) = &result {
             if let Some(size) = metadata.size {
-                objectstore_metrics::distribution!(
-                    "get.size"@b: size,
-                    "usecase" => id.usecase(),
-                    "backend_choice" => backend_choice,
-                    "backend_type" => backend_type
+                objectstore_metrics::record!(
+                    "get.size" = size,
+                    usecase = id.usecase().to_owned(),
+                    backend_choice = backend_choice,
+                    backend_type = backend_type,
                 );
             } else {
                 tracing::warn!(?backend_type, "Missing object size");
@@ -236,11 +243,11 @@ impl TieredStorage {
             self.high_volume_backend.delete_object(id).await?;
         }
 
-        objectstore_metrics::distribution!(
-            "delete.latency"@s: start.elapsed(),
-            "usecase" => id.usecase(),
-            "backend_choice" => backend_choice,
-            "backend_type" => backend_type
+        objectstore_metrics::record!(
+            "delete.latency" = start.elapsed(),
+            usecase = id.usecase().to_owned(),
+            backend_choice = backend_choice,
+            backend_type = backend_type,
         );
 
         Ok(())

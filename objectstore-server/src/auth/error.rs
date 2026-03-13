@@ -42,10 +42,7 @@ impl AuthError {
     /// Increment a counter and emit a debug log for this auth failure.
     pub fn log(&self, permission: Option<Permission>, usecase: Option<&str>) {
         let code = self.code();
-        objectstore_metrics::counter!(
-            "server.auth.failure": 1,
-            "code" => code,
-        );
+        objectstore_metrics::count!("server.auth.failure", code = code);
         let msg = self.to_string();
         tracing::debug!(?permission, ?usecase, ?code, ?msg, "Authorization failure");
     }

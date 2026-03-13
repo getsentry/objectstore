@@ -232,10 +232,7 @@ impl RateLimiter {
             return true;
         };
 
-        objectstore_metrics::counter!(
-            "server.request.rate_limited": 1,
-            "reason" => rejection.as_str(),
-        );
+        objectstore_metrics::count!("server.request.rate_limited", reason = rejection.as_str());
         tracing::warn!(
             reason = rejection.as_str(),
             "Request rejected: rate limit exceeded"
@@ -398,9 +395,9 @@ impl BandwidthRateLimiter {
 
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
-            objectstore_metrics::gauge!("server.bandwidth.ewma"@b: global_ewma.floor() as u64);
+            objectstore_metrics::gauge!("server.bandwidth.ewma" = global_ewma.floor() as u64);
             if let Some(limit) = global_limit {
-                objectstore_metrics::gauge!("server.bandwidth.limit"@b: limit);
+                objectstore_metrics::gauge!("server.bandwidth.limit" = limit);
             }
 
             // Per-usecase
@@ -421,8 +418,12 @@ impl BandwidthRateLimiter {
                 }
             }
 
-            objectstore_metrics::gauge!("server.rate_limiter.bandwidth.scope_map_size": scopes.len());
-            objectstore_metrics::gauge!("server.rate_limiter.bandwidth.usecase_map_size": usecases.len());
+            objectstore_metrics::gauge!(
+                "server.rate_limiter.bandwidth.scope_map_size" = scopes.len()
+            );
+            objectstore_metrics::gauge!(
+                "server.rate_limiter.bandwidth.usecase_map_size" = usecases.len()
+            );
         }
     }
 
@@ -557,12 +558,18 @@ impl ThroughputRateLimiter {
             loop {
                 interval.tick().await;
                 global_estimator.update_ewma(&mut global_ewma, to_rps);
-                objectstore_metrics::gauge!("server.throughput.ewma": global_ewma.floor() as u64);
+                objectstore_metrics::gauge!("server.throughput.ewma" = global_ewma.floor() as u64);
                 if let Some(limit) = global_limit {
-                    objectstore_metrics::gauge!("server.rate_limiter.throughput.limit": u64::from(limit));
+                    objectstore_metrics::gauge!(
+                        "server.rate_limiter.throughput.limit" = u64::from(limit)
+                    );
                 }
-                objectstore_metrics::gauge!("server.rate_limiter.throughput.scope_map_size": scopes.len());
-                objectstore_metrics::gauge!("server.rate_limiter.throughput.usecase_map_size": usecases.len());
+                objectstore_metrics::gauge!(
+                    "server.rate_limiter.throughput.scope_map_size" = scopes.len()
+                );
+                objectstore_metrics::gauge!(
+                    "server.rate_limiter.throughput.usecase_map_size" = usecases.len()
+                );
             }
         });
     }

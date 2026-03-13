@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn captures_counter() {
         let captured = with_capturing_test_client(|| {
-            crate::counter!("test.counter": 1);
+            crate::count!("test.counter");
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.counter:+1|c");
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn captures_counter_with_tags() {
         let captured = with_capturing_test_client(|| {
-            crate::counter!("test.counter": 1, "env" => "prod", "region" => "us");
+            crate::count!("test.counter", env = "prod", region = "us");
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.counter:+1|c|#env:prod,region:us");
@@ -147,25 +147,34 @@ mod tests {
     #[test]
     fn captures_gauge() {
         let captured = with_capturing_test_client(|| {
-            crate::gauge!("test.gauge": 42usize);
+            crate::gauge!("test.gauge" = 42usize);
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.gauge:42|g");
     }
 
     #[test]
-    fn captures_gauge_bytes() {
+    fn captures_gauge_increment() {
         let captured = with_capturing_test_client(|| {
-            crate::gauge!("test.gauge"@b: 1024u64);
+            crate::gauge!("test.gauge" += 5usize);
         });
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0], "test.gauge:1024|g");
+        assert_eq!(captured[0], "test.gauge:+5|g");
+    }
+
+    #[test]
+    fn captures_gauge_decrement() {
+        let captured = with_capturing_test_client(|| {
+            crate::gauge!("test.gauge" -= 3usize);
+        });
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], "test.gauge:-3|g");
     }
 
     #[test]
     fn captures_distribution() {
         let captured = with_capturing_test_client(|| {
-            crate::distribution!("test.dist": 2.78f64);
+            crate::record!("test.dist" = 2.78f64);
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.dist:2.78|d");
@@ -175,41 +184,28 @@ mod tests {
     fn captures_distribution_seconds() {
         let captured = with_capturing_test_client(|| {
             let dur = std::time::Duration::from_millis(1500);
-            crate::distribution!("test.latency"@s: dur);
+            crate::record!("test.latency" = dur);
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.latency:1.5|d");
     }
 
     #[test]
-    fn captures_distribution_bytes() {
+    fn captures_counter_explicit_increment() {
         let captured = with_capturing_test_client(|| {
-            crate::distribution!("test.size"@b: 4096u64);
+            crate::count!("test.counter" += 5);
         });
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0], "test.size:4096|d");
+        assert_eq!(captured[0], "test.counter:+5|c");
     }
 
     #[test]
     fn captures_distribution_with_tags() {
         let captured = with_capturing_test_client(|| {
             let dur = std::time::Duration::from_secs(2);
-            crate::distribution!(
-                "test.latency"@s: dur,
-                "route" => "/v1/test",
-                "method" => "GET"
-            );
+            crate::record!("test.latency" = dur, route = "/v1/test", method = "GET",);
         });
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.latency:2|d|#route:/v1/test,method:GET");
-    }
-
-    #[test]
-    fn integer_tag_values() {
-        let captured = with_capturing_test_client(|| {
-            crate::counter!("test.status": 1, "status" => 200u16);
-        });
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0], "test.status:+1|c|#status:200");
     }
 }
