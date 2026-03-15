@@ -133,7 +133,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::stream::make_stream;
+    use crate::stream;
 
     #[tokio::test]
     async fn stores_metadata() {
@@ -157,7 +157,7 @@ mod tests {
             size: None,
         };
         backend
-            .put_object(&id, &metadata, make_stream(b"oh hai!"))
+            .put_object(&id, &metadata, stream::single("oh hai!"))
             .await
             .unwrap();
 
@@ -192,7 +192,7 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &metadata, make_stream(b"oh hai!"))
+            .put_object(&id, &metadata, stream::single("oh hai!"))
             .await
             .unwrap();
 

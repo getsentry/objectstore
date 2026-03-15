@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{DeleteResponse, GetResponse, PutResponse};
@@ -81,7 +81,7 @@ impl super::common::Backend for InMemoryBackend {
         Ok(entry.map(|(metadata, bytes)| {
             let mut metadata = metadata;
             metadata.size = Some(bytes.len());
-            let stream = futures_util::stream::once(async move { Ok(bytes) }).boxed();
+            let stream = crate::stream::single(bytes);
             (metadata, stream)
         }))
     }

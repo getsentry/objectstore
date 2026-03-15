@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use argh::FromArgs;
-use bytes::Bytes;
 use bytesize::ByteSize;
-use futures_util::StreamExt;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
@@ -23,6 +21,7 @@ use yansi::Paint;
 use objectstore_service::backend::bigtable::BigTableBackend;
 use objectstore_service::backend::common::Backend;
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::stream;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::scope::{Scope, Scopes};
 
@@ -218,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
                 rng.fill(&mut buf[..]);
 
                 let id = ObjectId::random(context);
-                let stream = futures_util::stream::once(async { Ok(Bytes::from(buf)) }).boxed();
+                let stream = stream::single(buf);
 
                 let start = Instant::now();
                 let result = backend.put_object(&id, &metadata, stream).await;

@@ -217,10 +217,11 @@ where
     }
 }
 
-/// Creates a [`ClientStream`] from a byte slice.
-#[cfg(test)]
-pub fn make_stream(contents: &[u8]) -> ClientStream {
-    tokio_stream::once(Ok::<Bytes, ClientError>(contents.to_vec().into())).boxed()
+/// Creates a single-chunk stream that yields `contents` as one item.
+pub fn single<E: Send + 'static>(
+    contents: impl Into<Bytes>,
+) -> BoxStream<'static, Result<Bytes, E>> {
+    futures_util::stream::once(std::future::ready(Ok(contents.into()))).boxed()
 }
 
 /// Collects a stream of `Bytes` chunks into a `Vec<u8>`.

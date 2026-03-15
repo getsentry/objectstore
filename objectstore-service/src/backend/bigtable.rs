@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use tonic::Code;
 
@@ -373,7 +373,7 @@ impl Backend for BigTableBackend {
         let mut metadata = row.metadata;
         metadata.size = Some(row.payload.len());
 
-        let stream = stream::once(async { Ok(row.payload.into()) }).boxed();
+        let stream = crate::stream::single(row.payload);
         Ok(Some((metadata, stream)))
     }
 
@@ -521,7 +521,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::stream::{make_stream, read_to_vec};
+    use crate::stream;
 
     // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done
     // automatically in CI.
@@ -574,12 +574,12 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
@@ -620,7 +620,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello"))
+            .put_object(&id, &metadata, stream::single("hello"))
             .await?;
 
         let metadata = Metadata {
@@ -629,12 +629,12 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"world"))
+            .put_object(&id, &metadata, stream::single("world"))
             .await?;
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "world");
         assert_eq!(meta.custom, metadata.custom);
@@ -650,7 +650,7 @@ mod tests {
         let metadata = Metadata::default();
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         backend.delete_object(&id).await?;
@@ -675,7 +675,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let result = backend.get_object(&id).await?;
@@ -698,7 +698,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let result = backend.get_object(&id).await?;
@@ -719,7 +719,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let meta = backend.get_metadata(&id).await?.unwrap();
@@ -751,7 +751,9 @@ mod tests {
         };
 
         // Write a tombstone (no real payload, just metadata)
-        backend.put_object(&id, &metadata, make_stream(b"")).await?;
+        backend
+            .put_object(&id, &metadata, stream::single(""))
+            .await?;
 
         let meta = backend.get_metadata(&id).await?.unwrap();
         assert_eq!(meta.is_redirect_tombstone, Some(true));
@@ -773,7 +775,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         // Manually rewrite the row with a timestamp that will trigger a bump.
@@ -821,7 +823,7 @@ mod tests {
 
         // Verify the payload is still intact after the bump.
         let (_, stream) = backend.get_object(&id).await?.unwrap();
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
 
         Ok(())
@@ -841,7 +843,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         // A freshly written object has time_expires ≈ now + 2d, which is well outside
@@ -868,7 +870,7 @@ mod tests {
         let metadata = Metadata::default();
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
@@ -890,7 +892,9 @@ mod tests {
             ..Default::default()
         };
 
-        backend.put_object(&id, &metadata, make_stream(b"")).await?;
+        backend
+            .put_object(&id, &metadata, stream::single(""))
+            .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
         assert_eq!(result, DeleteOutcome::Tombstone);
