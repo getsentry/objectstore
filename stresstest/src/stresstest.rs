@@ -424,7 +424,6 @@ async fn run_batch_workload(
                     let mut results = many.send();
 
                     while let Some(result) = results.next().await {
-                        let elapsed_secs = batch_start.elapsed().as_secs_f64();
                         match result {
                             objectstore_client::OperationResult::Put(key, Ok(_)) => {
                                 // Find the matching payload info by key
@@ -445,7 +444,6 @@ async fn run_batch_workload(
                                 }
 
                                 let mut m = metrics.lock().unwrap();
-                                m.write_timing.add(elapsed_secs);
                                 m.file_sizes.add(file_size as f64);
                                 m.bytes_written += file_size;
                             }
@@ -462,6 +460,12 @@ async fn run_batch_workload(
                             }
                         }
                     }
+
+                    metrics
+                        .lock()
+                        .unwrap()
+                        .write_timing
+                        .add(batch_start.elapsed().as_secs_f64());
                     drop(permit);
                 };
                 tokio::spawn(task);
