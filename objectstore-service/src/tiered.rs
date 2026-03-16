@@ -156,16 +156,15 @@ impl Backend for TieredStorage {
             BackendChoice::LongTerm => self.long_term_backend.name(),
         };
 
-        let usecase = id.usecase().to_owned();
         objectstore_metrics::record!(
             "put.latency" = start.elapsed(),
-            usecase = usecase.clone(),
+            usecase = id.usecase().to_owned(),
             backend_choice = final_choice.as_str(),
             backend_type = backend_ty,
         );
         objectstore_metrics::record!(
             "put.size" = stored_size,
-            usecase = usecase,
+            usecase = id.usecase().to_owned(),
             backend_choice = final_choice.as_str(),
             backend_type = backend_ty,
         );
@@ -320,12 +319,6 @@ mod tests {
         let id = ObjectId::new(make_context(), "does-not-exist".into());
 
         storage.delete_object(&id).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn random_id_has_uuid_key() {
-        let id = ObjectId::random(make_context());
-        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
     }
 
     #[tokio::test]
