@@ -171,14 +171,18 @@ impl BigTableBackend {
             )?
         } else {
             let token_provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
-            BigTableConnection::new_with_token_provider(
+            BigTableConnection::new_with_managed_transport(
                 project_id,
                 instance_name,
-                false,                    // is_read_only
-                connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
+                false, // is_read_only
                 Some(CONNECT_TIMEOUT),
                 Arc::new(token_provider),
-            )?
+                connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
+                true,                     // prime_channels
+                None,                     // app_profile_id
+                Some(Duration::from_mins(50)), // max_channel_age
+            )
+            .await?
         };
 
         let client = bigtable.client();
