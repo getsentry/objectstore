@@ -1,4 +1,13 @@
-//! Payload stream type and zero-copy buffering utilities.
+//! Stream types and buffering utilities for object data.
+//!
+//! Data flows in streams to keep memory consumption low. Two distinct types
+//! cover the two directions of data flow:
+//!
+//! - [`ClientStream`] — incoming data from a client PUT request body. Uses
+//!   [`ClientError`] as the error type so backends can distinguish a broken
+//!   client connection from a backend I/O failure (400 vs 500).
+//! - [`PayloadStream`] — outgoing data returned from
+//!   [`Backend::get_object`](crate::backend::common::Backend::get_object).
 
 use std::error::Error;
 use std::fmt;
@@ -9,13 +18,17 @@ use bytes::{Bytes, BytesMut};
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
-/// Type alias for data streams used in service APIs.
+/// Outgoing byte stream returned by [`Backend::get_object`](crate::backend::common::Backend::get_object).
+///
+/// Use [`single`] to construct a single-chunk `PayloadStream` from an owned value.
 pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 
 /// Error originating from a client-supplied input stream.
 ///
-/// Wraps any error yielded by the incoming HTTP request body, allowing backends
-/// to distinguish a broken client connection (4xx) from a backend I/O failure (5xx).
+/// Wraps any error yielded by a [`ClientStream`] (the incoming HTTP request body).
+/// Backends receive this via [`ClientStream`] and can detect it with
+/// [`unpack_client_error`] to return a 4xx response rather than treating
+/// it as a 5xx backend failure.
 #[derive(Clone, Debug)]
 pub struct ClientError(Arc<dyn Error + Send + Sync + 'static>);
 
@@ -48,8 +61,49 @@ impl From<ClientError> for io::Error {
     }
 }
 
-/// Type alias for incoming client-supplied data streams (request bodies for PUT/upload).
+/// Incoming byte stream from a client PUT request body.
+///
+/// Uses [`ClientError`] as the error type so that a dropped or interrupted
+/// client connection is distinguishable from a backend I/O failure. Backends
+/// that detect a [`ClientError`] (via [`unpack_client_error`]) can surface it
+/// as [`crate::error::Error::Client`], which the server maps to HTTP 400 rather
+/// than 500.
+///
+/// Use [`single`] to construct a single-chunk `ClientStream` from an owned value.
 pub type ClientStream = BoxStream<'static, Result<Bytes, ClientError>>;
+
+/// Walks the source chain of `err` looking for a [`ClientError`].
+///
+/// At each step, two locations are checked:
+///
+/// - **Direct**: the error itself is a `ClientError`.
+/// - **Packed in `io::Error`**: the error is an `io::Error` whose custom inner
+///   value is a `ClientError`.
+///
+/// Use this in `put_object` implementations to reclassify body-stream errors
+/// as [`crate::error::Error::Client`] instead of an opaque server error.
+pub fn unpack_client_error<E>(err: &E) -> Option<ClientError>
+where
+    E: Error + 'static,
+{
+    let mut source = Some(err as &(dyn Error + 'static));
+
+    while let Some(s) = source {
+        // The client error may be wrapped as custom `io::Error`, in which case it cannot be
+        // discovered by iterating `sources`.
+        let target = match s.downcast_ref::<io::Error>().and_then(|e| e.get_ref()) {
+            Some(inner) => inner,
+            None => s,
+        };
+
+        if let Some(client_error) = target.downcast_ref::<ClientError>() {
+            return Some(client_error.clone());
+        }
+
+        source = s.source();
+    }
+    None
+}
 
 #[derive(Debug, Default)]
 enum ChunkedBytesState {

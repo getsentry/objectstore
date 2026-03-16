@@ -13,4 +13,4 @@ pub mod streaming;
 mod tiered;
 
 pub use service::{StorageConfig, StorageService};
-pub use stream::{ClientError, ClientStream, PayloadStream};
+pub use stream::{ClientStream, PayloadStream};
