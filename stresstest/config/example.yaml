@@ -30,11 +30,12 @@ workloads:
       p99: 20 KiB
   - name: snapshots
     mode: batch
-    concurrency: 4
+    concurrency: 2
     organizations: 1000
     file_sizes:
-      p50: 20 KiB
-      p99: 40 KiB
+      p50: 200 KiB
+      p99: 1 MiB
+      max: 1 MiB
     actions:
       writes: 20000
       reads: 0
