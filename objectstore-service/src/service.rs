@@ -609,22 +609,9 @@ mod tests {
         (service, hv, lt)
     }
 
-    // --- Integration tests (real backends) ---
-
     #[tokio::test]
     async fn stores_files() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let hv = BoxBackend::new(StorageConfig::FileSystem {
-            path: tempdir.path().to_path_buf(),
-        })
-        .await
-        .unwrap();
-        let lt = BoxBackend::new(StorageConfig::FileSystem {
-            path: tempdir.path().to_path_buf(),
-        })
-        .await
-        .unwrap();
-        let service = StorageService::new(hv, lt);
+        let (service, _, _) = make_service();
 
         let key = service
             .insert_object(
