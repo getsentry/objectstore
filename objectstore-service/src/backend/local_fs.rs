@@ -1,7 +1,7 @@
 //! Local filesystem backend for development and testing.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::pin;
 
 use futures_util::StreamExt;
@@ -13,6 +13,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::service::FileSystemConfig;
 use crate::stream::{self, ClientStream};
 
 /// Local filesystem backend for development and testing.
@@ -22,9 +23,9 @@ pub struct LocalFsBackend {
 }
 
 impl LocalFsBackend {
-    /// Creates a new [`LocalFsBackend`] rooted at the given directory.
-    pub fn new(path: &Path) -> Self {
-        Self { path: path.into() }
+    /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
+    pub fn new(config: FileSystemConfig) -> Self {
+        Self { path: config.path }
     }
 }
 
@@ -133,12 +134,15 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
+    use crate::service::FileSystemConfig;
     use crate::stream;
 
     #[tokio::test]
     async fn stores_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(tempdir.path());
+        let backend = LocalFsBackend::new(FileSystemConfig {
+            path: tempdir.path().to_path_buf(),
+        });
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -177,7 +181,9 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_returns_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(tempdir.path());
+        let backend = LocalFsBackend::new(FileSystemConfig {
+            path: tempdir.path().to_path_buf(),
+        });
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -209,7 +215,9 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_nonexistent() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(tempdir.path());
+        let backend = LocalFsBackend::new(FileSystemConfig {
+            path: tempdir.path().to_path_buf(),
+        });
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),

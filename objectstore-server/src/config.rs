@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
+pub use objectstore_service::StorageConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -89,220 +90,6 @@ impl Zeroize for ConfigSecret {
     fn zeroize(&mut self) {
         self.0.zeroize();
     }
-}
-
-/// Storage backend configuration.
-///
-/// The `type` field in YAML or `__TYPE` in environment variables determines which variant is used.
-///
-/// Used in: [`Config::high_volume_storage`], [`Config::long_term_storage`]
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Storage {
-    /// Local filesystem storage backend (type `"filesystem"`).
-    ///
-    /// Stores objects as files on the local filesystem. Suitable for development, testing,
-    /// and single-server deployments.
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: filesystem
-    ///   path: /data
-    /// ```
-    FileSystem {
-        /// Directory path for storing objects.
-        ///
-        /// The directory will be created if it doesn't exist. Relative paths are resolved from
-        /// the server's working directory.
-        ///
-        /// # Default
-        ///
-        /// `"data"` (relative to the server's working directory)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
-        /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
-        /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
-        path: PathBuf,
-    },
-
-    /// S3-compatible storage backend (type `"s3compatible"`).
-    ///
-    /// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
-    /// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
-    ///
-    /// [Amazon S3]: https://aws.amazon.com/s3/
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: s3compatible
-    ///   endpoint: https://s3.amazonaws.com
-    ///   bucket: my-bucket
-    /// ```
-    S3Compatible {
-        /// S3 endpoint URL.
-        ///
-        /// Examples: `https://s3.amazonaws.com`, `http://localhost:9000` (for MinIO)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        endpoint: String,
-
-        /// S3 bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
-        bucket: String,
-    },
-
-    /// [Google Cloud Storage] backend (type `"gcs"`).
-    ///
-    /// Stores objects in Google Cloud Storage (GCS). Authentication uses Application Default
-    /// Credentials (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS`
-    /// environment variable or GCE/GKE metadata service.
-    ///
-    /// **Note**: The bucket must be pre-created with the following lifecycle policy:
-    /// - `daysSinceCustomTime`: 1 day
-    /// - `action`: delete
-    ///
-    /// [Google Cloud Storage]: https://cloud.google.com/storage
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: gcs
-    ///   bucket: objectstore-bucket
-    /// ```
-    Gcs {
-        /// Optional custom GCS endpoint URL.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default GCS endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default GCS endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        endpoint: Option<String>,
-
-        /// GCS bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
-        bucket: String,
-    },
-
-    /// [Google Bigtable] backend (type `"bigtable"`).
-    ///
-    /// Stores objects in Google Cloud Bigtable, a NoSQL wide-column database. This backend is
-    /// optimized for high-throughput, low-latency workloads with small objects. Authentication uses
-    /// Application Default Credentials (ADC).
-    ///
-    /// **Note**: The table must be pre-created with appropriate column families. Ensure to have the
-    /// following column families:
-    /// - `fg`: timestamp-based garbage collection (`maxage=1s`)
-    /// - `fm`: manual garbage collection (`no GC policy`)
-    ///
-    /// [Google Bigtable]: https://cloud.google.com/bigtable
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// high_volume_storage:
-    ///   type: bigtable
-    ///   project_id: my-project
-    ///   instance_name: objectstore
-    ///   table_name: objectstore
-    /// ```
-    BigTable {
-        /// Optional custom Bigtable endpoint.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default Bigtable endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default Bigtable endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
-        endpoint: Option<String>,
-
-        /// GCP project ID.
-        ///
-        /// The Google project ID (not project number) containing the Bigtable instance.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
-        /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
-        project_id: String,
-
-        /// Bigtable instance name.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
-        /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
-        instance_name: String,
-
-        /// Bigtable table name.
-        ///
-        /// The table must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
-        /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
-        table_name: String,
-
-        /// Optional number of connections to maintain to Bigtable.
-        ///
-        /// # Default
-        ///
-        /// `None` (defaults to 1)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
-        /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
-        connections: Option<usize>,
-    },
 }
 
 /// Runtime configuration for the Tokio async runtime.
@@ -753,7 +540,7 @@ pub struct Config {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE` for the backend type. See [`Storage`] for available
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE` for the backend type. See [`StorageConfig`] for available
     ///   options.
     ///
     /// # Example
@@ -765,7 +552,7 @@ pub struct Config {
     ///   instance_name: objectstore
     ///   table_name: objectstore
     /// ```
-    pub high_volume_storage: Storage,
+    pub high_volume_storage: StorageConfig,
 
     /// Storage backend for large objects with long-term retention.
     ///
@@ -785,7 +572,7 @@ pub struct Config {
     /// # Environment Variables
     ///
     /// - `OS__LONG_TERM_STORAGE__TYPE` - Backend type (filesystem, s3compatible, gcs, bigtable)
-    /// - Additional fields depending on the type (see [`Storage`])
+    /// - Additional fields depending on the type (see [`StorageConfig`])
     ///
     /// # Example
     ///
@@ -794,7 +581,7 @@ pub struct Config {
     ///   type: gcs
     ///   bucket: my-objectstore-bucket
     /// ```
-    pub long_term_storage: Storage,
+    pub long_term_storage: StorageConfig,
 
     /// Configuration of the internal task runtime.
     ///
@@ -927,10 +714,10 @@ impl Default for Config {
         Self {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
-            high_volume_storage: Storage::FileSystem {
+            high_volume_storage: StorageConfig::FileSystem {
                 path: PathBuf::from("data/high-volume"),
             },
-            long_term_storage: Storage::FileSystem {
+            long_term_storage: StorageConfig::FileSystem {
                 path: PathBuf::from("data/long-term"),
             },
 
@@ -1006,7 +793,7 @@ mod tests {
 
             let config = Config::load(None).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            let StorageConfig::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
             else {
                 panic!("expected s3 storage");
             };
@@ -1053,7 +840,7 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
+            let StorageConfig::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
             else {
                 panic!("expected s3 storage");
             };
@@ -1092,7 +879,7 @@ mod tests {
 
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let Storage::S3Compatible {
+            let StorageConfig::S3Compatible {
                 endpoint,
                 bucket: _bucket,
             } = &dbg!(&config).long_term_storage

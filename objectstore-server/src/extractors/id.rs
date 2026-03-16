@@ -227,12 +227,12 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
-    use objectstore_service::{StorageConfig, StorageService};
+    use objectstore_service::{InMemoryBackend, StorageConfig, StorageService};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use crate::auth::PublicKeyDirectory;
-    use crate::config::{Config, Storage};
+    use crate::config::Config;
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
@@ -240,19 +240,17 @@ mod tests {
 
     async fn test_state(mut config: Config) -> (ServiceState, TempDir) {
         let tempdir = TempDir::new().unwrap();
-        config.high_volume_storage = Storage::FileSystem {
+        config.high_volume_storage = StorageConfig::FileSystem {
             path: tempdir.path().join("high-volume"),
         };
-        config.long_term_storage = Storage::FileSystem {
+        config.long_term_storage = StorageConfig::FileSystem {
             path: tempdir.path().join("long-term"),
         };
 
-        let fs_config = StorageConfig::FileSystem {
-            path: tempdir.path(),
-        };
-        let service = StorageService::new(fs_config.clone(), fs_config)
-            .await
-            .unwrap();
+        let service = StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory-hv")),
+            Box::new(InMemoryBackend::new("in-memory-lt")),
+        );
         let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 

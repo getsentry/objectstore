@@ -19,6 +19,7 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
+use crate::service::GcsConfig;
 use crate::stream::{self, ClientStream};
 
 /// Default endpoint used to access the GCS JSON API.
@@ -276,20 +277,22 @@ pub struct GcsBackend {
 }
 
 impl GcsBackend {
-    /// Creates an authenticated GCS JSON API backend bound to the given bucket.
-    pub async fn new(endpoint: Option<&str>, bucket: &str) -> anyhow::Result<Self> {
-        let (endpoint, token_provider) = match endpoint {
-            Some(emulator_host) => (emulator_host, None),
-            None => {
-                let provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
-                (DEFAULT_ENDPOINT, Some(provider))
-            }
+    /// Creates an authenticated GCS JSON API backend bound to the bucket in `config`.
+    pub async fn new(config: GcsConfig) -> anyhow::Result<Self> {
+        let GcsConfig { endpoint, bucket } = config;
+
+        let token_provider = if endpoint.is_none() {
+            Some(PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?)
+        } else {
+            None
         };
+
+        let endpoint_str = endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
 
         Ok(Self {
             client: common::reqwest_client(),
-            endpoint: endpoint.parse().context("invalid GCS endpoint URL")?,
-            bucket: bucket.to_string(),
+            endpoint: endpoint_str.parse().context("invalid GCS endpoint URL")?,
+            bucket,
             token_provider,
         })
     }
@@ -591,6 +594,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
+    use crate::service::GcsConfig;
     use crate::stream;
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
@@ -599,7 +603,11 @@ mod tests {
     // Refer to the readme for how to set up the emulator.
 
     async fn create_test_backend() -> Result<GcsBackend> {
-        GcsBackend::new(Some("http://localhost:8087"), "test-bucket").await
+        GcsBackend::new(GcsConfig {
+            endpoint: Some("http://localhost:8087".into()),
+            bucket: "test-bucket".into(),
+        })
+        .await
     }
 
     fn make_id() -> ObjectId {

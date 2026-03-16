@@ -9,13 +9,13 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
-use objectstore_service::{StorageConfig, StorageService};
+use objectstore_service::{BoxBackend, StorageService};
 use tokio::runtime::Handle;
 
 use objectstore_service::id::ObjectContext;
 
 use crate::auth::PublicKeyDirectory;
-use crate::config::{Config, Storage};
+use crate::config::Config;
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
 use crate::web::RequestCounter;
 
@@ -59,10 +59,9 @@ impl Services {
     pub async fn spawn(config: Config) -> Result<ServiceState> {
         tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
 
-        let high_volume = map_storage_config(&config.high_volume_storage);
-        let long_term = map_storage_config(&config.long_term_storage);
+        let high_volume = BoxBackend::new(config.high_volume_storage.clone()).await?;
+        let long_term = BoxBackend::new(config.long_term_storage.clone()).await?;
         let service = StorageService::new(high_volume, long_term)
-            .await?
             .with_concurrency_limit(config.service.max_concurrency);
         service.start();
 
@@ -103,32 +102,6 @@ impl Services {
     /// Used for cases where the payload size is known upfront (e.g. batch INSERT).
     pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
         self.rate_limiter.record_bandwidth(context, bytes);
-    }
-}
-
-fn map_storage_config(config: &'_ Storage) -> StorageConfig<'_> {
-    match config {
-        Storage::FileSystem { path } => StorageConfig::FileSystem { path },
-        Storage::S3Compatible { endpoint, bucket } => {
-            StorageConfig::S3Compatible { endpoint, bucket }
-        }
-        Storage::Gcs { endpoint, bucket } => StorageConfig::Gcs {
-            endpoint: endpoint.as_deref(),
-            bucket,
-        },
-        Storage::BigTable {
-            endpoint,
-            project_id,
-            instance_name,
-            table_name,
-            connections,
-        } => StorageConfig::BigTable {
-            endpoint: endpoint.as_deref(),
-            project_id,
-            instance_name,
-            table_name,
-            connections: *connections,
-        },
     }
 }
 

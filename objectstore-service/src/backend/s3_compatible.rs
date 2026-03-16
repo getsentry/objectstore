@@ -13,6 +13,7 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::service::S3CompatibleConfig;
 use crate::stream::{self, ClientStream};
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -227,11 +228,11 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
 
 impl S3CompatibleBackend<NoToken> {
     /// Creates a new S3-compatible backend that sends unauthenticated requests.
-    pub fn without_token(endpoint: &str, bucket: &str) -> Self {
+    pub fn without_token(config: S3CompatibleConfig) -> Self {
         Self {
             client: common::reqwest_client(),
-            endpoint: endpoint.into(),
-            bucket: bucket.into(),
+            endpoint: config.endpoint,
+            bucket: config.bucket,
             token_provider: None,
         }
     }

@@ -17,6 +17,7 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
+use crate::service::BigTableConfig;
 use crate::stream::{ChunkedBytes, ClientStream};
 
 /// Connection timeout used for the initial connection to Bigtable.
@@ -158,30 +159,32 @@ impl RowData {
 }
 
 impl BigTableBackend {
-    /// Creates a new [`BigTableBackend`].
+    /// Creates a new [`BigTableBackend`] from the given `config`.
     ///
-    /// Pass an `endpoint` to connect to a local emulator; omit it to use real GCP credentials.
-    /// `connections` controls the gRPC connection pool size (defaults to 1).
-    pub async fn new(
-        endpoint: Option<&str>,
-        project_id: &str,
-        instance_name: &str,
-        table_name: &str,
-        connections: Option<usize>,
-    ) -> anyhow::Result<Self> {
-        let bigtable = if let Some(endpoint) = endpoint {
+    /// Pass an `endpoint` in the config to connect to a local emulator; omit it to use real GCP
+    /// credentials. `connections` controls the gRPC connection pool size (defaults to 1).
+    pub async fn new(config: BigTableConfig) -> anyhow::Result<Self> {
+        let BigTableConfig {
+            endpoint,
+            project_id,
+            instance_name,
+            table_name,
+            connections,
+        } = config;
+
+        let bigtable = if let Some(ref endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
                 endpoint,
-                project_id,
-                instance_name,
+                &project_id,
+                &instance_name,
                 false, // is_read_only
                 Some(CONNECT_TIMEOUT),
             )?
         } else {
             let token_provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
             BigTableConnection::new_with_managed_transport(
-                project_id,
-                instance_name,
+                &project_id,
+                &instance_name,
                 false, // is_read_only
                 Some(CONNECT_TIMEOUT),
                 Arc::new(token_provider),
@@ -198,8 +201,8 @@ impl BigTableBackend {
         Ok(Self {
             bigtable,
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
-            table_path: client.get_full_table_name(table_name),
-            table_name: table_name.to_owned(),
+            table_path: client.get_full_table_name(&table_name),
+            table_name,
         })
     }
 
@@ -533,6 +536,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
+    use crate::service::BigTableConfig;
     use crate::stream;
 
     // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done
@@ -556,13 +560,13 @@ mod tests {
     }
 
     async fn create_test_backend() -> Result<BigTableBackend> {
-        BigTableBackend::new(
-            Some("localhost:8086"),
-            "testing",
-            "objectstore",
-            "objectstore",
-            None,
-        )
+        BigTableBackend::new(BigTableConfig {
+            endpoint: Some("localhost:8086".into()),
+            project_id: "testing".into(),
+            instance_name: "objectstore".into(),
+            table_name: "objectstore".into(),
+            connections: None,
+        })
         .await
     }
 

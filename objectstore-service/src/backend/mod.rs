@@ -20,5 +20,4 @@ pub mod gcs;
 pub mod local_fs;
 pub mod s3_compatible;
 
-#[cfg(test)]
-pub(crate) mod in_memory;
+pub mod in_memory;
