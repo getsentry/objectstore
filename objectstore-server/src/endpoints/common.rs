@@ -90,6 +90,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
+            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(_) => {

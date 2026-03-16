@@ -11,14 +11,13 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use tonic::Code;
 
-use crate::PayloadStream;
 use crate::backend::common::{
     Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::stream::ChunkedBytes;
+use crate::stream::{ChunkedBytes, ClientStream};
 
 /// Connection timeout used for the initial connection to BigQuery.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -340,7 +339,7 @@ impl Backend for BigTableBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        mut stream: PayloadStream,
+        mut stream: ClientStream,
     ) -> Result<PutResponse> {
         tracing::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();

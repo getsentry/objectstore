@@ -42,7 +42,6 @@ use std::sync::Arc;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
-use crate::PayloadStream;
 use crate::concurrency::ConcurrencyPermit;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
@@ -270,7 +269,7 @@ async fn execute_operation(
             })
         }
         Operation::Insert(insert) => {
-            let stream: PayloadStream =
+            let stream =
                 futures_util::stream::once(futures_util::future::ready(Ok(insert.payload))).boxed();
             let id = tiered
                 .insert_object(context, insert.key, &insert.metadata, stream)
@@ -298,6 +297,7 @@ mod tests {
     use super::*;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
+    use crate::stream::ClientStream;
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -444,7 +444,7 @@ mod tests {
             &self,
             id: &ObjectId,
             metadata: &Metadata,
-            stream: crate::PayloadStream,
+            stream: ClientStream,
         ) -> Result<()> {
             self.in_flight.fetch_add(1, Ordering::SeqCst);
             let _ = self.paused_tx.send(()).await;

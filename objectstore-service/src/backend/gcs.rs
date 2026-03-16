@@ -13,13 +13,13 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use crate::PayloadStream;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
+use crate::stream::ClientStream;
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -468,7 +468,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<PutResponse> {
         tracing::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
@@ -509,7 +509,10 @@ impl Backend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: upload object", e))?;
+            .map_err(|e| match common::unpack_client_error(&e) {
+                Some(ce) => Error::Client(ce),
+                _ => Error::reqwest("GCS: upload object", e),
+            })?;
 
         Ok(())
     }

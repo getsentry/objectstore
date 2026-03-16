@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::Stream;
-use objectstore_service::PayloadStream;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
@@ -719,17 +718,17 @@ impl TokenBucket {
     }
 }
 
-/// A wrapper around a `PayloadStream` that measures bandwidth usage.
+/// A wrapper around a byte stream that measures bandwidth usage.
 ///
-/// This behaves exactly as a `PayloadStream`, except that every time an item is polled,
-/// all accumulators are incremented by the size of the returned `Bytes` chunk.
-pub(crate) struct MeteredPayloadStream {
-    inner: PayloadStream,
+/// Every time a chunk is polled successfully, all accumulators are incremented
+/// by its size. Generic over both the stream type `S` and its error type.
+pub(crate) struct MeteredPayloadStream<S> {
+    inner: S,
     accumulators: Vec<Arc<AtomicU64>>,
 }
 
-impl MeteredPayloadStream {
-    pub fn new(inner: PayloadStream, accumulators: Vec<Arc<AtomicU64>>) -> Self {
+impl<S> MeteredPayloadStream<S> {
+    pub fn new(inner: S, accumulators: Vec<Arc<AtomicU64>>) -> Self {
         Self {
             inner,
             accumulators,
@@ -737,20 +736,23 @@ impl MeteredPayloadStream {
     }
 }
 
-impl std::fmt::Debug for MeteredPayloadStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S> fmt::Debug for MeteredPayloadStream<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MeteredPayloadStream")
             .field("accumulators", &self.accumulators)
             .finish()
     }
 }
 
-impl Stream for MeteredPayloadStream {
-    type Item = std::io::Result<Bytes>;
+impl<S, E> Stream for MeteredPayloadStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let res = this.inner.as_mut().poll_next(cx);
+        let res = Pin::new(&mut this.inner).poll_next(cx);
         if let Poll::Ready(Some(Ok(ref bytes))) = res {
             let len = bytes.len() as u64;
             for acc in &this.accumulators {

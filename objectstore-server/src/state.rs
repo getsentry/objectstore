@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
-use objectstore_service::{PayloadStream, StorageConfig, StorageService};
+use bytes::Bytes;
+use futures_util::Stream;
+use objectstore_service::{StorageConfig, StorageService};
 use tokio::runtime::Handle;
 
 use objectstore_service::id::ObjectContext;
@@ -81,9 +82,20 @@ impl Services {
         }))
     }
 
-    /// Wraps a [`PayloadStream`] with bandwidth metering for rate limiting.
-    pub fn meter_stream(&self, stream: PayloadStream, context: &ObjectContext) -> PayloadStream {
-        MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context)).boxed()
+    /// Wraps a byte stream with bandwidth metering for rate limiting.
+    ///
+    /// Works with any stream type — use for both [`objectstore_service::PayloadStream`]
+    /// (outgoing, `E = io::Error`) and [`objectstore_service::ClientStream`]
+    /// (incoming, `E = ClientError`).
+    pub(crate) fn meter_stream<S, E>(
+        &self,
+        stream: S,
+        context: &ObjectContext,
+    ) -> MeteredPayloadStream<S>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    {
+        MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context))
     }
 
     /// Records bandwidth usage for the given context without wrapping a stream.

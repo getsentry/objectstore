@@ -11,12 +11,11 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
-use crate::PayloadStream;
 use crate::backend::common::{BoxedBackend, DeleteOutcome};
 use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
-use crate::stream::SizedPeek;
+use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -60,7 +59,7 @@ impl TieredStorage {
         context: ObjectContext,
         key: Option<String>,
         metadata: &Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<InsertResponse> {
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = context.usecase.clone());
@@ -277,7 +276,7 @@ mod tests {
     use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::make_stream;
+    use crate::stream::{ClientStream, PayloadStream, make_stream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -509,7 +508,7 @@ mod tests {
             &self,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _stream: PayloadStream,
+            _stream: ClientStream,
         ) -> Result<()> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
@@ -620,7 +619,7 @@ mod tests {
             &self,
             id: &ObjectId,
             metadata: &Metadata,
-            stream: PayloadStream,
+            stream: ClientStream,
         ) -> Result<()> {
             self.0.put_object(id, metadata, stream).await
         }
@@ -682,10 +681,10 @@ mod tests {
         // fit under the threshold but collectively exceed it.
         let chunk_size = 512 * 1024; // 512 KiB per chunk
         let chunk_count = 4; // 4 × 512 KiB = 2 MiB total
-        let chunks: Vec<std::io::Result<bytes::Bytes>> = (0..chunk_count)
-            .map(|i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size])))
-            .collect();
-        let stream = futures_util::stream::iter(chunks).boxed();
+        let stream: ClientStream = futures_util::stream::iter(
+            (0..chunk_count).map(move |i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size]))),
+        )
+        .boxed();
 
         let id = storage
             .insert_object(

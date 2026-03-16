@@ -13,9 +13,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::Metadata;
 
 use super::common::{DeleteResponse, GetResponse, PutResponse};
-use crate::PayloadStream;
 use crate::error::Result;
 use crate::id::ObjectId;
+use crate::stream::ClientStream;
 
 type Store = HashMap<ObjectId, (Metadata, Bytes)>;
 
@@ -66,7 +66,7 @@ impl super::common::Backend for InMemoryBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> Result<PutResponse> {
         let bytes: BytesMut = stream.try_collect().await?;
         self.store

@@ -7,12 +7,21 @@ use std::any::Any;
 
 use thiserror::Error as ThisError;
 
+use crate::stream::ClientError;
+
 /// Error type for service operations.
 #[derive(Debug, ThisError)]
 pub enum Error {
     /// IO errors related to payload streaming or file operations.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Error originating from a client-supplied input stream.
+    ///
+    /// Indicates the client is at fault (e.g. dropped connection mid-upload) and should
+    /// map to a 4xx response rather than a 5xx.
+    #[error("error reading client stream: {0}")]
+    Client(#[from] ClientError),
 
     /// Errors related to de/serialization.
     #[error("serde error: {context}")]

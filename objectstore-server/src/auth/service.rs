@@ -1,6 +1,6 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
-use objectstore_service::{PayloadStream, StorageService};
+use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 
@@ -90,7 +90,7 @@ impl AuthAwareService {
         context: ObjectContext,
         key: Option<String>,
         metadata: Metadata,
-        stream: PayloadStream,
+        stream: ClientStream,
     ) -> ApiResult<InsertResponse> {
         self.assert_authorized(Permission::ObjectWrite, &context)?;
         Ok(self
