@@ -17,11 +17,12 @@
 
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use argh::FromArgs;
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
+use stresstest::workload::WorkloadMode;
 
 use crate::config::Config;
 
@@ -52,11 +53,29 @@ async fn main() -> anyhow::Result<()> {
         .cleanup(config.cleanup);
 
     for w in config.workloads {
+        if matches!(w.mode, WorkloadMode::Batch) {
+            if w.actions.reads > 0 || w.actions.deletes > 0 {
+                bail!(
+                    "workload '{}': batch mode only supports writes, but reads={} and deletes={} were configured",
+                    w.name,
+                    w.actions.reads,
+                    w.actions.deletes
+                );
+            }
+            if w.actions.writes == 0 {
+                bail!(
+                    "workload '{}': batch mode requires actions.writes > 0",
+                    w.name
+                );
+            }
+        }
+
         let workload = Workload::builder(w.name)
             .concurrency(w.concurrency)
             .organizations(w.organizations)
             .mode(w.mode)
             .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
+            .max_size(w.file_sizes.max.map(|b| b.0))
             .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
             .build();
 

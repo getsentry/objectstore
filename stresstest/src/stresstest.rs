@@ -12,10 +12,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
+use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
-use crate::workload::{Action, Workload, WorkloadMode};
+use crate::workload::{Action, InternalId, Workload, WorkloadMode};
 
 /// Stresstest runner that can execute multiple workloads concurrently against a remote.
 ///
@@ -118,7 +119,12 @@ impl Stresstest {
             .into_iter()
             .map(|workload| {
                 let remote = Arc::clone(&remote);
-                tokio::spawn(run_workload(remote, workload, duration, ttl))
+                match workload.mode {
+                    WorkloadMode::Batch => {
+                        tokio::spawn(run_batch_workload(remote, workload, duration, ttl))
+                    }
+                    _ => tokio::spawn(run_workload(remote, workload, duration, ttl)),
+                }
             })
             .collect();
 
@@ -158,6 +164,7 @@ impl Stresstest {
                 .unwrap();
             total_metrics.write_failures += metrics.write_failures;
             total_metrics.read_failures += metrics.read_failures;
+            total_metrics.many_requests += metrics.many_requests;
 
             workload
         });
@@ -235,7 +242,7 @@ async fn run_workload(
 ) -> (Workload, WorkloadMetrics, Duration) {
     // In throughput mode, allow for a high concurrency value.
     let concurrency = match workload.mode {
-        WorkloadMode::Weighted => workload.concurrency,
+        WorkloadMode::Weighted | WorkloadMode::Batch => workload.concurrency,
         WorkloadMode::Throughput => 100,
     };
 
@@ -352,6 +359,137 @@ async fn run_workload(
     (workload, metrics, elapsed)
 }
 
+async fn run_batch_workload(
+    remote: Arc<HttpRemote>,
+    workload: Workload,
+    duration: Duration,
+    ttl: Option<Duration>,
+) -> (Workload, WorkloadMetrics, Duration) {
+    let concurrency = workload.concurrency;
+    let batch_size = workload.batch_write_count();
+
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let start = Instant::now();
+    let deadline = tokio::time::Instant::now() + duration;
+
+    let workload = Arc::new(Mutex::new(workload));
+    let metrics = Arc::new(Mutex::new(WorkloadMetrics::default()));
+
+    let sleep = tokio::time::sleep_until(deadline);
+    tokio::pin!(sleep);
+
+    loop {
+        if deadline.elapsed() > Duration::ZERO {
+            break;
+        }
+        tokio::select! {
+            permit = semaphore.clone().acquire_owned() => {
+                let workload = Arc::clone(&workload);
+                let remote = Arc::clone(&remote);
+                let metrics = Arc::clone(&metrics);
+
+                let (payloads, usecase, org_id) = {
+                    let mut wl = workload.lock().unwrap();
+                    let payloads = wl.next_write_payloads(batch_size);
+                    let org_id = wl.next_organization_id();
+                    let mut usecase = Usecase::new(&wl.name);
+                    if let Some(ttl) = ttl {
+                        usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
+                    }
+                    (payloads, usecase, org_id)
+                };
+
+                let task = async move {
+                    let session = remote.session(&usecase, org_id);
+                    let mut many = session.many();
+
+                    let payload_info: Vec<(InternalId, u64)> = payloads
+                        .iter()
+                        .map(|(id, p)| (*id, p.len))
+                        .collect();
+
+                    for (internal_id, payload) in payloads {
+                        let stream = ReaderStream::new(payload).boxed();
+                        many = many.push(
+                            session
+                                .put_stream(stream)
+                                .compression(None)
+                                .key(internal_id.to_string()),
+                        );
+                    }
+
+                    metrics.lock().unwrap().many_requests += 1;
+
+                    let batch_start = Instant::now();
+                    let mut results = many.send();
+
+                    while let Some(result) = results.next().await {
+                        let elapsed_secs = batch_start.elapsed().as_secs_f64();
+                        match result {
+                            objectstore_client::OperationResult::Put(key, Ok(_)) => {
+                                // Find the matching payload info by key
+                                let file_size = payload_info
+                                    .iter()
+                                    .find(|(id, _)| id.to_string() == key)
+                                    .map(|(_, size)| *size)
+                                    .unwrap_or(0);
+
+                                let external_id = (usecase.clone(), org_id, key.clone());
+                                let internal_id = payload_info
+                                    .iter()
+                                    .find(|(id, _)| id.to_string() == key)
+                                    .map(|(id, _)| *id);
+
+                                if let Some(internal_id) = internal_id {
+                                    workload.lock().unwrap().push_file(internal_id, external_id);
+                                }
+
+                                let mut m = metrics.lock().unwrap();
+                                m.write_timing.add(elapsed_secs);
+                                m.file_sizes.add(file_size as f64);
+                                m.bytes_written += file_size;
+                            }
+                            objectstore_client::OperationResult::Put(_, Err(err)) => {
+                                print_error("batch write", &err.into());
+                                metrics.lock().unwrap().write_failures += 1;
+                            }
+                            objectstore_client::OperationResult::Error(err) => {
+                                print_error("batch request", &err.into());
+                                metrics.lock().unwrap().write_failures += 1;
+                            }
+                            _ => {
+                                // Batch mode only sends puts, so other results are unexpected
+                            }
+                        }
+                    }
+                    drop(permit);
+                };
+                tokio::spawn(task);
+            }
+            _ = &mut sleep => {
+                break;
+            }
+        }
+    }
+
+    let _permits = semaphore.acquire_many(concurrency as u32).await;
+
+    let metrics: WorkloadMetrics = {
+        let mut metrics = metrics.lock().unwrap();
+        std::mem::take(&mut metrics)
+    };
+
+    let workload = Arc::try_unwrap(workload)
+        .map_err(|_| ())
+        .unwrap()
+        .into_inner()
+        .unwrap();
+
+    let elapsed = start.elapsed();
+
+    (workload, metrics, elapsed)
+}
+
 fn print_error(message: &str, error: &Error) {
     eprintln!("{} {}", "ERROR:".bold().red(), message.bold());
     for source in error.chain() {
@@ -363,6 +501,9 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
     let sketch = &metrics.file_sizes;
     if sketch.count() > 0 {
         print!("{} ({} ops", "WRITE:".bold().green(), sketch.count().bold());
+        if metrics.many_requests > 0 {
+            print!(", {} many requests", metrics.many_requests.bold());
+        }
         if metrics.write_failures > 0 {
             print!(
                 ", {}",
@@ -380,6 +521,10 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         );
 
         print_ops(&metrics.write_timing, duration);
+        if metrics.many_requests > 0 {
+            let many_ps = metrics.many_requests as f64 / duration.as_secs_f64();
+            print!(", {:.2} many requests/s", many_ps.bold());
+        }
         print_throughput(metrics.bytes_written, duration);
         print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
     } else if metrics.write_failures > 0 {
@@ -462,4 +607,6 @@ struct WorkloadMetrics {
 
     write_failures: u64,
     read_failures: u64,
+
+    many_requests: u64,
 }

@@ -27,6 +27,12 @@ pub enum WorkloadMode {
     ///
     /// Actions are used to determine the ops per second for each operation.
     Throughput,
+
+    /// The workload sends batch requests containing multiple write operations each.
+    ///
+    /// Actions' `writes` value determines how many put operations are included per batch request.
+    /// Reads and deletes are not supported in this mode.
+    Batch,
 }
 
 /// A builder for creating a [`Workload`].
@@ -40,6 +46,7 @@ pub struct WorkloadBuilder {
 
     p50_size: u64,
     p99_size: u64,
+    max_size: Option<u64>,
 
     write_weight: usize,
     read_weight: usize,
@@ -69,6 +76,12 @@ impl WorkloadBuilder {
     pub fn size_distribution(mut self, p50: u64, p99: u64) -> Self {
         self.p50_size = p50;
         self.p99_size = p99;
+        self
+    }
+
+    /// Sets an optional maximum payload size. Sampled sizes will be clamped to this value.
+    pub fn max_size(mut self, max_size: Option<u64>) -> Self {
+        self.max_size = max_size;
         self
     }
 
@@ -102,6 +115,7 @@ impl WorkloadBuilder {
 
             rng,
             size_distribution,
+            max_size: self.max_size,
             action_distribution,
 
             start_time: None,
@@ -135,6 +149,8 @@ pub struct Workload {
     rng: SmallRng,
     /// A distribution that generates payload sizes for the `write` action.
     size_distribution: LogNormal<f64>,
+    /// Optional maximum payload size in bytes.
+    max_size: Option<u64>,
     /// A distribution that generates actions, such as write/read/delete.
     action_distribution: WeightedIndex<usize>,
 
@@ -157,6 +173,7 @@ impl Workload {
 
             p50_size: 16 * 1024,
             p99_size: 1024 * 1024,
+            max_size: None,
 
             write_weight: 33,
             read_weight: 33,
@@ -166,7 +183,11 @@ impl Workload {
 
     fn get_payload(&self, seed: u64) -> Payload {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let len = self.size_distribution.sample(&mut rng) as u64;
+        let mut len = self.size_distribution.sample(&mut rng) as u64;
+
+        if let Some(max) = self.max_size {
+            len = len.min(max);
+        }
 
         Payload { len, rng }
     }
@@ -240,9 +261,24 @@ impl Workload {
 
     pub(crate) fn next_action(&mut self) -> Option<Action> {
         match self.mode {
-            WorkloadMode::Weighted => Some(self.next_action_weighted()),
+            WorkloadMode::Weighted | WorkloadMode::Batch => Some(self.next_action_weighted()),
             WorkloadMode::Throughput => self.next_action_throughput(),
         }
+    }
+
+    /// Generates `count` write payloads for use in batch mode.
+    pub(crate) fn next_write_payloads(&mut self, count: usize) -> Vec<(InternalId, Payload)> {
+        (0..count)
+            .map(|_| {
+                let seed = self.rng.next_u64();
+                (InternalId(seed), self.get_payload(seed))
+            })
+            .collect()
+    }
+
+    /// Returns the number of writes per batch, derived from the `actions.writes` weight.
+    pub(crate) fn batch_write_count(&self) -> usize {
+        self.action_distribution.weight(0).unwrap()
     }
 
     pub(crate) fn next_organization_id(&mut self) -> u64 {
