@@ -317,6 +317,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_without_key_generates_unique_id() {
+        let (service, _, _) = make_service();
+
+        let id = service
+            .insert_object(
+                make_context(),
+                None,
+                Default::default(),
+                stream::single("auto-keyed"),
+            )
+            .await
+            .unwrap();
+
+        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
+    }
+
+    #[tokio::test]
     async fn stores_files() {
         let (service, _, _) = make_service();
 
