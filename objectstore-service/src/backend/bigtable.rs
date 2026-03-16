@@ -177,7 +177,7 @@ impl BigTableBackend {
                 false, // is_read_only
                 Some(CONNECT_TIMEOUT),
                 Arc::new(token_provider),
-                connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
+                connections.unwrap_or(1),
                 true,                     // prime_channels
                 None,                     // app_profile_id
                 Some(Duration::from_mins(50)), // max_channel_age
