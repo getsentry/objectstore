@@ -42,6 +42,7 @@ use std::sync::Arc;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
+use crate::backend::common::Backend as _;
 use crate::concurrency::ConcurrencyPermit;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
@@ -269,10 +270,9 @@ async fn execute_operation(
             })
         }
         Operation::Insert(insert) => {
+            let id = ObjectId::optional(context, insert.key);
             let stream = crate::stream::single(insert.payload);
-            let id = tiered
-                .insert_object(context, insert.key, &insert.metadata, stream)
-                .await?;
+            tiered.put_object(&id, &insert.metadata, stream).await?;
             Ok(OpResponse::Inserted { id })
         }
         Operation::Delete(delete) => {

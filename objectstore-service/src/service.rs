@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::BoxedBackend;
+use crate::backend::common::{Backend as _, BoxedBackend};
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
@@ -228,9 +228,11 @@ impl StorageService {
         metadata: Metadata,
         stream: ClientStream,
     ) -> Result<InsertResponse> {
+        let id = ObjectId::optional(context, key);
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
-            inner.insert_object(context, key, &metadata, stream).await
+            inner.put_object(&id, &metadata, stream).await?;
+            Ok(id)
         })
         .await
     }
@@ -295,7 +297,6 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::Backend as _;
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;

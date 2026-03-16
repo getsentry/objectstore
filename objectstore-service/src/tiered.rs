@@ -11,10 +11,12 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::{BoxedBackend, ConditionalOutcome};
+use crate::backend::common::{
+    Backend, BoxedBackend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse,
+    PutResponse,
+};
 use crate::error::Result;
-use crate::id::{ObjectContext, ObjectId};
-use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use crate::id::ObjectId;
 use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -53,16 +55,20 @@ pub(crate) struct TieredStorage {
     pub(crate) long_term_backend: BoxedBackend,
 }
 
-impl TieredStorage {
-    pub(crate) async fn insert_object(
+#[async_trait::async_trait]
+impl Backend for TieredStorage {
+    fn name(&self) -> &'static str {
+        "tiered"
+    }
+
+    async fn put_object(
         &self,
-        context: ObjectContext,
-        key: Option<String>,
+        id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
-    ) -> Result<InsertResponse> {
+    ) -> Result<PutResponse> {
         if metadata.origin.is_none() {
-            objectstore_metrics::count!("put.origin_missing", usecase = context.usecase.clone());
+            objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
         }
 
         let start = Instant::now();
@@ -76,11 +82,9 @@ impl TieredStorage {
 
         objectstore_metrics::record!(
             "put.first_chunk.latency" = start.elapsed(),
-            usecase = context.usecase.clone(),
+            usecase = id.usecase().to_owned(),
             backend_choice = backend_choice.as_str(),
         );
-
-        let id = ObjectId::optional(context, key);
 
         let (final_choice, stored_size) = match backend_choice {
             BackendChoice::HighVolume => {
@@ -89,7 +93,7 @@ impl TieredStorage {
 
                 let outcome = self
                     .high_volume_backend
-                    .put_non_tombstone(&id, metadata, payload.clone())
+                    .put_non_tombstone(id, metadata, payload.clone())
                     .await?;
 
                 if outcome == ConditionalOutcome::Tombstone {
@@ -99,7 +103,7 @@ impl TieredStorage {
                     // in a follow-up.
                     let stream = crate::stream::single(payload).boxed();
                     self.long_term_backend
-                        .put_object(&id, metadata, stream)
+                        .put_object(id, metadata, stream)
                         .await?;
                     (BackendChoice::LongTerm, stored_size)
                 } else {
@@ -122,7 +126,7 @@ impl TieredStorage {
 
                 // First write the object to long-term.
                 self.long_term_backend
-                    .put_object(&id, metadata, stream)
+                    .put_object(id, metadata, stream)
                     .await?;
 
                 // Then write the redirect tombstone to high-volume.
@@ -134,12 +138,12 @@ impl TieredStorage {
                 let redirect_stream = futures_util::stream::empty().boxed();
                 let redirect_result = self
                     .high_volume_backend
-                    .put_object(&id, &redirect_metadata, redirect_stream)
+                    .put_object(id, &redirect_metadata, redirect_stream)
                     .await;
 
                 if redirect_result.is_err() {
                     // Clean up on any kind of error.
-                    self.long_term_backend.delete_object(&id).await?;
+                    self.long_term_backend.delete_object(id).await?;
                 }
                 redirect_result?;
 
@@ -166,33 +170,10 @@ impl TieredStorage {
             backend_type = backend_ty,
         );
 
-        Ok(id)
+        Ok(())
     }
 
-    pub(crate) async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        let start = Instant::now();
-
-        let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume_backend.name();
-        let mut result = self.high_volume_backend.get_metadata(id).await?;
-
-        if result.as_ref().is_some_and(|m| m.is_tombstone()) {
-            result = self.long_term_backend.get_metadata(id).await?;
-            backend_choice = "long-term";
-            backend_type = self.long_term_backend.name();
-        }
-
-        objectstore_metrics::record!(
-            "head.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice,
-            backend_type = backend_type,
-        );
-
-        Ok(result)
-    }
-
-    pub(crate) async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -228,7 +209,30 @@ impl TieredStorage {
         Ok(result)
     }
 
-    pub(crate) async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+        let start = Instant::now();
+
+        let mut backend_choice = "high-volume";
+        let mut backend_type = self.high_volume_backend.name();
+        let mut result = self.high_volume_backend.get_metadata(id).await?;
+
+        if result.as_ref().is_some_and(|m| m.is_tombstone()) {
+            result = self.long_term_backend.get_metadata(id).await?;
+            backend_choice = "long-term";
+            backend_type = self.long_term_backend.name();
+        }
+
+        objectstore_metrics::record!(
+            "head.latency" = start.elapsed(),
+            usecase = id.usecase().to_owned(),
+            backend_choice = backend_choice,
+            backend_type = backend_type,
+        );
+
+        Ok(result)
+    }
+
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
@@ -279,6 +283,7 @@ mod tests {
     use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
+    use crate::id::ObjectContext;
     use crate::stream::{self, ClientStream, PayloadStream};
 
     fn make_context() -> ObjectContext {
@@ -318,23 +323,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_without_key_generates_unique_id() {
-        let (storage, _hv, _lt) = make_tiered_storage();
+    async fn random_id_has_uuid_key() {
+        let id = ObjectId::random(make_context());
+        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
+    }
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                None,
-                &Default::default(),
-                stream::single("auto-keyed"),
-            )
+    #[tokio::test]
+    async fn put_and_get_roundtrip() {
+        let (storage, _hv, _lt) = make_tiered_storage();
+        let id = ObjectId::random(make_context());
+
+        storage
+            .put_object(&id, &Default::default(), stream::single("auto-keyed"))
             .await
             .unwrap();
 
-        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
-
-        let (_, stream) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = stream.try_collect().await.unwrap();
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = s.try_collect().await.unwrap();
         assert_eq!(body.as_ref(), b"auto-keyed");
     }
 
@@ -344,14 +349,10 @@ mod tests {
     async fn small_object_goes_to_high_volume() {
         let (storage, hv, lt) = make_tiered_storage();
         let payload = vec![0u8; 100]; // 100 bytes, well under 1 MiB
+        let id = ObjectId::new(make_context(), "small".into());
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("small".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -364,14 +365,10 @@ mod tests {
         let (storage, hv, lt) = make_tiered_storage();
         let payload_len = 2 * 1024 * 1024; // 2 MiB, over threshold
         let payload = vec![0xABu8; payload_len];
+        let id = ObjectId::new(make_context(), "large".into());
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("large".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -388,16 +385,12 @@ mod tests {
     #[tokio::test]
     async fn reinsert_with_existing_tombstone_routes_to_long_term() {
         let (storage, hv, lt) = make_tiered_storage();
+        let id = ObjectId::new(make_context(), "reinsert-key".into());
 
         // First: insert a large object → creates tombstone in hv, payload in lt
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                stream::single(large_payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(large_payload))
             .await
             .unwrap();
 
@@ -408,12 +401,7 @@ mod tests {
         // detect the existing tombstone and route to long-term anyway.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         storage
-            .insert_object(
-                make_context(),
-                Some("reinsert-key".into()),
-                &Default::default(),
-                stream::single(small_payload),
-            )
+            .put_object(&id, &Default::default(), stream::single(small_payload))
             .await
             .unwrap();
 
@@ -438,14 +426,10 @@ mod tests {
             ..Default::default()
         };
         let payload = vec![0u8; 2 * 1024 * 1024]; // force long-term
+        let id = ObjectId::new(make_context(), "expiry-test".into());
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("expiry-test".into()),
-                &metadata_in,
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &metadata_in, stream::single(payload))
             .await
             .unwrap();
 
@@ -475,19 +459,16 @@ mod tests {
             content_type: "image/png".into(),
             ..Default::default()
         };
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("redirect-read".into()),
-                &metadata_in,
-                stream::single(payload),
-            )
+        let id = ObjectId::new(make_context(), "redirect-read".into());
+
+        storage
+            .put_object(&id, &metadata_in, stream::single(payload))
             .await
             .unwrap();
 
         // get_object should transparently follow the tombstone
-        let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = stream.try_collect().await.unwrap();
+        let (metadata, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = s.try_collect().await.unwrap();
         assert_eq!(body.len(), payload_len);
         assert!(!metadata.is_tombstone());
 
@@ -542,14 +523,10 @@ mod tests {
             long_term_backend: Box::new(lt.clone()),
         };
 
+        let id = ObjectId::new(make_context(), "orphan-test".into());
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
         let result = storage
-            .insert_object(
-                make_context(),
-                Some("orphan-test".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await;
 
         assert!(result.is_err());
@@ -562,15 +539,11 @@ mod tests {
     #[tokio::test]
     async fn orphan_tombstone_returns_none() {
         let (storage, _hv, lt) = make_tiered_storage();
+        let id = ObjectId::new(make_context(), "orphan-tombstone".into());
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("orphan-tombstone".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -592,15 +565,11 @@ mod tests {
     #[tokio::test]
     async fn delete_cleans_up_both_backends() {
         let (storage, hv, lt) = make_tiered_storage();
+        let id = ObjectId::new(make_context(), "delete-both".into());
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("delete-both".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -652,15 +621,11 @@ mod tests {
             long_term_backend: lt,
         };
 
+        let id = ObjectId::new(make_context(), "fail-delete".into());
         let payload_len = 2 * 1024 * 1024; // 2 MiB -> goes to long-term
         let payload = vec![0xABu8; payload_len];
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("fail-delete".into()),
-                &Default::default(),
-                stream::single(payload),
-            )
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -671,8 +636,8 @@ mod tests {
         assert!(hv_meta.is_tombstone());
 
         // The object should still be reachable through the service
-        let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = stream.try_collect().await.unwrap();
+        let (metadata, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body: BytesMut = s.try_collect().await.unwrap();
         assert_eq!(body.len(), payload_len);
         assert!(!metadata.is_tombstone());
     }
@@ -682,6 +647,7 @@ mod tests {
     #[tokio::test]
     async fn multi_chunk_large_object_chains_buffered_and_remaining() {
         let (storage, _hv, lt) = make_tiered_storage();
+        let id = ObjectId::new(make_context(), "multi-chunk".into());
 
         // Deliver a 2 MiB payload across multiple chunks that individually
         // fit under the threshold but collectively exceed it.
@@ -692,13 +658,8 @@ mod tests {
         )
         .boxed();
 
-        let id = storage
-            .insert_object(
-                make_context(),
-                Some("multi-chunk".into()),
-                &Default::default(),
-                stream,
-            )
+        storage
+            .put_object(&id, &Default::default(), stream)
             .await
             .unwrap();
 
