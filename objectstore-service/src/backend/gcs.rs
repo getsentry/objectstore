@@ -591,7 +591,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::stream::{make_stream, read_to_vec};
+    use crate::stream;
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
     // automatically in CI.
@@ -627,12 +627,12 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
@@ -675,7 +675,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello"))
+            .put_object(&id, &metadata, stream::single("hello"))
             .await?;
 
         let metadata = Metadata {
@@ -684,12 +684,12 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"world"))
+            .put_object(&id, &metadata, stream::single("world"))
             .await?;
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
 
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
         assert_eq!(str_payload, "world");
         assert_eq!(meta.custom, metadata.custom);
@@ -705,7 +705,7 @@ mod tests {
         let metadata = Metadata::default();
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         backend.delete_object(&id).await?;
@@ -730,7 +730,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let result = backend.get_object(&id).await?;
@@ -753,7 +753,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let result = backend.get_object(&id).await?;
@@ -775,7 +775,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         let meta = backend.get_metadata(&id).await?.unwrap();
@@ -811,7 +811,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         // Manually set custom_time to just inside the bump window.
@@ -834,7 +834,7 @@ mod tests {
 
         // Verify the payload is still intact after the bump.
         let (_, stream) = backend.get_object(&id).await?.unwrap();
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
 
         Ok(())
@@ -854,7 +854,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(b"hello, world"))
+            .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
         // A freshly written object has time_expires ≈ now + 2d, which is well outside
@@ -890,11 +890,11 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, make_stream(&compressed))
+            .put_object(&id, &metadata, stream::single(compressed.clone()))
             .await?;
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
-        let payload = read_to_vec(stream).await?;
+        let payload = stream::read_to_vec(stream).await?;
 
         assert_eq!(meta.compression, Some(Compression::Zstd));
         assert_eq!(

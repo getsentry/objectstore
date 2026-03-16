@@ -383,7 +383,7 @@ mod tests {
     use crate::backend::common::Backend as _;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::{ClientStream, make_stream};
+    use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -414,7 +414,7 @@ mod tests {
                 make_context(),
                 Some("testing".into()),
                 Default::default(),
-                make_stream(b"oh hai!"),
+                stream::single("oh hai!"),
             )
             .await
             .unwrap();
@@ -438,7 +438,7 @@ mod tests {
                 make_context(),
                 Some("testing".into()),
                 Default::default(),
-                make_stream(b"oh hai!"),
+                stream::single("oh hai!"),
             )
             .await
             .unwrap();
@@ -472,13 +472,14 @@ mod tests {
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
-        let payload = vec![0xAB; 2 * 1024 * 1024]; // 2 MiB
+        let payload_len = 2 * 1024 * 1024;
+        let payload = vec![0xAB; payload_len]; // 2 MiB
         let id = service
             .insert_object(
                 make_context(),
                 Some("delete-cleanup-test".into()),
                 Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -486,7 +487,7 @@ mod tests {
         // Sanity: the object is readable through the service (follows the tombstone).
         let (_, stream) = service.get_object(id.clone()).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
+        assert_eq!(body.len(), payload_len);
 
         // Delete through the service layer.
         service.delete_object(id.clone()).await.unwrap();
@@ -511,7 +512,7 @@ mod tests {
                 make_context(),
                 Some("test-key".into()),
                 Metadata::default(),
-                make_stream(b"hello world"),
+                stream::single("hello world"),
             )
             .await
             .unwrap();
@@ -530,7 +531,7 @@ mod tests {
                 make_context(),
                 Some("meta-key".into()),
                 Metadata::default(),
-                make_stream(b"data"),
+                stream::single("data"),
             )
             .await
             .unwrap();
@@ -658,7 +659,7 @@ mod tests {
             make_context(),
             Some("completion-test".into()),
             Metadata::default(),
-            make_stream(&payload),
+            stream::single(payload),
         );
 
         // Start insert through the public API. select! drops the future once the
@@ -709,7 +710,7 @@ mod tests {
                 make_context(),
                 Some("first".into()),
                 Metadata::default(),
-                make_stream(b"data"),
+                stream::single("data"),
             )
             .await
         });
@@ -723,7 +724,7 @@ mod tests {
                 make_context(),
                 Some("second".into()),
                 Metadata::default(),
-                make_stream(b"data"),
+                stream::single("data"),
             )
             .await;
 
@@ -765,7 +766,7 @@ mod tests {
                 make_context(),
                 Some("in-use-test".into()),
                 Metadata::default(),
-                make_stream(b"data"),
+                stream::single("data"),
             )
             .await
         });

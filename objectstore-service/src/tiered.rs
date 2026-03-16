@@ -276,7 +276,7 @@ mod tests {
     use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::{ClientStream, PayloadStream, make_stream};
+    use crate::stream::{self, ClientStream, PayloadStream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -323,7 +323,7 @@ mod tests {
                 make_context(),
                 None,
                 &Default::default(),
-                make_stream(b"auto-keyed"),
+                stream::single("auto-keyed"),
             )
             .await
             .unwrap();
@@ -347,7 +347,7 @@ mod tests {
                 make_context(),
                 Some("small".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -359,21 +359,22 @@ mod tests {
     #[tokio::test]
     async fn large_object_goes_to_long_term_with_tombstone() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
+        let payload_len = 2 * 1024 * 1024; // 2 MiB, over threshold
+        let payload = vec![0xABu8; payload_len];
 
         let id = storage
             .insert_object(
                 make_context(),
                 Some("large".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
 
         // Real payload should be in long-term
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert_eq!(lt_bytes.len(), payload.len());
+        assert_eq!(lt_bytes.len(), payload_len);
         assert!(!lt_meta.is_tombstone());
 
         // A redirect tombstone should exist in high-volume
@@ -392,7 +393,7 @@ mod tests {
                 make_context(),
                 Some("reinsert-key".into()),
                 &Default::default(),
-                make_stream(&large_payload),
+                stream::single(large_payload),
             )
             .await
             .unwrap();
@@ -408,7 +409,7 @@ mod tests {
                 make_context(),
                 Some("reinsert-key".into()),
                 &Default::default(),
-                make_stream(&small_payload),
+                stream::single(small_payload),
             )
             .await
             .unwrap();
@@ -416,7 +417,7 @@ mod tests {
         // The small object should be in long-term (not high-volume)
         let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
         assert!(!lt_meta.is_tombstone());
-        assert_eq!(lt_bytes.len(), small_payload.len());
+        assert_eq!(lt_bytes.len(), 100);
 
         // The tombstone in hv should still be present
         let (hv_meta, _) = hv.get_stored(&id).unwrap();
@@ -440,7 +441,7 @@ mod tests {
                 make_context(),
                 Some("expiry-test".into()),
                 &metadata_in,
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -464,7 +465,8 @@ mod tests {
     #[tokio::test]
     async fn reads_follow_tombstone_redirect() {
         let (storage, _hv, _lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+        let payload_len = 2 * 1024 * 1024; // 2 MiB, over threshold
+        let payload = vec![0xCDu8; payload_len];
 
         let metadata_in = Metadata {
             content_type: "image/png".into(),
@@ -475,7 +477,7 @@ mod tests {
                 make_context(),
                 Some("redirect-read".into()),
                 &metadata_in,
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -483,7 +485,7 @@ mod tests {
         // get_object should transparently follow the tombstone
         let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
+        assert_eq!(body.len(), payload_len);
         assert!(!metadata.is_tombstone());
 
         // get_metadata should also follow the tombstone
@@ -543,7 +545,7 @@ mod tests {
                 make_context(),
                 Some("orphan-test".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await;
 
@@ -564,7 +566,7 @@ mod tests {
                 make_context(),
                 Some("orphan-tombstone".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -594,7 +596,7 @@ mod tests {
                 make_context(),
                 Some("delete-both".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -647,13 +649,14 @@ mod tests {
             long_term_backend: lt,
         };
 
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
+        let payload_len = 2 * 1024 * 1024; // 2 MiB -> goes to long-term
+        let payload = vec![0xABu8; payload_len];
         let id = storage
             .insert_object(
                 make_context(),
                 Some("fail-delete".into()),
                 &Default::default(),
-                make_stream(&payload),
+                stream::single(payload),
             )
             .await
             .unwrap();
@@ -667,7 +670,7 @@ mod tests {
         // The object should still be reachable through the service
         let (metadata, stream) = storage.get_object(&id).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload.len());
+        assert_eq!(body.len(), payload_len);
         assert!(!metadata.is_tombstone());
     }
 

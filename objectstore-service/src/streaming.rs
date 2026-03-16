@@ -269,8 +269,7 @@ async fn execute_operation(
             })
         }
         Operation::Insert(insert) => {
-            let stream =
-                futures_util::stream::once(futures_util::future::ready(Ok(insert.payload))).boxed();
+            let stream = crate::stream::single(insert.payload);
             let id = tiered
                 .insert_object(context, insert.key, &insert.metadata, stream)
                 .await?;
@@ -297,7 +296,7 @@ mod tests {
     use super::*;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
-    use crate::stream::ClientStream;
+    use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -382,7 +381,7 @@ mod tests {
                 context.clone(),
                 Some("key1".into()),
                 Metadata::default(),
-                futures_util::stream::once(async { Ok(Bytes::from("hello")) }).boxed(),
+                stream::single("hello"),
             )
             .await
             .unwrap();
@@ -549,7 +548,7 @@ mod tests {
                     make_context(),
                     Some("blocker".into()),
                     Metadata::default(),
-                    futures_util::stream::once(async { Ok(Bytes::from("x")) }).boxed(),
+                    stream::single("x"),
                 )
                 .await;
         });
