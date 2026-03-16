@@ -228,6 +228,11 @@ impl<S, E> SizedPeek<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
+    /// Reads from `stream` into an internal buffer until `limit` bytes are accumulated
+    /// or the stream ends.
+    ///
+    /// Uses strictly-greater-than comparison: a stream of exactly `limit` bytes is
+    /// considered exhausted.
     pub async fn new(mut stream: S, limit: usize) -> Result<Self, E> {
         let mut buffer = ChunkedBytes::new(limit);
 

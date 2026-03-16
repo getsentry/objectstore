@@ -80,6 +80,10 @@ pub trait Backend: Debug + Send + Sync + 'static {
         metadata: &Metadata,
         payload: Bytes,
     ) -> Result<ConditionalOutcome> {
+        // NB: This method currently lives on the general `Backend` trait for
+        // convenience, but it is only meaningful for high-volume backends.
+        // A follow-up will move it to a dedicated trait implemented only where
+        // it is applicable.
         let existing = self.get_metadata(id).await?;
         if existing.is_some_and(|m| m.is_tombstone()) {
             Ok(ConditionalOutcome::Tombstone)

@@ -94,10 +94,9 @@ impl TieredStorage {
 
                 if outcome == ConditionalOutcome::Tombstone {
                     // Tombstone already exists in HV — write to long-term instead.
-                    // TODO: If the caller changed the expiration policy relative to the
-                    // existing tombstone, the tombstone and the LT object will have
-                    // inconsistent expiry. This is a known issue and will be fixed in a
-                    // follow-up.
+                    // TODO: The new object's expiry may differ from the tombstone's,
+                    // leaving them inconsistent. This is a known gap and will be fixed
+                    // in a follow-up.
                     let stream = crate::stream::single(payload).boxed();
                     self.long_term_backend
                         .put_object(&id, metadata, stream)
