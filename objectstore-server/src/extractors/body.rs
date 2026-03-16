@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use axum::extract::{FromRequest, FromRequestParts, Path, Request};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::id::ObjectContext;
-use objectstore_service::{ClientError, ClientStream};
+use objectstore_service::stream::{ClientError, ClientStream};
 
 use super::id::ContextParams;
 use crate::state::ServiceState;

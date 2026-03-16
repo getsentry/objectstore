@@ -19,7 +19,7 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::stream::ClientStream;
+use crate::stream::{self, ClientStream};
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -509,7 +509,7 @@ impl Backend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| match common::unpack_client_error(&e) {
+            .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::reqwest("GCS: upload object", e),
             })?;

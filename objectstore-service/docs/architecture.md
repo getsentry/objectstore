@@ -91,18 +91,18 @@ entirety.
 
 ## Streaming and Buffering
 
-Data flows as a [`PayloadStream`] throughout the API to keep memory consumption
-low.
+Data flows in streams throughout the API to keep memory consumption low. See the
+[`stream`] module for the stream types and related utilities.
 
-On **writes**, the service buffers the incoming stream only up to the 1 MiB
-threshold to determine which backend to use. Once exceeded, the buffered bytes
-are prepended to the remaining stream and everything flows through to the
-long-term backend without further accumulation.
+On **writes**, the incoming request body arrives as a [`ClientStream`]. The
+service buffers it only up to the 1 MiB threshold to determine which backend to
+use. Once exceeded, the buffered bytes are prepended to the remaining stream and
+everything flows through to the long-term backend without further accumulation.
 
-On **reads**, the service streams the response back wherever the backend
-supports it. Not all backends stream small payloads (e.g. BigTable returns them
-in a single response), but for large objects in the long-term backend, data is
-streamed end-to-end.
+On **reads**, the backend returns a [`PayloadStream`] that the service forwards
+to the caller. Not all backends stream small payloads (e.g. BigTable returns
+them in a single response), but for large objects in the long-term backend, data
+is streamed end-to-end.
 
 ## Expiration
 

@@ -13,7 +13,7 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::ClientStream;
+use crate::stream::{self, ClientStream};
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
@@ -258,7 +258,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .and_then(|response| response.error_for_status())
-            .map_err(|cause| match common::unpack_client_error(&cause) {
+            .map_err(|cause| match stream::unpack_client_error(&cause) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::Reqwest {
                     context: "S3: failed to put object".to_string(),

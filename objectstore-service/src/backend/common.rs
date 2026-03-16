@@ -1,14 +1,12 @@
 //! Shared trait definition and types for all backends.
 
-use std::error::Error as StdError;
 use std::fmt::Debug;
-use std::io;
 
 use objectstore_types::metadata::Metadata;
 
 use crate::error::Result;
 use crate::id::ObjectId;
-use crate::stream::{ClientError, ClientStream, PayloadStream};
+use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
 ///
@@ -94,40 +92,4 @@ pub fn reqwest_client() -> reqwest::Client {
         .no_deflate()
         .build()
         .expect("Client::new()")
-}
-
-/// Walks the source chain of `err` looking for a [`ClientError`].
-///
-/// At each step, two locations are checked:
-///
-/// - **Direct**: the error itself is a `ClientError` (e.g. when the caller is
-///   `local_fs`, which owns the `io::Error` and can surface the inner error
-///   directly via [`io::Error::get_ref`]).
-/// - **Packed in `io::Error`**: the error is an `io::Error` whose custom inner
-///   value is a `ClientError` (e.g. when reqwest/hyper propagates a failed body
-///   stream as `reqwest::Error → hyper error → io::Error(other: ClientError)`).
-///
-/// Use this in `put_object` implementations to reclassify body-stream errors
-/// as [`crate::error::Error::Client`] instead of an opaque server error.
-pub(super) fn unpack_client_error<E>(err: &E) -> Option<ClientError>
-where
-    E: StdError + 'static,
-{
-    let mut source = Some(err as &(dyn StdError + 'static));
-
-    while let Some(s) = source {
-        // The client error may be wrapped as custom `io::Error``, in which case it cannot be
-        // discovered by iterating `sources`.
-        let target = match s.downcast_ref::<io::Error>().and_then(|e| e.get_ref()) {
-            Some(inner) => inner,
-            None => s,
-        };
-
-        if let Some(client_error) = target.downcast_ref::<ClientError>() {
-            return Some(client_error.clone());
-        }
-
-        source = s.source();
-    }
-    None
 }

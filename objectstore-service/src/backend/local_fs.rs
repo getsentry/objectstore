@@ -10,10 +10,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::backend::common::{self, Backend, DeleteResponse, GetResponse, PutResponse};
+use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::ClientStream;
+use crate::stream::{self, ClientStream};
 
 /// Local filesystem backend for development and testing.
 #[derive(Debug)]
@@ -63,7 +63,7 @@ impl Backend for LocalFsBackend {
 
         tokio::io::copy(&mut reader, &mut writer)
             .await
-            .map_err(|e| match common::unpack_client_error(&e) {
+            .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
                 None => e.into(),
             })?;
