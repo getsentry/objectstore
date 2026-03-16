@@ -27,11 +27,11 @@ pub type DeleteResponse = ();
 
 /// Outcome of a tombstone-conditional operation.
 ///
-/// Returned by [`Backend::put_if_not_tombstone`] and
+/// Returned by [`Backend::put_non_tombstone`] and
 /// [`Backend::delete_non_tombstone`] to indicate whether the operation
 /// proceeded or was skipped because a redirect tombstone was present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationOutcome {
+pub enum ConditionalOutcome {
     /// The operation executed normally (write stored, delete removed).
     Executed,
     /// A redirect tombstone was found; the operation was skipped.
@@ -68,40 +68,40 @@ pub trait Backend: Debug + Send + Sync + 'static {
 
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
-    /// Returns [`OperationOutcome::Tombstone`] (skipping the write) when a
-    /// redirect tombstone is present, or [`OperationOutcome::Executed`] after
+    /// Returns [`ConditionalOutcome::Tombstone`] (skipping the write) when a
+    /// redirect tombstone is present, or [`ConditionalOutcome::Executed`] after
     /// storing the object.
     ///
     /// Takes [`Bytes`] instead of a [`ClientStream`] because callers on this
     /// path have already fully buffered the payload.
-    async fn put_if_not_tombstone(
+    async fn put_non_tombstone(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
-    ) -> Result<OperationOutcome> {
+    ) -> Result<ConditionalOutcome> {
         let existing = self.get_metadata(id).await?;
         if existing.is_some_and(|m| m.is_tombstone()) {
-            Ok(OperationOutcome::Tombstone)
+            Ok(ConditionalOutcome::Tombstone)
         } else {
             let stream = crate::stream::single(payload).boxed();
             self.put_object(id, metadata, stream).await?;
-            Ok(OperationOutcome::Executed)
+            Ok(ConditionalOutcome::Executed)
         }
     }
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
-    /// Returns [`OperationOutcome::Tombstone`] (leaving the row intact) when
-    /// the object is a redirect tombstone, or [`OperationOutcome::Executed`]
+    /// Returns [`ConditionalOutcome::Tombstone`] (leaving the row intact) when
+    /// the object is a redirect tombstone, or [`ConditionalOutcome::Executed`]
     /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<OperationOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
         let metadata = self.get_metadata(id).await?;
         if metadata.is_some_and(|m| m.is_tombstone()) {
-            Ok(OperationOutcome::Tombstone)
+            Ok(ConditionalOutcome::Tombstone)
         } else {
             self.delete_object(id).await?;
-            Ok(OperationOutcome::Executed)
+            Ok(ConditionalOutcome::Executed)
         }
     }
 }
