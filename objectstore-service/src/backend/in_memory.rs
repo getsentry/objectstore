@@ -12,7 +12,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
-use super::common::{DeleteResponse, GetResponse, PutResponse};
+use super::common::{ConditionalOutcome, DeleteResponse, GetResponse, PutResponse};
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::ClientStream;
@@ -80,6 +80,22 @@ impl super::common::Backend for InMemoryBackend {
             .unwrap()
             .insert(id.clone(), (metadata.clone(), bytes.freeze()));
         Ok(())
+    }
+
+    async fn put_non_tombstone(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: Bytes,
+    ) -> Result<ConditionalOutcome> {
+        let mut store = self.store.lock().unwrap();
+        if store.get(id).is_some_and(|(m, _)| m.is_tombstone()) {
+            return Ok(ConditionalOutcome::Tombstone);
+        }
+        let mut metadata = metadata.clone();
+        metadata.size = Some(payload.len());
+        store.insert(id.clone(), (metadata, payload));
+        Ok(ConditionalOutcome::Executed)
     }
 
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
