@@ -11,8 +11,8 @@
 //! concerns live in `StorageService`, which coordinates across two backend
 //! instances.
 //!
-//! Backends are type-erased into a [`BoxedBackend`](common::BoxedBackend)
-//! (`Box<dyn Backend>`) so the service can work with any combination.
+//! Backends are type-erased into a [`BoxedBackend`] so the service can work
+//! with any combination.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
