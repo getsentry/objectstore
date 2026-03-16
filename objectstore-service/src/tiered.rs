@@ -11,7 +11,7 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::{BoxedBackend, DeleteOutcome};
+use crate::backend::common::{BoxedBackend, OperationOutcome};
 use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
@@ -68,7 +68,7 @@ impl TieredStorage {
         let start = Instant::now();
 
         let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
-        let mut backend = if peeked.is_exhausted() {
+        let backend_choice = if peeked.is_exhausted() {
             BackendChoice::HighVolume
         } else {
             BackendChoice::LongTerm
@@ -77,33 +77,39 @@ impl TieredStorage {
         objectstore_metrics::record!(
             "put.first_chunk.latency" = start.elapsed(),
             usecase = context.usecase.clone(),
-            backend_choice = backend.as_str(),
+            backend_choice = backend_choice.as_str(),
         );
 
-        let has_key = key.is_some();
         let id = ObjectId::optional(context, key);
 
-        // There might currently be a tombstone at the given path from a previously stored object.
-        if has_key {
-            let metadata = self.high_volume_backend.get_metadata(&id).await?;
-            if metadata.is_some_and(|m| m.is_tombstone()) {
-                // Write the object to the other backend and keep the tombstone in place
-                backend = BackendChoice::LongTerm;
-            }
-        };
-
-        // Capture before `match backend` consumes the value.
-        let backend_choice = backend.as_str();
-
-        let (backend_ty, stored_size) = match backend {
+        let (final_choice, backend_ty, stored_size) = match backend_choice {
             BackendChoice::HighVolume => {
-                let stored_size = peeked.len() as u64;
-                let stream = peeked.into_stream().boxed();
+                let payload = peeked.into_bytes();
+                let stored_size = payload.len() as u64;
 
-                self.high_volume_backend
-                    .put_object(&id, metadata, stream)
+                let outcome = self
+                    .high_volume_backend
+                    .put_if_not_tombstone(&id, metadata, payload.clone())
                     .await?;
-                (self.high_volume_backend.name(), stored_size)
+
+                if outcome == OperationOutcome::Tombstone {
+                    // Tombstone already exists in HV — write to long-term instead.
+                    let stream = crate::stream::single(payload).boxed();
+                    self.long_term_backend
+                        .put_object(&id, metadata, stream)
+                        .await?;
+                    (
+                        BackendChoice::LongTerm,
+                        self.long_term_backend.name(),
+                        stored_size,
+                    )
+                } else {
+                    (
+                        BackendChoice::HighVolume,
+                        self.high_volume_backend.name(),
+                        stored_size,
+                    )
+                }
             }
             BackendChoice::LongTerm => {
                 let stored_size = Arc::new(AtomicU64::new(0));
@@ -119,30 +125,31 @@ impl TieredStorage {
                     })
                     .boxed();
 
-                // first write the object
+                // First write the object to long-term.
                 self.long_term_backend
                     .put_object(&id, metadata, stream)
                     .await?;
 
+                // Then write the redirect tombstone to high-volume.
                 let redirect_metadata = Metadata {
                     is_redirect_tombstone: Some(true),
                     expiration_policy: metadata.expiration_policy,
                     ..Default::default()
                 };
                 let redirect_stream = futures_util::stream::empty().boxed();
-                let redirect_request =
-                    self.high_volume_backend
-                        .put_object(&id, &redirect_metadata, redirect_stream);
+                let redirect_result = self
+                    .high_volume_backend
+                    .put_object(&id, &redirect_metadata, redirect_stream)
+                    .await;
 
-                // then we write the tombstone
-                let redirect_result = redirect_request.await;
                 if redirect_result.is_err() {
-                    // and clean up on any kind of error
+                    // Clean up on any kind of error.
                     self.long_term_backend.delete_object(&id).await?;
                 }
                 redirect_result?;
 
                 (
+                    BackendChoice::LongTerm,
                     self.long_term_backend.name(),
                     stored_size.load(Ordering::Acquire),
                 )
@@ -153,13 +160,13 @@ impl TieredStorage {
         objectstore_metrics::record!(
             "put.latency" = start.elapsed(),
             usecase = usecase.clone(),
-            backend_choice = backend_choice,
+            backend_choice = final_choice.as_str(),
             backend_type = backend_ty,
         );
         objectstore_metrics::record!(
             "put.size" = stored_size,
             usecase = usecase,
-            backend_choice = backend_choice,
+            backend_choice = final_choice.as_str(),
             backend_type = backend_ty,
         );
 
@@ -232,7 +239,7 @@ impl TieredStorage {
         let mut backend_type = self.high_volume_backend.name();
 
         let outcome = self.high_volume_backend.delete_non_tombstone(id).await?;
-        if outcome == DeleteOutcome::Tombstone {
+        if outcome == OperationOutcome::Tombstone {
             backend_choice = "long-term";
             backend_type = self.long_term_backend.name();
             // Delete the long-term object first, then clean up the tombstone.

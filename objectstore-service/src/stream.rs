@@ -197,7 +197,7 @@ impl ChunkedBytes {
 /// Reads up to `limit` bytes from a stream to support size-based routing decisions.
 ///
 /// Constructed via the async [`SizedPeek::new`], which reads eagerly so that
-/// [`is_exhausted()`](Self::is_exhausted) and [`len()`](Self::len) are always valid.
+/// [`is_exhausted()`](Self::is_exhausted) is always valid.
 /// The full stream (buffered prefix plus any unconsumed remainder) is recovered
 /// with [`into_stream()`](Self::into_stream).
 ///
@@ -218,8 +218,27 @@ impl<S> SizedPeek<S> {
     }
 
     /// Returns the number of bytes held in the buffer (at most `limit`).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Consumes self and returns the buffered data as [`Bytes`].
+    ///
+    /// Only valid when [`is_exhausted()`](Self::is_exhausted) returns `true` —
+    /// i.e. the entire stream fit within the peek limit and all data is in
+    /// the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stream was not fully consumed (pending data or remaining
+    /// stream exist).
+    pub fn into_bytes(self) -> Bytes {
+        assert!(
+            self.is_exhausted(),
+            "into_bytes() called on non-exhausted SizedPeek"
+        );
+        self.buffer.into_bytes()
     }
 }
 

@@ -11,8 +11,10 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use tonic::Code;
 
+use bytes::Bytes;
+
 use crate::backend::common::{
-    Backend, DeleteOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    Backend, DeleteResponse, GetResponse, MetadataResponse, OperationOutcome, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -186,6 +188,28 @@ fn column_filter(column: &[u8]) -> v2::RowFilter {
         filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
             [b"^", column, b"$"].concat(),
         )),
+    }
+}
+
+/// Creates a row filter that matches a redirect tombstone by its metadata JSON.
+///
+/// The predicate checks the metadata column for the `is_redirect_tombstone` marker.
+/// We cannot use payload-column presence because `put_row` always writes a `p` cell
+/// — even for tombstones (with empty bytes). The RE2 regex is anchored to the JSON
+/// start; the field ordering of [`Metadata`] ensures `is_redirect_tombstone` is
+/// serialized first.
+fn tombstone_predicate() -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_METADATA),
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
+                    )),
+                },
+            ],
+        })),
     }
 }
 
@@ -517,7 +541,80 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
+    async fn put_if_not_tombstone(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: Bytes,
+    ) -> Result<OperationOutcome> {
+        tracing::debug!("Conditional put to Bigtable backend");
+
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        let now = SystemTime::now();
+        let (family, timestamp_micros) = match metadata.expiration_policy {
+            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
+            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
+            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+        };
+
+        let write_mutations = vec![
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::DeleteFromRow(
+                    mutation::DeleteFromRow {},
+                )),
+            },
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                    timestamp_micros,
+                    value: payload.to_vec(),
+                })),
+            },
+            v2::Mutation {
+                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_METADATA.to_owned(),
+                    timestamp_micros,
+                    value: serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
+                        context: "failed to serialize metadata".to_string(),
+                        cause,
+                    })?,
+                })),
+            },
+        ];
+
+        // Predicate: tombstone present → true_mutations (no-op), skip write.
+        // Tombstone absent → false_mutations fire the write.
+        let request = v2::CheckAndMutateRowRequest {
+            table_name: self.table_path.clone(),
+            row_key: path,
+            predicate_filter: Some(tombstone_predicate()),
+            true_mutations: vec![], // Tombstone matched → skip write.
+            false_mutations: write_mutations, // No tombstone → write the object.
+            ..Default::default()
+        };
+
+        let is_tombstone = self
+            .with_retry("put_if_not_tombstone", || async {
+                self.bigtable
+                    .client()
+                    .check_and_mutate_row(request.clone())
+                    .await
+            })
+            .await?
+            .predicate_matched;
+
+        if is_tombstone {
+            Ok(OperationOutcome::Tombstone)
+        } else {
+            Ok(OperationOutcome::Executed)
+        }
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<OperationOutcome> {
         tracing::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -527,27 +624,12 @@ impl Backend for BigTableBackend {
             )),
         };
 
-        // Detect tombstones by checking the metadata column for the
-        // `is_redirect_tombstone` marker.  We cannot use payload-column
-        // presence because `put_row` always writes a `p` cell — even for
-        // tombstones (with empty bytes).
+        // Predicate: tombstone present → true_mutations (no-op), leave intact.
+        // Tombstone absent → false_mutations fire the delete.
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
             row_key: path,
-            predicate_filter: Some(v2::RowFilter {
-                filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-                    filters: vec![
-                        column_filter(COLUMN_METADATA),
-                        v2::RowFilter {
-                            filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                                // RE2 full-match anchored to the JSON start. The field ordering of
-                                // Metadata ensures `is_redirect_tombstone` is serialized first.
-                                b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
-                            )),
-                        },
-                    ],
-                })),
-            }),
+            predicate_filter: Some(tombstone_predicate()),
             true_mutations: vec![], // Tombstone matched → leave intact (no mutations).
             false_mutations: vec![delete_mutation], // Not a tombstone → delete the row.
             ..Default::default()
@@ -564,9 +646,9 @@ impl Backend for BigTableBackend {
             .predicate_matched;
 
         if is_tombstone {
-            Ok(DeleteOutcome::Tombstone)
+            Ok(OperationOutcome::Tombstone)
         } else {
-            Ok(DeleteOutcome::Deleted)
+            Ok(OperationOutcome::Executed)
         }
     }
 }
@@ -970,7 +1052,7 @@ mod tests {
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Deleted);
+        assert_eq!(result, OperationOutcome::Executed);
 
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
@@ -993,7 +1075,7 @@ mod tests {
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Tombstone);
+        assert_eq!(result, OperationOutcome::Tombstone);
 
         // Tombstone should still exist — delete_non_tombstone leaves it intact.
         let get_result = backend.get_metadata(&id).await?;
@@ -1011,7 +1093,7 @@ mod tests {
 
         let id = make_id();
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, DeleteOutcome::Deleted);
+        assert_eq!(result, OperationOutcome::Executed);
 
         Ok(())
     }

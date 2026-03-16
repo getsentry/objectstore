@@ -2,7 +2,10 @@
 
 use std::fmt::Debug;
 
+use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
+
+use bytes::Bytes;
 
 use crate::error::Result;
 use crate::id::ObjectId;
@@ -22,13 +25,17 @@ pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub type DeleteResponse = ();
 
-/// Response from [`Backend::delete_non_tombstone`].
+/// Outcome of a tombstone-conditional operation.
+///
+/// Returned by [`Backend::put_if_not_tombstone`] and
+/// [`Backend::delete_non_tombstone`] to indicate whether the operation
+/// proceeded or was skipped because a redirect tombstone was present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeleteOutcome {
-    /// The entity was a redirect tombstone; it was left intact.
+pub enum OperationOutcome {
+    /// The operation executed normally (write stored, delete removed).
+    Executed,
+    /// A redirect tombstone was found; the operation was skipped.
     Tombstone,
-    /// The entity was a regular object (now deleted) or non-existent.
-    Deleted,
 }
 
 /// Trait implemented by all storage backends.
@@ -59,18 +66,42 @@ pub trait Backend: Debug + Send + Sync + 'static {
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
 
+    /// Writes the object only if NO redirect tombstone exists at this key.
+    ///
+    /// Returns [`OperationOutcome::Tombstone`] (skipping the write) when a
+    /// redirect tombstone is present, or [`OperationOutcome::Executed`] after
+    /// storing the object.
+    ///
+    /// Takes [`Bytes`] instead of a [`ClientStream`] because callers on this
+    /// path have already fully buffered the payload.
+    async fn put_if_not_tombstone(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: Bytes,
+    ) -> Result<OperationOutcome> {
+        let existing = self.get_metadata(id).await?;
+        if existing.is_some_and(|m| m.is_tombstone()) {
+            Ok(OperationOutcome::Tombstone)
+        } else {
+            let stream = crate::stream::single(payload).boxed();
+            self.put_object(id, metadata, stream).await?;
+            Ok(OperationOutcome::Executed)
+        }
+    }
+
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
-    /// Returns [`DeleteOutcome::Tombstone`] (leaving the row intact) when
-    /// the object is a redirect tombstone, or [`DeleteOutcome::Deleted`]
+    /// Returns [`OperationOutcome::Tombstone`] (leaving the row intact) when
+    /// the object is a redirect tombstone, or [`OperationOutcome::Executed`]
     /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<OperationOutcome> {
         let metadata = self.get_metadata(id).await?;
         if metadata.is_some_and(|m| m.is_tombstone()) {
-            Ok(DeleteOutcome::Tombstone)
+            Ok(OperationOutcome::Tombstone)
         } else {
             self.delete_object(id).await?;
-            Ok(DeleteOutcome::Deleted)
+            Ok(OperationOutcome::Executed)
         }
     }
 }
