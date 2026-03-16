@@ -19,8 +19,16 @@ use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::stream::{ChunkedBytes, ClientStream};
 
-/// Connection timeout used for the initial connection to BigQuery.
+/// Connection timeout used for the initial connection to Bigtable.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum age for connections (GRPC channels) to Bigtable, after which they will be swapped with
+/// new ones in the background.
+/// This is intended to avoid latency spikes that could occur every hour or so, when the server
+/// closes long standing connections ([source](https://web.archive.org/web/20260211140930/https://docs.cloud.google.com/bigtable/docs/performance#cold-starts:~:text=return%20an%20error.-,Cold%20start,-at%20client%20initialization)).
+/// `tonic` already handles reconnections transparently, but lazily, meaning that the first requests
+/// that attempt to use a certain channel after the server has closed it will pay the cost of the
+/// reconnection, resulting in increased latency for those requests.
+const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 /// Permission scopes required for accessing the BigTable data API.
@@ -171,14 +179,18 @@ impl BigTableBackend {
             )?
         } else {
             let token_provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
-            BigTableConnection::new_with_token_provider(
+            BigTableConnection::new_with_managed_transport(
                 project_id,
                 instance_name,
-                false,                    // is_read_only
-                connections.unwrap_or(1), // TODO: Implement dynamic connection pooling
+                false, // is_read_only
                 Some(CONNECT_TIMEOUT),
                 Arc::new(token_provider),
-            )?
+                connections.unwrap_or(1),
+                true, // prime_channels
+                None, // app_profile_id
+                MAX_CHANNEL_AGE,
+            )
+            .await?
         };
 
         let client = bigtable.client();
