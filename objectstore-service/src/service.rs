@@ -364,31 +364,24 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_redirect_and_delete() {
-        let high_volume = BigTableBackend::new(BigTableConfig {
+        let bigtable_config = BigTableConfig {
             endpoint: Some("localhost:8086".into()),
             project_id: "testing".into(),
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
-        })
-        .await
-        .unwrap();
-        let long_term = GcsBackend::new(GcsConfig {
+        };
+        let gcs_config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
-        })
-        .await
-        .unwrap();
+        };
 
-        let service = StorageService::new(Box::new(high_volume), Box::new(long_term));
+        let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
+        let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
+        let service = StorageService::new(high_volume, long_term);
 
         // A separate GCS backend to directly inspect the long-term storage.
-        let gcs_backend = crate::backend::gcs::GcsBackend::new(GcsConfig {
-            endpoint: Some("http://localhost:8087".into()),
-            bucket: "test-bucket".into(),
-        })
-        .await
-        .unwrap();
+        let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
