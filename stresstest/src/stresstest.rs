@@ -1,5 +1,6 @@
 //! Run workloads concurrently against a remote storage service and print metrics.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
-use crate::workload::{Action, InternalId, Workload, WorkloadMode};
+use crate::workload::{Action, Workload, WorkloadMode};
 
 /// Stresstest runner that can execute multiple workloads concurrently against a remote.
 ///
@@ -403,18 +404,17 @@ async fn run_batch_workload(
                     let session = remote.session(&usecase, org_id);
                     let mut many = session.many();
 
-                    let payload_info: Vec<(InternalId, u64)> = payloads
-                        .iter()
-                        .map(|(id, p)| (*id, p.len))
-                        .collect();
+                    let mut payload_info = HashMap::with_capacity(payloads.len());
 
                     for (internal_id, payload) in payloads {
+                        let key = internal_id.to_string();
+                        payload_info.insert(key.clone(), (internal_id, payload.len));
                         let stream = ReaderStream::new(payload).boxed();
                         many = many.push(
                             session
                                 .put_stream(stream)
                                 .compression(None)
-                                .key(internal_id.to_string()),
+                                .key(key),
                         );
                     }
 
@@ -426,26 +426,18 @@ async fn run_batch_workload(
                     while let Some(result) = results.next().await {
                         match result {
                             objectstore_client::OperationResult::Put(key, Ok(_)) => {
-                                // Find the matching payload info by key
-                                let file_size = payload_info
-                                    .iter()
-                                    .find(|(id, _)| id.to_string() == key)
-                                    .map(|(_, size)| *size)
-                                    .unwrap_or(0);
-
-                                let external_id = (usecase.clone(), org_id, key.clone());
-                                let internal_id = payload_info
-                                    .iter()
-                                    .find(|(id, _)| id.to_string() == key)
-                                    .map(|(id, _)| *id);
-
-                                if let Some(internal_id) = internal_id {
+                                if let Some((internal_id, file_size)) =
+                                    payload_info.remove(&key)
+                                {
+                                    let external_id = (usecase.clone(), org_id, key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
-                                }
 
-                                let mut m = metrics.lock().unwrap();
-                                m.file_sizes.add(file_size as f64);
-                                m.bytes_written += file_size;
+                                    let mut m = metrics.lock().unwrap();
+                                    m.file_sizes.add(file_size as f64);
+                                    m.bytes_written += file_size;
+                                } else {
+                                    eprintln!("batch put returned unknown key: {key}");
+                                }
                             }
                             objectstore_client::OperationResult::Put(_, Err(err)) => {
                                 print_error("batch write", &err.into());
@@ -455,8 +447,8 @@ async fn run_batch_workload(
                                 print_error("batch request", &err.into());
                                 metrics.lock().unwrap().write_failures += 1;
                             }
-                            _ => {
-                                // Batch mode only sends puts, so other results are unexpected
+                            other => {
+                                eprintln!("unexpected batch result: {other:?}");
                             }
                         }
                     }
