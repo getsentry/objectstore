@@ -19,8 +19,11 @@ use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::stream::{ChunkedBytes, ClientStream};
 
-/// Connection timeout used for the initial connection to BigQuery.
+/// Connection timeout used for the initial connection to Bigtable.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum age for connections (GRPC channels) to Bigtable, after which they will be swapped with
+/// new ones in the background.
+const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 /// Permission scopes required for accessing the BigTable data API.
@@ -178,9 +181,9 @@ impl BigTableBackend {
                 Some(CONNECT_TIMEOUT),
                 Arc::new(token_provider),
                 connections.unwrap_or(1),
-                true,                          // prime_channels
-                None,                          // app_profile_id
-                Some(Duration::from_mins(50)), // max_channel_age
+                true, // prime_channels
+                None, // app_profile_id
+                MAX_CHANNEL_AGE,
             )
             .await?
         };
