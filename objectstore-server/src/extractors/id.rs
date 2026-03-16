@@ -227,7 +227,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
-    use objectstore_service::{InMemoryBackend, StorageConfig, StorageService};
+    use objectstore_service::backend::in_memory::InMemoryBackend;
+    use objectstore_service::{StorageConfig, StorageService};
     use tempfile::TempDir;
     use tower::ServiceExt;
 

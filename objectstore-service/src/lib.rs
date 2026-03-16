@@ -13,6 +13,5 @@ pub mod streaming;
 mod tiered;
 
 pub use backend::common::BoxedBackend;
-pub use backend::in_memory::InMemoryBackend;
 pub use service::{BoxBackend, StorageConfig, StorageService};
 pub use stream::{ClientStream, PayloadStream};

@@ -17,7 +17,6 @@
 pub mod bigtable;
 pub mod common;
 pub mod gcs;
+pub mod in_memory;
 pub mod local_fs;
 pub mod s3_compatible;
-
-pub mod in_memory;
