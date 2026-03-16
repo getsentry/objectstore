@@ -17,8 +17,89 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::service::BigTableConfig;
 use crate::stream::{ChunkedBytes, ClientStream};
+
+/// Configuration for [`BigTableBackend`].
+///
+/// Stores objects in [Google Cloud Bigtable], a NoSQL wide-column database optimized for
+/// high-throughput, low-latency workloads with small objects. Authentication uses Application
+/// Default Credentials (ADC).
+///
+/// **Note**: The table must be pre-created with the following column families:
+/// - `fg`: timestamp-based garbage collection (`maxage=1s`)
+/// - `fm`: manual garbage collection (`no GC policy`)
+///
+/// [Google Cloud Bigtable]: https://cloud.google.com/bigtable
+///
+/// # Example
+///
+/// ```yaml
+/// high_volume_storage:
+///   type: bigtable
+///   project_id: my-project
+///   instance_name: objectstore
+///   table_name: objectstore
+/// ```
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BigTableConfig {
+    /// Optional custom Bigtable endpoint.
+    ///
+    /// Useful for testing with emulators. If `None`, uses the default Bigtable endpoint.
+    ///
+    /// # Default
+    ///
+    /// `None` (uses default Bigtable endpoint)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
+    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
+    ///
+    /// Or for long-term storage:
+    /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
+    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
+    pub endpoint: Option<String>,
+
+    /// GCP project ID.
+    ///
+    /// The Google project ID (not project number) containing the Bigtable instance.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
+    /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
+    pub project_id: String,
+
+    /// Bigtable instance name.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
+    /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
+    pub instance_name: String,
+
+    /// Bigtable table name.
+    ///
+    /// The table must exist before starting the server.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
+    /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
+    pub table_name: String,
+
+    /// Optional number of connections to maintain to Bigtable.
+    ///
+    /// # Default
+    ///
+    /// `None` (defaults to 1)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
+    /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
+    pub connections: Option<usize>,
+}
 
 /// Connection timeout used for the initial connection to Bigtable.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -536,7 +617,6 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::service::BigTableConfig;
     use crate::stream;
 
     // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done

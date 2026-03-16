@@ -6,11 +6,9 @@
 //! redirect tombstones, and consistency guarantees.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
-use serde::{Deserialize, Serialize};
 
 use crate::backend::common::BoxedBackend;
 use crate::concurrency::ConcurrencyLimiter;
@@ -28,300 +26,6 @@ pub type MetadataResponse = Option<Metadata>;
 pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
-
-/// Storage backend configuration.
-///
-/// The `type` field in YAML or `__TYPE` in environment variables determines which variant is used.
-///
-/// Used to configure storage backends for [`StorageService`].
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum StorageConfig {
-    /// Local filesystem storage backend (type `"filesystem"`).
-    ///
-    /// Stores objects as files on the local filesystem. Suitable for development, testing,
-    /// and single-server deployments.
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: filesystem
-    ///   path: /data
-    /// ```
-    FileSystem {
-        /// Directory path for storing objects.
-        ///
-        /// The directory will be created if it doesn't exist. Relative paths are resolved from
-        /// the server's working directory.
-        ///
-        /// # Default
-        ///
-        /// `"data"` (relative to the server's working directory)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
-        /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
-        /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
-        path: PathBuf,
-    },
-
-    /// S3-compatible storage backend (type `"s3compatible"`).
-    ///
-    /// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
-    /// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
-    ///
-    /// [Amazon S3]: https://aws.amazon.com/s3/
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: s3compatible
-    ///   endpoint: https://s3.amazonaws.com
-    ///   bucket: my-bucket
-    /// ```
-    S3Compatible {
-        /// S3 endpoint URL.
-        ///
-        /// Examples: `https://s3.amazonaws.com`, `http://localhost:9000` (for MinIO)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        endpoint: String,
-
-        /// S3 bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
-        bucket: String,
-    },
-
-    /// [Google Cloud Storage] backend (type `"gcs"`).
-    ///
-    /// Stores objects in Google Cloud Storage (GCS). Authentication uses Application Default
-    /// Credentials (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS`
-    /// environment variable or GCE/GKE metadata service.
-    ///
-    /// **Note**: The bucket must be pre-created with the following lifecycle policy:
-    /// - `daysSinceCustomTime`: 1 day
-    /// - `action`: delete
-    ///
-    /// [Google Cloud Storage]: https://cloud.google.com/storage
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: gcs
-    ///   bucket: objectstore-bucket
-    /// ```
-    Gcs {
-        /// Optional custom GCS endpoint URL.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default GCS endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default GCS endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        endpoint: Option<String>,
-
-        /// GCS bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
-        bucket: String,
-    },
-
-    /// [Google Bigtable] backend (type `"bigtable"`).
-    ///
-    /// Stores objects in Google Cloud Bigtable, a NoSQL wide-column database. This backend is
-    /// optimized for high-throughput, low-latency workloads with small objects. Authentication uses
-    /// Application Default Credentials (ADC).
-    ///
-    /// **Note**: The table must be pre-created with appropriate column families. Ensure to have the
-    /// following column families:
-    /// - `fg`: timestamp-based garbage collection (`maxage=1s`)
-    /// - `fm`: manual garbage collection (`no GC policy`)
-    ///
-    /// [Google Bigtable]: https://cloud.google.com/bigtable
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// high_volume_storage:
-    ///   type: bigtable
-    ///   project_id: my-project
-    ///   instance_name: objectstore
-    ///   table_name: objectstore
-    /// ```
-    BigTable {
-        /// Optional custom Bigtable endpoint.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default Bigtable endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default Bigtable endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
-        endpoint: Option<String>,
-
-        /// GCP project ID.
-        ///
-        /// The Google project ID (not project number) containing the Bigtable instance.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
-        /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
-        project_id: String,
-
-        /// Bigtable instance name.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
-        /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
-        instance_name: String,
-
-        /// Bigtable table name.
-        ///
-        /// The table must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
-        /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
-        table_name: String,
-
-        /// Optional number of connections to maintain to Bigtable.
-        ///
-        /// # Default
-        ///
-        /// `None` (defaults to 1)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
-        /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
-        connections: Option<usize>,
-    },
-}
-
-/// Configuration for [`LocalFsBackend`](crate::backend::local_fs::LocalFsBackend).
-#[derive(Debug)]
-pub struct FileSystemConfig {
-    /// Directory path for storing objects.
-    pub path: PathBuf,
-}
-
-/// Configuration for [`S3CompatibleBackend`](crate::backend::s3_compatible::S3CompatibleBackend).
-#[derive(Debug)]
-pub struct S3CompatibleConfig {
-    /// S3 endpoint URL.
-    pub endpoint: String,
-    /// S3 bucket name.
-    pub bucket: String,
-}
-
-/// Configuration for [`GcsBackend`](crate::backend::gcs::GcsBackend).
-#[derive(Debug)]
-pub struct GcsConfig {
-    /// Optional custom GCS endpoint URL.
-    pub endpoint: Option<String>,
-    /// GCS bucket name.
-    pub bucket: String,
-}
-
-/// Configuration for [`BigTableBackend`](crate::backend::bigtable::BigTableBackend).
-#[derive(Debug)]
-pub struct BigTableConfig {
-    /// Optional custom Bigtable endpoint.
-    pub endpoint: Option<String>,
-    /// GCP project ID.
-    pub project_id: String,
-    /// Bigtable instance name.
-    pub instance_name: String,
-    /// Bigtable table name.
-    pub table_name: String,
-    /// Optional number of connections to maintain to Bigtable.
-    pub connections: Option<usize>,
-}
-
-/// Factory for constructing a [`BoxedBackend`] from a [`StorageConfig`].
-#[derive(Debug)]
-pub struct BoxBackend;
-
-impl BoxBackend {
-    /// Constructs a [`BoxedBackend`] from the given [`StorageConfig`].
-    #[allow(clippy::new_ret_no_self)]
-    pub async fn new(config: StorageConfig) -> anyhow::Result<BoxedBackend> {
-        Ok(match config {
-            StorageConfig::FileSystem { path } => Box::new(
-                crate::backend::local_fs::LocalFsBackend::new(FileSystemConfig { path }),
-            ),
-            StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
-                crate::backend::s3_compatible::S3CompatibleBackend::without_token(
-                    S3CompatibleConfig { endpoint, bucket },
-                ),
-            ),
-            StorageConfig::Gcs { endpoint, bucket } => Box::new(
-                crate::backend::gcs::GcsBackend::new(GcsConfig { endpoint, bucket }).await?,
-            ),
-            StorageConfig::BigTable {
-                endpoint,
-                project_id,
-                instance_name,
-                table_name,
-                connections,
-            } => Box::new(
-                crate::backend::bigtable::BigTableBackend::new(BigTableConfig {
-                    endpoint,
-                    project_id,
-                    instance_name,
-                    table_name,
-                    connections,
-                })
-                .await?,
-            ),
-        })
-    }
-}
 
 /// Default concurrency limit for [`StorageService`].
 ///
@@ -590,7 +294,9 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::common::Backend as _;
+    use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
@@ -631,18 +337,13 @@ mod tests {
 
     #[tokio::test]
     async fn works_with_gcs() {
-        let hv = BoxBackend::new(StorageConfig::Gcs {
+        let config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
-        })
-        .await
-        .unwrap();
-        let lt = BoxBackend::new(StorageConfig::Gcs {
-            endpoint: Some("http://localhost:8087".into()),
-            bucket: "test-bucket".into(),
-        })
-        .await
-        .unwrap();
+        };
+
+        let hv = Box::new(GcsBackend::new(config.clone()).await.unwrap());
+        let lt = Box::new(GcsBackend::new(config).await.unwrap());
         let service = StorageService::new(hv, lt);
 
         let key = service
@@ -663,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_redirect_and_delete() {
-        let high_volume = BoxBackend::new(StorageConfig::BigTable {
+        let high_volume = BigTableBackend::new(BigTableConfig {
             endpoint: Some("localhost:8086".into()),
             project_id: "testing".into(),
             instance_name: "objectstore".into(),
@@ -672,13 +373,14 @@ mod tests {
         })
         .await
         .unwrap();
-        let long_term = BoxBackend::new(StorageConfig::Gcs {
+        let long_term = GcsBackend::new(GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
         })
         .await
         .unwrap();
-        let service = StorageService::new(high_volume, long_term);
+
+        let service = StorageService::new(Box::new(high_volume), Box::new(long_term));
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = crate::backend::gcs::GcsBackend::new(GcsConfig {

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
-use objectstore_service::{BoxBackend, StorageService};
+use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
 
 use objectstore_service::id::ObjectContext;
@@ -59,8 +59,8 @@ impl Services {
     pub async fn spawn(config: Config) -> Result<ServiceState> {
         tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
 
-        let high_volume = BoxBackend::new(config.high_volume_storage.clone()).await?;
-        let long_term = BoxBackend::new(config.long_term_storage.clone()).await?;
+        let high_volume = backend::from_config(config.high_volume_storage.clone()).await?;
+        let long_term = backend::from_config(config.long_term_storage.clone()).await?;
         let service = StorageService::new(high_volume, long_term)
             .with_concurrency_limit(config.service.max_concurrency);
         service.start();

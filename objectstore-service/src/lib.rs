@@ -12,6 +12,5 @@ pub mod stream;
 pub mod streaming;
 mod tiered;
 
-pub use backend::common::BoxedBackend;
-pub use service::{BoxBackend, StorageConfig, StorageService};
+pub use service::StorageService;
 pub use stream::{ClientStream, PayloadStream};

@@ -59,16 +59,17 @@ system optimally handles both small, frequently-accessed objects and large,
 infrequently-accessed ones:
 
 - **High-volume backend** (typically
-  [BigTable](StorageConfig::BigTable)): optimized for low-latency reads and
-  writes of small objects. Most objects in practice are small (metadata blobs,
-  debug symbols, etc.), so this path handles the majority of traffic.
-- **Long-term backend** (typically [GCS](StorageConfig::Gcs)): optimized for
-  large objects where per-byte storage cost matters more than access latency.
+  [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
+  and writes of small objects. Most objects in practice are small (metadata
+  blobs, debug symbols, etc.), so this path handles the majority of traffic.
+- **Long-term backend** (typically [GCS](backend::StorageConfig::Gcs)):
+  optimized for large objects where per-byte storage cost matters more than
+  access latency.
 
 The threshold is **1 MiB**. Objects at or below this size go to the high-volume
 backend; objects exceeding it go to the long-term backend.
 
-See [`StorageConfig`] for available backend implementations.
+See [`backend::StorageConfig`] for available backend implementations.
 
 # Metadata and Payload
 

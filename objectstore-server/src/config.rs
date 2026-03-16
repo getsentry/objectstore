@@ -40,11 +40,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
-pub use objectstore_service::StorageConfig;
+use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
+
+pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -714,12 +716,12 @@ impl Default for Config {
         Self {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
-            high_volume_storage: StorageConfig::FileSystem {
+            high_volume_storage: StorageConfig::FileSystem(FileSystemConfig {
                 path: PathBuf::from("data/high-volume"),
-            },
-            long_term_storage: StorageConfig::FileSystem {
+            }),
+            long_term_storage: StorageConfig::FileSystem(FileSystemConfig {
                 path: PathBuf::from("data/long-term"),
-            },
+            }),
 
             runtime: Runtime::default(),
             logging: Logging::default(),
@@ -793,12 +795,11 @@ mod tests {
 
             let config = Config::load(None).unwrap();
 
-            let StorageConfig::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).long_term_storage else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
-            assert_eq!(bucket, "whatever");
+            assert_eq!(c.endpoint, "http://localhost:8888");
+            assert_eq!(c.bucket, "whatever");
             assert_eq!(
                 config.metrics.tags,
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
@@ -840,12 +841,11 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let StorageConfig::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).long_term_storage else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
-            assert_eq!(bucket, "whatever");
+            assert_eq!(c.endpoint, "http://localhost:8888");
+            assert_eq!(c.bucket, "whatever");
 
             assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
             assert_eq!(config.sentry.environment.as_deref(), Some("production"));
@@ -879,15 +879,11 @@ mod tests {
 
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let StorageConfig::S3Compatible {
-                endpoint,
-                bucket: _bucket,
-            } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).long_term_storage else {
                 panic!("expected s3 storage");
             };
             // Env should overwrite the yaml config
-            assert_eq!(endpoint, "http://localhost:9001");
+            assert_eq!(c.endpoint, "http://localhost:9001");
 
             Ok(())
         });

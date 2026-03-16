@@ -13,8 +13,49 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::service::S3CompatibleConfig;
 use crate::stream::{self, ClientStream};
+
+/// Configuration for [`S3CompatibleBackend`].
+///
+/// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
+/// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
+///
+/// [Amazon S3]: https://aws.amazon.com/s3/
+///
+/// # Example
+///
+/// ```yaml
+/// long_term_storage:
+///   type: s3compatible
+///   endpoint: https://s3.amazonaws.com
+///   bucket: my-bucket
+/// ```
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct S3CompatibleConfig {
+    /// S3 endpoint URL.
+    ///
+    /// Examples: `https://s3.amazonaws.com`, `http://localhost:9000` (for MinIO)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
+    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
+    ///
+    /// Or for long-term storage:
+    /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
+    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
+    pub endpoint: String,
+
+    /// S3 bucket name.
+    ///
+    /// The bucket must exist before starting the server.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
+    /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
+    pub bucket: String,
+}
 
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///

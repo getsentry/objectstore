@@ -19,9 +19,9 @@ use tokio::sync::Semaphore;
 use yansi::Paint;
 
 use objectstore_service::backend::bigtable::BigTableBackend;
+use objectstore_service::backend::bigtable::BigTableConfig;
 use objectstore_service::backend::common::Backend;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::service::BigTableConfig;
 use objectstore_service::stream;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::scope::{Scope, Scopes};

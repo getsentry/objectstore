@@ -13,8 +13,41 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::service::FileSystemConfig;
 use crate::stream::{self, ClientStream};
+
+/// Configuration for [`LocalFsBackend`].
+///
+/// Stores objects as files on the local filesystem. Suitable for development, testing,
+/// and single-server deployments.
+///
+/// # Example
+///
+/// ```yaml
+/// long_term_storage:
+///   type: filesystem
+///   path: /data
+/// ```
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct FileSystemConfig {
+    /// Directory path for storing objects.
+    ///
+    /// The directory will be created if it doesn't exist. Relative paths are resolved from
+    /// the server's working directory.
+    ///
+    /// # Default
+    ///
+    /// `"data"` (relative to the server's working directory)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
+    /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
+    ///
+    /// Or for long-term storage:
+    /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
+    /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
+    pub path: PathBuf,
+}
 
 /// Local filesystem backend for development and testing.
 #[derive(Debug)]
@@ -134,7 +167,6 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::service::FileSystemConfig;
     use crate::stream;
 
     #[tokio::test]

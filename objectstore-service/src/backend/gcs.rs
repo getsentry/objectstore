@@ -19,8 +19,57 @@ use crate::backend::common::{
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::service::GcsConfig;
 use crate::stream::{self, ClientStream};
+
+/// Configuration for [`GcsBackend`].
+///
+/// Stores objects in [Google Cloud Storage]. Authentication uses Application Default Credentials
+/// (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS` environment variable or
+/// the GCE/GKE metadata service.
+///
+/// **Note**: The bucket must be pre-created with the following lifecycle policy:
+/// - `daysSinceCustomTime`: 1 day
+/// - `action`: delete
+///
+/// [Google Cloud Storage]: https://cloud.google.com/storage
+///
+/// # Example
+///
+/// ```yaml
+/// long_term_storage:
+///   type: gcs
+///   bucket: objectstore-bucket
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GcsConfig {
+    /// Optional custom GCS endpoint URL.
+    ///
+    /// Useful for testing with emulators. If `None`, uses the default GCS endpoint.
+    ///
+    /// # Default
+    ///
+    /// `None` (uses default GCS endpoint)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
+    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
+    ///
+    /// Or for long-term storage:
+    /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
+    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
+    pub endpoint: Option<String>,
+
+    /// GCS bucket name.
+    ///
+    /// The bucket must exist before starting the server.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
+    /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
+    pub bucket: String,
+}
 
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
@@ -594,7 +643,6 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::service::GcsConfig;
     use crate::stream;
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
