@@ -82,7 +82,7 @@ impl TieredStorage {
 
         let id = ObjectId::optional(context, key);
 
-        let (final_choice, backend_ty, stored_size) = match backend_choice {
+        let (final_choice, stored_size) = match backend_choice {
             BackendChoice::HighVolume => {
                 let payload = peeked.into_bytes();
                 let stored_size = payload.len() as u64;
@@ -102,17 +102,9 @@ impl TieredStorage {
                     self.long_term_backend
                         .put_object(&id, metadata, stream)
                         .await?;
-                    (
-                        BackendChoice::LongTerm,
-                        self.long_term_backend.name(),
-                        stored_size,
-                    )
+                    (BackendChoice::LongTerm, stored_size)
                 } else {
-                    (
-                        BackendChoice::HighVolume,
-                        self.high_volume_backend.name(),
-                        stored_size,
-                    )
+                    (BackendChoice::HighVolume, stored_size)
                 }
             }
             BackendChoice::LongTerm => {
@@ -154,10 +146,14 @@ impl TieredStorage {
 
                 (
                     BackendChoice::LongTerm,
-                    self.long_term_backend.name(),
                     stored_size.load(Ordering::Acquire),
                 )
             }
+        };
+
+        let backend_ty = match final_choice {
+            BackendChoice::HighVolume => self.high_volume_backend.name(),
+            BackendChoice::LongTerm => self.long_term_backend.name(),
         };
 
         let usecase = id.usecase().to_owned();
