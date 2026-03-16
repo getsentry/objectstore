@@ -23,6 +23,11 @@ use crate::stream::{ChunkedBytes, ClientStream};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum age for connections (GRPC channels) to Bigtable, after which they will be swapped with
 /// new ones in the background.
+/// This is intended to avoid latency spikes that could occur every hour or so, when the server
+/// closes long standing connections ([source](https://web.archive.org/web/20260211140930/https://docs.cloud.google.com/bigtable/docs/performance#cold-starts:~:text=return%20an%20error.-,Cold%20start,-at%20client%20initialization)).
+/// `tonic` already handles reconnections transparently, but lazily, meaning that the first requests
+/// that attempt to use a certain channel after the server has closed it, will pay the cost of the
+/// reconnection, resulting in increased latency for those requests.
 const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
