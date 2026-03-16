@@ -576,7 +576,7 @@ impl Backend for BigTableBackend {
             row_key: path,
             predicate_filter: Some(tombstone_predicate()),
             true_mutations: vec![], // Tombstone matched → skip write.
-            false_mutations, // No tombstone → write the object.
+            false_mutations,        // No tombstone → write the object.
             ..Default::default()
         };
 
