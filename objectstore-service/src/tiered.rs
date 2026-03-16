@@ -84,7 +84,7 @@ impl TieredStorage {
 
         let (final_choice, stored_size) = match backend_choice {
             BackendChoice::HighVolume => {
-                let payload = peeked.into_bytes();
+                let payload = peeked.into_bytes().await?;
                 let stored_size = payload.len() as u64;
 
                 let outcome = self
@@ -144,10 +144,7 @@ impl TieredStorage {
                 }
                 redirect_result?;
 
-                (
-                    BackendChoice::LongTerm,
-                    stored_size.load(Ordering::Acquire),
-                )
+                (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
             }
         };
 

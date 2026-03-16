@@ -222,35 +222,12 @@ impl<S> SizedPeek<S> {
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
-
-    /// Consumes self and returns the buffered data as [`Bytes`].
-    ///
-    /// Only valid when [`is_exhausted()`](Self::is_exhausted) returns `true` —
-    /// i.e. the entire stream fit within the peek limit and all data is in
-    /// the buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the stream was not fully consumed (pending data or remaining
-    /// stream exist).
-    pub fn into_bytes(self) -> Bytes {
-        assert!(
-            self.is_exhausted(),
-            "into_bytes() called on non-exhausted SizedPeek"
-        );
-        self.buffer.into_bytes()
-    }
 }
 
 impl<S, E> SizedPeek<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
-    /// Reads from `stream` into an internal buffer until `limit` bytes are accumulated
-    /// or the stream ends.
-    ///
-    /// Uses strictly-greater-than comparison: a stream of exactly `limit` bytes is
-    /// considered exhausted.
     pub async fn new(mut stream: S, limit: usize) -> Result<Self, E> {
         let mut buffer = ChunkedBytes::new(limit);
 
@@ -270,6 +247,24 @@ where
             pending: None,
             stream: None,
         })
+    }
+
+    /// Consumes self and returns all bytes as a single [`Bytes`].
+    ///
+    /// If the peek limit was exceeded, drains the remaining stream before
+    /// returning. Always correct regardless of [`is_exhausted`](Self::is_exhausted).
+    pub async fn into_bytes(mut self) -> Result<Bytes, E> {
+        if let Some(pending) = self.pending.take() {
+            self.buffer.push(pending);
+        }
+
+        if let Some(mut stream) = self.stream.take() {
+            while let Some(chunk) = stream.try_next().await? {
+                self.buffer.push(chunk);
+            }
+        }
+
+        Ok(self.buffer.into_bytes())
     }
 }
 

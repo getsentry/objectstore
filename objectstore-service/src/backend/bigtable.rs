@@ -213,6 +213,45 @@ fn tombstone_predicate() -> v2::RowFilter {
     }
 }
 
+/// Builds the three mutations that write an object row: clear existing data,
+/// then set the payload and metadata cells.
+///
+/// Used by both [`BigTableBackend::put_row`] (unconditional write) and
+/// [`BigTableBackend::put_non_tombstone`] (conditional write).
+fn build_write_mutations(
+    metadata: &Metadata,
+    payload: Vec<u8>,
+    now: SystemTime,
+) -> Result<[mutation::Mutation; 3]> {
+    let (family, timestamp_micros) = match metadata.expiration_policy {
+        ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
+        ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
+        ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+    };
+
+    let metadata_bytes = serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
+        context: "failed to serialize metadata".to_string(),
+        cause,
+    })?;
+
+    Ok([
+        // NB: We explicitly delete the row to clear metadata on overwrite.
+        mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+        mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: COLUMN_PAYLOAD.to_owned(),
+            timestamp_micros,
+            value: payload,
+        }),
+        mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: COLUMN_METADATA.to_owned(),
+            timestamp_micros,
+            value: metadata_bytes,
+        }),
+    ])
+}
+
 /// Parsed data from a BigTable row's cells.
 struct RowData {
     metadata: Metadata,
@@ -418,32 +457,7 @@ impl BigTableBackend {
         payload: Vec<u8>,
         action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
-        let now = SystemTime::now();
-        let (family, timestamp_micros) = match metadata.expiration_policy {
-            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
-        };
-
-        let mutations = [
-            // NB: We explicitly delete the row to clear metadata on overwrite.
-            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: family.to_owned(),
-                column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                timestamp_micros,
-                value: payload,
-            }),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: family.to_owned(),
-                column_qualifier: COLUMN_METADATA.to_owned(),
-                timestamp_micros,
-                value: serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
-                    context: "failed to serialize metadata".to_string(),
-                    cause,
-                })?,
-            }),
-        ];
+        let mutations = build_write_mutations(metadata, payload, SystemTime::now())?;
         self.mutate(path, mutations, action).await
     }
 }
@@ -550,40 +564,10 @@ impl Backend for BigTableBackend {
         tracing::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-
-        let now = SystemTime::now();
-        let (family, timestamp_micros) = match metadata.expiration_policy {
-            ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-            ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-            ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
-        };
-
-        let write_mutations = vec![
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::DeleteFromRow(
-                    mutation::DeleteFromRow {},
-                )),
-            },
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: family.to_owned(),
-                    column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                    timestamp_micros,
-                    value: payload.to_vec(),
-                })),
-            },
-            v2::Mutation {
-                mutation: Some(mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: family.to_owned(),
-                    column_qualifier: COLUMN_METADATA.to_owned(),
-                    timestamp_micros,
-                    value: serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
-                        context: "failed to serialize metadata".to_string(),
-                        cause,
-                    })?,
-                })),
-            },
-        ];
+        let false_mutations = build_write_mutations(metadata, payload.to_vec(), SystemTime::now())?
+            .into_iter()
+            .map(|m| v2::Mutation { mutation: Some(m) })
+            .collect();
 
         // Predicate: tombstone present → true_mutations (no-op), skip write.
         // Tombstone absent → false_mutations fire the write.
@@ -592,12 +576,12 @@ impl Backend for BigTableBackend {
             row_key: path,
             predicate_filter: Some(tombstone_predicate()),
             true_mutations: vec![], // Tombstone matched → skip write.
-            false_mutations: write_mutations, // No tombstone → write the object.
+            false_mutations, // No tombstone → write the object.
             ..Default::default()
         };
 
         let is_tombstone = self
-            .with_retry("put_if_not_tombstone", || async {
+            .with_retry("put_non_tombstone", || async {
                 self.bigtable
                     .client()
                     .check_and_mutate_row(request.clone())
