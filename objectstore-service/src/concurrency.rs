@@ -15,6 +15,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tracing::Level;
 
 use crate::error::{Error, Result};
 
@@ -176,11 +177,14 @@ where
                 .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
             if let Err(ref e) = result {
-                tracing::error!(
-                    operation,
-                    error = e as &dyn std::error::Error,
-                    "Task failed"
-                );
+                let err_ref = e as &dyn std::error::Error;
+                match e.level() {
+                    Level::ERROR => tracing::error!(operation, error = err_ref, "Task failed"),
+                    Level::WARN => tracing::warn!(operation, error = err_ref, "Task failed"),
+                    Level::INFO => tracing::info!(operation, error = err_ref, "Task failed"),
+                    Level::DEBUG => tracing::debug!(operation, error = err_ref, "Task failed"),
+                    Level::TRACE => tracing::trace!(operation, error = err_ref, "Task failed"),
+                }
             }
 
             objectstore_metrics::record!(

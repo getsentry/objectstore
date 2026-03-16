@@ -109,6 +109,25 @@ impl Error {
             cause: None,
         }
     }
+
+    /// Returns the appropriate log level for this error.
+    pub fn level(&self) -> tracing::Level {
+        match self {
+            // Malformed client input at DEBUG level
+            Self::Client(_) => tracing::Level::DEBUG,
+            Self::Metadata(_) => tracing::Level::DEBUG,
+            // Like rate limits, we treat capacity errors as warnings
+            Self::AtCapacity => tracing::Level::WARN,
+            // All other errors are service or backend failures
+            Error::Io(_) => tracing::Level::ERROR,
+            Error::Serde { .. } => tracing::Level::ERROR,
+            Error::Reqwest { .. } => tracing::Level::ERROR,
+            Error::GcpAuth(_) => tracing::Level::ERROR,
+            Error::Panic(_) => tracing::Level::ERROR,
+            Error::Dropped => tracing::Level::ERROR,
+            Error::Generic { .. } => tracing::Level::ERROR,
+        }
+    }
 }
 
 /// Result type for service operations.
