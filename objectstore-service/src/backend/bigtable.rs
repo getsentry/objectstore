@@ -26,7 +26,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// This is intended to avoid latency spikes that could occur every hour or so, when the server
 /// closes long standing connections ([source](https://web.archive.org/web/20260211140930/https://docs.cloud.google.com/bigtable/docs/performance#cold-starts:~:text=return%20an%20error.-,Cold%20start,-at%20client%20initialization)).
 /// `tonic` already handles reconnections transparently, but lazily, meaning that the first requests
-/// that attempt to use a certain channel after the server has closed it, will pay the cost of the
+/// that attempt to use a certain channel after the server has closed it will pay the cost of the
 /// reconnection, resulting in increased latency for those requests.
 const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
