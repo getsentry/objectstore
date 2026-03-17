@@ -27,7 +27,7 @@ const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
-/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`](crate::backend::StorageConfig::Tiered)
+/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
 /// inside another tiered config is not supported.
 ///
 /// # Example

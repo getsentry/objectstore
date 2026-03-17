@@ -78,9 +78,9 @@ async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backe
     })
 }
 
-/// Configuration for the high-volume backend in a [`TieredStorageConfig`].
+/// Configuration for the high-volume backend in a [`tiered::TieredStorageConfig`].
 ///
-/// Only backends that implement [`HighVolumeBackend`] are valid here.
+/// Only backends that implement [`common::HighVolumeBackend`] are valid here.
 /// Currently this is limited to BigTable.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -91,7 +91,7 @@ pub enum HighVolumeStorageConfig {
     BigTable(bigtable::BigTableConfig),
 }
 
-/// Constructs a type-erased [`HighVolumeBackend`] from the given config.
+/// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
 async fn hv_from_config(
     config: HighVolumeStorageConfig,
 ) -> anyhow::Result<Box<dyn common::HighVolumeBackend>> {
