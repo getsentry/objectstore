@@ -53,10 +53,12 @@ panic-isolated — a failure in one request does not bring down the service.
 
 # Two-Tier Backend System
 
-Every [`StorageService`] is initialized with two backends: a **high-volume**
-backend and a **long-term** backend. This split exists because no single storage
-system optimally handles both small, frequently-accessed objects and large,
-infrequently-accessed ones:
+[`TieredStorage`](backend::tiered::TieredStorage) is the
+[`Backend`](backend::common::Backend) implementation that provides the two-tier
+system. Passing it to [`StorageService::new`] enables the two-tier
+configuration. This split exists because no single storage system optimally
+handles both small, frequently-accessed objects and large, infrequently-accessed
+ones:
 
 - **High-volume backend** (typically
   [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
@@ -66,17 +68,19 @@ infrequently-accessed ones:
   optimized for large objects where per-byte storage cost matters more than
   access latency.
 
-The threshold is **1 MiB**. Objects at or below this size go to the high-volume
-backend; objects exceeding it go to the long-term backend.
+The threshold is **1 MiB**. `TieredStorage` routes objects at or below this
+size to the high-volume backend; objects exceeding it go to the long-term
+backend.
 
 See [`backend::StorageConfig`] for available backend implementations.
 
 ## Redirect Tombstones
 
-For large objects, the high-volume backend stores a **redirect tombstone** — a
-zero-payload marker whose metadata has `is_redirect_tombstone: true`. This
-allows reads to check only the high-volume backend and follow the tombstone to
-long-term storage, without scanning both backends on every read.
+For large objects, `TieredStorage` stores a **redirect tombstone** in the
+high-volume backend — a zero-payload marker whose metadata has
+`is_redirect_tombstone: true`. This allows reads to check only the high-volume
+backend and follow the tombstone to long-term storage, without scanning both
+backends on every read.
 
 # Metadata and Payload
 

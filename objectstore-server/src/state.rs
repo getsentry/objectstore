@@ -9,10 +9,10 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
+use objectstore_service::backend::tiered::TieredStorage;
+use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
-
-use objectstore_service::id::ObjectContext;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::Config;
@@ -61,7 +61,8 @@ impl Services {
 
         let high_volume = backend::from_config(config.high_volume_storage.clone()).await?;
         let long_term = backend::from_config(config.long_term_storage.clone()).await?;
-        let service = StorageService::new(high_volume, long_term)
+        let storage = TieredStorage::new(high_volume, long_term);
+        let service = StorageService::new(Box::new(storage))
             .with_concurrency_limit(config.service.max_concurrency);
         service.start();
 

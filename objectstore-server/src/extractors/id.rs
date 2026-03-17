@@ -239,10 +239,7 @@ mod tests {
     use crate::web::RequestCounter;
 
     async fn test_state(config: Config) -> ServiceState {
-        let service = StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory-hv")),
-            Box::new(InMemoryBackend::new("in-memory-lt")),
-        );
+        let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")));
         let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
