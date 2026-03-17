@@ -5,7 +5,7 @@
 //! GCS, local filesystem, S3-compatible) to a uniform interface that
 //! [`StorageService`](crate::StorageService) consumes.
 //!
-//! Two-tier routing is encapsulated [`TieredStorage`](tiered::TieredStorage)
+//! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
 //! and can be configured via [`StorageConfig::Tiered`].
 //!
 //! Backends are type-erased into a [`BoxedBackend`] so the service can work

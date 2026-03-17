@@ -4,9 +4,25 @@
 //! on size and maintains redirect tombstones so that reads never need to probe
 //! both backends. See the [crate-level documentation](crate) for details.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use futures_util::StreamExt;
+use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
-use super::StorageConfig;
+use crate::backend::StorageConfig;
+use crate::backend::common::{
+    Backend, BoxedBackend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse,
+    PutResponse,
+};
+use crate::error::Result;
+use crate::id::ObjectId;
+use crate::stream::{ClientStream, SizedPeek};
+
+/// The threshold up until which we will go to the "high volume" backend.
+const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
 /// Configuration for [`TieredStorage`].
 ///
@@ -35,24 +51,6 @@ pub struct TieredStorageConfig {
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
 }
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
-use futures_util::StreamExt;
-use objectstore_types::metadata::Metadata;
-
-use crate::backend::common::{
-    Backend, BoxedBackend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse,
-    PutResponse,
-};
-use crate::error::Result;
-use crate::id::ObjectId;
-use crate::stream::{ClientStream, SizedPeek};
-
-/// The threshold up until which we will go to the "high volume" backend.
-const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
 #[derive(Debug)]
 enum BackendChoice {
