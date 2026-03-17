@@ -1,14 +1,58 @@
 //! Shared trait definition and types for all backends.
 
-use std::fmt::Debug;
+use std::fmt;
 
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 
 use bytes::Bytes;
 
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, PayloadStream};
+
+/// Information about a redirect tombstone in the high-volume backend.
+///
+/// Currently carries only the `expiration_policy` so the high-volume backend
+/// can GC tombstones when the underlying object expires.
+#[derive(Debug, Clone, Copy)]
+pub struct Tombstone {
+    /// The expiration policy copied from the original object.
+    pub expiration_policy: ExpirationPolicy,
+}
+
+/// Typed response from [`HighVolumeBackend::hv_get_object`].
+pub enum HvGetResponse {
+    /// A real object was found.
+    Object(Metadata, PayloadStream),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
+
+impl fmt::Debug for HvGetResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HvGetResponse::Object(metadata, _stream) => f
+                .debug_tuple("Object")
+                .field(metadata)
+                .finish_non_exhaustive(),
+            HvGetResponse::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
+            HvGetResponse::NotFound => write!(f, "NotFound"),
+        }
+    }
+}
+
+/// Typed metadata-only response from [`HighVolumeBackend::hv_get_metadata`].
+#[derive(Debug)]
+pub enum HvMetadataResponse {
+    /// Metadata for a real object was found.
+    Object(Metadata),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
 
 /// User agent string used for outgoing requests.
 ///
@@ -39,7 +83,7 @@ pub enum ConditionalOutcome {
 
 /// Trait implemented by all storage backends.
 #[async_trait::async_trait]
-pub trait Backend: Debug + Send + Sync + 'static {
+pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
     fn name(&self) -> &'static str;
 
@@ -89,12 +133,31 @@ pub trait HighVolumeBackend: Backend {
         payload: Bytes,
     ) -> Result<ConditionalOutcome>;
 
+    /// Retrieves an object with explicit tombstone awareness.
+    ///
+    /// Returns [`HvGetResponse::Tombstone`] instead of synthesizing a tombstone
+    /// object, making the caller's routing logic a compile-time distinction.
+    async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse>;
+
+    /// Retrieves only metadata with explicit tombstone awareness.
+    ///
+    /// Implementations should skip the payload column where possible to avoid
+    /// fetching up to 1 MiB of data just to discover a tombstone.
+    async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse>;
+
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
     /// Returns [`ConditionalOutcome::Tombstone`] (leaving the row intact) when
     /// the object is a redirect tombstone, or [`ConditionalOutcome::Executed`]
     /// (after deleting it) for regular objects and non-existent rows.
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome>;
+
+    /// Writes a redirect tombstone for the given object.
+    ///
+    /// A tombstone signals that the real object lives in the long-term backend.
+    /// Only the `expiration_policy` inside `tombstone` is preserved — it is carried
+    /// so the high-volume backend can GC tombstones when the underlying object expires.
+    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()>;
 }
 
 /// Creates a reqwest client with required defaults.

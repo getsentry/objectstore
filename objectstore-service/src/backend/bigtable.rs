@@ -14,8 +14,8 @@ use tonic::Code;
 use bytes::Bytes;
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, HvGetResponse,
+    HvMetadataResponse, MetadataResponse, PutResponse, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -489,6 +489,9 @@ impl Backend for BigTableBackend {
         let Some(row) = self.read_row(&path, None, "get").await? else {
             return Ok(None);
         };
+        if row.metadata.is_tombstone() {
+            return Err(Error::UnexpectedTombstone);
+        }
 
         if row.needs_tti_bump() {
             // TODO: Schedule into background persistently so this doesn't get lost on restarts
@@ -511,12 +514,15 @@ impl Backend for BigTableBackend {
 
         // Only read the metadata column — skip the (potentially large) payload.
         // NB: `metadata.size` will not be populated since the payload is not fetched.
-        let Some(row) = self
+        let row_opt = self
             .read_row(&path, Some(column_filter(COLUMN_METADATA)), "get_metadata")
-            .await?
-        else {
+            .await?;
+        let Some(row) = row_opt else {
             return Ok(None);
         };
+        if row.metadata.is_tombstone() {
+            return Err(Error::UnexpectedTombstone);
+        }
 
         // Conditional TTI bump: read the payload only when a bump is actually needed.
         if row.needs_tti_bump() {
@@ -630,6 +636,94 @@ impl HighVolumeBackend for BigTableBackend {
         } else {
             Ok(ConditionalOutcome::Executed)
         }
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
+        tracing::debug!("Writing tombstone to Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+        // TODO: Store tombstones in a dedicated column instead of encoding the marker in
+        // `is_redirect_tombstone` within the metadata JSON. The JSON-regex predicate used by
+        // `put_non_tombstone` / `delete_non_tombstone` is a workaround until that column exists.
+        let metadata = Metadata {
+            is_redirect_tombstone: Some(true),
+            expiration_policy: tombstone.expiration_policy,
+            ..Default::default()
+        };
+        self.put_row(path, &metadata, vec![], "create_tombstone")
+            .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
+        tracing::debug!("Reading from Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        let Some(row) = self.read_row(&path, None, "hv_get_object").await? else {
+            return Ok(HvGetResponse::NotFound);
+        };
+
+        if row.needs_tti_bump() {
+            // TODO: Schedule into background persistently so this doesn't get lost on restarts
+            let _ = self
+                .put_row(path, &row.metadata, row.payload.clone(), "tti-bump")
+                .await;
+        }
+
+        Ok(if row.metadata.is_tombstone() {
+            HvGetResponse::Tombstone(Tombstone {
+                expiration_policy: row.metadata.expiration_policy,
+            })
+        } else {
+            let mut metadata = row.metadata;
+            metadata.size = Some(row.payload.len());
+            HvGetResponse::Object(metadata, crate::stream::single(row.payload))
+        })
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
+        tracing::debug!("Reading metadata from Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        // Only read the metadata column — skip the (potentially large) payload.
+        // NB: `metadata.size` will not be populated since the payload is not fetched.
+        let row_opt = self
+            .read_row(
+                &path,
+                Some(column_filter(COLUMN_METADATA)),
+                "hv_get_metadata",
+            )
+            .await?;
+        let Some(row) = row_opt else {
+            return Ok(HvMetadataResponse::NotFound);
+        };
+
+        if row.metadata.is_tombstone() {
+            if row.needs_tti_bump() {
+                // Tombstone payload is always empty — bump without a separate payload read.
+                let _ = self.put_row(path, &row.metadata, vec![], "tti-bump").await;
+            }
+            return Ok(HvMetadataResponse::Tombstone(Tombstone {
+                expiration_policy: row.metadata.expiration_policy,
+            }));
+        }
+
+        // Conditional TTI bump: read the payload only when a bump is actually needed.
+        if row.needs_tti_bump() {
+            // Best-effort — failures here should not fail the metadata read.
+            if let Ok(Some(payload_row)) = self
+                .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
+                .await
+            {
+                let _ = self
+                    .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
+                    .await;
+            }
+        }
+
+        Ok(HvMetadataResponse::Object(row.metadata))
     }
 }
 
@@ -899,7 +993,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_metadata_tombstone() -> Result<()> {
+    async fn test_get_metadata_tombstone_returns_error() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -913,8 +1007,11 @@ mod tests {
             .put_object(&id, &metadata, stream::single(""))
             .await?;
 
-        let meta = backend.get_metadata(&id).await?.unwrap();
-        assert_eq!(meta.is_redirect_tombstone, Some(true));
+        let result = backend.get_metadata(&id).await;
+        assert!(
+            matches!(result, Err(Error::UnexpectedTombstone)),
+            "expected UnexpectedTombstone, got {result:?}"
+        );
 
         Ok(())
     }
@@ -1058,9 +1155,9 @@ mod tests {
         assert_eq!(result, ConditionalOutcome::Tombstone);
 
         // Tombstone should still exist — delete_non_tombstone leaves it intact.
-        let get_result = backend.get_metadata(&id).await?;
+        let get_result = backend.hv_get_metadata(&id).await?;
         assert!(
-            get_result.is_some(),
+            matches!(get_result, HvMetadataResponse::Tombstone(_)),
             "tombstone should still exist after delete_non_tombstone"
         );
 

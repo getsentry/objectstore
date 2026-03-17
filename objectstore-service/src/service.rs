@@ -235,7 +235,9 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{ConditionalOutcome, HighVolumeBackend};
+    use crate::backend::common::{
+        ConditionalOutcome, HighVolumeBackend, HvGetResponse, HvMetadataResponse, Tombstone,
+    };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -527,6 +529,20 @@ mod tests {
 
         async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
             self.inner.delete_non_tombstone(id).await
+        }
+
+        async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
+            self.inner.create_tombstone(id, tombstone).await?;
+            self.on_put.notify_one();
+            Ok(())
+        }
+
+        async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
+            self.inner.hv_get_object(id).await
+        }
+
+        async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
+            self.inner.hv_get_metadata(id).await
         }
     }
 

@@ -65,6 +65,13 @@ pub enum Error {
     #[error("task dropped")]
     Dropped,
 
+    /// A redirect tombstone was encountered at a place where it is not supported.
+    ///
+    /// This indicates a caller bug — tombstone-aware reads must go through the
+    /// [`HighVolumeBackend`](crate::backend::common::HighVolumeBackend) methods.
+    #[error("unexpected tombstone")]
+    UnexpectedTombstone,
+
     /// The service has reached its concurrency limit and cannot accept more operations.
     #[error("concurrency limit reached")]
     AtCapacity,
@@ -119,13 +126,14 @@ impl Error {
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => tracing::Level::WARN,
             // All other errors are service or backend failures
-            Error::Io(_) => tracing::Level::ERROR,
-            Error::Serde { .. } => tracing::Level::ERROR,
-            Error::Reqwest { .. } => tracing::Level::ERROR,
-            Error::GcpAuth(_) => tracing::Level::ERROR,
-            Error::Panic(_) => tracing::Level::ERROR,
-            Error::Dropped => tracing::Level::ERROR,
-            Error::Generic { .. } => tracing::Level::ERROR,
+            Self::Io(_) => tracing::Level::ERROR,
+            Self::Serde { .. } => tracing::Level::ERROR,
+            Self::Reqwest { .. } => tracing::Level::ERROR,
+            Self::GcpAuth(_) => tracing::Level::ERROR,
+            Self::Panic(_) => tracing::Level::ERROR,
+            Self::Dropped => tracing::Level::ERROR,
+            Self::UnexpectedTombstone => tracing::Level::ERROR,
+            Self::Generic { .. } => tracing::Level::ERROR,
         }
     }
 }

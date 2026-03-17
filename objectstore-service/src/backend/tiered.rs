@@ -13,8 +13,8 @@ use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, HvGetResponse,
+    HvMetadataResponse, MetadataResponse, PutResponse, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
@@ -136,6 +136,14 @@ impl TieredStorage {
             long_term,
         }
     }
+
+    /// Returns the name of the backend corresponding to the given routing choice.
+    fn backend_type(&self, choice: &BackendChoice) -> &'static str {
+        match choice {
+            BackendChoice::HighVolume => self.high_volume.name(),
+            BackendChoice::LongTerm => self.long_term.name(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -209,31 +217,22 @@ impl Backend for TieredStorage {
                 self.long_term.put_object(id, metadata, stream).await?;
 
                 // Then write the redirect tombstone to high-volume.
-                let redirect_metadata = Metadata {
-                    is_redirect_tombstone: Some(true),
+                let tombstone = Tombstone {
                     expiration_policy: metadata.expiration_policy,
-                    ..Default::default()
                 };
-                let redirect_stream = futures_util::stream::empty().boxed();
-                let redirect_result = self
-                    .high_volume
-                    .put_object(id, &redirect_metadata, redirect_stream)
-                    .await;
+                let tombstone_result = self.high_volume.create_tombstone(id, tombstone).await;
 
-                if redirect_result.is_err() {
+                if tombstone_result.is_err() {
                     // Clean up on any kind of error.
                     self.long_term.delete_object(id).await?;
                 }
-                redirect_result?;
+                tombstone_result?;
 
                 (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
             }
         };
 
-        let backend_ty = match final_choice {
-            BackendChoice::HighVolume => self.high_volume.name(),
-            BackendChoice::LongTerm => self.long_term.name(),
-        };
+        let backend_ty = self.backend_type(&final_choice);
 
         objectstore_metrics::record!(
             "put.latency" = start.elapsed(),
@@ -254,33 +253,36 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume.name();
-        let mut result = self.high_volume.get_object(id).await?;
+        let hv_result = self.high_volume.hv_get_object(id).await?;
+        let (result, backend_choice) = match hv_result {
+            HvGetResponse::NotFound => (None, BackendChoice::HighVolume),
+            HvGetResponse::Object(metadata, stream) => {
+                (Some((metadata, stream)), BackendChoice::HighVolume)
+            }
+            HvGetResponse::Tombstone(_) => (
+                self.long_term.get_object(id).await?,
+                BackendChoice::LongTerm,
+            ),
+        };
 
-        if result.is_tombstone() {
-            result = self.long_term.get_object(id).await?;
-            backend_choice = "long-term";
-            backend_type = self.long_term.name();
-        }
-
+        let backend_type = self.backend_type(&backend_choice);
         objectstore_metrics::record!(
             "get.latency.pre-response" = start.elapsed(),
             usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice,
+            backend_choice = backend_choice.as_str(),
             backend_type = backend_type,
         );
 
-        if let Some((metadata, _stream)) = &result {
+        if let Some((ref metadata, _)) = result {
             if let Some(size) = metadata.size {
                 objectstore_metrics::record!(
                     "get.size" = size,
                     usecase = id.usecase().to_owned(),
-                    backend_choice = backend_choice,
+                    backend_choice = backend_choice.as_str(),
                     backend_type = backend_type,
                 );
             } else {
-                tracing::warn!(?backend_type, "Missing object size");
+                tracing::warn!(backend_type, "Missing object size");
             }
         }
 
@@ -290,21 +292,21 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume.name();
-        let mut result = self.high_volume.get_metadata(id).await?;
-
-        if result.as_ref().is_some_and(|m| m.is_tombstone()) {
-            result = self.long_term.get_metadata(id).await?;
-            backend_choice = "long-term";
-            backend_type = self.long_term.name();
-        }
+        let hv_result = self.high_volume.hv_get_metadata(id).await?;
+        let (result, backend_choice) = match hv_result {
+            HvMetadataResponse::NotFound => (None, BackendChoice::HighVolume),
+            HvMetadataResponse::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
+            HvMetadataResponse::Tombstone(_) => {
+                let result = self.long_term.get_metadata(id).await?;
+                (result, BackendChoice::LongTerm)
+            }
+        };
 
         objectstore_metrics::record!(
             "head.latency" = start.elapsed(),
             usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice,
-            backend_type = backend_type,
+            backend_choice = backend_choice.as_str(),
+            backend_type = self.backend_type(&backend_choice),
         );
 
         Ok(result)
@@ -313,13 +315,11 @@ impl Backend for TieredStorage {
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let start = Instant::now();
 
-        let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume.name();
+        let mut backend_choice = BackendChoice::HighVolume;
 
         let outcome = self.high_volume.delete_non_tombstone(id).await?;
         if outcome == ConditionalOutcome::Tombstone {
-            backend_choice = "long-term";
-            backend_type = self.long_term.name();
+            backend_choice = BackendChoice::LongTerm;
             // Delete the long-term object first, then clean up the tombstone.
             // This ordering ensures that if the long-term delete fails, the
             // tombstone remains and the data is still reachable (not orphaned).
@@ -330,21 +330,11 @@ impl Backend for TieredStorage {
         objectstore_metrics::record!(
             "delete.latency" = start.elapsed(),
             usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice,
-            backend_type = backend_type,
+            backend_choice = backend_choice.as_str(),
+            backend_type = self.backend_type(&backend_choice),
         );
 
         Ok(())
-    }
-}
-
-trait GetResponseExt {
-    fn is_tombstone(&self) -> bool;
-}
-
-impl GetResponseExt for GetResponse {
-    fn is_tombstone(&self) -> bool {
-        self.as_ref().is_some_and(|(m, _)| m.is_tombstone())
     }
 }
 
@@ -548,26 +538,23 @@ mod tests {
 
     // --- Tombstone inconsistency tests ---
 
-    /// A backend where put_object always fails, but reads/deletes work normally.
+    /// A backend where `create_tombstone` always fails, but all other operations work normally.
     #[derive(Debug)]
-    struct FailingPutBackend(InMemoryBackend);
+    struct FailingTombstoneBackend(InMemoryBackend);
 
     #[async_trait::async_trait]
-    impl Backend for FailingPutBackend {
+    impl Backend for FailingTombstoneBackend {
         fn name(&self) -> &'static str {
-            "failing-put"
+            "failing-tombstone"
         }
 
         async fn put_object(
             &self,
-            _id: &ObjectId,
-            _metadata: &Metadata,
-            _stream: ClientStream,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: ClientStream,
         ) -> Result<PutResponse> {
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "simulated tombstone write failure",
-            )))
+            self.0.put_object(id, metadata, stream).await
         }
 
         async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
@@ -580,7 +567,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl HighVolumeBackend for FailingPutBackend {
+    impl HighVolumeBackend for FailingTombstoneBackend {
         async fn put_non_tombstone(
             &self,
             id: &ObjectId,
@@ -593,6 +580,21 @@ mod tests {
         async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
             self.0.delete_non_tombstone(id).await
         }
+
+        async fn create_tombstone(&self, _id: &ObjectId, _tombstone: Tombstone) -> Result<()> {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "simulated tombstone write failure",
+            )))
+        }
+
+        async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
+            self.0.hv_get_object(id).await
+        }
+
+        async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
+            self.0.hv_get_metadata(id).await
+        }
     }
 
     /// If the tombstone write to the high-volume backend fails after the long-term
@@ -601,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
-        let hv = FailingPutBackend(InMemoryBackend::new("hv"));
+        let hv = FailingTombstoneBackend(InMemoryBackend::new("hv"));
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
         let id = ObjectId::new(make_context(), "orphan-test".into());
