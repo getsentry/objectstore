@@ -1,5 +1,6 @@
 //! Run workloads concurrently against a remote storage service and print metrics.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
+use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
@@ -118,7 +120,12 @@ impl Stresstest {
             .into_iter()
             .map(|workload| {
                 let remote = Arc::clone(&remote);
-                tokio::spawn(run_workload(remote, workload, duration, ttl))
+                match workload.mode {
+                    WorkloadMode::Batch => {
+                        tokio::spawn(run_batch_workload(remote, workload, duration, ttl))
+                    }
+                    _ => tokio::spawn(run_workload(remote, workload, duration, ttl)),
+                }
             })
             .collect();
 
@@ -149,6 +156,10 @@ impl Stresstest {
                 .merge(&metrics.write_timing)
                 .unwrap();
             total_metrics
+                .batch_timing
+                .merge(&metrics.batch_timing)
+                .unwrap();
+            total_metrics
                 .read_timing
                 .merge(&metrics.read_timing)
                 .unwrap();
@@ -158,6 +169,7 @@ impl Stresstest {
                 .unwrap();
             total_metrics.write_failures += metrics.write_failures;
             total_metrics.read_failures += metrics.read_failures;
+            total_metrics.many_requests += metrics.many_requests;
 
             workload
         });
@@ -220,7 +232,7 @@ impl Stresstest {
         if cleanup_timing.count() > 0 {
             print_ops(&cleanup_timing, cleanup_duration);
             println!();
-            print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+            print_percentiles("", &cleanup_timing, Duration::from_secs_f64);
         }
 
         Ok(())
@@ -235,7 +247,7 @@ async fn run_workload(
 ) -> (Workload, WorkloadMetrics, Duration) {
     // In throughput mode, allow for a high concurrency value.
     let concurrency = match workload.mode {
-        WorkloadMode::Weighted => workload.concurrency,
+        WorkloadMode::Weighted | WorkloadMode::Batch => workload.concurrency,
         WorkloadMode::Throughput => 100,
     };
 
@@ -352,6 +364,132 @@ async fn run_workload(
     (workload, metrics, elapsed)
 }
 
+async fn run_batch_workload(
+    remote: Arc<HttpRemote>,
+    workload: Workload,
+    duration: Duration,
+    ttl: Option<Duration>,
+) -> (Workload, WorkloadMetrics, Duration) {
+    let concurrency = workload.concurrency;
+    let batch_size = workload.batch_write_count();
+
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let start = Instant::now();
+    let deadline = tokio::time::Instant::now() + duration;
+
+    let workload = Arc::new(Mutex::new(workload));
+    let metrics = Arc::new(Mutex::new(WorkloadMetrics::default()));
+
+    let sleep = tokio::time::sleep_until(deadline);
+    tokio::pin!(sleep);
+
+    loop {
+        if deadline.elapsed() > Duration::ZERO {
+            break;
+        }
+        tokio::select! {
+            permit = semaphore.clone().acquire_owned() => {
+                let workload = Arc::clone(&workload);
+                let remote = Arc::clone(&remote);
+                let metrics = Arc::clone(&metrics);
+
+                let (payloads, usecase, org_id) = {
+                    let mut wl = workload.lock().unwrap();
+                    let payloads = wl.next_write_payloads(batch_size);
+                    let org_id = wl.next_organization_id();
+                    let mut usecase = Usecase::new(&wl.name);
+                    if let Some(ttl) = ttl {
+                        usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
+                    }
+                    (payloads, usecase, org_id)
+                };
+
+                let task = async move {
+                    let session = remote.session(&usecase, org_id);
+                    let mut many = session.many();
+
+                    let mut payload_info = HashMap::with_capacity(payloads.len());
+
+                    for (internal_id, payload) in payloads {
+                        let key = internal_id.to_string();
+                        payload_info.insert(key.clone(), (internal_id, payload.len));
+                        let stream = ReaderStream::new(payload).boxed();
+                        many = many.push(
+                            session
+                                .put_stream(stream)
+                                .compression(None)
+                                .key(key),
+                        );
+                    }
+
+                    metrics.lock().unwrap().many_requests += 1;
+
+                    let batch_start = Instant::now();
+                    let mut results = many.send();
+
+                    while let Some(result) = results.next().await {
+                        match result {
+                            objectstore_client::OperationResult::Put(key, Ok(_)) => {
+                                if let Some((internal_id, file_size)) =
+                                    payload_info.remove(&key)
+                                {
+                                    let external_id = (usecase.clone(), org_id, key);
+                                    workload.lock().unwrap().push_file(internal_id, external_id);
+
+                                    let mut m = metrics.lock().unwrap();
+                                    m.file_sizes.add(file_size as f64);
+                                    m.bytes_written += file_size;
+                                } else {
+                                    eprintln!("batch put returned unknown key: {key}");
+                                }
+                            }
+                            objectstore_client::OperationResult::Put(_, Err(err)) => {
+                                print_error("batch write", &err.into());
+                                metrics.lock().unwrap().write_failures += 1;
+                            }
+                            objectstore_client::OperationResult::Error(err) => {
+                                print_error("batch request", &err.into());
+                                metrics.lock().unwrap().write_failures += 1;
+                            }
+                            other => {
+                                eprintln!("unexpected batch result: {other:?}");
+                            }
+                        }
+                    }
+
+                    metrics
+                        .lock()
+                        .unwrap()
+                        .batch_timing
+                        .add(batch_start.elapsed().as_secs_f64());
+                    drop(permit);
+                };
+                tokio::spawn(task);
+            }
+            _ = &mut sleep => {
+                break;
+            }
+        }
+    }
+
+    let _permits = semaphore.acquire_many(concurrency as u32).await;
+
+    let metrics: WorkloadMetrics = {
+        let mut metrics = metrics.lock().unwrap();
+        std::mem::take(&mut metrics)
+    };
+
+    let workload = Arc::try_unwrap(workload)
+        .map_err(|_| ())
+        .unwrap()
+        .into_inner()
+        .unwrap();
+
+    let elapsed = start.elapsed();
+
+    (workload, metrics, elapsed)
+}
+
 fn print_error(message: &str, error: &Error) {
     eprintln!("{} {}", "ERROR:".bold().red(), message.bold());
     for source in error.chain() {
@@ -363,6 +501,9 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
     let sketch = &metrics.file_sizes;
     if sketch.count() > 0 {
         print!("{} ({} ops", "WRITE:".bold().green(), sketch.count().bold());
+        if metrics.many_requests > 0 {
+            print!(", {} many requests", metrics.many_requests.bold());
+        }
         if metrics.write_failures > 0 {
             print!(
                 ", {}",
@@ -379,9 +520,30 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
             avg.bold()
         );
 
-        print_ops(&metrics.write_timing, duration);
+        // Always show individual ops/s (file_sizes tracks every individual write)
+        print_ops(sketch, duration);
+        if metrics.many_requests > 0 {
+            let many_ps = metrics.many_requests as f64 / duration.as_secs_f64();
+            print!(", {:.2} \"many\" operations/s", many_ps.bold());
+        }
         print_throughput(metrics.bytes_written, duration);
-        print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
+
+        // Show timing percentiles, keeping batch and individual write timings separate
+        let has_write_timing = metrics.write_timing.count() > 0;
+        let has_batch_timing = metrics.batch_timing.count() > 0;
+        match (has_write_timing, has_batch_timing) {
+            (true, true) => {
+                print_percentiles("write ", &metrics.write_timing, Duration::from_secs_f64);
+                print_percentiles("batch ", &metrics.batch_timing, Duration::from_secs_f64);
+            }
+            (true, false) => {
+                print_percentiles("", &metrics.write_timing, Duration::from_secs_f64);
+            }
+            (false, true) => {
+                print_percentiles("", &metrics.batch_timing, Duration::from_secs_f64);
+            }
+            (false, false) => {}
+        }
     } else if metrics.write_failures > 0 {
         println!(
             "{}",
@@ -405,7 +567,7 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         println!(")");
         print_ops(&metrics.read_timing, duration);
         print_throughput(metrics.bytes_read, duration);
-        print_percentiles(&metrics.read_timing, Duration::from_secs_f64);
+        print_percentiles("", &metrics.read_timing, Duration::from_secs_f64);
     } else if metrics.read_failures > 0 {
         println!(
             "{}",
@@ -422,18 +584,18 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         );
         print_ops(&metrics.delete_timing, duration);
         println!();
-        print_percentiles(&metrics.delete_timing, Duration::from_secs_f64);
+        print_percentiles("", &metrics.delete_timing, Duration::from_secs_f64);
     }
 }
 
-fn print_percentiles<T: fmt::Debug>(sketch: &DDSketch, map: impl Fn(f64) -> T) {
+fn print_percentiles<T: fmt::Debug>(label: &str, sketch: &DDSketch, map: impl Fn(f64) -> T) {
     let ops = sketch.count();
     let avg = map(sketch.sum().unwrap() / ops as f64);
     let p50 = map(sketch.quantile(0.5).unwrap().unwrap());
     let p90 = map(sketch.quantile(0.9).unwrap().unwrap());
     let p99 = map(sketch.quantile(0.99).unwrap().unwrap());
     println!(
-        "  avg: {:.2?}; p50: {p50:.2?}; p90: {p90:.2?}; p99: {p99:.2?}",
+        "  {label}avg: {:.2?}; p50: {p50:.2?}; p90: {p90:.2?}; p99: {p99:.2?}",
         avg.bold()
     );
 }
@@ -457,9 +619,12 @@ struct WorkloadMetrics {
     bytes_read: u64,
 
     write_timing: DDSketch,
+    batch_timing: DDSketch,
     read_timing: DDSketch,
     delete_timing: DDSketch,
 
     write_failures: u64,
     read_failures: u64,
+
+    many_requests: u64,
 }

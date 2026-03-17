@@ -43,6 +43,7 @@ fn default_organizations() -> u64 {
 pub struct FileSizes {
     pub p50: ByteSize,
     pub p99: ByteSize,
+    pub max: Option<ByteSize>,
 }
 
 #[derive(Debug, Deserialize)]
