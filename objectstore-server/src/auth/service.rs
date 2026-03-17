@@ -51,7 +51,7 @@ impl AuthAwareService {
     ) -> ApiResult<Self> {
         if enforce && context.is_none() {
             let err = AuthError::InternalError("Missing auth context".into());
-            err.log(None, None);
+            err.log(None, None, enforce);
             Err(err.into())
         } else {
             Ok(Self {
@@ -67,7 +67,7 @@ impl AuthAwareService {
             Some(auth) => auth.assert_authorized(perm, context),
             None => Ok(()),
         }
-        .inspect_err(|err| err.log(Some(perm), Some(context.usecase.as_str())));
+        .inspect_err(|err| err.log(Some(perm), Some(context.usecase.as_str()), self.enforce));
 
         match self.enforce {
             true => Ok(auth_result?),
