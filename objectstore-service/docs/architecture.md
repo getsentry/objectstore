@@ -62,11 +62,14 @@ ones:
 
 - **High-volume backend** (typically
   [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
-  and writes of small objects. Most objects in practice are small (metadata
-  blobs, debug symbols, etc.), so this path handles the majority of traffic.
+  and writes of small objects. Must implement
+  [`HighVolumeBackend`](backend::common::HighVolumeBackend), which adds atomic
+  operations used by `TieredStorage` to maintain consistency of redirects.
+  Objects in practice are small (metadata blobs, event attachments, etc.), so
+  this path handles the majority of traffic by volume.
 - **Long-term backend** (typically [GCS](backend::StorageConfig::Gcs)):
-  optimized for large objects where per-byte storage cost matters more than
-  access latency.
+  optimized for large objects and long retention periods where per-byte storage
+  cost matters more than access latency.
 
 The threshold is **1 MiB**. `TieredStorage` routes objects at or below this
 size to the high-volume backend; objects exceeding it go to the long-term

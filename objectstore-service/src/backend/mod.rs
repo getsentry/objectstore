@@ -7,14 +7,9 @@
 //!
 //! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
 //! and can be configured via [`StorageConfig::Tiered`].
-//!
-//! Backends are type-erased into a [`BoxedBackend`] so the service can work
-//! with any combination.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-use common::BoxedBackend;
 
 pub mod bigtable;
 pub mod common;
@@ -56,11 +51,11 @@ pub enum StorageConfig {
     Tiered(tiered::TieredStorageConfig),
 }
 
-/// Constructs a [`BoxedBackend`] from the given [`StorageConfig`].
-pub async fn from_config(config: StorageConfig) -> Result<BoxedBackend> {
+/// Constructs a type-erased [`Backend`](common::Backend) from the given [`StorageConfig`].
+pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::Tiered(c) => {
-            let hv = from_leaf_config(*c.high_volume).await?;
+            let hv = hv_from_config(c.high_volume).await?;
             let lt = from_leaf_config(*c.long_term).await?;
             Box::new(tiered::TieredStorage::new(hv, lt))
         }
@@ -71,7 +66,7 @@ pub async fn from_config(config: StorageConfig) -> Result<BoxedBackend> {
     })
 }
 
-async fn from_leaf_config(config: StorageConfig) -> Result<BoxedBackend> {
+async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
         StorageConfig::S3Compatible(c) => {
@@ -80,5 +75,27 @@ async fn from_leaf_config(config: StorageConfig) -> Result<BoxedBackend> {
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
+    })
+}
+
+/// Configuration for the high-volume backend in a [`tiered::TieredStorageConfig`].
+///
+/// Only backends that implement [`common::HighVolumeBackend`] are valid here.
+/// Currently this is limited to BigTable.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HighVolumeStorageConfig {
+    /// [Google Bigtable] backend.
+    ///
+    /// [Google Bigtable]: https://cloud.google.com/bigtable
+    BigTable(bigtable::BigTableConfig),
+}
+
+/// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
+async fn hv_from_config(
+    config: HighVolumeStorageConfig,
+) -> anyhow::Result<Box<dyn common::HighVolumeBackend>> {
+    Ok(match config {
+        HighVolumeStorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
     })
 }

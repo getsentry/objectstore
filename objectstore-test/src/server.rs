@@ -134,7 +134,6 @@ fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
             tempdirs.push(dir);
         }
         StorageConfig::Tiered(c) => {
-            replace_fs_paths(&mut c.high_volume, tempdirs);
             replace_fs_paths(&mut c.long_term, tempdirs);
         }
         StorageConfig::S3Compatible(_) | StorageConfig::Gcs(_) | StorageConfig::BigTable(_) => {}

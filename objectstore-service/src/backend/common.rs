@@ -2,7 +2,6 @@
 
 use std::fmt::Debug;
 
-use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 
 use bytes::Bytes;
@@ -27,8 +26,8 @@ pub type DeleteResponse = ();
 
 /// Outcome of a tombstone-conditional operation.
 ///
-/// Returned by [`Backend::put_non_tombstone`] and
-/// [`Backend::delete_non_tombstone`] to indicate whether the operation
+/// Returned by [`HighVolumeBackend::put_non_tombstone`] and
+/// [`HighVolumeBackend::delete_non_tombstone`] to indicate whether the operation
 /// proceeded or was skipped because a redirect tombstone was present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionalOutcome {
@@ -65,7 +64,16 @@ pub trait Backend: Debug + Send + Sync + 'static {
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
+}
 
+/// Trait for backends that support tombstone-conditional operations.
+///
+/// Only backends suitable for the high-volume tier of
+/// [`TieredStorage`](super::tiered::TieredStorage) implement this trait.
+/// The conditional methods provide atomic operations to avoid overwriting
+/// redirect tombstones.
+#[async_trait::async_trait]
+pub trait HighVolumeBackend: Backend {
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
     /// Returns [`ConditionalOutcome::Tombstone`] (skipping the write) when a
@@ -79,39 +87,15 @@ pub trait Backend: Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
-    ) -> Result<ConditionalOutcome> {
-        // NB: This method currently lives on the general `Backend` trait for
-        // convenience, but it is only meaningful for high-volume backends.
-        // A follow-up will move it to a dedicated trait implemented only where
-        // it is applicable.
-        let existing = self.get_metadata(id).await?;
-        if existing.is_some_and(|m| m.is_tombstone()) {
-            Ok(ConditionalOutcome::Tombstone)
-        } else {
-            let stream = crate::stream::single(payload).boxed();
-            self.put_object(id, metadata, stream).await?;
-            Ok(ConditionalOutcome::Executed)
-        }
-    }
+    ) -> Result<ConditionalOutcome>;
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
     /// Returns [`ConditionalOutcome::Tombstone`] (leaving the row intact) when
     /// the object is a redirect tombstone, or [`ConditionalOutcome::Executed`]
     /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
-        let metadata = self.get_metadata(id).await?;
-        if metadata.is_some_and(|m| m.is_tombstone()) {
-            Ok(ConditionalOutcome::Tombstone)
-        } else {
-            self.delete_object(id).await?;
-            Ok(ConditionalOutcome::Executed)
-        }
-    }
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome>;
 }
-
-/// A type-erased [`Backend`] instance.
-pub type BoxedBackend = Box<dyn Backend>;
 
 /// Creates a reqwest client with required defaults.
 ///

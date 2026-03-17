@@ -745,6 +745,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
+    use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -888,9 +889,7 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let StorageConfig::BigTable(hv) = c.high_volume.as_ref() else {
-                panic!("expected bigtable high_volume");
-            };
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
             let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
                 panic!("expected gcs long_term");
@@ -905,8 +904,10 @@ mod tests {
     fn tiered_storage_via_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("OS__STORAGE__TYPE", "tiered");
-            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "filesystem");
-            jail.set_env("OS__STORAGE__HIGH_VOLUME__PATH", "/data/hv");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "bigtable");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__PROJECT_ID", "my-project");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME", "my-instance");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "my-table");
             jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
             jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
 
@@ -915,10 +916,10 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let StorageConfig::FileSystem(hv) = c.high_volume.as_ref() else {
-                panic!("expected filesystem high_volume");
-            };
-            assert_eq!(hv.path, Path::new("/data/hv"));
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            assert_eq!(hv.project_id, "my-project");
+            assert_eq!(hv.instance_name, "my-instance");
+            assert_eq!(hv.table_name, "my-table");
             let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
                 panic!("expected filesystem long_term");
             };
