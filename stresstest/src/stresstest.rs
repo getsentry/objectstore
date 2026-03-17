@@ -156,6 +156,10 @@ impl Stresstest {
                 .merge(&metrics.write_timing)
                 .unwrap();
             total_metrics
+                .batch_timing
+                .merge(&metrics.batch_timing)
+                .unwrap();
+            total_metrics
                 .read_timing
                 .merge(&metrics.read_timing)
                 .unwrap();
@@ -228,7 +232,7 @@ impl Stresstest {
         if cleanup_timing.count() > 0 {
             print_ops(&cleanup_timing, cleanup_duration);
             println!();
-            print_percentiles(&cleanup_timing, Duration::from_secs_f64);
+            print_percentiles("", &cleanup_timing, Duration::from_secs_f64);
         }
 
         Ok(())
@@ -456,7 +460,7 @@ async fn run_batch_workload(
                     metrics
                         .lock()
                         .unwrap()
-                        .write_timing
+                        .batch_timing
                         .add(batch_start.elapsed().as_secs_f64());
                     drop(permit);
                 };
@@ -516,14 +520,30 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
             avg.bold()
         );
 
+        // Always show individual ops/s (file_sizes tracks every individual write)
+        print_ops(sketch, duration);
         if metrics.many_requests > 0 {
             let many_ps = metrics.many_requests as f64 / duration.as_secs_f64();
-            print!("  {:.2} \"many\" operations/s", many_ps.bold());
-        } else {
-            print_ops(&metrics.write_timing, duration);
+            print!(", {:.2} \"many\" operations/s", many_ps.bold());
         }
         print_throughput(metrics.bytes_written, duration);
-        print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
+
+        // Show timing percentiles, keeping batch and individual write timings separate
+        let has_write_timing = metrics.write_timing.count() > 0;
+        let has_batch_timing = metrics.batch_timing.count() > 0;
+        match (has_write_timing, has_batch_timing) {
+            (true, true) => {
+                print_percentiles("write ", &metrics.write_timing, Duration::from_secs_f64);
+                print_percentiles("batch ", &metrics.batch_timing, Duration::from_secs_f64);
+            }
+            (true, false) => {
+                print_percentiles("", &metrics.write_timing, Duration::from_secs_f64);
+            }
+            (false, true) => {
+                print_percentiles("", &metrics.batch_timing, Duration::from_secs_f64);
+            }
+            (false, false) => {}
+        }
     } else if metrics.write_failures > 0 {
         println!(
             "{}",
@@ -547,7 +567,7 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         println!(")");
         print_ops(&metrics.read_timing, duration);
         print_throughput(metrics.bytes_read, duration);
-        print_percentiles(&metrics.read_timing, Duration::from_secs_f64);
+        print_percentiles("", &metrics.read_timing, Duration::from_secs_f64);
     } else if metrics.read_failures > 0 {
         println!(
             "{}",
@@ -564,18 +584,18 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
         );
         print_ops(&metrics.delete_timing, duration);
         println!();
-        print_percentiles(&metrics.delete_timing, Duration::from_secs_f64);
+        print_percentiles("", &metrics.delete_timing, Duration::from_secs_f64);
     }
 }
 
-fn print_percentiles<T: fmt::Debug>(sketch: &DDSketch, map: impl Fn(f64) -> T) {
+fn print_percentiles<T: fmt::Debug>(label: &str, sketch: &DDSketch, map: impl Fn(f64) -> T) {
     let ops = sketch.count();
     let avg = map(sketch.sum().unwrap() / ops as f64);
     let p50 = map(sketch.quantile(0.5).unwrap().unwrap());
     let p90 = map(sketch.quantile(0.9).unwrap().unwrap());
     let p99 = map(sketch.quantile(0.99).unwrap().unwrap());
     println!(
-        "  avg: {:.2?}; p50: {p50:.2?}; p90: {p90:.2?}; p99: {p99:.2?}",
+        "  {label}avg: {:.2?}; p50: {p50:.2?}; p90: {p90:.2?}; p99: {p99:.2?}",
         avg.bold()
     );
 }
@@ -599,6 +619,7 @@ struct WorkloadMetrics {
     bytes_read: u64,
 
     write_timing: DDSketch,
+    batch_timing: DDSketch,
     read_timing: DDSketch,
     delete_timing: DDSketch,
 
