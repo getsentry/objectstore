@@ -516,10 +516,11 @@ fn print_metrics(metrics: &WorkloadMetrics, duration: Duration) {
             avg.bold()
         );
 
-        print_ops(&metrics.write_timing, duration);
         if metrics.many_requests > 0 {
             let many_ps = metrics.many_requests as f64 / duration.as_secs_f64();
-            print!(", {:.2} many requests/s", many_ps.bold());
+            print!("  {:.2} \"many\" operations/s", many_ps.bold());
+        } else {
+            print_ops(&metrics.write_timing, duration);
         }
         print_throughput(metrics.bytes_written, duration);
         print_percentiles(&metrics.write_timing, Duration::from_secs_f64);
