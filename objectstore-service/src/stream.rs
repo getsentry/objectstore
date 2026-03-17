@@ -197,7 +197,7 @@ impl ChunkedBytes {
 /// Reads up to `limit` bytes from a stream to support size-based routing decisions.
 ///
 /// Constructed via the async [`SizedPeek::new`], which reads eagerly so that
-/// [`is_exhausted()`](Self::is_exhausted) and [`len()`](Self::len) are always valid.
+/// [`is_exhausted()`](Self::is_exhausted) is always valid.
 /// The full stream (buffered prefix plus any unconsumed remainder) is recovered
 /// with [`into_stream()`](Self::into_stream).
 ///
@@ -218,6 +218,7 @@ impl<S> SizedPeek<S> {
     }
 
     /// Returns the number of bytes held in the buffer (at most `limit`).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
@@ -251,6 +252,24 @@ where
             pending: None,
             stream: None,
         })
+    }
+
+    /// Consumes self and returns all bytes as a single [`Bytes`].
+    ///
+    /// If the peek limit was exceeded, drains the remaining stream before
+    /// returning. Always correct regardless of [`is_exhausted`](Self::is_exhausted).
+    pub async fn into_bytes(mut self) -> Result<Bytes, E> {
+        if let Some(pending) = self.pending.take() {
+            self.buffer.push(pending);
+        }
+
+        if let Some(mut stream) = self.stream.take() {
+            while let Some(chunk) = stream.try_next().await? {
+                self.buffer.push(chunk);
+            }
+        }
+
+        Ok(self.buffer.into_bytes())
     }
 }
 
