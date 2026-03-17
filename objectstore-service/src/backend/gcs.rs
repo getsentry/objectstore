@@ -36,7 +36,7 @@ use crate::stream::{self, ClientStream};
 /// # Example
 ///
 /// ```yaml
-/// long_term_storage:
+/// storage:
 ///   type: gcs
 ///   bucket: objectstore-bucket
 /// ```
@@ -52,12 +52,8 @@ pub struct GcsConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
-    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-    ///
-    /// Or for long-term storage:
-    /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
-    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
+    /// - `OS__STORAGE__TYPE=gcs`
+    /// - `OS__STORAGE__ENDPOINT=http://localhost:9000` (optional)
     pub endpoint: Option<String>,
 
     /// GCS bucket name.
@@ -66,8 +62,7 @@ pub struct GcsConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
-    /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
+    /// - `OS__STORAGE__BUCKET=my-gcs-bucket`
     pub bucket: String,
 }
 

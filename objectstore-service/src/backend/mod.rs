@@ -5,11 +5,8 @@
 //! GCS, local filesystem, S3-compatible) to a uniform interface that
 //! [`StorageService`](crate::StorageService) consumes.
 //!
-//! Backend methods operate on single objects identified by an
-//! [`ObjectId`](crate::id::ObjectId). Unlike the service-level API, backends
-//! have no knowledge of the two-tier routing or redirect tombstones — those
-//! concerns live in `StorageService`, which coordinates across two backend
-//! instances.
+//! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
+//! and can be configured via [`StorageConfig::Tiered`].
 //!
 //! Backends are type-erased into a [`BoxedBackend`] so the service can work
 //! with any combination.
@@ -50,10 +47,31 @@ pub enum StorageConfig {
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
     BigTable(bigtable::BigTableConfig),
+
+    /// Tiered storage backend (type `"tiered"`).
+    ///
+    /// Routes objects across two backends based on size: small objects go to
+    /// `high_volume`, large objects go to `long_term`. Nesting `Tiered` inside
+    /// another `Tiered` is not supported and will return an error at startup.
+    Tiered(tiered::TieredStorageConfig),
 }
 
 /// Constructs a [`BoxedBackend`] from the given [`StorageConfig`].
 pub async fn from_config(config: StorageConfig) -> Result<BoxedBackend> {
+    Ok(match config {
+        StorageConfig::Tiered(c) => {
+            let hv = from_leaf_config(*c.high_volume).await?;
+            let lt = from_leaf_config(*c.long_term).await?;
+            Box::new(tiered::TieredStorage::new(hv, lt))
+        }
+        // All non-Tiered variants are handled by from_leaf_config. A wildcard
+        // is intentional here: any new leaf variant should fall through to
+        // from_leaf_config, which will handle it or produce a compile error.
+        _ => from_leaf_config(config).await?,
+    })
+}
+
+async fn from_leaf_config(config: StorageConfig) -> Result<BoxedBackend> {
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
         StorageConfig::S3Compatible(c) => {
@@ -61,5 +79,6 @@ pub async fn from_config(config: StorageConfig) -> Result<BoxedBackend> {
         }
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
+        StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
     })
 }

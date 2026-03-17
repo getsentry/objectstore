@@ -10,7 +10,9 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
+use serde::{Deserialize, Serialize};
 
+use crate::backend::StorageConfig;
 use crate::backend::common::{
     Backend, BoxedBackend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse,
     PutResponse,
@@ -21,6 +23,34 @@ use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+
+/// Configuration for [`TieredStorage`].
+///
+/// Composes two backends into a tiered routing setup: `high_volume` for small
+/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
+/// inside another tiered config is not supported.
+///
+/// # Example
+///
+/// ```yaml
+/// storage:
+///   type: tiered
+///   high_volume:
+///     type: bigtable
+///     project_id: my-project
+///     instance_name: objectstore
+///     table_name: objectstore
+///   long_term:
+///     type: gcs
+///     bucket: my-objectstore-bucket
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TieredStorageConfig {
+    /// Backend for high-volume, small objects.
+    pub high_volume: Box<StorageConfig>,
+    /// Backend for large, long-term objects.
+    pub long_term: Box<StorageConfig>,
+}
 
 #[derive(Debug)]
 enum BackendChoice {

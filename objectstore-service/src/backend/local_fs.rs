@@ -23,7 +23,7 @@ use crate::stream::{self, ClientStream};
 /// # Example
 ///
 /// ```yaml
-/// long_term_storage:
+/// storage:
 ///   type: filesystem
 ///   path: /data
 /// ```
@@ -40,12 +40,8 @@ pub struct FileSystemConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
-    /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
-    ///
-    /// Or for long-term storage:
-    /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
-    /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
+    /// - `OS__STORAGE__TYPE=filesystem`
+    /// - `OS__STORAGE__PATH=/path/to/storage`
     pub path: PathBuf,
 }
 

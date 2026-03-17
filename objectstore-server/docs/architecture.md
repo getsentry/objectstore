@@ -96,14 +96,14 @@ Configuration uses [figment](https://docs.rs/figment) for layered merging with
 this precedence (highest wins):
 
 1. **Environment variables** — prefixed with `OS__`, using `__` as a nested
-   separator. Example: `OS__LONG_TERM_STORAGE__TYPE=gcs`
+   separator. Example: `OS__STORAGE__TYPE=tiered`
 2. **YAML file** — passed via the `-c` / `--config` CLI flag
-3. **Defaults** — sensible development defaults (local filesystem backends,
+3. **Defaults** — sensible development defaults (local filesystem backend,
    auth disabled)
 
 Key configuration sections:
-- `high_volume_storage` / `long_term_storage` — backend type and connection
-  parameters
+- `storage` — backend type and connection parameters; use `type: tiered` for
+  two-tier routing with `high_volume` and `long_term` sub-backends
 - `auth` — key directory and enforcement toggle
 - `rate_limits` — throughput and bandwidth limits
 - `http` — HTTP layer parameters (concurrency limit)
