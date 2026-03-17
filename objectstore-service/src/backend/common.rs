@@ -70,7 +70,7 @@ pub trait Backend: Debug + Send + Sync + 'static {
 ///
 /// Only backends suitable for the high-volume tier of
 /// [`TieredStorage`](super::tiered::TieredStorage) implement this trait.
-/// The conditional methods use CAS-style semantics to avoid overwriting
+/// The conditional methods provide atomic operations to avoid overwriting
 /// redirect tombstones.
 #[async_trait::async_trait]
 pub trait HighVolumeBackend: Backend {
