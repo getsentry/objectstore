@@ -10,10 +10,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::backend::tiered::TieredStorage;
+use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
-
-use objectstore_service::id::ObjectContext;
 
 use crate::auth::PublicKeyDirectory;
 use crate::config::Config;

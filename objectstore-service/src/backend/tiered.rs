@@ -82,7 +82,7 @@ impl std::fmt::Display for BackendChoice {
 ///
 /// See the individual methods for per-operation tombstone behavior.
 ///
-/// # Wrapping with `StorageService`
+/// # Usage
 ///
 /// `TieredStorage` handles only the routing and consistency logic. Wrap it in a
 /// [`StorageService`](crate::service::StorageService) to add task spawning, panic isolation,
