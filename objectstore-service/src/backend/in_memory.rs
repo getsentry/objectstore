@@ -82,6 +82,24 @@ impl super::common::Backend for InMemoryBackend {
         Ok(())
     }
 
+    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+        let entry = self.store.lock().unwrap().get(id).cloned();
+        Ok(entry.map(|(metadata, bytes)| {
+            let mut metadata = metadata;
+            metadata.size = Some(bytes.len());
+            let stream = crate::stream::single(bytes);
+            (metadata, stream)
+        }))
+    }
+
+    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+        self.store.lock().unwrap().remove(id);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl super::common::HighVolumeBackend for InMemoryBackend {
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -98,18 +116,12 @@ impl super::common::Backend for InMemoryBackend {
         Ok(ConditionalOutcome::Executed)
     }
 
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        let entry = self.store.lock().unwrap().get(id).cloned();
-        Ok(entry.map(|(metadata, bytes)| {
-            let mut metadata = metadata;
-            metadata.size = Some(bytes.len());
-            let stream = crate::stream::single(bytes);
-            (metadata, stream)
-        }))
-    }
-
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        self.store.lock().unwrap().remove(id);
-        Ok(())
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+        let mut store = self.store.lock().unwrap();
+        if store.get(id).is_some_and(|(m, _)| m.is_tombstone()) {
+            return Ok(ConditionalOutcome::Tombstone);
+        }
+        store.remove(id);
+        Ok(ConditionalOutcome::Executed)
     }
 }

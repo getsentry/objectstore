@@ -12,11 +12,11 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::StorageConfig;
 use crate::backend::common::{
-    Backend, BoxedBackend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
     PutResponse,
 };
+use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, SizedPeek};
@@ -27,7 +27,7 @@ const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
-/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
+/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`](crate::backend::StorageConfig::Tiered)
 /// inside another tiered config is not supported.
 ///
 /// # Example
@@ -47,7 +47,10 @@ const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TieredStorageConfig {
     /// Backend for high-volume, small objects.
-    pub high_volume: Box<StorageConfig>,
+    ///
+    /// Must be a backend that implements [`HighVolumeBackend`] (currently
+    /// only BigTable).
+    pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
 }
@@ -120,14 +123,14 @@ impl std::fmt::Display for BackendChoice {
 #[derive(Debug)]
 pub struct TieredStorage {
     /// The backend for small objects (≤ 1 MiB).
-    high_volume: BoxedBackend,
+    high_volume: Box<dyn HighVolumeBackend>,
     /// The backend for large objects (> 1 MiB).
-    long_term: BoxedBackend,
+    long_term: Box<dyn Backend>,
 }
 
 impl TieredStorage {
     /// Creates a new `TieredStorage` with the given backends.
-    pub fn new(high_volume: BoxedBackend, long_term: BoxedBackend) -> Self {
+    pub fn new(high_volume: Box<dyn HighVolumeBackend>, long_term: Box<dyn Backend>) -> Self {
         Self {
             high_volume,
             long_term,
@@ -358,7 +361,7 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::id::ObjectContext;
-    use crate::stream::{self, ClientStream, PayloadStream};
+    use crate::stream::{self};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -550,7 +553,7 @@ mod tests {
     struct FailingPutBackend(InMemoryBackend);
 
     #[async_trait::async_trait]
-    impl crate::backend::common::Backend for FailingPutBackend {
+    impl Backend for FailingPutBackend {
         fn name(&self) -> &'static str {
             "failing-put"
         }
@@ -560,19 +563,35 @@ mod tests {
             _id: &ObjectId,
             _metadata: &Metadata,
             _stream: ClientStream,
-        ) -> Result<()> {
+        ) -> Result<PutResponse> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "simulated tombstone write failure",
             )))
         }
 
-        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
             self.0.get_object(id).await
         }
 
-        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
+        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
             self.0.delete_object(id).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HighVolumeBackend for FailingPutBackend {
+        async fn put_non_tombstone(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            payload: bytes::Bytes,
+        ) -> Result<ConditionalOutcome> {
+            self.0.put_non_tombstone(id, metadata, payload).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+            self.0.delete_non_tombstone(id).await
         }
     }
 
@@ -646,7 +665,7 @@ mod tests {
     struct FailingDeleteBackend(InMemoryBackend);
 
     #[async_trait::async_trait]
-    impl crate::backend::common::Backend for FailingDeleteBackend {
+    impl Backend for FailingDeleteBackend {
         fn name(&self) -> &'static str {
             "failing-delete"
         }
@@ -656,15 +675,15 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
-        ) -> Result<()> {
+        ) -> Result<PutResponse> {
             self.0.put_object(id, metadata, stream).await
         }
 
-        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
             self.0.get_object(id).await
         }
 
-        async fn delete_object(&self, _id: &ObjectId) -> Result<()> {
+        async fn delete_object(&self, _id: &ObjectId) -> Result<DeleteResponse> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "simulated long-term delete failure",

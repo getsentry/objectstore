@@ -14,7 +14,8 @@ use tonic::Code;
 use bytes::Bytes;
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -545,7 +546,10 @@ impl Backend for BigTableBackend {
 
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl HighVolumeBackend for BigTableBackend {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_non_tombstone(
         &self,

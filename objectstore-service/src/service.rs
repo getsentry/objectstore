@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::{Backend, BoxedBackend};
+use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
@@ -70,7 +70,7 @@ pub struct StorageService {
 
 impl StorageService {
     /// Creates a new `StorageService` wrapping the given backend.
-    pub fn new(backend: BoxedBackend) -> Self {
+    pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
             inner: Arc::from(backend),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
@@ -235,6 +235,7 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
+    use crate::backend::common::{ConditionalOutcome, HighVolumeBackend};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -296,9 +297,8 @@ mod tests {
             bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
         };
 
-        let hv = Box::new(GcsBackend::new(config.clone()).await.unwrap());
-        let lt = Box::new(GcsBackend::new(config).await.unwrap());
-        let service = StorageService::new(Box::new(TieredStorage::new(hv, lt)));
+        let backend = GcsBackend::new(config).await.unwrap();
+        let service = StorageService::new(Box::new(backend));
 
         let key = service
             .insert_object(
@@ -514,14 +514,27 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl HighVolumeBackend for GatedBackend {
+        async fn put_non_tombstone(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            payload: bytes::Bytes,
+        ) -> Result<ConditionalOutcome> {
+            self.inner.put_non_tombstone(id, metadata, payload).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+            self.inner.delete_non_tombstone(id).await
+        }
+    }
+
     #[tokio::test]
     async fn receiver_drop_does_not_prevent_completion() {
-        let hv = GatedBackend::new("gated-hv");
-        let lt = GatedBackend::new("gated-lt").with_pause();
-        let service = StorageService::new(Box::new(TieredStorage::new(
-            Box::new(hv.clone()),
-            Box::new(lt.clone()),
-        )));
+        let hv = Box::new(GatedBackend::new("gated-hv"));
+        let lt = Box::new(GatedBackend::new("gated-lt").with_pause());
+        let service = StorageService::new(Box::new(TieredStorage::new(hv.clone(), lt.clone())));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
