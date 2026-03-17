@@ -30,16 +30,8 @@ async fn test_basic() {
     let mut cmd = Command::new(OBJECTSTORE_EXE);
     cmd.arg("run")
         .env("OS__HTTP_ADDR", &addr)
-        .env("OS__HIGH_VOLUME_STORAGE__TYPE", "filesystem")
-        .env(
-            "OS__HIGH_VOLUME_STORAGE__PATH",
-            tempdir.path().display().to_string(),
-        )
-        .env("OS__LONG_TERM_STORAGE__TYPE", "filesystem")
-        .env(
-            "OS__LONG_TERM_STORAGE__PATH",
-            tempdir.path().display().to_string(),
-        )
+        .env("OS__STORAGE__TYPE", "filesystem")
+        .env("OS__STORAGE__PATH", tempdir.path().display().to_string())
         .env("OS__LOGGING__LEVEL", "warn");
     if let Ok(statsd_host) = std::env::var("STATSD_HOST") {
         cmd.env("OS__METRICS__ADDR", statsd_host);

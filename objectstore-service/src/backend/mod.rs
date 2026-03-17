@@ -64,6 +64,9 @@ pub async fn from_config(config: StorageConfig) -> Result<BoxedBackend> {
             let lt = from_leaf_config(*c.long_term).await?;
             Box::new(tiered::TieredStorage::new(hv, lt))
         }
+        // All non-Tiered variants are handled by from_leaf_config. A wildcard
+        // is intentional here: any new leaf variant should fall through to
+        // from_leaf_config, which will handle it or produce a compile error.
         _ => from_leaf_config(config).await?,
     })
 }

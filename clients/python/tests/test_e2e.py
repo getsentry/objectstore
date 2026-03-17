@@ -95,10 +95,8 @@ class Server:
         env = {
             **os.environ,
             "OS__HTTP_ADDR": addr,
-            "OS__HIGH_VOLUME_STORAGE__TYPE": "filesystem",
-            "OS__HIGH_VOLUME_STORAGE__PATH": f"{self._tempdir}/high-volume",
-            "OS__LONG_TERM_STORAGE__TYPE": "filesystem",
-            "OS__LONG_TERM_STORAGE__PATH": f"{self._tempdir}/long-term",
+            "OS__STORAGE__TYPE": "filesystem",
+            "OS__STORAGE__PATH": self._tempdir,
             "OS__LOG__LEVEL": "trace",
             "OS__AUTH__ENFORCE": "true",
             "OS__AUTH__KEYS": env_key_map,
