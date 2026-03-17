@@ -2,7 +2,7 @@
 //!
 //! [`StreamExecutor`] processes a stream of `(idx, Result<`[`Operation`]`, E>)` tuples
 //! concurrently within a bounded window. Errors in the input stream pass through
-//! unchanged; successful operations are executed against `TieredStorage` directly,
+//! unchanged; successful operations are executed against the backend directly,
 //! with [`tokio::spawn`] for panic isolation and run-to-completion guarantees.
 //!
 //! ## Window and Permit Reservation
@@ -42,12 +42,11 @@ use std::sync::Arc;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::Backend as _;
+use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyPermit;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
 use crate::service::GetResponse;
-use crate::tiered::TieredStorage;
 
 /// An insert operation: stores an object at the given key.
 #[derive(Debug)]
@@ -192,7 +191,7 @@ impl std::fmt::Debug for OpResponse {
 /// calculation, permit reservation, and concurrency model.
 #[derive(Debug)]
 pub struct StreamExecutor {
-    pub(crate) tiered: Arc<TieredStorage>,
+    pub(crate) backend: Arc<dyn Backend>,
     pub(crate) window: usize,
     pub(crate) reservation: ConcurrencyPermit,
 }
@@ -223,7 +222,7 @@ impl StreamExecutor {
         E: From<Error> + Send + 'static,
     {
         let StreamExecutor {
-            tiered,
+            backend,
             window,
             reservation,
         } = self;
@@ -236,7 +235,7 @@ impl StreamExecutor {
         operations
             .map(move |(idx, item)| {
                 let permit = Arc::clone(&reservation);
-                let tiered = Arc::clone(&tiered);
+                let backend = Arc::clone(&backend);
                 let context = context.clone();
                 async move {
                     let op = match item {
@@ -245,7 +244,7 @@ impl StreamExecutor {
                     };
 
                     let spawn = crate::concurrency::spawn_metered(op.kind(), permit, async move {
-                        execute_operation(tiered, context, op).await
+                        execute_operation(backend, context, op).await
                     });
 
                     (idx, spawn.await.map_err(E::from))
@@ -256,14 +255,14 @@ impl StreamExecutor {
 }
 
 async fn execute_operation(
-    tiered: Arc<TieredStorage>,
+    backend: Arc<dyn Backend>,
     context: ObjectContext,
     op: Operation,
 ) -> Result<OpResponse> {
     match op {
         Operation::Get(get) => {
             let id = ObjectId::new(context, get.key);
-            let response = tiered.get_object(&id).await?;
+            let response = backend.get_object(&id).await?;
             Ok(OpResponse::Got {
                 key: id.key,
                 response,
@@ -272,12 +271,12 @@ async fn execute_operation(
         Operation::Insert(insert) => {
             let id = ObjectId::optional(context, insert.key);
             let stream = crate::stream::single(insert.payload);
-            tiered.put_object(&id, &insert.metadata, stream).await?;
+            backend.put_object(&id, &insert.metadata, stream).await?;
             Ok(OpResponse::Inserted { id })
         }
         Operation::Delete(delete) => {
             let id = ObjectId::new(context, delete.key);
-            tiered.delete_object(&id).await?;
+            backend.delete_object(&id).await?;
             Ok(OpResponse::Deleted { key: id.key })
         }
     }
@@ -296,6 +295,7 @@ mod tests {
     use super::*;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
+    use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
@@ -305,14 +305,12 @@ mod tests {
         }
     }
 
-    fn make_service_with_limit(limit: usize) -> crate::service::StorageService {
-        let hv = InMemoryBackend::new("in-memory-hv");
-        let lt = InMemoryBackend::new("in-memory-lt");
-        crate::service::StorageService::new(Box::new(hv), Box::new(lt))
+    fn make_service_with_limit(limit: usize) -> StorageService {
+        StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
             .with_concurrency_limit(limit)
     }
 
-    fn make_service() -> crate::service::StorageService {
+    fn make_service() -> StorageService {
         make_service_with_limit(500)
     }
 
@@ -478,9 +476,7 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
         };
-        let lt = InMemoryBackend::new("in-memory-lt");
-        let service = crate::service::StorageService::new(Box::new(gated), Box::new(lt))
-            .with_concurrency_limit(100);
+        let service = StorageService::new(Box::new(gated)).with_concurrency_limit(100);
 
         let executor = service.stream().unwrap();
         assert_eq!(executor.window(), 10);
@@ -536,9 +532,7 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::new(AtomicUsize::new(0)),
         };
-        let lt = InMemoryBackend::new("in-memory-lt");
-        let service = crate::service::StorageService::new(Box::new(gated), Box::new(lt))
-            .with_concurrency_limit(1);
+        let service = StorageService::new(Box::new(gated)).with_concurrency_limit(1);
 
         // Hold the only permit via a blocking insert.
         let svc = service.clone();

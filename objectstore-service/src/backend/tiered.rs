@@ -43,16 +43,66 @@ impl std::fmt::Display for BackendChoice {
     }
 }
 
-/// Two-tier storage that routes objects by size.
+/// Two-tier storage backend that routes objects by size.
 ///
-/// Objects smaller than 1 MiB go to the high-volume backend; larger objects go
-/// to the long-term backend with a redirect tombstone in the high-volume
-/// backend. See [`StorageService`](crate::service::StorageService) for the
-/// public API that wraps this with task spawning and panic isolation.
+/// `TieredStorage` implements [`Backend`] and is intended to be used inside a
+/// [`StorageService`](crate::StorageService), which wraps it with task spawning and panic
+/// isolation.
+///
+/// # Size-Based Routing
+///
+/// Objects are routed at write time based on their size relative to a **1 MiB threshold**:
+///
+/// - Objects **≤ 1 MiB** go to the `high_volume_backend` — optimized for low-latency reads
+///   and writes of small objects (e.g. BigTable).
+/// - Objects **> 1 MiB** go to the `long_term_backend` — optimized for cost-efficient
+///   storage of large objects (e.g. GCS).
+///
+/// # Redirect Tombstones
+///
+/// Because the [`ObjectId`] is backend-independent, reads must be able to find an object without
+/// knowing which backend stores it. A naive approach would check the long-term backend on every
+/// read miss in the high-volume backend — but that is slow and expensive.
+///
+/// Instead, when an object is stored in the long-term backend, a **redirect tombstone** is
+/// written in the high-volume backend. A redirect tombstone is an empty object with
+/// [`is_redirect_tombstone`](objectstore_types::metadata::Metadata::is_redirect_tombstone)
+/// set in its metadata. It acts as a signpost: "the real data lives in the other backend."
+///
+/// # Consistency Without Locks
+///
+/// The tombstone system maintains consistency through operation ordering rather than
+/// distributed locks. The invariant is: a redirect tombstone is always the **last thing
+/// written** and the **last thing removed**.
+///
+/// - On **write**, the real object is persisted before the tombstone. If the tombstone write
+///   fails, the real object is rolled back.
+/// - On **delete**, the real object is removed before the tombstone. If the long-term delete
+///   fails, the tombstone remains and the data stays reachable.
+///
+/// See the individual methods for per-operation tombstone behavior.
+///
+/// # Wrapping with `StorageService`
+///
+/// `TieredStorage` handles only the routing and consistency logic. Wrap it in a
+/// [`StorageService`](crate::service::StorageService) to add task spawning, panic isolation,
+/// and concurrency limiting.
 #[derive(Debug)]
-pub(crate) struct TieredStorage {
-    pub(crate) high_volume_backend: BoxedBackend,
-    pub(crate) long_term_backend: BoxedBackend,
+pub struct TieredStorage {
+    /// The backend for small objects (≤ 1 MiB).
+    high_volume: BoxedBackend,
+    /// The backend for large objects (> 1 MiB).
+    long_term: BoxedBackend,
+}
+
+impl TieredStorage {
+    /// Creates a new `TieredStorage` with the given backends.
+    pub fn new(high_volume: BoxedBackend, long_term: BoxedBackend) -> Self {
+        Self {
+            high_volume,
+            long_term,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -92,7 +142,7 @@ impl Backend for TieredStorage {
                 let stored_size = payload.len() as u64;
 
                 let outcome = self
-                    .high_volume_backend
+                    .high_volume
                     .put_non_tombstone(id, metadata, payload.clone())
                     .await?;
 
@@ -102,9 +152,7 @@ impl Backend for TieredStorage {
                     // leaving them inconsistent. This is a known gap and will be fixed
                     // in a follow-up.
                     let stream = crate::stream::single(payload).boxed();
-                    self.long_term_backend
-                        .put_object(id, metadata, stream)
-                        .await?;
+                    self.long_term.put_object(id, metadata, stream).await?;
                     (BackendChoice::LongTerm, stored_size)
                 } else {
                     (BackendChoice::HighVolume, stored_size)
@@ -125,9 +173,7 @@ impl Backend for TieredStorage {
                     .boxed();
 
                 // First write the object to long-term.
-                self.long_term_backend
-                    .put_object(id, metadata, stream)
-                    .await?;
+                self.long_term.put_object(id, metadata, stream).await?;
 
                 // Then write the redirect tombstone to high-volume.
                 let redirect_metadata = Metadata {
@@ -137,13 +183,13 @@ impl Backend for TieredStorage {
                 };
                 let redirect_stream = futures_util::stream::empty().boxed();
                 let redirect_result = self
-                    .high_volume_backend
+                    .high_volume
                     .put_object(id, &redirect_metadata, redirect_stream)
                     .await;
 
                 if redirect_result.is_err() {
                     // Clean up on any kind of error.
-                    self.long_term_backend.delete_object(id).await?;
+                    self.long_term.delete_object(id).await?;
                 }
                 redirect_result?;
 
@@ -152,8 +198,8 @@ impl Backend for TieredStorage {
         };
 
         let backend_ty = match final_choice {
-            BackendChoice::HighVolume => self.high_volume_backend.name(),
-            BackendChoice::LongTerm => self.long_term_backend.name(),
+            BackendChoice::HighVolume => self.high_volume.name(),
+            BackendChoice::LongTerm => self.long_term.name(),
         };
 
         objectstore_metrics::record!(
@@ -176,13 +222,13 @@ impl Backend for TieredStorage {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume_backend.name();
-        let mut result = self.high_volume_backend.get_object(id).await?;
+        let mut backend_type = self.high_volume.name();
+        let mut result = self.high_volume.get_object(id).await?;
 
         if result.is_tombstone() {
-            result = self.long_term_backend.get_object(id).await?;
+            result = self.long_term.get_object(id).await?;
             backend_choice = "long-term";
-            backend_type = self.long_term_backend.name();
+            backend_type = self.long_term.name();
         }
 
         objectstore_metrics::record!(
@@ -212,13 +258,13 @@ impl Backend for TieredStorage {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume_backend.name();
-        let mut result = self.high_volume_backend.get_metadata(id).await?;
+        let mut backend_type = self.high_volume.name();
+        let mut result = self.high_volume.get_metadata(id).await?;
 
         if result.as_ref().is_some_and(|m| m.is_tombstone()) {
-            result = self.long_term_backend.get_metadata(id).await?;
+            result = self.long_term.get_metadata(id).await?;
             backend_choice = "long-term";
-            backend_type = self.long_term_backend.name();
+            backend_type = self.long_term.name();
         }
 
         objectstore_metrics::record!(
@@ -235,17 +281,17 @@ impl Backend for TieredStorage {
         let start = Instant::now();
 
         let mut backend_choice = "high-volume";
-        let mut backend_type = self.high_volume_backend.name();
+        let mut backend_type = self.high_volume.name();
 
-        let outcome = self.high_volume_backend.delete_non_tombstone(id).await?;
+        let outcome = self.high_volume.delete_non_tombstone(id).await?;
         if outcome == ConditionalOutcome::Tombstone {
             backend_choice = "long-term";
-            backend_type = self.long_term_backend.name();
+            backend_type = self.long_term.name();
             // Delete the long-term object first, then clean up the tombstone.
             // This ordering ensures that if the long-term delete fails, the
             // tombstone remains and the data is still reachable (not orphaned).
-            self.long_term_backend.delete_object(id).await?;
-            self.high_volume_backend.delete_object(id).await?;
+            self.long_term.delete_object(id).await?;
+            self.high_volume.delete_object(id).await?;
         }
 
         objectstore_metrics::record!(
@@ -279,7 +325,6 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::common::BoxedBackend;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::id::ObjectContext;
@@ -295,10 +340,7 @@ mod tests {
     fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: Box::new(lt.clone()),
-        };
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
         (storage, hv, lt)
     }
 
@@ -510,11 +552,8 @@ mod tests {
     #[tokio::test]
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
-        let hv: BoxedBackend = Box::new(FailingPutBackend(InMemoryBackend::new("hv")));
-        let storage = TieredStorage {
-            high_volume_backend: hv,
-            long_term_backend: Box::new(lt.clone()),
-        };
+        let hv = FailingPutBackend(InMemoryBackend::new("hv"));
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
         let id = ObjectId::new(make_context(), "orphan-test".into());
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -608,11 +647,8 @@ mod tests {
     #[tokio::test]
     async fn tombstone_preserved_when_long_term_delete_fails() {
         let hv = InMemoryBackend::new("hv");
-        let lt: BoxedBackend = Box::new(FailingDeleteBackend(InMemoryBackend::new("lt")));
-        let storage = TieredStorage {
-            high_volume_backend: Box::new(hv.clone()),
-            long_term_backend: lt,
-        };
+        let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
 
         let id = ObjectId::new(make_context(), "fail-delete".into());
         let payload_len = 2 * 1024 * 1024; // 2 MiB -> goes to long-term
