@@ -14,13 +14,13 @@ use crate::stream::{ClientStream, PayloadStream};
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
 /// Backend response for put operations.
-pub(super) type PutResponse = ();
+pub type PutResponse = ();
 /// Backend response for get operations.
-pub(super) type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, PayloadStream)>;
 /// Backend response for metadata-only get operations.
-pub(super) type MetadataResponse = Option<Metadata>;
+pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
-pub(super) type DeleteResponse = ();
+pub type DeleteResponse = ();
 
 /// Response from [`Backend::delete_non_tombstone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,9 +30,6 @@ pub enum DeleteOutcome {
     /// The entity was a regular object (now deleted) or non-existent.
     Deleted,
 }
-
-/// A type-erased [`Backend`] instance.
-pub type BoxedBackend = Box<dyn Backend>;
 
 /// Trait implemented by all storage backends.
 #[async_trait::async_trait]
@@ -78,11 +75,14 @@ pub trait Backend: Debug + Send + Sync + 'static {
     }
 }
 
+/// A type-erased [`Backend`] instance.
+pub type BoxedBackend = Box<dyn Backend>;
+
 /// Creates a reqwest client with required defaults.
 ///
 /// Automatic decompression is disabled because backends store pre-compressed
 /// payloads and manage `Content-Encoding` themselves.
-pub fn reqwest_client() -> reqwest::Client {
+pub(super) fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)

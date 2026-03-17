@@ -308,7 +308,7 @@ mod tests {
     fn make_service_with_limit(limit: usize) -> crate::service::StorageService {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        crate::service::StorageService::from_backends(Box::new(hv), Box::new(lt))
+        crate::service::StorageService::new(Box::new(hv), Box::new(lt))
             .with_concurrency_limit(limit)
     }
 
@@ -479,7 +479,7 @@ mod tests {
             in_flight: Arc::clone(&in_flight),
         };
         let lt = InMemoryBackend::new("in-memory-lt");
-        let service = crate::service::StorageService::from_backends(Box::new(gated), Box::new(lt))
+        let service = crate::service::StorageService::new(Box::new(gated), Box::new(lt))
             .with_concurrency_limit(100);
 
         let executor = service.stream().unwrap();
@@ -537,7 +537,7 @@ mod tests {
             in_flight: Arc::new(AtomicUsize::new(0)),
         };
         let lt = InMemoryBackend::new("in-memory-lt");
-        let service = crate::service::StorageService::from_backends(Box::new(gated), Box::new(lt))
+        let service = crate::service::StorageService::new(Box::new(gated), Box::new(lt))
             .with_concurrency_limit(1);
 
         // Hold the only permit via a blocking insert.

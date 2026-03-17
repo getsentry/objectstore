@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 use yansi::Paint;
 
 use objectstore_service::backend::bigtable::BigTableBackend;
+use objectstore_service::backend::bigtable::BigTableConfig;
 use objectstore_service::backend::common::Backend;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream;
@@ -90,13 +91,13 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    let backend = BigTableBackend::new(
-        args.addr.as_deref(),
-        &args.project,
-        &args.instance,
-        &args.table,
-        Some(args.pool),
-    )
+    let backend = BigTableBackend::new(BigTableConfig {
+        endpoint: args.addr.clone(),
+        project_id: args.project.clone(),
+        instance_name: args.instance.clone(),
+        table_name: args.table.clone(),
+        connections: Some(args.pool),
+    })
     .await
     .context("failed to connect to Bigtable")?;
 

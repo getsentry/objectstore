@@ -19,13 +19,19 @@ use crate::stream::ClientStream;
 
 type Store = HashMap<ObjectId, (Metadata, Bytes)>;
 
+/// In-memory [`Backend`](super::common::Backend) backed by a `HashMap`.
+///
+/// Removes the need for filesystem tempdir management in unit tests. The
+/// backend is [`Clone`] so tests can hold a handle for direct inspection while
+/// the service owns a boxed copy.
 #[derive(Debug, Clone)]
-pub(crate) struct InMemoryBackend {
+pub struct InMemoryBackend {
     name: &'static str,
     store: Arc<Mutex<Store>>,
 }
 
 impl InMemoryBackend {
+    /// Creates a new `InMemoryBackend` with the given diagnostic `name`.
     pub fn new(name: &'static str) -> Self {
         Self {
             name,

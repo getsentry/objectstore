@@ -6,7 +6,6 @@
 //! redirect tombstones, and consistency guarantees.
 
 use std::future::Future;
-use std::path::Path;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
@@ -27,49 +26,6 @@ pub type MetadataResponse = Option<Metadata>;
 pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
-
-/// Configuration to initialize a [`StorageService`].
-#[derive(Debug, Clone)]
-pub enum StorageConfig<'a> {
-    /// Use a local filesystem as the storage backend.
-    FileSystem {
-        /// The path to the directory where files will be stored.
-        path: &'a Path,
-    },
-    /// Use an S3-compatible storage backend.
-    S3Compatible {
-        /// Optional endpoint URL for the S3-compatible storage.
-        endpoint: &'a str,
-        /// The name of the bucket to use.
-        bucket: &'a str,
-    },
-    /// Use Google Cloud Storage as storage backend.
-    Gcs {
-        /// Optional endpoint URL for the S3-compatible storage.
-        ///
-        /// Assumes an emulator without authentication if set.
-        endpoint: Option<&'a str>,
-        /// The name of the bucket to use.
-        bucket: &'a str,
-    },
-    /// Use BigTable as storage backend.
-    BigTable {
-        /// Optional endpoint URL for the BigTable storage.
-        ///
-        /// Assumes an emulator without authentication if set.
-        endpoint: Option<&'a str>,
-        /// The Google Cloud project ID.
-        project_id: &'a str,
-        /// The BigTable instance name.
-        instance_name: &'a str,
-        /// The BigTable table name.
-        table_name: &'a str,
-        /// The number of concurrent connections to BigTable.
-        ///
-        /// Defaults to 1.
-        connections: Option<usize>,
-    },
-}
 
 /// Default concurrency limit for [`StorageService`].
 ///
@@ -142,20 +98,8 @@ pub struct StorageService {
 }
 
 impl StorageService {
-    /// Creates a new `StorageService` with the specified configuration.
-    pub async fn new(
-        high_volume_config: StorageConfig<'_>,
-        long_term_config: StorageConfig<'_>,
-    ) -> anyhow::Result<Self> {
-        let high_volume_backend = create_backend(high_volume_config).await?;
-        let long_term_backend = create_backend(long_term_config).await?;
-        Ok(Self::from_backends(high_volume_backend, long_term_backend))
-    }
-
-    pub(crate) fn from_backends(
-        high_volume_backend: BoxedBackend,
-        long_term_backend: BoxedBackend,
-    ) -> Self {
+    /// Creates a new `StorageService` from the given pre-built backends.
+    pub fn new(high_volume_backend: BoxedBackend, long_term_backend: BoxedBackend) -> Self {
         Self {
             inner: Arc::new(TieredStorage {
                 high_volume_backend,
@@ -339,36 +283,6 @@ impl StorageService {
     }
 }
 
-async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
-    Ok(match config {
-        StorageConfig::FileSystem { path } => {
-            Box::new(crate::backend::local_fs::LocalFsBackend::new(path))
-        }
-        StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
-            crate::backend::s3_compatible::S3CompatibleBackend::without_token(endpoint, bucket),
-        ),
-        StorageConfig::Gcs { endpoint, bucket } => {
-            Box::new(crate::backend::gcs::GcsBackend::new(endpoint, bucket).await?)
-        }
-        StorageConfig::BigTable {
-            endpoint,
-            project_id,
-            instance_name,
-            table_name,
-            connections,
-        } => Box::new(
-            crate::backend::bigtable::BigTableBackend::new(
-                endpoint,
-                project_id,
-                instance_name,
-                table_name,
-                connections,
-            )
-            .await?,
-        ),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -380,7 +294,9 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::common::Backend as _;
+    use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
@@ -395,19 +311,13 @@ mod tests {
     fn make_service() -> (StorageService, InMemoryBackend, InMemoryBackend) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
+        let service = StorageService::new(Box::new(hv.clone()), Box::new(lt.clone()));
         (service, hv, lt)
     }
 
-    // --- Integration tests (real backends) ---
-
     #[tokio::test]
     async fn stores_files() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let config = StorageConfig::FileSystem {
-            path: tempdir.path(),
-        };
-        let service = StorageService::new(config.clone(), config).await.unwrap();
+        let (service, _, _) = make_service();
 
         let key = service
             .insert_object(
@@ -427,11 +337,14 @@ mod tests {
 
     #[tokio::test]
     async fn works_with_gcs() {
-        let config = StorageConfig::Gcs {
-            endpoint: Some("http://localhost:8087"),
-            bucket: "test-bucket", // aligned with the env var in devservices and CI
+        let config = GcsConfig {
+            endpoint: Some("http://localhost:8087".into()),
+            bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
         };
-        let service = StorageService::new(config.clone(), config).await.unwrap();
+
+        let hv = Box::new(GcsBackend::new(config.clone()).await.unwrap());
+        let lt = Box::new(GcsBackend::new(config).await.unwrap());
+        let service = StorageService::new(hv, lt);
 
         let key = service
             .insert_object(
@@ -451,24 +364,24 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_redirect_and_delete() {
-        let high_volume = StorageConfig::BigTable {
-            endpoint: Some("localhost:8086"),
-            project_id: "testing",
-            instance_name: "objectstore",
-            table_name: "objectstore",
+        let bigtable_config = BigTableConfig {
+            endpoint: Some("localhost:8086".into()),
+            project_id: "testing".into(),
+            instance_name: "objectstore".into(),
+            table_name: "objectstore".into(),
             connections: None,
         };
-        let long_term = StorageConfig::Gcs {
-            endpoint: Some("http://localhost:8087"),
-            bucket: "test-bucket",
+        let gcs_config = GcsConfig {
+            endpoint: Some("http://localhost:8087".into()),
+            bucket: "test-bucket".into(),
         };
-        let service = StorageService::new(high_volume, long_term).await.unwrap();
+
+        let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
+        let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
+        let service = StorageService::new(high_volume, long_term);
 
         // A separate GCS backend to directly inspect the long-term storage.
-        let gcs_backend =
-            crate::backend::gcs::GcsBackend::new(Some("http://localhost:8087"), "test-bucket")
-                .await
-                .unwrap();
+        let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
@@ -575,8 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_in_backend_returns_task_failed() {
-        let service =
-            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend));
+        let service = StorageService::new(Box::new(PanickingBackend), Box::new(PanickingBackend));
 
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id).await;
@@ -652,7 +564,7 @@ mod tests {
     async fn receiver_drop_does_not_prevent_completion() {
         let hv = GatedBackend::new("gated-hv");
         let lt = GatedBackend::new("gated-lt").with_pause();
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
+        let service = StorageService::new(Box::new(hv.clone()), Box::new(lt.clone()));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
@@ -694,7 +606,7 @@ mod tests {
     fn make_limited_service(limit: usize) -> (StorageService, GatedBackend, GatedBackend) {
         let hv = GatedBackend::new("limited-hv").with_pause();
         let lt = GatedBackend::new("limited-lt");
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
+        let service = StorageService::new(Box::new(hv.clone()), Box::new(lt.clone()))
             .with_concurrency_limit(limit);
         (service, hv, lt)
     }
@@ -748,8 +660,7 @@ mod tests {
     async fn tasks_limit_returns_configured_limit() {
         let hv = GatedBackend::new("cap-hv");
         let lt = GatedBackend::new("cap-lt");
-        let service =
-            StorageService::from_backends(Box::new(hv), Box::new(lt)).with_concurrency_limit(7);
+        let service = StorageService::new(Box::new(hv), Box::new(lt)).with_concurrency_limit(7);
         assert_eq!(service.tasks_limit(), 7);
     }
 
@@ -779,9 +690,8 @@ mod tests {
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service =
-            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend))
-                .with_concurrency_limit(1);
+        let service = StorageService::new(Box::new(PanickingBackend), Box::new(PanickingBackend))
+            .with_concurrency_limit(1);
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());

@@ -16,7 +16,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use objectstore_server::config::{AuthZVerificationKey, Config, Storage};
+use objectstore_server::config::{AuthZVerificationKey, Config, StorageConfig};
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
 use objectstore_types::auth::Permission;
@@ -77,12 +77,12 @@ impl TestServer {
         crate::tracing::init();
 
         let long_term_tempdir = tempfile::tempdir().unwrap();
-        if let Storage::FileSystem { ref mut path } = config.long_term_storage {
-            *path = long_term_tempdir.path().into();
+        if let StorageConfig::FileSystem(ref mut c) = config.long_term_storage {
+            c.path = long_term_tempdir.path().into();
         }
         let high_volume_tempdir = tempfile::tempdir().unwrap();
-        if let Storage::FileSystem { ref mut path } = config.high_volume_storage {
-            *path = high_volume_tempdir.path().into();
+        if let StorageConfig::FileSystem(ref mut c) = config.high_volume_storage {
+            c.path = high_volume_tempdir.path().into();
         }
 
         config.auth.keys = BTreeMap::from([(
