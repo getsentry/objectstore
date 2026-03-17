@@ -25,7 +25,7 @@ use crate::stream::{self, ClientStream};
 /// # Example
 ///
 /// ```yaml
-/// long_term_storage:
+/// storage:
 ///   type: s3compatible
 ///   endpoint: https://s3.amazonaws.com
 ///   bucket: my-bucket
@@ -38,12 +38,8 @@ pub struct S3CompatibleConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
-    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-    ///
-    /// Or for long-term storage:
-    /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
-    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
+    /// - `OS__STORAGE__TYPE=s3compatible`
+    /// - `OS__STORAGE__ENDPOINT=https://s3.amazonaws.com`
     pub endpoint: String,
 
     /// S3 bucket name.
@@ -52,8 +48,7 @@ pub struct S3CompatibleConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
-    /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
+    /// - `OS__STORAGE__BUCKET=my-bucket`
     pub bucket: String,
 }
 

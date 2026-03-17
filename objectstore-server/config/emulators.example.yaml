@@ -1,17 +1,18 @@
 # Use a port different from devservices
 http_addr: 0.0.0.0:18888
 
-long_term_storage:
-  type: gcs
-  endpoint: http://localhost:8087
-  bucket: test-bucket
-
-high_volume_storage:
-  type: bigtable
-  endpoint: localhost:8086
-  project_id: testing
-  instance_name: objectstore
-  table_name: objectstore
+storage:
+  type: tiered
+  high_volume:
+    type: bigtable
+    endpoint: localhost:8086
+    project_id: testing
+    instance_name: objectstore
+    table_name: objectstore
+  long_term:
+    type: gcs
+    endpoint: http://localhost:8087
+    bucket: test-bucket
 
 logging:
   level: trace

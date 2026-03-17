@@ -4,6 +4,38 @@
 //! on size and maintains redirect tombstones so that reads never need to probe
 //! both backends. See the [crate-level documentation](crate) for details.
 
+use serde::{Deserialize, Serialize};
+
+use super::StorageConfig;
+
+/// Configuration for [`TieredStorage`].
+///
+/// Composes two backends into a tiered routing setup: `high_volume` for small
+/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
+/// inside another tiered config is not supported.
+///
+/// # Example
+///
+/// ```yaml
+/// storage:
+///   type: tiered
+///   high_volume:
+///     type: bigtable
+///     project_id: my-project
+///     instance_name: objectstore
+///     table_name: objectstore
+///   long_term:
+///     type: gcs
+///     bucket: my-objectstore-bucket
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TieredStorageConfig {
+    /// Backend for high-volume, small objects.
+    pub high_volume: Box<StorageConfig>,
+    /// Backend for large, long-term objects.
+    pub long_term: Box<StorageConfig>,
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;

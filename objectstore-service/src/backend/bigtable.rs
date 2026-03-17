@@ -36,7 +36,7 @@ use crate::stream::{ChunkedBytes, ClientStream};
 /// # Example
 ///
 /// ```yaml
-/// high_volume_storage:
+/// storage:
 ///   type: bigtable
 ///   project_id: my-project
 ///   instance_name: objectstore
@@ -54,12 +54,8 @@ pub struct BigTableConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
-    /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
-    ///
-    /// Or for long-term storage:
-    /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
-    /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
+    /// - `OS__STORAGE__TYPE=bigtable`
+    /// - `OS__STORAGE__ENDPOINT=localhost:8086` (optional)
     pub endpoint: Option<String>,
 
     /// GCP project ID.
@@ -68,16 +64,14 @@ pub struct BigTableConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
-    /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
+    /// - `OS__STORAGE__PROJECT_ID=my-project`
     pub project_id: String,
 
     /// Bigtable instance name.
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
-    /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
+    /// - `OS__STORAGE__INSTANCE_NAME=my-instance`
     pub instance_name: String,
 
     /// Bigtable table name.
@@ -86,8 +80,7 @@ pub struct BigTableConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
-    /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
+    /// - `OS__STORAGE__TABLE_NAME=objectstore`
     pub table_name: String,
 
     /// Optional number of connections to maintain to Bigtable.
@@ -98,8 +91,7 @@ pub struct BigTableConfig {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
-    /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
+    /// - `OS__STORAGE__CONNECTIONS=16` (optional)
     pub connections: Option<usize>,
 }
 

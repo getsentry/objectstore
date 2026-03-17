@@ -179,28 +179,16 @@ Devservices continue to run in the background until explicitly stopped. If you
 prefer to start containers manually, please check `devservices/config.yml` for
 the required images and configuration, such as port mapping.
 
-For **Google BigTable**, we automatically create a table with the required
-column families. Use this configuration to connect (recommended as high-volume
-backend):
+ - For **Google BigTable**, we automatically create a table with the required
+column families.
+ - For **Google Cloud Storage** (GCS), a test bucket is already configured in
+  the dev container.
 
-```yaml
-high_volume_storage:
-  type: bigtable
-  endpoint: localhost:8086
-  project_id: testing
-  instance_name: objectstore
-  table_name: objectstore
-```
+The emulators example config is pre-configured with a tiered configuration using
+both backends. To use it:
 
-For **Google Cloud Storage** (GCS), a test bucket is already configured in the
-dev container. Use this configuration to connect (recommended as long-term
-backend):
-
-```yaml
-long_term_storage:
-  type: gcs
-  endpoint: http://localhost:8087
-  bucket: test-bucket
+```sh
+cargo run -- -c objectstore-server/config/emulators.example.yaml run
 ```
 
 ### Editor Setup
@@ -243,10 +231,8 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 cargo run -- -c objectstore-server/config/local.example.yaml run
 
 # Option 2: Environment variables
-export OS__HIGH_VOLUME_STORAGE__TYPE=filesystem
-export OS__HIGH_VOLUME_STORAGE__PATH=data/high-volume
-export OS__LONG_TERM_STORAGE__TYPE=filesystem
-export OS__LONG_TERM_STORAGE__PATH=data/long-term
+export OS__STORAGE__TYPE=filesystem
+export OS__STORAGE__PATH=data
 cargo run -- run
 ```
 
