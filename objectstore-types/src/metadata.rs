@@ -10,11 +10,9 @@
 //!
 //! - **HTTP headers** — used by the public API. [`Metadata::from_headers`] and
 //!   [`Metadata::to_headers`] handle this conversion for public fields only.
-//!   Internal fields like [`Metadata::is_redirect_tombstone`] are handled by
-//!   backends directly.
 //! - **JSON** — used internally by backends for storage. JSON serialization
-//!   includes additional internal fields (e.g. `is_redirect_tombstone`) that
-//!   are skipped in the header representation.
+//!   includes additional internal fields that are skipped in the header
+//!   representation.
 //!
 //! # HTTP header prefixes
 //!
@@ -41,8 +39,6 @@ use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
-/// The custom HTTP header that contains the serialized redirect tombstone.
-pub const HEADER_REDIRECT_TOMBSTONE: &str = "x-sn-redirect-tombstone";
 /// The custom HTTP header that contains the object creation time.
 pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
 /// The custom HTTP header that contains the object expiration time.
@@ -225,19 +221,6 @@ impl FromStr for Compression {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Metadata {
-    /// Internal redirect tombstone marker (header: `x-sn-redirect-tombstone`).
-    ///
-    /// When `Some(true)`, this object is a tombstone stored on the high-volume
-    /// backend indicating that the real payload lives on the long-term backend.
-    /// This field is **not** included in [`from_headers`](Metadata::from_headers)
-    /// or [`to_headers`](Metadata::to_headers) — backends handle it directly.
-    ///
-    /// **Important:** This field must remain the first field in the struct.
-    /// The BigTable backend uses a regex predicate on the serialized JSON that
-    /// assumes `is_redirect_tombstone` appears at the start of the object.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_redirect_tombstone: Option<bool>,
-
     /// The expiration policy of the object (header: `x-sn-expiration`).
     ///
     /// Skipped during serialization when set to [`ExpirationPolicy::Manual`].
@@ -294,8 +277,6 @@ impl Metadata {
     /// Extracts public API metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
-    /// Internal fields like `is_redirect_tombstone` are not parsed; backends handle those
-    /// separately.
     pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
@@ -353,12 +334,10 @@ impl Metadata {
 
     /// Turns the metadata into a [`HeaderMap`] for the public API.
     ///
-    /// It will prefix any non-standard headers with the given `prefix`.
-    /// Internal fields like `is_redirect_tombstone` and GCS-specific headers are not
-    /// emitted; backends handle those separately.
+    /// It will prefix any non-standard headers with the given `prefix`. GCS-specific headers are
+    /// not emitted; backends handle those separately.
     pub fn to_headers(&self, prefix: &str) -> Result<HeaderMap, Error> {
         let Self {
-            is_redirect_tombstone: _,
             content_type,
             compression,
             origin,
@@ -405,11 +384,6 @@ impl Metadata {
 
         Ok(headers)
     }
-
-    /// Returns `true` if this metadata represents a redirect tombstone.
-    pub fn is_tombstone(&self) -> bool {
-        self.is_redirect_tombstone == Some(true)
-    }
 }
 
 /// Validates that `content_type` is a valid [IANA Media
@@ -422,7 +396,6 @@ fn validate_content_type(content_type: &str) -> Result<(), Error> {
 impl Default for Metadata {
     fn default() -> Self {
         Self {
-            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::Manual,
             time_created: None,
             time_expires: None,
@@ -589,7 +562,6 @@ mod tests {
     #[test]
     fn to_headers_all_fields() {
         let metadata = Metadata {
-            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
@@ -623,7 +595,6 @@ mod tests {
     fn full_roundtrip_all_fields() {
         let prefix = "x-test-";
         let metadata = Metadata {
-            is_redirect_tombstone: None,
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
@@ -657,20 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn from_headers_ignores_redirect_tombstone() {
-        // Redirect tombstone is internal backend metadata, not parsed by from_headers.
-        // Backends handle it separately.
-        let mut headers = HeaderMap::new();
-        let name: HeaderName = format!("x-goog-meta-{HEADER_REDIRECT_TOMBSTONE}")
-            .parse()
-            .unwrap();
-        headers.insert(name, "true".parse().unwrap());
-
-        let metadata = Metadata::from_headers(&headers, "x-goog-meta-").unwrap();
-        assert!(metadata.is_redirect_tombstone.is_none());
-    }
-
-    #[test]
     fn from_headers_invalid_time_expires() {
         let mut headers = HeaderMap::new();
         let name: HeaderName = format!("x-goog-meta-{HEADER_TIME_EXPIRES}")
@@ -694,7 +651,6 @@ mod tests {
     #[test]
     fn serde_roundtrip_all_fields() {
         let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
@@ -731,7 +687,6 @@ mod tests {
         assert!(metadata.origin.is_none());
         assert!(metadata.time_created.is_none());
         assert!(metadata.time_expires.is_none());
-        assert!(metadata.is_redirect_tombstone.is_none());
         assert!(metadata.size.is_none());
         assert!(metadata.custom.is_empty());
     }

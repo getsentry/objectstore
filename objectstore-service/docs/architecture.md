@@ -80,17 +80,21 @@ See [`backend::StorageConfig`] for available backend implementations.
 ## Redirect Tombstones
 
 For large objects, `TieredStorage` stores a **redirect tombstone** in the
-high-volume backend — a zero-payload marker whose metadata has
-`is_redirect_tombstone: true`. This allows reads to check only the high-volume
-backend and follow the tombstone to long-term storage, without scanning both
-backends on every read.
+high-volume backend — a marker that signals the real payload lives on the
+long-term backend. This allows reads to check only the high-volume backend and
+follow the tombstone to long-term storage, without scanning both backends on
+every read.
+
+How tombstones are physically stored is determined by the [`HighVolumeBackend`]
+implementation. Refer to the backend's own documentation for storage format
+details.
 
 # Metadata and Payload
 
 Every object consists of structured **metadata** and a binary **payload**.
 Metadata contains a set of built-in keys with special semantics (such as
-expiration policies and redirect tombstone markers) as well as arbitrary
-user-defined key-value pairs. Metadata is always stored alongside the payload in
+expiration policies) as well as arbitrary user-defined key-value pairs.
+Metadata is always stored alongside the payload in
 the same backend — never in a separate data store. This ensures that inspecting
 a backend directly is sufficient to resolve an object together with its
 metadata, without joining across stores.

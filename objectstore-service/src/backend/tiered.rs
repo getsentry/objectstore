@@ -98,9 +98,10 @@ impl std::fmt::Display for BackendChoice {
 /// read miss in the high-volume backend — but that is slow and expensive.
 ///
 /// Instead, when an object is stored in the long-term backend, a **redirect tombstone** is
-/// written in the high-volume backend. A redirect tombstone is an empty object with
-/// [`is_redirect_tombstone`](objectstore_types::metadata::Metadata::is_redirect_tombstone)
-/// set in its metadata. It acts as a signpost: "the real data lives in the other backend."
+/// written in the high-volume backend. It acts as a signpost: "the real data lives in the
+/// other backend." How tombstones are physically stored is determined by the
+/// [`HighVolumeBackend`] implementation — refer to the backend's own documentation for
+/// storage format details.
 ///
 /// # Consistency Without Locks
 ///
@@ -492,7 +493,6 @@ mod tests {
 
         // The long-term object should have the full metadata
         let (lt_meta, _) = lt.get(&id).expect_object();
-        assert!(!lt_meta.is_tombstone());
         assert_eq!(lt_meta.content_type, "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
     }
@@ -502,8 +502,7 @@ mod tests {
     #[tokio::test]
     async fn reads_follow_tombstone_redirect() {
         let (storage, _hv, _lt) = make_tiered_storage();
-        let payload_len = 2 * 1024 * 1024; // 2 MiB, over threshold
-        let payload = vec![0xCDu8; payload_len];
+        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
 
         let metadata_in = Metadata {
             content_type: "image/png".into(),
@@ -512,19 +511,17 @@ mod tests {
         let id = ObjectId::new(make_context(), "redirect-read".into());
 
         storage
-            .put_object(&id, &metadata_in, stream::single(payload))
+            .put_object(&id, &metadata_in, stream::single(payload.clone()))
             .await
             .unwrap();
 
         // get_object should transparently follow the tombstone
-        let (metadata, s) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = s.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload_len);
-        assert!(!metadata.is_tombstone());
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
 
         // get_metadata should also follow the tombstone
         let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
-        assert!(!metadata.is_tombstone());
         assert_eq!(metadata.content_type, "image/png");
     }
 
@@ -694,10 +691,9 @@ mod tests {
         let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
 
         let id = ObjectId::new(make_context(), "fail-delete".into());
-        let payload_len = 2 * 1024 * 1024; // 2 MiB -> goes to long-term
-        let payload = vec![0xABu8; payload_len];
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Default::default(), stream::single(payload.clone()))
             .await
             .unwrap();
 
@@ -707,10 +703,9 @@ mod tests {
         hv.get(&id).expect_tombstone();
 
         // The object should still be reachable through the service
-        let (metadata, s) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = s.try_collect().await.unwrap();
-        assert_eq!(body.len(), payload_len);
-        assert!(!metadata.is_tombstone());
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
     }
 
     // --- Multi-chunk streaming tests ---

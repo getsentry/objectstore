@@ -4,8 +4,8 @@ use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::{ExpirationPolicy, HEADER_REDIRECT_TOMBSTONE, Metadata};
-use reqwest::header::{HeaderMap, HeaderName};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
 use crate::backend::common::{
@@ -125,11 +125,6 @@ fn metadata_to_gcs_headers(
     prefix: &str,
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
-    // Tombstone is internal metadata not handled by to_headers
-    if metadata.is_tombstone() {
-        let name = HeaderName::try_from(format!("{prefix}{HEADER_REDIRECT_TOMBSTONE}"))?;
-        headers.append(name, "true".parse()?);
-    }
     // GCS custom-time for lifecycle expiration
     if let Some(expires_in) = metadata.expiration_policy.expires_in() {
         let expires_at =
@@ -196,14 +191,6 @@ where
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
         metadata.size = response.content_length().map(|len| len as usize);
-
-        // Tombstone is internal metadata not parsed by from_headers
-        let tombstone_header = format!("{GCS_CUSTOM_PREFIX}{HEADER_REDIRECT_TOMBSTONE}");
-        let is_tombstone =
-            headers.get(tombstone_header).and_then(|v| v.to_str().ok()) == Some("true");
-        if is_tombstone {
-            metadata.is_redirect_tombstone = Some(true);
-        }
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
