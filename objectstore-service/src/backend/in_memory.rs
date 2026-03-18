@@ -13,8 +13,8 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    ConditionalOutcome, DeleteResponse, GetResponse, HvGetResponse, HvMetadataResponse,
-    PutResponse, Tombstone,
+    ConditionalOutcome, DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata,
+    Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -156,24 +156,24 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         Ok(())
     }
 
-    async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
+    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
-            None => HvGetResponse::NotFound,
-            Some(StoreEntry::Tombstone(tombstone)) => HvGetResponse::Tombstone(tombstone),
+            None => TieredGet::NotFound,
+            Some(StoreEntry::Tombstone(tombstone)) => TieredGet::Tombstone(tombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
-                HvGetResponse::Object(metadata, crate::stream::single(bytes))
+                TieredGet::Object(metadata, crate::stream::single(bytes))
             }
         })
     }
 
-    async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
+    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
-            None => HvMetadataResponse::NotFound,
-            Some(StoreEntry::Tombstone(tombstone)) => HvMetadataResponse::Tombstone(tombstone),
-            Some(StoreEntry::Object(metadata, _bytes)) => HvMetadataResponse::Object(metadata),
+            None => TieredMetadata::NotFound,
+            Some(StoreEntry::Tombstone(tombstone)) => TieredMetadata::Tombstone(tombstone),
+            Some(StoreEntry::Object(metadata, _bytes)) => TieredMetadata::Object(metadata),
         })
     }
 }

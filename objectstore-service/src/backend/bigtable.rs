@@ -14,8 +14,8 @@ use tonic::Code;
 use bytes::Bytes;
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, HvGetResponse,
-    HvMetadataResponse, MetadataResponse, PutResponse, Tombstone,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    PutResponse, TieredGet, TieredMetadata, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -656,12 +656,12 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
+    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
         tracing::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let Some(row) = self.read_row(&path, None, "hv_get_object").await? else {
-            return Ok(HvGetResponse::NotFound);
+        let Some(row) = self.read_row(&path, None, "get_tiered_object").await? else {
+            return Ok(TieredGet::NotFound);
         };
 
         if row.needs_tti_bump() {
@@ -672,18 +672,18 @@ impl HighVolumeBackend for BigTableBackend {
         }
 
         Ok(if row.metadata.is_tombstone() {
-            HvGetResponse::Tombstone(Tombstone {
+            TieredGet::Tombstone(Tombstone {
                 expiration_policy: row.metadata.expiration_policy,
             })
         } else {
             let mut metadata = row.metadata;
             metadata.size = Some(row.payload.len());
-            HvGetResponse::Object(metadata, crate::stream::single(row.payload))
+            TieredGet::Object(metadata, crate::stream::single(row.payload))
         })
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
+    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -693,11 +693,11 @@ impl HighVolumeBackend for BigTableBackend {
             .read_row(
                 &path,
                 Some(column_filter(COLUMN_METADATA)),
-                "hv_get_metadata",
+                "get_tiered_metadata",
             )
             .await?;
         let Some(row) = row_opt else {
-            return Ok(HvMetadataResponse::NotFound);
+            return Ok(TieredMetadata::NotFound);
         };
 
         if row.metadata.is_tombstone() {
@@ -705,7 +705,7 @@ impl HighVolumeBackend for BigTableBackend {
                 // Tombstone payload is always empty — bump without a separate payload read.
                 let _ = self.put_row(path, &row.metadata, vec![], "tti-bump").await;
             }
-            return Ok(HvMetadataResponse::Tombstone(Tombstone {
+            return Ok(TieredMetadata::Tombstone(Tombstone {
                 expiration_policy: row.metadata.expiration_policy,
             }));
         }
@@ -723,7 +723,7 @@ impl HighVolumeBackend for BigTableBackend {
             }
         }
 
-        Ok(HvMetadataResponse::Object(row.metadata))
+        Ok(TieredMetadata::Object(row.metadata))
     }
 }
 
@@ -1155,9 +1155,9 @@ mod tests {
         assert_eq!(result, ConditionalOutcome::Tombstone);
 
         // Tombstone should still exist — delete_non_tombstone leaves it intact.
-        let get_result = backend.hv_get_metadata(&id).await?;
+        let get_result = backend.get_tiered_metadata(&id).await?;
         assert!(
-            matches!(get_result, HvMetadataResponse::Tombstone(_)),
+            matches!(get_result, TieredMetadata::Tombstone(_)),
             "tombstone should still exist after delete_non_tombstone"
         );
 
@@ -1181,12 +1181,12 @@ mod tests {
 
         let id = make_id();
         assert!(matches!(
-            backend.hv_get_object(&id).await?,
-            HvGetResponse::NotFound
+            backend.get_tiered_object(&id).await?,
+            TieredGet::NotFound
         ));
         assert!(matches!(
-            backend.hv_get_metadata(&id).await?,
-            HvMetadataResponse::NotFound
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::NotFound
         ));
 
         Ok(())
@@ -1203,13 +1203,13 @@ mod tests {
             .await?;
 
         // Both hv methods must surface the tombstone with the correct expiration_policy.
-        let HvMetadataResponse::Tombstone(t) = backend.hv_get_metadata(&id).await? else {
-            panic!("expected HvMetadataResponse::Tombstone");
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected TieredMetadataResponse::Tombstone");
         };
         assert_eq!(t.expiration_policy, expiration_policy);
         assert!(matches!(
-            backend.hv_get_object(&id).await?,
-            HvGetResponse::Tombstone(_)
+            backend.get_tiered_object(&id).await?,
+            TieredGet::Tombstone(_)
         ));
 
         // Legacy get_object / get_metadata must error rather than leak tombstone data.

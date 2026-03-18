@@ -20,8 +20,8 @@ pub struct Tombstone {
     pub expiration_policy: ExpirationPolicy,
 }
 
-/// Typed response from [`HighVolumeBackend::hv_get_object`].
-pub enum HvGetResponse {
+/// Typed response from [`HighVolumeBackend::get_tiered_object`].
+pub enum TieredGet {
     /// A real object was found.
     Object(Metadata, PayloadStream),
     /// A redirect tombstone was found; the real object lives in the long-term backend.
@@ -30,22 +30,22 @@ pub enum HvGetResponse {
     NotFound,
 }
 
-impl fmt::Debug for HvGetResponse {
+impl fmt::Debug for TieredGet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HvGetResponse::Object(metadata, _stream) => f
+            TieredGet::Object(metadata, _stream) => f
                 .debug_tuple("Object")
                 .field(metadata)
                 .finish_non_exhaustive(),
-            HvGetResponse::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
-            HvGetResponse::NotFound => write!(f, "NotFound"),
+            TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
+            TieredGet::NotFound => write!(f, "NotFound"),
         }
     }
 }
 
-/// Typed metadata-only response from [`HighVolumeBackend::hv_get_metadata`].
+/// Typed metadata-only response from [`HighVolumeBackend::get_tiered_metadata`].
 #[derive(Debug)]
-pub enum HvMetadataResponse {
+pub enum TieredMetadata {
     /// Metadata for a real object was found.
     Object(Metadata),
     /// A redirect tombstone was found; the real object lives in the long-term backend.
@@ -135,15 +135,15 @@ pub trait HighVolumeBackend: Backend {
 
     /// Retrieves an object with explicit tombstone awareness.
     ///
-    /// Returns [`HvGetResponse::Tombstone`] instead of synthesizing a tombstone
+    /// Returns [`TieredGetResponse::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
-    async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse>;
+    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet>;
 
     /// Retrieves only metadata with explicit tombstone awareness.
     ///
     /// Implementations should skip the payload column where possible to avoid
     /// fetching up to 1 MiB of data just to discover a tombstone.
-    async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse>;
+    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata>;
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///

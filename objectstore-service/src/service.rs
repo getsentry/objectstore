@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::common::{
-        ConditionalOutcome, HighVolumeBackend, HvGetResponse, HvMetadataResponse, Tombstone,
+        ConditionalOutcome, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
     };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
@@ -537,12 +537,12 @@ mod tests {
             Ok(())
         }
 
-        async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
-            self.inner.hv_get_object(id).await
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.inner.get_tiered_object(id).await
         }
 
-        async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
-            self.inner.hv_get_metadata(id).await
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.inner.get_tiered_metadata(id).await
         }
     }
 

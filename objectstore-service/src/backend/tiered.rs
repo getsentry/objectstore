@@ -13,8 +13,8 @@ use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, HvGetResponse,
-    HvMetadataResponse, MetadataResponse, PutResponse, Tombstone,
+    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    PutResponse, TieredGet, TieredMetadata, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
@@ -253,13 +253,13 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.hv_get_object(id).await?;
+        let hv_result = self.high_volume.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
-            HvGetResponse::NotFound => (None, BackendChoice::HighVolume),
-            HvGetResponse::Object(metadata, stream) => {
+            TieredGet::NotFound => (None, BackendChoice::HighVolume),
+            TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
-            HvGetResponse::Tombstone(_) => (
+            TieredGet::Tombstone(_) => (
                 self.long_term.get_object(id).await?,
                 BackendChoice::LongTerm,
             ),
@@ -292,11 +292,11 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.hv_get_metadata(id).await?;
+        let hv_result = self.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
-            HvMetadataResponse::NotFound => (None, BackendChoice::HighVolume),
-            HvMetadataResponse::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
-            HvMetadataResponse::Tombstone(_) => {
+            TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
+            TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
+            TieredMetadata::Tombstone(_) => {
                 let result = self.long_term.get_metadata(id).await?;
                 (result, BackendChoice::LongTerm)
             }
@@ -580,12 +580,12 @@ mod tests {
             )))
         }
 
-        async fn hv_get_object(&self, id: &ObjectId) -> Result<HvGetResponse> {
-            self.0.hv_get_object(id).await
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.0.get_tiered_object(id).await
         }
 
-        async fn hv_get_metadata(&self, id: &ObjectId) -> Result<HvMetadataResponse> {
-            self.0.hv_get_metadata(id).await
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.0.get_tiered_metadata(id).await
         }
     }
 
