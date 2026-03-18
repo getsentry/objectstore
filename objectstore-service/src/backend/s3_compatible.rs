@@ -15,6 +15,43 @@ use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::stream::{self, ClientStream};
 
+/// Configuration for [`S3CompatibleBackend`].
+///
+/// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
+/// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
+///
+/// [Amazon S3]: https://aws.amazon.com/s3/
+///
+/// # Example
+///
+/// ```yaml
+/// storage:
+///   type: s3compatible
+///   endpoint: https://s3.amazonaws.com
+///   bucket: my-bucket
+/// ```
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct S3CompatibleConfig {
+    /// S3 endpoint URL.
+    ///
+    /// Examples: `https://s3.amazonaws.com`, `http://localhost:9000` (for MinIO)
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__TYPE=s3compatible`
+    /// - `OS__STORAGE__ENDPOINT=https://s3.amazonaws.com`
+    pub endpoint: String,
+
+    /// S3 bucket name.
+    ///
+    /// The bucket must exist before starting the server.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__BUCKET=my-bucket`
+    pub bucket: String,
+}
+
 /// Prefix used for custom metadata in headers for the GCS backend.
 ///
 /// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogmeta>
@@ -227,11 +264,11 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
 
 impl S3CompatibleBackend<NoToken> {
     /// Creates a new S3-compatible backend that sends unauthenticated requests.
-    pub fn without_token(endpoint: &str, bucket: &str) -> Self {
+    pub fn without_token(config: S3CompatibleConfig) -> Self {
         Self {
             client: common::reqwest_client(),
-            endpoint: endpoint.into(),
-            bucket: bucket.into(),
+            endpoint: config.endpoint,
+            bucket: config.bucket,
             token_provider: None,
         }
     }

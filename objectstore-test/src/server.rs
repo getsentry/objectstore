@@ -16,7 +16,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use objectstore_server::config::{AuthZVerificationKey, Config, Storage};
+use objectstore_server::config::{AuthZVerificationKey, Config, StorageConfig};
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
 use objectstore_types::auth::Permission;
@@ -58,15 +58,14 @@ pub static TEST_EDDSA_PUBKEY: LazyLock<String> =
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
-    _long_term_tempdir: TempDir,
-    _high_volume_tempdir: TempDir,
+    _tempdirs: Vec<TempDir>,
 }
 
 impl TestServer {
     /// Spawns a new test server with the given configuration.
     ///
-    /// Unless overridden to a different kind of backend, the long-term and high-volume storage
-    /// backends will use temporary directories.
+    /// Unless overridden to a different kind of backend, any filesystem storage backends will use
+    /// temporary directories.
     pub async fn with_config(mut config: Config) -> Self {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr).unwrap();
@@ -76,14 +75,8 @@ impl TestServer {
         config.logging.level = "trace".parse().unwrap();
         crate::tracing::init();
 
-        let long_term_tempdir = tempfile::tempdir().unwrap();
-        if let Storage::FileSystem { ref mut path } = config.long_term_storage {
-            *path = long_term_tempdir.path().into();
-        }
-        let high_volume_tempdir = tempfile::tempdir().unwrap();
-        if let Storage::FileSystem { ref mut path } = config.high_volume_storage {
-            *path = high_volume_tempdir.path().into();
-        }
+        let mut tempdirs = Vec::new();
+        replace_fs_paths(&mut config.storage, &mut tempdirs);
 
         config.auth.keys = BTreeMap::from([(
             TEST_EDDSA_KID.into(),
@@ -104,8 +97,7 @@ impl TestServer {
         Self {
             handle,
             socket,
-            _long_term_tempdir: long_term_tempdir,
-            _high_volume_tempdir: high_volume_tempdir,
+            _tempdirs: tempdirs,
         }
     }
 
@@ -126,5 +118,24 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.handle.abort();
+    }
+}
+
+/// Recursively replaces filesystem backend paths with temporary directories.
+///
+/// For `FileSystem` variants, a new temp dir is created and its path is substituted.
+/// For `Tiered` variants, both sub-backends are processed recursively.
+/// Other backend types are left unchanged.
+fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
+    match config {
+        StorageConfig::FileSystem(c) => {
+            let dir = tempfile::tempdir().unwrap();
+            c.path = dir.path().into();
+            tempdirs.push(dir);
+        }
+        StorageConfig::Tiered(c) => {
+            replace_fs_paths(&mut c.long_term, tempdirs);
+        }
+        StorageConfig::S3Compatible(_) | StorageConfig::Gcs(_) | StorageConfig::BigTable(_) => {}
     }
 }

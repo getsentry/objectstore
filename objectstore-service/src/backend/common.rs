@@ -1,12 +1,58 @@
 //! Shared trait definition and types for all backends.
 
-use std::fmt::Debug;
+use std::fmt;
 
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+
+use bytes::Bytes;
 
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, PayloadStream};
+
+/// Information about a redirect tombstone in the high-volume backend.
+///
+/// Currently carries only the `expiration_policy` so the high-volume backend
+/// can GC tombstones when the underlying object expires.
+#[derive(Debug, Clone)]
+pub struct Tombstone {
+    /// The expiration policy copied from the original object.
+    pub expiration_policy: ExpirationPolicy,
+}
+
+/// Typed response from [`HighVolumeBackend::get_tiered_object`].
+pub enum TieredGet {
+    /// A real object was found.
+    Object(Metadata, PayloadStream),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
+
+impl fmt::Debug for TieredGet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TieredGet::Object(metadata, _stream) => f
+                .debug_tuple("Object")
+                .field(metadata)
+                .finish_non_exhaustive(),
+            TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
+            TieredGet::NotFound => write!(f, "NotFound"),
+        }
+    }
+}
+
+/// Typed metadata-only response from [`HighVolumeBackend::get_tiered_metadata`].
+#[derive(Debug)]
+pub enum TieredMetadata {
+    /// Metadata for a real object was found.
+    Object(Metadata),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
 
 /// User agent string used for outgoing requests.
 ///
@@ -14,29 +60,30 @@ use crate::stream::{ClientStream, PayloadStream};
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
 /// Backend response for put operations.
-pub(super) type PutResponse = ();
+pub type PutResponse = ();
 /// Backend response for get operations.
-pub(super) type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, PayloadStream)>;
 /// Backend response for metadata-only get operations.
-pub(super) type MetadataResponse = Option<Metadata>;
+pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
-pub(super) type DeleteResponse = ();
+pub type DeleteResponse = ();
 
-/// Response from [`Backend::delete_non_tombstone`].
+/// Outcome of a tombstone-conditional operation.
+///
+/// Returned by [`HighVolumeBackend::put_non_tombstone`] and
+/// [`HighVolumeBackend::delete_non_tombstone`] to indicate whether the operation
+/// proceeded or was skipped because a redirect tombstone was present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeleteOutcome {
-    /// The entity was a redirect tombstone; it was left intact.
+pub enum ConditionalOutcome {
+    /// The operation executed normally (write stored, delete removed).
+    Executed,
+    /// A redirect tombstone was found; the operation was skipped.
     Tombstone,
-    /// The entity was a regular object (now deleted) or non-existent.
-    Deleted,
 }
-
-/// A type-erased [`Backend`] instance.
-pub type BoxedBackend = Box<dyn Backend>;
 
 /// Trait implemented by all storage backends.
 #[async_trait::async_trait]
-pub trait Backend: Debug + Send + Sync + 'static {
+pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
     fn name(&self) -> &'static str;
 
@@ -61,28 +108,63 @@ pub trait Backend: Debug + Send + Sync + 'static {
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
+}
+
+/// Trait for backends that support tombstone-conditional operations.
+///
+/// Only backends suitable for the high-volume tier of
+/// [`TieredStorage`](super::tiered::TieredStorage) implement this trait.
+/// The conditional methods provide atomic operations to avoid overwriting
+/// redirect tombstones.
+#[async_trait::async_trait]
+pub trait HighVolumeBackend: Backend {
+    /// Writes the object only if NO redirect tombstone exists at this key.
+    ///
+    /// Returns [`ConditionalOutcome::Tombstone`] (skipping the write) when a
+    /// redirect tombstone is present, or [`ConditionalOutcome::Executed`] after
+    /// storing the object.
+    ///
+    /// Takes [`Bytes`] instead of a [`ClientStream`] because callers on this
+    /// path have already fully buffered the payload.
+    async fn put_non_tombstone(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: Bytes,
+    ) -> Result<ConditionalOutcome>;
+
+    /// Retrieves an object with explicit tombstone awareness.
+    ///
+    /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
+    /// object, making the caller's routing logic a compile-time distinction.
+    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet>;
+
+    /// Retrieves only metadata with explicit tombstone awareness.
+    ///
+    /// Implementations should skip the payload column where possible to avoid
+    /// fetching up to 1 MiB of data just to discover a tombstone.
+    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata>;
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
-    /// Returns [`DeleteOutcome::Tombstone`] (leaving the row intact) when
-    /// the object is a redirect tombstone, or [`DeleteOutcome::Deleted`]
+    /// Returns [`ConditionalOutcome::Tombstone`] (leaving the row intact) when
+    /// the object is a redirect tombstone, or [`ConditionalOutcome::Executed`]
     /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<DeleteOutcome> {
-        let metadata = self.get_metadata(id).await?;
-        if metadata.is_some_and(|m| m.is_tombstone()) {
-            Ok(DeleteOutcome::Tombstone)
-        } else {
-            self.delete_object(id).await?;
-            Ok(DeleteOutcome::Deleted)
-        }
-    }
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome>;
+
+    /// Writes a redirect tombstone for the given object.
+    ///
+    /// A tombstone signals that the real object lives in the long-term backend.
+    /// Only the `expiration_policy` inside `tombstone` is preserved — it is carried
+    /// so the high-volume backend can GC tombstones when the underlying object expires.
+    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()>;
 }
 
 /// Creates a reqwest client with required defaults.
 ///
 /// Automatic decompression is disabled because backends store pre-compressed
 /// payloads and manage `Content-Encoding` themselves.
-pub fn reqwest_client() -> reqwest::Client {
+pub(super) fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)

@@ -227,43 +227,29 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
-    use objectstore_service::{StorageConfig, StorageService};
-    use tempfile::TempDir;
+    use objectstore_service::StorageService;
+    use objectstore_service::backend::in_memory::InMemoryBackend;
     use tower::ServiceExt;
 
     use crate::auth::PublicKeyDirectory;
-    use crate::config::{Config, Storage};
+    use crate::config::Config;
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
     use crate::web::RequestCounter;
 
-    async fn test_state(mut config: Config) -> (ServiceState, TempDir) {
-        let tempdir = TempDir::new().unwrap();
-        config.high_volume_storage = Storage::FileSystem {
-            path: tempdir.path().join("high-volume"),
-        };
-        config.long_term_storage = Storage::FileSystem {
-            path: tempdir.path().join("long-term"),
-        };
-
-        let fs_config = StorageConfig::FileSystem {
-            path: tempdir.path(),
-        };
-        let service = StorageService::new(fs_config.clone(), fs_config)
-            .await
-            .unwrap();
+    async fn test_state(config: Config) -> ServiceState {
+        let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")));
         let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
-        let state = Arc::new(Services {
+        Arc::new(Services {
             config,
             service,
             key_directory,
             rate_limiter,
             request_counter: RequestCounter::new(0),
-        });
-        (state, tempdir)
+        })
     }
 
     async fn handle_object_id(Xt(id): Xt<ObjectId>) -> String {
@@ -301,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_object_id_parses_path() {
-        let (state, _tempdir) = test_state(Config::default()).await;
+        let state = test_state(Config::default()).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -319,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_object_id_with_empty_scopes() {
-        let (state, _tempdir) = test_state(Config::default()).await;
+        let state = test_state(Config::default()).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -335,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_object_context_parses_path() {
-        let (state, _tempdir) = test_state(Config::default()).await;
+        let state = test_state(Config::default()).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -353,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_object_context_with_empty_scopes() {
-        let (state, _tempdir) = test_state(Config::default()).await;
+        let state = test_state(Config::default()).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -370,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_object_id_invalid_scopes() {
-        let (state, _tempdir) = test_state(Config::default()).await;
+        let state = test_state(Config::default()).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -395,7 +381,7 @@ mod tests {
             }]),
             ..Config::default()
         };
-        let (state, _tempdir) = test_state(config).await;
+        let state = test_state(config).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -424,7 +410,7 @@ mod tests {
             }]),
             ..Config::default()
         };
-        let (state, _tempdir) = test_state(config).await;
+        let state = test_state(config).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -455,7 +441,7 @@ mod tests {
             }]),
             ..Config::default()
         };
-        let (state, _tempdir) = test_state(config).await;
+        let state = test_state(config).await;
         let app = test_router(state);
 
         // Matching service header → 403
@@ -500,7 +486,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let (state, _tempdir) = test_state(config).await;
+        let state = test_state(config).await;
         let app = test_router(state);
 
         let request = Request::builder()
@@ -531,7 +517,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let (state, _tempdir) = test_state(config).await;
+        let state = test_state(config).await;
         let app = test_router(state);
 
         let request = Request::builder()

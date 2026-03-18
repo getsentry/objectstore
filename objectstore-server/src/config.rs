@@ -15,8 +15,8 @@
 //! configuration structures. For example:
 //!
 //! - `OS__HTTP_ADDR=0.0.0.0:8888` sets the HTTP server address
-//! - `OS__LONG_TERM_STORAGE__TYPE=filesystem` sets the storage type
-//! - `OS__LONG_TERM_STORAGE__PATH=/data` sets the directory name
+//! - `OS__STORAGE__TYPE=filesystem` sets the storage type
+//! - `OS__STORAGE__PATH=/data` sets the directory path
 //!
 //! # YAML Configuration File
 //!
@@ -26,7 +26,7 @@
 //! ```yaml
 //! http_addr: 0.0.0.0:8888
 //!
-//! long_term_storage:
+//! storage:
 //!   type: filesystem
 //!   path: /data
 //! ```
@@ -40,10 +40,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
+use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
+
+pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -89,220 +92,6 @@ impl Zeroize for ConfigSecret {
     fn zeroize(&mut self) {
         self.0.zeroize();
     }
-}
-
-/// Storage backend configuration.
-///
-/// The `type` field in YAML or `__TYPE` in environment variables determines which variant is used.
-///
-/// Used in: [`Config::high_volume_storage`], [`Config::long_term_storage`]
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Storage {
-    /// Local filesystem storage backend (type `"filesystem"`).
-    ///
-    /// Stores objects as files on the local filesystem. Suitable for development, testing,
-    /// and single-server deployments.
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: filesystem
-    ///   path: /data
-    /// ```
-    FileSystem {
-        /// Directory path for storing objects.
-        ///
-        /// The directory will be created if it doesn't exist. Relative paths are resolved from
-        /// the server's working directory.
-        ///
-        /// # Default
-        ///
-        /// `"data"` (relative to the server's working directory)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=filesystem`
-        /// - `OS__HIGH_VOLUME_STORAGE__PATH=/path/to/storage`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=filesystem`
-        /// - `OS__LONG_TERM_STORAGE__PATH=/path/to/storage`
-        path: PathBuf,
-    },
-
-    /// S3-compatible storage backend (type `"s3compatible"`).
-    ///
-    /// Supports [Amazon S3] and other S3-compatible services. Authentication is handled via
-    /// environment variables (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) or IAM roles.
-    ///
-    /// [Amazon S3]: https://aws.amazon.com/s3/
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: s3compatible
-    ///   endpoint: https://s3.amazonaws.com
-    ///   bucket: my-bucket
-    /// ```
-    S3Compatible {
-        /// S3 endpoint URL.
-        ///
-        /// Examples: `https://s3.amazonaws.com`, `http://localhost:9000` (for MinIO)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=s3compatible`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=s3compatible`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=https://s3.amazonaws.com`
-        endpoint: String,
-
-        /// S3 bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-bucket`
-        bucket: String,
-    },
-
-    /// [Google Cloud Storage] backend (type `"gcs"`).
-    ///
-    /// Stores objects in Google Cloud Storage (GCS). Authentication uses Application Default
-    /// Credentials (ADC), which can be provided via the `GOOGLE_APPLICATION_CREDENTIALS`
-    /// environment variable or GCE/GKE metadata service.
-    ///
-    /// **Note**: The bucket must be pre-created with the following lifecycle policy:
-    /// - `daysSinceCustomTime`: 1 day
-    /// - `action`: delete
-    ///
-    /// [Google Cloud Storage]: https://cloud.google.com/storage
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// long_term_storage:
-    ///   type: gcs
-    ///   bucket: objectstore-bucket
-    /// ```
-    Gcs {
-        /// Optional custom GCS endpoint URL.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default GCS endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default GCS endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=gcs`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=gcs`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=http://localhost:9000` (optional)
-        endpoint: Option<String>,
-
-        /// GCS bucket name.
-        ///
-        /// The bucket must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__BUCKET=my-gcs-bucket`
-        /// - `OS__LONG_TERM_STORAGE__BUCKET=my-gcs-bucket`
-        bucket: String,
-    },
-
-    /// [Google Bigtable] backend (type `"bigtable"`).
-    ///
-    /// Stores objects in Google Cloud Bigtable, a NoSQL wide-column database. This backend is
-    /// optimized for high-throughput, low-latency workloads with small objects. Authentication uses
-    /// Application Default Credentials (ADC).
-    ///
-    /// **Note**: The table must be pre-created with appropriate column families. Ensure to have the
-    /// following column families:
-    /// - `fg`: timestamp-based garbage collection (`maxage=1s`)
-    /// - `fm`: manual garbage collection (`no GC policy`)
-    ///
-    /// [Google Bigtable]: https://cloud.google.com/bigtable
-    ///
-    /// # Example
-    ///
-    /// ```yaml
-    /// high_volume_storage:
-    ///   type: bigtable
-    ///   project_id: my-project
-    ///   instance_name: objectstore
-    ///   table_name: objectstore
-    /// ```
-    BigTable {
-        /// Optional custom Bigtable endpoint.
-        ///
-        /// Useful for testing with emulators. If `None`, uses the default Bigtable endpoint.
-        ///
-        /// # Default
-        ///
-        /// `None` (uses default Bigtable endpoint)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TYPE=bigtable`
-        /// - `OS__HIGH_VOLUME_STORAGE__ENDPOINT=localhost:8086` (optional)
-        ///
-        /// Or for long-term storage:
-        /// - `OS__LONG_TERM_STORAGE__TYPE=bigtable`
-        /// - `OS__LONG_TERM_STORAGE__ENDPOINT=localhost:8086` (optional)
-        endpoint: Option<String>,
-
-        /// GCP project ID.
-        ///
-        /// The Google project ID (not project number) containing the Bigtable instance.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__PROJECT_ID=my-project`
-        /// - `OS__LONG_TERM_STORAGE__PROJECT_ID=my-project`
-        project_id: String,
-
-        /// Bigtable instance name.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__INSTANCE_NAME=my-instance`
-        /// - `OS__LONG_TERM_STORAGE__INSTANCE_NAME=my-instance`
-        instance_name: String,
-
-        /// Bigtable table name.
-        ///
-        /// The table must exist before starting the server.
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__TABLE_NAME=objectstore`
-        /// - `OS__LONG_TERM_STORAGE__TABLE_NAME=objectstore`
-        table_name: String,
-
-        /// Optional number of connections to maintain to Bigtable.
-        ///
-        /// # Default
-        ///
-        /// `None` (defaults to 1)
-        ///
-        /// # Environment Variables
-        ///
-        /// - `OS__HIGH_VOLUME_STORAGE__CONNECTIONS=16` (optional)
-        /// - `OS__LONG_TERM_STORAGE__CONNECTIONS=16` (optional)
-        connections: Option<usize>,
-    },
 }
 
 /// Runtime configuration for the Tokio async runtime.
@@ -735,66 +524,43 @@ pub struct Config {
     /// `OS__HTTP_ADDR`
     pub http_addr: SocketAddr,
 
-    /// Storage backend for high-volume, small objects.
+    /// Storage backend configuration.
     ///
-    /// This backend is used for smaller objects in scenarios where high-throughput, low-latency
-    /// access with many small objects is desired. Good candidates include Bigtable, local
-    /// filesystem (for development), or fast SSDs. Can be set to the same backend as
-    /// `long_term_storage` for simplicity.
-    ///
-    /// **Note**: Currently, objects up to 1 MiB are stored in this backend, while larger objects
-    /// are stored in the [`long_term_storage`](`Config::long_term_storage`). This is subject to
-    /// change in the future and more configuration options will be added to influence this
-    /// decision.
+    /// Configures the storage backend used by the server. Use `type: "filesystem"` for
+    /// development, `type: "tiered"` for production two-tier routing (small objects to a
+    /// high-volume backend, large objects to a long-term backend), or any other single backend
+    /// type for simple deployments.
     ///
     /// # Default
     ///
-    /// Filesystem storage in `./data/high-volume` directory
+    /// Filesystem storage in the `./data` directory
     ///
     /// # Environment Variables
     ///
-    /// - `OS__HIGH_VOLUME_STORAGE__TYPE` for the backend type. See [`Storage`] for available
-    ///   options.
+    /// - `OS__STORAGE__TYPE` — backend type (`filesystem`, `tiered`, `gcs`, `bigtable`,
+    ///   `s3compatible`)
+    /// - Additional fields depending on the type (see [`StorageConfig`])
     ///
-    /// # Example
+    /// For tiered storage, sub-backend fields are nested under `high_volume` and `long_term`:
+    /// - `OS__STORAGE__TYPE=tiered`
+    /// - `OS__STORAGE__HIGH_VOLUME__TYPE=bigtable`
+    /// - `OS__STORAGE__LONG_TERM__TYPE=gcs`
     ///
-    /// ```yaml
-    /// high_volume_storage:
-    ///   type: bigtable
-    ///   project_id: my-project
-    ///   instance_name: objectstore
-    ///   table_name: objectstore
-    /// ```
-    pub high_volume_storage: Storage,
-
-    /// Storage backend for large objects with long-term retention.
-    ///
-    /// This backend is used for larger objects in scenarios with lower throughput and higher
-    /// latency requirements. Good candidates include S3, Google Cloud Storage, or other object
-    /// storage systems. Can be set to the same backend as `high_volume_storage` for simplicity.
-    ///
-    /// **Note**: Currently, objects over 1 MiB are stored in this backend, while smaller objects
-    /// are stored in the [`high_volume_storage`](`Config::high_volume_storage`). This is subject to
-    /// change in the future and more configuration options will be added to influence this
-    /// decision.
-    ///
-    /// # Default
-    ///
-    /// Filesystem storage in `./data/long-term` directory
-    ///
-    /// # Environment Variables
-    ///
-    /// - `OS__LONG_TERM_STORAGE__TYPE` - Backend type (filesystem, s3compatible, gcs, bigtable)
-    /// - Additional fields depending on the type (see [`Storage`])
-    ///
-    /// # Example
+    /// # Example (tiered)
     ///
     /// ```yaml
-    /// long_term_storage:
-    ///   type: gcs
-    ///   bucket: my-objectstore-bucket
+    /// storage:
+    ///   type: tiered
+    ///   high_volume:
+    ///     type: bigtable
+    ///     project_id: my-project
+    ///     instance_name: objectstore
+    ///     table_name: objectstore
+    ///   long_term:
+    ///     type: gcs
+    ///     bucket: my-objectstore-bucket
     /// ```
-    pub long_term_storage: Storage,
+    pub storage: StorageConfig,
 
     /// Configuration of the internal task runtime.
     ///
@@ -927,12 +693,9 @@ impl Default for Config {
         Self {
             http_addr: "0.0.0.0:8888".parse().unwrap(),
 
-            high_volume_storage: Storage::FileSystem {
-                path: PathBuf::from("data/high-volume"),
-            },
-            long_term_storage: Storage::FileSystem {
-                path: PathBuf::from("data/long-term"),
-            },
+            storage: StorageConfig::FileSystem(FileSystemConfig {
+                path: PathBuf::from("data"),
+            }),
 
             runtime: Runtime::default(),
             logging: Logging::default(),
@@ -982,6 +745,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
+    use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -992,9 +756,9 @@ mod tests {
     #[test]
     fn configurable_via_env() {
         figment::Jail::expect_with(|jail| {
-            jail.set_env("OS__LONG_TERM_STORAGE__TYPE", "s3compatible");
-            jail.set_env("OS__LONG_TERM_STORAGE__ENDPOINT", "http://localhost:8888");
-            jail.set_env("OS__LONG_TERM_STORAGE__BUCKET", "whatever");
+            jail.set_env("OS__STORAGE__TYPE", "s3compatible");
+            jail.set_env("OS__STORAGE__ENDPOINT", "http://localhost:8888");
+            jail.set_env("OS__STORAGE__BUCKET", "whatever");
             jail.set_env("OS__METRICS__TAGS__FOO", "bar");
             jail.set_env("OS__METRICS__TAGS__BAZ", "qux");
             jail.set_env("OS__SENTRY__DSN", "abcde");
@@ -1002,16 +766,14 @@ mod tests {
             jail.set_env("OS__SENTRY__ENVIRONMENT", "production");
             jail.set_env("OS__SENTRY__SERVER_NAME", "objectstore-deadbeef");
             jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
-            jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
 
             let config = Config::load(None).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).storage else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
-            assert_eq!(bucket, "whatever");
+            assert_eq!(c.endpoint, "http://localhost:8888");
+            assert_eq!(c.bucket, "whatever");
             assert_eq!(
                 config.metrics.tags,
                 [("foo".into(), "bar".into()), ("baz".into(), "qux".into())].into()
@@ -1036,7 +798,7 @@ mod tests {
         tempfile
             .write_all(
                 br#"
-            long_term_storage:
+            storage:
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
@@ -1053,12 +815,11 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let Storage::S3Compatible { endpoint, bucket } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).storage else {
                 panic!("expected s3 storage");
             };
-            assert_eq!(endpoint, "http://localhost:8888");
-            assert_eq!(bucket, "whatever");
+            assert_eq!(c.endpoint, "http://localhost:8888");
+            assert_eq!(c.bucket, "whatever");
 
             assert_eq!(config.sentry.dsn.unwrap().expose_secret().as_str(), "abcde");
             assert_eq!(config.sentry.environment.as_deref(), Some("production"));
@@ -1079,7 +840,7 @@ mod tests {
         tempfile
             .write_all(
                 br#"
-            long_term_storage:
+            storage:
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
@@ -1088,19 +849,81 @@ mod tests {
             .unwrap();
 
         figment::Jail::expect_with(|jail| {
-            jail.set_env("OS__LONG_TERM_STORAGE__ENDPOINT", "http://localhost:9001");
+            jail.set_env("OS__STORAGE__ENDPOINT", "http://localhost:9001");
 
             let config = Config::load(Some(tempfile.path())).unwrap();
 
-            let Storage::S3Compatible {
-                endpoint,
-                bucket: _bucket,
-            } = &dbg!(&config).long_term_storage
-            else {
+            let StorageConfig::S3Compatible(c) = &dbg!(&config).storage else {
                 panic!("expected s3 storage");
             };
             // Env should overwrite the yaml config
-            assert_eq!(endpoint, "http://localhost:9001");
+            assert_eq!(c.endpoint, "http://localhost:9001");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_storage_via_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            storage:
+                type: tiered
+                high_volume:
+                    type: bigtable
+                    project_id: my-project
+                    instance_name: objectstore
+                    table_name: objectstore
+                long_term:
+                    type: gcs
+                    bucket: my-objectstore-bucket
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
+                panic!("expected tiered storage");
+            };
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            assert_eq!(hv.project_id, "my-project");
+            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
+                panic!("expected gcs long_term");
+            };
+            assert_eq!(lt.bucket, "my-objectstore-bucket");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_storage_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "tiered");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "bigtable");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__PROJECT_ID", "my-project");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME", "my-instance");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "my-table");
+            jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
+            jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
+
+            let config = Config::load(None).unwrap();
+
+            let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
+                panic!("expected tiered storage");
+            };
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            assert_eq!(hv.project_id, "my-project");
+            assert_eq!(hv.instance_name, "my-instance");
+            assert_eq!(hv.table_name, "my-table");
+            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
+                panic!("expected filesystem long_term");
+            };
+            assert_eq!(lt.path, Path::new("/data/lt"));
 
             Ok(())
         });

@@ -2,22 +2,20 @@
 //!
 //! [`StorageService`] is the main entry point for storing and retrieving
 //! objects. Each operation runs in a separate tokio task for panic isolation.
-//! See the [crate-level documentation](crate) for the two-tier backend system,
-//! redirect tombstones, and consistency guarantees.
+//!
+//! See the [crate-level documentation](crate) for full architecture details.
 
 use std::future::Future;
-use std::path::Path;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 
-use crate::backend::common::BoxedBackend;
+use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
-use crate::tiered::TieredStorage;
 
 /// Service response for [`StorageService::get_object`].
 pub type GetResponse = Option<(Metadata, PayloadStream)>;
@@ -28,105 +26,34 @@ pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
 
-/// Configuration to initialize a [`StorageService`].
-#[derive(Debug, Clone)]
-pub enum StorageConfig<'a> {
-    /// Use a local filesystem as the storage backend.
-    FileSystem {
-        /// The path to the directory where files will be stored.
-        path: &'a Path,
-    },
-    /// Use an S3-compatible storage backend.
-    S3Compatible {
-        /// Optional endpoint URL for the S3-compatible storage.
-        endpoint: &'a str,
-        /// The name of the bucket to use.
-        bucket: &'a str,
-    },
-    /// Use Google Cloud Storage as storage backend.
-    Gcs {
-        /// Optional endpoint URL for the S3-compatible storage.
-        ///
-        /// Assumes an emulator without authentication if set.
-        endpoint: Option<&'a str>,
-        /// The name of the bucket to use.
-        bucket: &'a str,
-    },
-    /// Use BigTable as storage backend.
-    BigTable {
-        /// Optional endpoint URL for the BigTable storage.
-        ///
-        /// Assumes an emulator without authentication if set.
-        endpoint: Option<&'a str>,
-        /// The Google Cloud project ID.
-        project_id: &'a str,
-        /// The BigTable instance name.
-        instance_name: &'a str,
-        /// The BigTable table name.
-        table_name: &'a str,
-        /// The number of concurrent connections to BigTable.
-        ///
-        /// Defaults to 1.
-        connections: Option<usize>,
-    },
-}
-
 /// Default concurrency limit for [`StorageService`].
 ///
 /// This value is used when no explicit limit is set via
 /// [`StorageService::with_concurrency_limit`].
 pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 
-/// Asynchronous storage service with a two-tier backend system.
+/// Asynchronous storage service wrapping a single [`Backend`].
 ///
 /// `StorageService` is the main entry point for storing and retrieving objects.
-/// It routes objects to a high-volume or long-term backend based on size (see
-/// the [crate-level documentation](crate) for details) and maintains redirect
-/// tombstones so that reads never need to probe both backends.
+/// It delegates all storage operations to the backend supplied at construction,
+/// adding task spawning, panic isolation, and a concurrency limit on top.
+///
+/// The typical backend is [`TieredStorage`](crate::backend::tiered::TieredStorage),
+/// which provides size-based routing to high-volume and long-term backends along
+/// with redirect tombstone management. Any type implementing [`Backend`] can be used.
 ///
 /// # Lifecycle
 ///
 /// After construction, call [`start`](StorageService::start) to start the
 /// service's background processes.
 ///
-/// # Redirect Tombstones
-///
-/// Because the [`ObjectId`] is backend-independent, reads must be able to find
-/// an object without knowing which backend stores it. A naive approach would
-/// check the long-term backend on every read miss in the high-volume backend —
-/// but that is slow and expensive.
-///
-/// Instead, when an object is stored in the long-term backend, the service
-/// writes a **redirect tombstone** in the high-volume backend. A redirect
-/// tombstone is an empty object with
-/// [`is_redirect_tombstone: true`](objectstore_types::metadata::Metadata::is_redirect_tombstone)
-/// in its metadata. It acts as a signpost: "the real data lives in the other
-/// backend."
-///
-/// # Consistency Without Locks
-///
-/// The tombstone system maintains consistency through operation ordering rather
-/// than distributed locks. The invariant is: a redirect tombstone is always the
-/// **last thing written** and the **last thing removed**.
-///
-/// - On **write**, the real object is persisted before the tombstone. If the
-///   tombstone write fails, the real object is rolled back.
-/// - On **delete**, the real object is removed before the tombstone. If the
-///   long-term delete fails, the tombstone remains and the data stays reachable.
-///
-/// This ensures that at every intermediate step, either the data is fully
-/// reachable (tombstone points to data) or fully absent — never an orphan in
-/// either direction.
-///
-/// See the individual methods for per-operation tombstone behavior.
-///
 /// # Run-to-Completion and Panic Isolation
 ///
 /// Each operation runs to completion even if the caller is cancelled (e.g., on
-/// client disconnect). This ensures that multi-step operations such as writing
-/// redirect tombstones are never left partially applied. Operations are also
-/// isolated from panics in backend code — a failure in one operation does not
-/// bring down other in-flight work. See [`Error::Panic`].
+/// client disconnect). This ensures that multi-step operations in the backend
+/// are never left partially applied. Operations are also isolated from panics in
+/// backend code — a failure in one operation does not bring down other in-flight
+/// work. See [`Error::Panic`].
 ///
 /// # Concurrency Limit
 ///
@@ -137,30 +64,15 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 /// [`Error::AtCapacity`].
 #[derive(Clone, Debug)]
 pub struct StorageService {
-    inner: Arc<TieredStorage>,
+    inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
 }
 
 impl StorageService {
-    /// Creates a new `StorageService` with the specified configuration.
-    pub async fn new(
-        high_volume_config: StorageConfig<'_>,
-        long_term_config: StorageConfig<'_>,
-    ) -> anyhow::Result<Self> {
-        let high_volume_backend = create_backend(high_volume_config).await?;
-        let long_term_backend = create_backend(long_term_config).await?;
-        Ok(Self::from_backends(high_volume_backend, long_term_backend))
-    }
-
-    pub(crate) fn from_backends(
-        high_volume_backend: BoxedBackend,
-        long_term_backend: BoxedBackend,
-    ) -> Self {
+    /// Creates a new `StorageService` wrapping the given backend.
+    pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
-            inner: Arc::new(TieredStorage {
-                high_volume_backend,
-                long_term_backend,
-            }),
+            inner: Arc::from(backend),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
@@ -209,7 +121,7 @@ impl StorageService {
         })?;
 
         Ok(StreamExecutor {
-            tiered: Arc::clone(&self.inner),
+            backend: Arc::clone(&self.inner),
             window,
             reservation,
         })
@@ -266,17 +178,7 @@ impl StorageService {
     ///
     /// Once called, the operation runs to completion even if the returned future
     /// is dropped (e.g., on client disconnect). This guarantees that partially
-    /// written objects are never left without their redirect tombstone.
-    ///
-    /// # Tombstone handling
-    ///
-    /// If the object has a caller-provided key and a redirect tombstone already
-    /// exists at that key, the new write is routed to the long-term backend
-    /// (preserving the existing tombstone as a redirect to the new data).
-    ///
-    /// For long-term writes, the real object is persisted first, then the
-    /// tombstone. If the tombstone write fails, the real object is rolled back
-    /// to avoid orphans.
+    /// written objects in the backend are never left in an inconsistent state.
     pub async fn insert_object(
         &self,
         context: ObjectContext,
@@ -284,20 +186,16 @@ impl StorageService {
         metadata: Metadata,
         stream: ClientStream,
     ) -> Result<InsertResponse> {
+        let id = ObjectId::optional(context, key);
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
-            inner.insert_object(context, key, &metadata, stream).await
+            inner.put_object(&id, &metadata, stream).await?;
+            Ok(id)
         })
         .await
     }
 
     /// Retrieves only the metadata for an object, without the payload.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Looks up the object in the high-volume backend first. If the result is a
-    /// redirect tombstone, follows the redirect and fetches metadata from the
-    /// long-term backend instead.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("get_metadata", async move { inner.get_metadata(&id).await })
@@ -305,12 +203,6 @@ impl StorageService {
     }
 
     /// Streams the contents of an object.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Looks up the object in the high-volume backend first. If the result is a
-    /// redirect tombstone, follows the redirect and fetches the object from the
-    /// long-term backend instead.
     pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("get", async move { inner.get_object(&id).await })
@@ -322,51 +214,13 @@ impl StorageService {
     /// # Run-to-completion
     ///
     /// Once called, the operation runs to completion even if the returned future
-    /// is dropped. This guarantees that the tombstone is only removed after the
-    /// long-term object has been successfully deleted.
-    ///
-    /// # Tombstone handling
-    ///
-    /// Attempts to delete from the high-volume backend, but skips deletion if
-    /// the entry is a redirect tombstone. When a tombstone is found, the
-    /// long-term object is deleted first, then the tombstone. This ordering
-    /// ensures that if the long-term delete fails, the tombstone remains and
-    /// the data is still reachable.
+    /// is dropped. This guarantees that multi-step delete sequences in the backend
+    /// are never left partially applied.
     pub async fn delete_object(&self, id: ObjectId) -> Result<DeleteResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("delete", async move { inner.delete_object(&id).await })
             .await
     }
-}
-
-async fn create_backend(config: StorageConfig<'_>) -> anyhow::Result<BoxedBackend> {
-    Ok(match config {
-        StorageConfig::FileSystem { path } => {
-            Box::new(crate::backend::local_fs::LocalFsBackend::new(path))
-        }
-        StorageConfig::S3Compatible { endpoint, bucket } => Box::new(
-            crate::backend::s3_compatible::S3CompatibleBackend::without_token(endpoint, bucket),
-        ),
-        StorageConfig::Gcs { endpoint, bucket } => {
-            Box::new(crate::backend::gcs::GcsBackend::new(endpoint, bucket).await?)
-        }
-        StorageConfig::BigTable {
-            endpoint,
-            project_id,
-            instance_name,
-            table_name,
-            connections,
-        } => Box::new(
-            crate::backend::bigtable::BigTableBackend::new(
-                endpoint,
-                project_id,
-                instance_name,
-                table_name,
-                connections,
-            )
-            .await?,
-        ),
-    })
 }
 
 #[cfg(test)]
@@ -380,8 +234,13 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::common::Backend as _;
+    use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
+    use crate::backend::common::{
+        ConditionalOutcome, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
+    };
+    use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
+    use crate::backend::tiered::TieredStorage;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
 
@@ -392,22 +251,30 @@ mod tests {
         }
     }
 
-    fn make_service() -> (StorageService, InMemoryBackend, InMemoryBackend) {
-        let hv = InMemoryBackend::new("in-memory-hv");
-        let lt = InMemoryBackend::new("in-memory-lt");
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
-        (service, hv, lt)
+    fn make_service() -> StorageService {
+        StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
     }
 
-    // --- Integration tests (real backends) ---
+    #[tokio::test]
+    async fn insert_without_key_generates_unique_id() {
+        let service = make_service();
+
+        let id = service
+            .insert_object(
+                make_context(),
+                None,
+                Default::default(),
+                stream::single("auto-keyed"),
+            )
+            .await
+            .unwrap();
+
+        assert!(uuid::Uuid::parse_str(id.key()).is_ok());
+    }
 
     #[tokio::test]
     async fn stores_files() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let config = StorageConfig::FileSystem {
-            path: tempdir.path(),
-        };
-        let service = StorageService::new(config.clone(), config).await.unwrap();
+        let service = make_service();
 
         let key = service
             .insert_object(
@@ -427,11 +294,13 @@ mod tests {
 
     #[tokio::test]
     async fn works_with_gcs() {
-        let config = StorageConfig::Gcs {
-            endpoint: Some("http://localhost:8087"),
-            bucket: "test-bucket", // aligned with the env var in devservices and CI
+        let config = GcsConfig {
+            endpoint: Some("http://localhost:8087".into()),
+            bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
         };
-        let service = StorageService::new(config.clone(), config).await.unwrap();
+
+        let backend = GcsBackend::new(config).await.unwrap();
+        let service = StorageService::new(Box::new(backend));
 
         let key = service
             .insert_object(
@@ -451,24 +320,24 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_redirect_and_delete() {
-        let high_volume = StorageConfig::BigTable {
-            endpoint: Some("localhost:8086"),
-            project_id: "testing",
-            instance_name: "objectstore",
-            table_name: "objectstore",
+        let bigtable_config = BigTableConfig {
+            endpoint: Some("localhost:8086".into()),
+            project_id: "testing".into(),
+            instance_name: "objectstore".into(),
+            table_name: "objectstore".into(),
             connections: None,
         };
-        let long_term = StorageConfig::Gcs {
-            endpoint: Some("http://localhost:8087"),
-            bucket: "test-bucket",
+        let gcs_config = GcsConfig {
+            endpoint: Some("http://localhost:8087".into()),
+            bucket: "test-bucket".into(),
         };
-        let service = StorageService::new(high_volume, long_term).await.unwrap();
+
+        let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
+        let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
+        let service = StorageService::new(Box::new(TieredStorage::new(high_volume, long_term)));
 
         // A separate GCS backend to directly inspect the long-term storage.
-        let gcs_backend =
-            crate::backend::gcs::GcsBackend::new(Some("http://localhost:8087"), "test-bucket")
-                .await
-                .unwrap();
+        let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
@@ -505,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn basic_spawn_insert_and_get() {
-        let (service, _hv, _lt) = make_service();
+        let service = make_service();
 
         let id = service
             .insert_object(
@@ -524,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn basic_spawn_metadata_and_delete() {
-        let (service, _hv, _lt) = make_service();
+        let service = make_service();
 
         let id = service
             .insert_object(
@@ -575,8 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_in_backend_returns_task_failed() {
-        let service =
-            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend));
+        let service = StorageService::new(Box::new(PanickingBackend));
 
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id).await;
@@ -648,11 +516,41 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl HighVolumeBackend for GatedBackend {
+        async fn put_non_tombstone(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            payload: bytes::Bytes,
+        ) -> Result<ConditionalOutcome> {
+            self.inner.put_non_tombstone(id, metadata, payload).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+            self.inner.delete_non_tombstone(id).await
+        }
+
+        async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
+            self.inner.create_tombstone(id, tombstone).await?;
+            self.on_put.notify_one();
+            Ok(())
+        }
+
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.inner.get_tiered_object(id).await
+        }
+
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.inner.get_tiered_metadata(id).await
+        }
+    }
+
     #[tokio::test]
     async fn receiver_drop_does_not_prevent_completion() {
-        let hv = GatedBackend::new("gated-hv");
-        let lt = GatedBackend::new("gated-lt").with_pause();
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()));
+        let hv = Box::new(GatedBackend::new("gated-hv"));
+        let lt = Box::new(GatedBackend::new("gated-lt").with_pause());
+        let service = StorageService::new(Box::new(TieredStorage::new(hv.clone(), lt.clone())));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
@@ -685,23 +583,20 @@ mod tests {
         // Verify the object was fully written despite the caller being dropped.
         let id = ObjectId::new(make_context(), "completion-test".into());
         assert!(lt.inner.contains(&id), "long-term object missing");
-        let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
-        assert!(meta.is_tombstone(), "expected redirect tombstone");
+        hv.inner.get(&id).expect_tombstone();
     }
 
     // --- Concurrency limit tests ---
 
-    fn make_limited_service(limit: usize) -> (StorageService, GatedBackend, GatedBackend) {
-        let hv = GatedBackend::new("limited-hv").with_pause();
-        let lt = GatedBackend::new("limited-lt");
-        let service = StorageService::from_backends(Box::new(hv.clone()), Box::new(lt.clone()))
-            .with_concurrency_limit(limit);
-        (service, hv, lt)
+    fn make_limited_service(limit: usize) -> (StorageService, GatedBackend) {
+        let backend = GatedBackend::new("limited").with_pause();
+        let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
+        (service, backend)
     }
 
     #[tokio::test]
     async fn at_capacity_rejects() {
-        let (service, hv, _lt) = make_limited_service(1);
+        let (service, hv) = make_limited_service(1);
 
         // First insert blocks on the gated backend, holding the single permit.
         let svc = service.clone();
@@ -746,16 +641,14 @@ mod tests {
 
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
-        let hv = GatedBackend::new("cap-hv");
-        let lt = GatedBackend::new("cap-lt");
-        let service =
-            StorageService::from_backends(Box::new(hv), Box::new(lt)).with_concurrency_limit(7);
+        let backend = Box::new(InMemoryBackend::new("cap"));
+        let service = StorageService::new(backend).with_concurrency_limit(7);
         assert_eq!(service.tasks_limit(), 7);
     }
 
     #[tokio::test]
     async fn tasks_running_tracks_in_flight() {
-        let (service, hv, _lt) = make_limited_service(5);
+        let (service, hv) = make_limited_service(5);
 
         assert_eq!(service.tasks_running(), 0);
 
@@ -779,9 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service =
-            StorageService::from_backends(Box::new(PanickingBackend), Box::new(PanickingBackend))
-                .with_concurrency_limit(1);
+        let service = StorageService::new(Box::new(PanickingBackend)).with_concurrency_limit(1);
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
