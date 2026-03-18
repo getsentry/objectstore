@@ -276,10 +276,8 @@ fn build_write_mutations(
         ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
     };
 
-    let metadata_bytes = serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
-        context: "failed to serialize metadata".to_string(),
-        cause,
-    })?;
+    let metadata_bytes = serde_json::to_vec(metadata)
+        .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
 
     Ok([
         // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -330,10 +328,8 @@ fn build_tombstone_mutations(
     let tombstone_meta = TombstoneMeta {
         expiration_policy: tombstone.expiration_policy,
     };
-    let metadata_bytes = serde_json::to_vec(&tombstone_meta).map_err(|cause| Error::Serde {
-        context: "failed to serialize tombstone meta".to_string(),
-        cause,
-    })?;
+    let metadata_bytes = serde_json::to_vec(&tombstone_meta)
+        .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?;
 
     Ok([
         mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
@@ -413,10 +409,7 @@ impl RowData {
                 COLUMN_TOMBSTONE_META => {
                     tombstone_meta_opt =
                         Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                            Error::Serde {
-                                context: "failed to deserialize tombstone meta".to_string(),
-                                cause,
-                            }
+                            Error::serde("failed to deserialize tombstone meta", cause)
                         })?);
                 }
                 COLUMN_METADATA => {
@@ -429,15 +422,12 @@ impl RowData {
                         tombstone_meta_opt = Some(TombstoneMeta {
                             expiration_policy: legacy_meta.expiration_policy,
                         });
-                        continue;
+                    } else {
+                        metadata_opt =
+                            Some(serde_json::from_slice(&cell.value).map_err(|cause| {
+                                Error::serde("failed to deserialize metadata", cause)
+                            })?);
                     }
-
-                    metadata_opt = Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                        Error::Serde {
-                            context: "failed to deserialize metadata".to_string(),
-                            cause,
-                        }
-                    })?);
                 }
                 _ => {}
             }
