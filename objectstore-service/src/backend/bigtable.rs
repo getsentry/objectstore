@@ -646,6 +646,34 @@ impl BigTableBackend {
         let mutations = build_tombstone_mutations(tombstone, SystemTime::now())?;
         self.mutate(path, mutations, action).await
     }
+
+    /// Best-effort TTI bump for a row.
+    ///
+    /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
+    async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool) {
+        let expiration_policy = row.expiration_policy();
+
+        match row {
+            RowData::Tombstone { .. } => {
+                let tombstone = Tombstone { expiration_policy };
+                let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
+            }
+            RowData::Object { metadata, payload } if loaded => {
+                let _ = self
+                    .put_row(path, metadata, payload.clone(), "tti-bump")
+                    .await;
+            }
+            RowData::Object { metadata, .. } => {
+                let payload_read = self
+                    .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
+                    .await;
+
+                if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
+                    let _ = self.put_row(path, metadata, payload, "tti-bump").await;
+                }
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -683,22 +711,18 @@ impl Backend for BigTableBackend {
             return Ok(None);
         };
 
-        let needs_bump = row.needs_tti_bump();
-        match row {
-            RowData::Tombstone { .. } => Err(Error::UnexpectedTombstone),
-            RowData::Object { metadata, payload } => {
-                if needs_bump {
-                    // TODO: Schedule into background persistently so this doesn't get lost on restarts
-                    let _ = self
-                        .put_row(path, &metadata, payload.clone(), "tti-bump")
-                        .await;
-                }
-                let mut metadata = metadata;
-                metadata.size = Some(payload.len());
-                let stream = crate::stream::single(payload);
-                Ok(Some((metadata, stream)))
-            }
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, true).await;
         }
+
+        let RowData::Object { metadata, payload } = row else {
+            return Err(Error::UnexpectedTombstone);
+        };
+
+        let mut metadata = metadata;
+        metadata.size = Some(payload.len());
+        let stream = crate::stream::single(payload);
+        Ok(Some((metadata, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -706,33 +730,25 @@ impl Backend for BigTableBackend {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
-        // Read metadata and tombstone columns — skip the (potentially large) payload.
+        // Read metadata columns — skip the (potentially large) payload.
         // NB: `metadata.size` will not be populated since the payload is not fetched.
         let row_opt = self
             .read_row(&path, Some(metadata_filter()), "get_metadata")
             .await?;
+
         let Some(row) = row_opt else {
             return Ok(None);
         };
 
-        let needs_bump = row.needs_tti_bump();
-        match row {
-            RowData::Tombstone { .. } => Err(Error::UnexpectedTombstone),
-            RowData::Object { metadata, .. } => {
-                // Conditional TTI bump: read the payload only when a bump is actually needed.
-                if needs_bump {
-                    // TODO: Schedule into background persistently so this doesn't get lost on restarts
-                    // Best-effort — failures here should not fail the metadata read.
-                    let payload_read = self
-                        .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                        .await;
-                    if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
-                        let _ = self.put_row(path, &metadata, payload, "tti-bump").await;
-                    }
-                }
-                Ok(Some(metadata))
-            }
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, false).await;
         }
+
+        let RowData::Object { metadata, .. } = row else {
+            return Err(Error::UnexpectedTombstone);
+        };
+
+        Ok(Some(metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -851,32 +867,21 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredGet::NotFound);
         };
 
-        let needs_bump = row.needs_tti_bump();
-        match row {
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, true).await;
+        }
+
+        Ok(match row {
             RowData::Tombstone { meta, .. } => {
-                if needs_bump {
-                    // TODO: Schedule into background persistently so this doesn't get lost on restarts
-                    let tombstone = Tombstone {
-                        expiration_policy: meta.expiration_policy,
-                    };
-                    let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
-                }
-                Ok(TieredGet::Tombstone(Tombstone {
-                    expiration_policy: meta.expiration_policy,
-                }))
+                let expiration_policy = meta.expiration_policy;
+                TieredGet::Tombstone(Tombstone { expiration_policy })
             }
             RowData::Object { metadata, payload } => {
-                if needs_bump {
-                    // TODO: Schedule into background persistently so this doesn't get lost on restarts
-                    let _ = self
-                        .put_row(path, &metadata, payload.clone(), "tti-bump")
-                        .await;
-                }
                 let mut metadata = metadata;
                 metadata.size = Some(payload.len());
-                Ok(TieredGet::Object(metadata, crate::stream::single(payload)))
+                TieredGet::Object(metadata, crate::stream::single(payload))
             }
-        }
+        })
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -893,35 +898,21 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredMetadata::NotFound);
         };
 
-        let needs_bump = row.needs_tti_bump();
-        match row {
-            RowData::Tombstone { meta, .. } => {
-                if needs_bump {
-                    // Tombstone has no payload — bump without a separate payload read.
-                    let tombstone = Tombstone {
-                        expiration_policy: meta.expiration_policy,
-                    };
-                    let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
-                }
-                Ok(TieredMetadata::Tombstone(Tombstone {
-                    expiration_policy: meta.expiration_policy,
-                }))
-            }
-            RowData::Object { metadata, .. } => {
-                // Conditional TTI bump: read the payload only when a bump is actually needed.
-                if needs_bump {
-                    // TODO: Schedule into background persistently so this doesn't get lost on restarts
-                    // Best-effort — failures here should not fail the metadata read.
-                    let payload_read = self
-                        .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                        .await;
-                    if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
-                        let _ = self.put_row(path, &metadata, payload, "tti-bump").await;
-                    }
-                }
-                Ok(TieredMetadata::Object(metadata))
-            }
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, false).await;
         }
+
+        Ok(match row {
+            RowData::Tombstone { meta, .. } => {
+                let expiration_policy = meta.expiration_policy;
+                TieredMetadata::Tombstone(Tombstone { expiration_policy })
+            }
+            RowData::Object { metadata, payload } => {
+                let mut metadata = metadata;
+                metadata.size = Some(payload.len());
+                TieredMetadata::Object(metadata)
+            }
+        })
     }
 }
 
