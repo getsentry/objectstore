@@ -425,7 +425,7 @@ async fn run_batch_workload(
                     metrics.lock().unwrap().many_requests += 1;
 
                     let batch_start = Instant::now();
-                    let mut results = many.send();
+                    let mut results = many.send().await;
 
                     while let Some(result) = results.next().await {
                         match result {
