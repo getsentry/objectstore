@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use async_stream::stream;
 use futures_util::{Stream, StreamExt as _};
 use multer::Field;
 use objectstore_types::metadata::{Compression, Metadata};
@@ -25,10 +25,15 @@ const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 /// Maximum number of operations to send in a batch request.
-const MAX_BATCH_OPS: usize = 1000;
+const MAX_BATCH_OPS: usize = 999;
 
 /// Maximum amount of bytes to send as a part's body in a batch request.
 const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
+
+/// Operations that are guaranteed to exceed `MAX_BATCH_PART_SIZE` are executed using requests to
+/// the individual object endpoint, rather than the batch endpoint.
+/// This determines the maximum number of such requests that can be executed concurrently.
+const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
 
 // TODO: add limit and logic for whole batch request body size
 
@@ -220,6 +225,26 @@ impl OperationContext {
     }
 }
 
+/// The result of classifying a single operation for batch processing.
+enum Classified {
+    /// The operation can be included in a batch request.
+    Batchable(BatchOperation),
+    /// The operation must be executed as an individual request (e.g., oversized file body).
+    Individual(BatchOperation),
+    /// The operation failed during classification (e.g., file metadata error).
+    Failed(OperationResult),
+}
+
+/// Creates a typed error [`OperationResult`] for the given operation context.
+fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
+    let key = ctx.key().unwrap_or("<unknown>").to_owned();
+    match ctx {
+        OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
+        OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
+        OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+    }
+}
+
 impl OperationResult {
     async fn from_field(
         field: Field<'_>,
@@ -403,7 +428,7 @@ async fn send_batch(
     session: &Session,
     operations: Vec<BatchOperation>,
 ) -> crate::Result<Vec<OperationResult>> {
-    let context_map: HashMap<usize, OperationContext> = operations
+    let mut context_map: HashMap<usize, OperationContext> = operations
         .iter()
         .enumerate()
         .map(|(idx, op)| (idx, OperationContext::from(op)))
@@ -444,15 +469,8 @@ async fn send_batch(
             let error = Error::MalformedResponse(format!(
                 "server did not return a response for operation at index {idx}"
             ));
-            let result = match context_map.get(&idx) {
-                Some(ctx) => {
-                    let key = ctx.key().unwrap_or("<unknown>").to_owned();
-                    match ctx {
-                        OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
-                        OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
-                        OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
-                    }
-                }
+            let result = match context_map.remove(&idx) {
+                Some(ctx) => error_result(ctx, error),
                 None => OperationResult::Error(error),
             };
             results.push(result);
@@ -462,101 +480,174 @@ async fn send_batch(
     Ok(results)
 }
 
+/// Splits a `Vec` into owned chunks of at most `MAX_BATCH_OPS` elements.
+fn into_chunks(items: Vec<BatchOperation>) -> Vec<Vec<BatchOperation>> {
+    let mut chunks = Vec::new();
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        chunks.push(iter.by_ref().take(MAX_BATCH_OPS).collect());
+    }
+    chunks
+}
+
+/// Classifies a single operation for batch processing.
+///
+/// Insert operations whose file body exceeds [`MAX_BATCH_PART_SIZE`] are marked
+/// as [`Classified::Individual`]. Everything else is [`Classified::Batchable`].
+/// No HTTP requests are made — this only inspects file metadata.
+async fn classify(op: BatchOperation) -> Classified {
+    match op {
+        BatchOperation::Insert {
+            key,
+            metadata,
+            body: PutBody::File(file),
+        } => {
+            let meta = match file.metadata().await {
+                Ok(meta) => meta,
+                Err(err) => {
+                    let key = key.unwrap_or_else(|| "<unknown>".to_owned());
+                    return Classified::Failed(OperationResult::Put(key, Err(err.into())));
+                }
+            };
+
+            let op = BatchOperation::Insert {
+                key,
+                metadata,
+                body: PutBody::File(file),
+            };
+            if meta.len() <= MAX_BATCH_PART_SIZE as u64 {
+                Classified::Batchable(op)
+            } else {
+                Classified::Individual(op)
+            }
+        }
+        // TODO: similar handling for other `PutBody` variants
+        other => Classified::Batchable(other),
+    }
+}
+
+/// Classifies all operations, partitioning them into batchable, individual, and failed.
+async fn classify_all(
+    operations: Vec<BatchOperation>,
+) -> (
+    Vec<BatchOperation>,
+    Vec<BatchOperation>,
+    Vec<OperationResult>,
+) {
+    let mut batchable = Vec::new();
+    let mut individual = Vec::new();
+    let mut failed = Vec::new();
+    for op in operations {
+        match classify(op).await {
+            Classified::Batchable(op) => batchable.push(op),
+            Classified::Individual(op) => individual.push(op),
+            Classified::Failed(result) => failed.push(result),
+        }
+    }
+    (batchable, individual, failed)
+}
+
+/// Executes a single operation as an individual (non-batch) request.
+async fn execute_individual(op: BatchOperation, session: &Session) -> OperationResult {
+    match op {
+        BatchOperation::Get {
+            key,
+            decompress,
+            accept_encoding,
+        } => {
+            let get = GetBuilder {
+                session: session.clone(),
+                key: key.clone(),
+                decompress,
+                accept_encoding,
+            };
+            match get.send().await {
+                Ok(response) => OperationResult::Get(key, Ok(response)),
+                Err(err) => OperationResult::Get(key, Err(err)),
+            }
+        }
+        BatchOperation::Insert {
+            key,
+            metadata,
+            body,
+        } => {
+            let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
+            let put = PutBuilder {
+                session: session.clone(),
+                metadata,
+                key,
+                body,
+            };
+            match put.send().await {
+                Ok(response) => OperationResult::Put(response.key.clone(), Ok(response)),
+                Err(err) => OperationResult::Put(error_key, Err(err)),
+            }
+        }
+        BatchOperation::Delete { key } => {
+            let delete = DeleteBuilder {
+                session: session.clone(),
+                key: key.clone(),
+            };
+            match delete.send().await {
+                Ok(()) => OperationResult::Delete(key, Ok(())),
+                Err(err) => OperationResult::Delete(key, Err(err)),
+            }
+        }
+    }
+}
+
+/// Sends a chunk of operations as a single batch request.
+///
+/// On batch-level failure, produces per-operation error results.
+async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Vec<OperationResult> {
+    let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
+    match send_batch(session, operations).await {
+        Ok(results) => results,
+        Err(e) => {
+            let shared = Arc::new(e);
+            contexts
+                .into_iter()
+                .map(|ctx| error_result(ctx, Error::Batch(shared.clone())))
+                .collect()
+        }
+    }
+}
+
 impl ManyBuilder {
     /// Consumes this builder, returning a lazy stream over all the enqueued operations' results.
     ///
     /// The results are not guaranteed to be in the order they were originally enqueued in.
-    pub fn send(self) -> OperationResults {
+    pub async fn send(self) -> OperationResults {
         let session = self.session;
-        let mut operations = self.operations;
 
-        let inner = stream! {
-            while !operations.is_empty() {
-                let mut batch: Vec<BatchOperation> = vec![];
+        // Classify all operations
+        let (batchable, individual, failed) = classify_all(self.operations).await;
+        let chunks = into_chunks(batchable);
 
-                // If the body size would exceed the server-side limit, execute the operation as a
-                // single-object request instead of adding it to the batch.
-                while !operations.is_empty() && batch.len() < MAX_BATCH_OPS {
-                    let operation = operations.pop().unwrap();
-                    match operation {
-                        BatchOperation::Insert {
-                            key,
-                            metadata,
-                            body: PutBody::File(file),
-                        } => {
-                            let meta = match file.metadata().await {
-                                Ok(meta) => meta,
-                                Err(err) => {
-                                    let key = key.unwrap_or_else(|| "<unknown>".to_owned());
-                                    yield OperationResult::Put(key, Err(err.into()));
-                                    continue;
-                                }
-                            };
-
-                            let size = meta.len();
-                            if size <= MAX_BATCH_PART_SIZE as u64 {
-                                batch.push(BatchOperation::Insert {
-                                    key,
-                                    metadata,
-                                    body: PutBody::File(file),
-                                });
-                                continue;
-                            }
-                            let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
-                            let put = PutBuilder {
-                                session: session.clone(),
-                                metadata,
-                                key,
-                                body: PutBody::File(file),
-                            };
-                            let res = put.send().await;
-                            let res = match res {
-                                Ok(ref inner) => OperationResult::Put(inner.key.clone(), res),
-                                Err(err) => OperationResult::Put(error_key, Err(err)),
-                            };
-                            yield res;
-                        }
-                        // TODO: similar handling for other `PutBody` variants
-                        _ => batch.push(operation),
-                    }
+        // Execute individual requests for items that are too large, concurrently
+        let individual_results = futures_util::stream::iter(individual)
+            .map({
+                let session = session.clone();
+                move |op| {
+                    let session = session.clone();
+                    async move { execute_individual(op, &session).await }
                 }
+            })
+            .buffer_unordered(MAX_INDIVIDUAL_CONCURRENCY);
 
-                if batch.is_empty() {
-                    continue;
-                }
+        // Execute remaining chunks as batch requests
+        let batch_results = futures_util::stream::iter(chunks)
+            .then(move |chunk| {
+                let session = session.clone();
+                async move { execute_batch(chunk, &session).await }
+            })
+            .flat_map(futures_util::stream::iter);
 
-                // Extract operation context before send_batch consumes the chunk,
-                // so we can create typed error results if the batch fails.
-                let contexts: Vec<_> =
-                    batch.iter().map(OperationContext::from).collect();
+        let results = futures_util::stream::iter(failed)
+            .chain(individual_results)
+            .chain(batch_results);
 
-                match send_batch(&session, batch).await {
-                    Ok(results) => {
-                        for result in results {
-                            yield result;
-                        }
-                    }
-                    Err(e) => {
-                        let shared = std::sync::Arc::new(e);
-                        for ctx in contexts {
-                            let error = Error::Batch(shared.clone());
-                            let key = ctx.key().unwrap_or("<unknown>").to_owned();
-                            yield match ctx {
-                                OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
-                                OperationContext::Insert { .. } => {
-                                    OperationResult::Put(key, Err(error))
-                                }
-                                OperationContext::Delete { .. } => {
-                                    OperationResult::Delete(key, Err(error))
-                                }
-                            };
-                        }
-                    }
-                }
-            }
-        };
-
-        OperationResults(Box::pin(inner))
+        OperationResults(results.boxed())
     }
 
     /// Enqueues an operation.

@@ -2516,7 +2516,6 @@ name = "objectstore-client"
 version = "0.1.2"
 dependencies = [
  "async-compression",
- "async-stream",
  "bytes",
  "futures-util",
  "infer",
