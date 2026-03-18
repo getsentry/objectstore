@@ -526,6 +526,7 @@ impl Backend for BigTableBackend {
 
         // Conditional TTI bump: read the payload only when a bump is actually needed.
         if row.needs_tti_bump() {
+            // TODO: Schedule into background persistently so this doesn't get lost on restarts
             // Best-effort — failures here should not fail the metadata read.
             if let Ok(Some(payload_row)) = self
                 .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
@@ -712,6 +713,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         // Conditional TTI bump: read the payload only when a bump is actually needed.
         if row.needs_tti_bump() {
+            // TODO: Schedule into background persistently so this doesn't get lost on restarts
             // Best-effort — failures here should not fail the metadata read.
             if let Ok(Some(payload_row)) = self
                 .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
