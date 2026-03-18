@@ -231,7 +231,7 @@ enum Classified {
     Batchable(BatchOperation),
     /// The operation must be executed as an individual request (e.g., oversized file body).
     Individual(BatchOperation),
-    /// The operation failed during classification (e.g., file metadata error).
+    /// An error was encountered during classification.
     Failed(OperationResult),
 }
 
