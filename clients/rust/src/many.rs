@@ -25,7 +25,7 @@ const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 /// Maximum number of operations to send in a batch request.
-const MAX_BATCH_OPS: usize = 999;
+const MAX_BATCH_OPS: usize = 1000;
 
 /// Maximum amount of bytes to send as a part's body in a batch request.
 const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
