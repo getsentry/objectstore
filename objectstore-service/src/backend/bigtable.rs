@@ -1320,6 +1320,10 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Also verifies that the `r = b""` sentinel (empty byte value) is correctly
+    /// detected by both the `ReadRows` column filter and the `CheckAndMutate`
+    /// `tombstone_predicate` — confirming the Bigtable filter treats empty-value cells
+    /// the same as non-empty ones for column-presence checks.
     async fn test_delete_non_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
@@ -1374,8 +1378,48 @@ mod tests {
         Ok(())
     }
 
-    /// Legacy tombstones (written before the `r` column migration) are detected by all read
-    /// paths and conditional predicates.
+    /// Writes a legacy-format tombstone row directly into Bigtable.
+    async fn write_legacy_tombstone(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+        expiration_policy: ExpirationPolicy,
+        time_expires: Option<SystemTime>,
+    ) -> Result<()> {
+        let meta = if expiration_policy.is_manual() {
+            r#"{"is_redirect_tombstone":true}"#.to_owned()
+        } else {
+            let policy_json = serde_json::to_string(&expiration_policy).unwrap();
+            format!(r#"{{"is_redirect_tombstone":true,"expiration_policy":{policy_json}}}"#)
+        };
+
+        let (family, timestamp_micros) = if expiration_policy.is_manual() {
+            (FAMILY_MANUAL, -1)
+        } else {
+            let t =
+                time_expires.unwrap_or(SystemTime::now() + expiration_policy.expires_in().unwrap());
+            let timestamp = t
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            (FAMILY_GC, timestamp as i64 * 1000)
+        };
+
+        backend
+            .mutate(
+                id.as_storage_path().to_string().into_bytes(),
+                [mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_METADATA.to_owned(),
+                    timestamp_micros,
+                    value: meta.into_bytes(),
+                })],
+                "test-setup",
+            )
+            .await?;
+
+        Ok(())
+    }
+
     ///
     /// Uses `Manual` expiration so `timestamp_micros = -1` (server-assigned ≈ write time) does
     /// not trigger immediate expiry.
@@ -1384,20 +1428,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id();
 
-        // The legacy regex predicate requires `is_redirect_tombstone` to be the first JSON field,
-        // so construct the bytes manually (serde_json sorts keys alphabetically).
-        backend
-            .mutate(
-                id.as_storage_path().to_string().into_bytes(),
-                [mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: FAMILY_MANUAL.to_owned(),
-                    column_qualifier: COLUMN_METADATA.to_owned(),
-                    timestamp_micros: -1,
-                    value: b"{\"is_redirect_tombstone\":true}".to_vec(),
-                })],
-                "test-setup",
-            )
-            .await?;
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
             panic!("expected tombstone");
@@ -1432,33 +1463,59 @@ mod tests {
         let id = make_id();
 
         let ttl = Duration::from_secs(2 * 24 * 3600);
-        let secs = ttl.as_secs();
-        let future_micros = (SystemTime::now() + ttl)
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            * 1000;
-        let meta = format!(
-            r#"{{"is_redirect_tombstone":true,"expiration_policy":{{"TimeToLive":{{"secs":{secs},"nanos":0}}}}}}"#
-        );
-
-        backend
-            .mutate(
-                id.as_storage_path().to_string().into_bytes(),
-                [mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: FAMILY_GC.to_owned(),
-                    column_qualifier: COLUMN_METADATA.to_owned(),
-                    timestamp_micros: future_micros,
-                    value: meta.into_bytes(),
-                })],
-                "test-setup",
-            )
-            .await?;
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
             panic!("expected TieredMetadata::Tombstone");
         };
-        assert_eq!(t.expiration_policy, ExpirationPolicy::TimeToLive(ttl),);
+        assert_eq!(t.expiration_policy, ExpirationPolicy::TimeToLive(ttl));
+
+        Ok(())
+    }
+
+    /// A legacy tombstone with TTI policy is upgraded to the new `r`/`t` column format on read.
+    ///
+    /// The bump path in both `get_tiered_metadata` and `get_tiered_object` calls
+    /// `put_tombstone_row`, which rewrites the row with `r` + `t` columns. The upgraded
+    /// row has a fresh cell timestamp (≈ now + TTI), so `time_expires` increases.
+    #[tokio::test]
+    async fn test_legacy_tombstone_tti_upgrade() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        let tti = Duration::from_secs(2 * 24 * 3600); // must exceed TTI_DEBOUNCE (1 day)
+
+        // Place time_expires just inside the bump window: past `now + tti - TTI_DEBOUNCE`
+        // but still in the future so `expires_before(now)` does not filter the row.
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        write_legacy_tombstone(
+            &backend,
+            &id,
+            ExpirationPolicy::TimeToIdle(tti),
+            Some(old_deadline),
+        )
+        .await?;
+
+        // First read detects the stale TTI and triggers `put_tombstone_row`.
+        let TieredMetadata::Tombstone(_) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected tombstone");
+        };
+
+        // After the bump, the row is rewritten with a fresh timestamp (≈ now + TTI).
+        // Verify the new time_expires is later than the pre-bump deadline.
+        let Some(RowData::Tombstone {
+            time_expires: Some(new_deadline),
+            ..
+        }) = backend.read_row(&path, None, "test-verify").await?
+        else {
+            panic!("expected tombstone row after bump");
+        };
+
+        assert!(
+            new_deadline > old_deadline,
+            "TTI bump should have extended the tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
+        );
 
         Ok(())
     }
