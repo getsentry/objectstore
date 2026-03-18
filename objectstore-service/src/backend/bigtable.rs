@@ -876,11 +876,7 @@ impl HighVolumeBackend for BigTableBackend {
                 let expiration_policy = meta.expiration_policy;
                 TieredMetadata::Tombstone(Tombstone { expiration_policy })
             }
-            RowData::Object { metadata, payload } => {
-                let mut metadata = metadata;
-                metadata.size = Some(payload.len());
-                TieredMetadata::Object(metadata)
-            }
+            RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
         })
     }
 }
