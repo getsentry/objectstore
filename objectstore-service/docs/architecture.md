@@ -85,7 +85,8 @@ long-term backend. This allows reads to check only the high-volume backend and
 follow the tombstone to long-term storage, without scanning both backends on
 every read.
 
-How tombstones are physically stored is determined by the [`HighVolumeBackend`]
+How tombstones are physically stored is determined by the
+[`HighVolumeBackend`](crate::backend::common::HighVolumeBackend)
 implementation. Refer to the backend's own documentation for storage format
 details.
 

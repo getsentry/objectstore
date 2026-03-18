@@ -6,12 +6,12 @@
 //! **tombstone** — never both. The two layouts are mutually exclusive and distinguished by
 //! column presence:
 //!
-//! | Column | Family | Content | Present when |
-//! |--------|--------|---------|--------------|
-//! | `p` | `fg`/`fm` | Compressed payload bytes | Object row only |
-//! | `m` | `fg`/`fm` | [`Metadata`] JSON | Object row only |
-//! | `r` | `fg`/`fm` | Redirect sentinel (`b""`) | Tombstone row only |
-//! | `t` | `fg`/`fm` | [`TombstoneMeta`] JSON | Tombstone row only |
+//! | Column | Family    | Content                     | Present when       |
+//! |--------|-----------|-----------------------------|--------------------|
+//! | `p`    | `fg`/`fm` | Compressed payload bytes    | Object row only    |
+//! | `m`    | `fg`/`fm` | [`Metadata`] JSON           | Object row only    |
+//! | `r`    | `fg`/`fm` | Redirect sentinel (`b""`)   | Tombstone row only |
+//! | `t`    | `fg`/`fm` | [`Tombstone`] metadata JSON | Tombstone row only |
 //!
 //! `p`/`m` and `r`/`t` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
