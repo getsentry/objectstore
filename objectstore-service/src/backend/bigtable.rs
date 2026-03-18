@@ -704,51 +704,20 @@ impl Backend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        tracing::debug!("Reading from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        let Some(row) = self.read_row(&path, None, "get").await? else {
-            return Ok(None);
-        };
-
-        if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, true).await;
+        match self.get_tiered_object(id).await? {
+            TieredGet::Object(metadata, payload) => Ok(Some((metadata, payload))),
+            TieredGet::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredGet::NotFound => Ok(None),
         }
-
-        let RowData::Object { metadata, payload } = row else {
-            return Err(Error::UnexpectedTombstone);
-        };
-
-        let mut metadata = metadata;
-        metadata.size = Some(payload.len());
-        let stream = crate::stream::single(payload);
-        Ok(Some((metadata, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        tracing::debug!("Reading metadata from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        // Read metadata columns — skip the (potentially large) payload.
-        // NB: `metadata.size` will not be populated since the payload is not fetched.
-        let row_opt = self
-            .read_row(&path, Some(metadata_filter()), "get_metadata")
-            .await?;
-
-        let Some(row) = row_opt else {
-            return Ok(None);
-        };
-
-        if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, false).await;
+        match self.get_tiered_metadata(id).await? {
+            TieredMetadata::Object(metadata) => Ok(Some(metadata)),
+            TieredMetadata::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredMetadata::NotFound => Ok(None),
         }
-
-        let RowData::Object { metadata, .. } = row else {
-            return Err(Error::UnexpectedTombstone);
-        };
-
-        Ok(Some(metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
