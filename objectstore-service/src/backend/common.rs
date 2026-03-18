@@ -135,7 +135,7 @@ pub trait HighVolumeBackend: Backend {
 
     /// Retrieves an object with explicit tombstone awareness.
     ///
-    /// Returns [`TieredGetResponse::Tombstone`] instead of synthesizing a tombstone
+    /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
     async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet>;
 
