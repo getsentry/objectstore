@@ -235,7 +235,9 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{ConditionalOutcome, HighVolumeBackend};
+    use crate::backend::common::{
+        ConditionalOutcome, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
+    };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -528,6 +530,20 @@ mod tests {
         async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
             self.inner.delete_non_tombstone(id).await
         }
+
+        async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
+            self.inner.create_tombstone(id, tombstone).await?;
+            self.on_put.notify_one();
+            Ok(())
+        }
+
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.inner.get_tiered_object(id).await
+        }
+
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.inner.get_tiered_metadata(id).await
+        }
     }
 
     #[tokio::test]
@@ -567,8 +583,7 @@ mod tests {
         // Verify the object was fully written despite the caller being dropped.
         let id = ObjectId::new(make_context(), "completion-test".into());
         assert!(lt.inner.contains(&id), "long-term object missing");
-        let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
-        assert!(meta.is_tombstone(), "expected redirect tombstone");
+        hv.inner.get(&id).expect_tombstone();
     }
 
     // --- Concurrency limit tests ---
