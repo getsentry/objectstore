@@ -49,7 +49,7 @@ impl InMemoryBackend {
         }
     }
 
-    /// Synchronous version of [`HighVolumeBackend::hv_get_stored`].
+    /// Returns the stored entry for `id`, for direct inspection in tests.
     pub fn get(&self, id: &ObjectId) -> Entry {
         match self.store.lock().unwrap().get(id).cloned() {
             None => Entry::NotFound,
