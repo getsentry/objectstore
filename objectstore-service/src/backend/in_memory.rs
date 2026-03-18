@@ -22,12 +22,12 @@ use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
 #[derive(Clone, Debug)]
-enum InMemoryEntry {
+enum StoreEntry {
     Object(Metadata, Bytes),
     Tombstone(Tombstone),
 }
 
-type Store = HashMap<ObjectId, InMemoryEntry>;
+type Store = HashMap<ObjectId, StoreEntry>;
 
 /// In-memory [`Backend`](super::common::Backend) backed by a `HashMap`.
 ///
@@ -49,22 +49,13 @@ impl InMemoryBackend {
         }
     }
 
-    /// Returns a clone of the stored metadata and bytes, if present.
-    ///
-    /// For tombstone entries, synthesizes a [`Metadata`] with
-    /// `is_redirect_tombstone: Some(true)` and returns empty bytes.
-    pub fn get_stored(&self, id: &ObjectId) -> Option<(Metadata, Bytes)> {
-        self.store.lock().unwrap().get(id).map(|entry| match entry {
-            InMemoryEntry::Object(metadata, bytes) => (metadata.clone(), bytes.clone()),
-            InMemoryEntry::Tombstone(tombstone) => {
-                let metadata = Metadata {
-                    is_redirect_tombstone: Some(true),
-                    expiration_policy: tombstone.expiration_policy,
-                    ..Default::default()
-                };
-                (metadata, Bytes::new())
-            }
-        })
+    /// Synchronous version of [`HighVolumeBackend::hv_get_stored`].
+    pub fn get(&self, id: &ObjectId) -> Entry {
+        match self.store.lock().unwrap().get(id).cloned() {
+            None => Entry::NotFound,
+            Some(StoreEntry::Tombstone(tombstone)) => Entry::Tombstone(tombstone),
+            Some(StoreEntry::Object(metadata, bytes)) => Entry::Object(metadata, bytes),
+        }
     }
 
     /// Returns `true` if the backend contains an entry for the given id.
@@ -100,7 +91,7 @@ impl super::common::Backend for InMemoryBackend {
         let bytes: BytesMut = stream.try_collect().await?;
         self.store.lock().unwrap().insert(
             id.clone(),
-            InMemoryEntry::Object(metadata.clone(), bytes.freeze()),
+            StoreEntry::Object(metadata.clone(), bytes.freeze()),
         );
         Ok(())
     }
@@ -109,8 +100,8 @@ impl super::common::Backend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
-            Some(InMemoryEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
-            Some(InMemoryEntry::Object(mut metadata, bytes)) => {
+            Some(StoreEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
+            Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
                 let stream = crate::stream::single(bytes);
                 Ok(Some((metadata, stream)))
@@ -135,13 +126,13 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         let mut store = self.store.lock().unwrap();
         if store
             .get(id)
-            .is_some_and(|e| matches!(e, InMemoryEntry::Tombstone(_)))
+            .is_some_and(|e| matches!(e, StoreEntry::Tombstone(_)))
         {
             return Ok(ConditionalOutcome::Tombstone);
         }
         let mut metadata = metadata.clone();
         metadata.size = Some(payload.len());
-        store.insert(id.clone(), InMemoryEntry::Object(metadata, payload));
+        store.insert(id.clone(), StoreEntry::Object(metadata, payload));
         Ok(ConditionalOutcome::Executed)
     }
 
@@ -149,7 +140,7 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         let mut store = self.store.lock().unwrap();
         if store
             .get(id)
-            .is_some_and(|e| matches!(e, InMemoryEntry::Tombstone(_)))
+            .is_some_and(|e| matches!(e, StoreEntry::Tombstone(_)))
         {
             return Ok(ConditionalOutcome::Tombstone);
         }
@@ -161,7 +152,7 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         self.store
             .lock()
             .unwrap()
-            .insert(id.clone(), InMemoryEntry::Tombstone(tombstone));
+            .insert(id.clone(), StoreEntry::Tombstone(tombstone));
         Ok(())
     }
 
@@ -169,8 +160,8 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => HvGetResponse::NotFound,
-            Some(InMemoryEntry::Tombstone(tombstone)) => HvGetResponse::Tombstone(tombstone),
-            Some(InMemoryEntry::Object(mut metadata, bytes)) => {
+            Some(StoreEntry::Tombstone(tombstone)) => HvGetResponse::Tombstone(tombstone),
+            Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
                 HvGetResponse::Object(metadata, crate::stream::single(bytes))
             }
@@ -181,8 +172,60 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => HvMetadataResponse::NotFound,
-            Some(InMemoryEntry::Tombstone(tombstone)) => HvMetadataResponse::Tombstone(tombstone),
-            Some(InMemoryEntry::Object(metadata, _bytes)) => HvMetadataResponse::Object(metadata),
+            Some(StoreEntry::Tombstone(tombstone)) => HvMetadataResponse::Tombstone(tombstone),
+            Some(StoreEntry::Object(metadata, _bytes)) => HvMetadataResponse::Object(metadata),
         })
+    }
+}
+
+/// Type returned by [`InMemoryBackend::get`] for direct inspection of stored entries.
+#[derive(Clone, Debug)]
+pub enum Entry {
+    /// No entry exists at this key.
+    NotFound,
+    /// A real object with its metadata and payload bytes.
+    Object(Metadata, Bytes),
+    /// A redirect tombstone indicating the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+}
+
+impl Entry {
+    /// Returns `true` if the entry is [`Entry::NotFound`].
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Entry::NotFound)
+    }
+
+    /// Returns `true` if the entry is [`Entry::Object`].
+    pub fn is_object(&self) -> bool {
+        matches!(self, Entry::Object(_, _))
+    }
+
+    /// Returns `true` if the entry is [`Entry::Tombstone`].
+    pub fn is_tombstone(&self) -> bool {
+        matches!(self, Entry::Tombstone(_))
+    }
+
+    /// Panics unless the entry is [`Entry::NotFound`].
+    pub fn expect_not_found(&self) {
+        match self {
+            Entry::NotFound => (),
+            _ => panic!("expected not found entry, got {:?}", self),
+        }
+    }
+
+    /// Returns the metadata and payload bytes, panicking if the entry is not [`Entry::Object`].
+    pub fn expect_object(&self) -> (Metadata, Bytes) {
+        match self {
+            Entry::Object(metadata, bytes) => (metadata.clone(), bytes.clone()),
+            _ => panic!("expected object entry, got {:?}", self),
+        }
+    }
+
+    /// Returns the tombstone, panicking if the entry is not [`Entry::Tombstone`].
+    pub fn expect_tombstone(&self) -> Tombstone {
+        match self {
+            Entry::Tombstone(tombstone) => tombstone.clone(),
+            _ => panic!("expected tombstone entry, got {:?}", self),
+        }
     }
 }

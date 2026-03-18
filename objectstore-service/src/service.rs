@@ -583,8 +583,7 @@ mod tests {
         // Verify the object was fully written despite the caller being dropped.
         let id = ObjectId::new(make_context(), "completion-test".into());
         assert!(lt.inner.contains(&id), "long-term object missing");
-        let (meta, _) = hv.inner.get_stored(&id).expect("tombstone missing");
-        assert!(meta.is_tombstone(), "expected redirect tombstone");
+        hv.inner.get(&id).expect_tombstone();
     }
 
     // --- Concurrency limit tests ---

@@ -1174,4 +1174,54 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_hv_get_not_found() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        assert!(matches!(
+            backend.hv_get_object(&id).await?,
+            HvGetResponse::NotFound
+        ));
+        assert!(matches!(
+            backend.hv_get_metadata(&id).await?,
+            HvMetadataResponse::NotFound
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_tombstone_round_trip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
+        backend
+            .create_tombstone(&id, Tombstone { expiration_policy })
+            .await?;
+
+        // Both hv methods must surface the tombstone with the correct expiration_policy.
+        let HvMetadataResponse::Tombstone(t) = backend.hv_get_metadata(&id).await? else {
+            panic!("expected HvMetadataResponse::Tombstone");
+        };
+        assert_eq!(t.expiration_policy, expiration_policy);
+        assert!(matches!(
+            backend.hv_get_object(&id).await?,
+            HvGetResponse::Tombstone(_)
+        ));
+
+        // Legacy get_object / get_metadata must error rather than leak tombstone data.
+        assert!(matches!(
+            backend.get_object(&id).await,
+            Err(Error::UnexpectedTombstone)
+        ));
+        assert!(matches!(
+            backend.get_metadata(&id).await,
+            Err(Error::UnexpectedTombstone)
+        ));
+
+        Ok(())
+    }
 }

@@ -431,13 +431,11 @@ mod tests {
             .unwrap();
 
         // Real payload should be in long-term
-        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
+        let (_, lt_bytes) = lt.get(&id).expect_object();
         assert_eq!(lt_bytes.len(), payload_len);
-        assert!(!lt_meta.is_tombstone());
 
         // A redirect tombstone should exist in high-volume
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(hv_meta.is_tombstone());
+        hv.get(&id).expect_tombstone();
     }
 
     #[tokio::test]
@@ -452,8 +450,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(hv_meta.is_tombstone());
+        hv.get(&id).expect_tombstone();
 
         // Now re-insert a SMALL payload with the same key. The service should
         // detect the existing tombstone and route to long-term anyway.
@@ -464,13 +461,11 @@ mod tests {
             .unwrap();
 
         // The small object should be in long-term (not high-volume)
-        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert!(!lt_meta.is_tombstone());
+        let (_, lt_bytes) = lt.get(&id).expect_object();
         assert_eq!(lt_bytes.len(), 100);
 
         // The tombstone in hv should still be present
-        let (hv_meta, _) = hv.get_stored(&id).unwrap();
-        assert!(hv_meta.is_tombstone());
+        hv.get(&id).expect_tombstone();
     }
 
     #[tokio::test]
@@ -491,15 +486,12 @@ mod tests {
             .await
             .unwrap();
 
-        // The tombstone in hv should have ONLY expiration_policy copied
-        let (tombstone, _) = hv.get_stored(&id).unwrap();
-        assert!(tombstone.is_tombstone());
+        // The tombstone in hv should have expiration_policy inherited
+        let tombstone = hv.get(&id).expect_tombstone();
         assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
-        assert_eq!(tombstone.content_type, Metadata::default().content_type);
-        assert!(tombstone.origin.is_none());
 
         // The long-term object should have the full metadata
-        let (lt_meta, _) = lt.get_stored(&id).unwrap();
+        let (lt_meta, _) = lt.get(&id).expect_object();
         assert!(!lt_meta.is_tombstone());
         assert_eq!(lt_meta.content_type, "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
@@ -712,8 +704,7 @@ mod tests {
         let result = storage.delete_object(&id).await;
         assert!(result.is_err());
 
-        let (hv_meta, _) = hv.get_stored(&id).expect("tombstone removed");
-        assert!(hv_meta.is_tombstone());
+        hv.get(&id).expect_tombstone();
 
         // The object should still be reachable through the service
         let (metadata, s) = storage.get_object(&id).await.unwrap().unwrap();
@@ -744,8 +735,7 @@ mod tests {
             .unwrap();
 
         // Should have been routed to long-term (over 1 MiB).
-        let (lt_meta, lt_bytes) = lt.get_stored(&id).unwrap();
-        assert!(!lt_meta.is_tombstone());
+        let (_, lt_bytes) = lt.get(&id).expect_object();
         assert_eq!(lt_bytes.len(), chunk_size * chunk_count);
 
         // Verify data integrity — each chunk's fill byte should appear in order.

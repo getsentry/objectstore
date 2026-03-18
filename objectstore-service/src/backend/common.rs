@@ -14,7 +14,7 @@ use crate::stream::{ClientStream, PayloadStream};
 ///
 /// Currently carries only the `expiration_policy` so the high-volume backend
 /// can GC tombstones when the underlying object expires.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Tombstone {
     /// The expiration policy copied from the original object.
     pub expiration_policy: ExpirationPolicy,
