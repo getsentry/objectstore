@@ -43,8 +43,8 @@ use tonic::Code;
 use bytes::Bytes;
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, TieredGet, TieredMetadata, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
+    TieredGet, TieredMetadata, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -142,6 +142,8 @@ const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"]
 
 /// How often to retry failed requests.
 const REQUEST_RETRY_COUNT: usize = 2;
+/// How many times to retry a CAS mutation before giving up and returning an error.
+const CAS_RETRY_COUNT: usize = 3;
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
@@ -782,7 +784,7 @@ impl HighVolumeBackend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
-    ) -> Result<ConditionalOutcome> {
+    ) -> Result<Option<Tombstone>> {
         tracing::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -791,36 +793,54 @@ impl HighVolumeBackend for BigTableBackend {
             .map(|m| v2::Mutation { mutation: Some(m) })
             .collect();
 
-        // Predicate: tombstone present → true_mutations (no-op), skip write.
-        // Tombstone absent → false_mutations fire the write.
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
-            row_key: path,
+            row_key: path.clone(),
             predicate_filter: Some(tombstone_predicate()),
             true_mutations: vec![], // Tombstone matched → skip write.
             false_mutations,        // No tombstone → write the object.
             ..Default::default()
         };
 
-        let is_tombstone = self
-            .with_retry("put_non_tombstone", || async {
-                self.bigtable
-                    .client()
-                    .check_and_mutate_row(request.clone())
-                    .await
-            })
-            .await?
-            .predicate_matched;
+        for _ in 0..CAS_RETRY_COUNT {
+            let is_tombstone = self
+                .with_retry("put_non_tombstone", || async {
+                    self.bigtable
+                        .client()
+                        .check_and_mutate_row(request.clone())
+                        .await
+                })
+                .await?
+                .predicate_matched;
 
-        if is_tombstone {
-            Ok(ConditionalOutcome::Tombstone)
-        } else {
-            Ok(ConditionalOutcome::Executed)
+            if !is_tombstone {
+                return Ok(None);
+            }
+
+            // A tombstone was present: read its data for the caller.
+            let row = self
+                .read_row(&path, Some(metadata_filter()), "put_non_tombstone")
+                .await?;
+
+            match row {
+                Some(RowData::Tombstone { target, meta, .. }) => {
+                    return Ok(Some(Tombstone {
+                        target: parse_redirect_target(&target, id)?,
+                        expiration_policy: meta.expiration_policy,
+                    }));
+                }
+                // Race: Tombstone was replaced by an object, retry to overwrite
+                Some(RowData::Object { .. }) => continue,
+                // Race: Tombstone was deleted, retry to write.
+                None => continue,
+            }
         }
+
+        Err(Error::generic("BigTable: race loop in put_non_tombstone"))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         tracing::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -830,32 +850,52 @@ impl HighVolumeBackend for BigTableBackend {
             )),
         };
 
-        // Predicate: tombstone present → true_mutations (no-op), leave intact.
-        // Tombstone absent → false_mutations fire the delete.
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
-            row_key: path,
+            row_key: path.clone(),
             predicate_filter: Some(tombstone_predicate()),
-            true_mutations: vec![], // Tombstone matched → leave intact (no mutations).
-            false_mutations: vec![delete_mutation], // Not a tombstone → delete the row.
+            true_mutations: vec![], // Tombstone matched → leave intact.
+            false_mutations: vec![delete_mutation], // No tombstone → delete.
             ..Default::default()
         };
 
-        let is_tombstone = self
-            .with_retry("delete_non_tombstone", || async {
-                self.bigtable
-                    .client()
-                    .check_and_mutate_row(request.clone())
-                    .await
-            })
-            .await?
-            .predicate_matched;
+        for _ in 0..CAS_RETRY_COUNT {
+            let is_tombstone = self
+                .with_retry("delete_non_tombstone", || async {
+                    self.bigtable
+                        .client()
+                        .check_and_mutate_row(request.clone())
+                        .await
+                })
+                .await?
+                .predicate_matched;
 
-        if is_tombstone {
-            Ok(ConditionalOutcome::Tombstone)
-        } else {
-            Ok(ConditionalOutcome::Executed)
+            if !is_tombstone {
+                return Ok(None);
+            }
+
+            // A tombstone was present: read its data for the caller.
+            let row = self
+                .read_row(&path, Some(metadata_filter()), "delete_non_tombstone")
+                .await?;
+
+            match row {
+                Some(RowData::Tombstone { target, meta, .. }) => {
+                    return Ok(Some(Tombstone {
+                        target: parse_redirect_target(&target, id)?,
+                        expiration_policy: meta.expiration_policy,
+                    }));
+                }
+                // Race: An object replaced the tombstone, delete the new object now.
+                Some(RowData::Object { .. }) => continue,
+                // Race: Entry was deleted in the meanwhile, nothing left to do.
+                None => return Ok(None),
+            }
         }
+
+        Err(Error::generic(
+            "BigTable: race loop in delete_non_tombstone",
+        ))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -1308,7 +1348,7 @@ mod tests {
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, ConditionalOutcome::Executed);
+        assert_eq!(result, None);
 
         let get_result = backend.get_object(&id).await?;
         assert!(get_result.is_none());
@@ -1316,27 +1356,25 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
     /// Verifies that the `r` column (now holding the LT storage path, or an empty value
     /// for legacy tombstones) is correctly detected by both the `ReadRows` column filter
     /// and the `CheckAndMutate` `tombstone_predicate` — confirming Bigtable treats
     /// non-empty-value cells as column-present in both filter types.
+    #[tokio::test]
     async fn test_delete_non_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        backend
-            .create_tombstone(
-                &id,
-                Tombstone {
-                    target: id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                },
-            )
-            .await?;
+        let tombstone = Tombstone {
+            target: id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+
+        backend.create_tombstone(&id, tombstone).await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, ConditionalOutcome::Tombstone);
+        let tombstone = result.expect("Some(tombstone)");
+        assert_eq!(tombstone.target, id, "tombstone target must be returned");
 
         // Tombstone should still exist — delete_non_tombstone leaves it intact.
         let get_result = backend.get_tiered_metadata(&id).await?;
@@ -1354,7 +1392,7 @@ mod tests {
 
         let id = make_id();
         let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, ConditionalOutcome::Executed);
+        assert_eq!(result, None);
 
         Ok(())
     }
@@ -1436,16 +1474,14 @@ mod tests {
             backend.get_tiered_object(&id).await?,
             TieredGet::Tombstone(_)
         ));
-        assert_eq!(
-            backend
-                .put_non_tombstone(&id, &Metadata::default(), bytes::Bytes::new())
-                .await?,
-            ConditionalOutcome::Tombstone,
-        );
-        assert_eq!(
-            backend.delete_non_tombstone(&id).await?,
-            ConditionalOutcome::Tombstone,
-        );
+
+        let t_opt = backend
+            .put_non_tombstone(&id, &Metadata::default(), bytes::Bytes::new())
+            .await?;
+        assert_eq!(t_opt.as_ref(), Some(&t));
+
+        let t_opt = backend.delete_non_tombstone(&id).await?;
+        assert_eq!(t_opt, Some(t));
 
         Ok(())
     }
