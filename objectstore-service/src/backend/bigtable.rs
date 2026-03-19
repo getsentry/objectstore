@@ -183,36 +183,6 @@ impl fmt::Debug for BigTableBackend {
     }
 }
 
-fn is_retryable(error: &BigTableError) -> bool {
-    match error {
-        // Transient errors on auth token refresh
-        BigTableError::GCPAuthError(_) => true,
-        // Transient GRPC network failures
-        BigTableError::TransportError(_) => true,
-        // These could also indicate transient network failures
-        BigTableError::IoError(_) => true,
-        BigTableError::TimeoutError(_) => true,
-
-        // See https://docs.cloud.google.com/bigtable/docs/status-codes
-        BigTableError::RpcError(status) => match status.code() {
-            // Generic retriable status
-            Code::Unavailable => true,
-            // Timeouts
-            Code::Cancelled => true,
-            Code::DeadlineExceeded => true,
-            // Token might have refreshed too late
-            Code::Unauthenticated => true,
-            // Unspecified, attempt to retry anyways
-            Code::Aborted => true,
-            Code::Internal => true,
-            Code::FailedPrecondition => true,
-            Code::Unknown => true,
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// Creates a row filter that matches a single column by exact qualifier.
 fn column_filter(column: &[u8]) -> v2::RowFilter {
     v2::RowFilter {
@@ -554,37 +524,6 @@ impl BigTableBackend {
         })
     }
 
-    /// Retries a BigTable RPC on transient errors.
-    async fn with_retry<T, F>(&self, action: &'static str, f: impl Fn() -> F) -> Result<T>
-    where
-        F: Future<Output = Result<T, BigTableError>> + Send,
-    {
-        let mut retry_count = 0usize;
-
-        loop {
-            match f().await {
-                Ok(res) => return Ok(res),
-                Err(e) => {
-                    if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) {
-                        objectstore_metrics::count!("bigtable.failures", action = action);
-                        return Err(Error::Generic {
-                            context: format!("Bigtable: `{action}` failed"),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
-                    retry_count += 1;
-                    objectstore_metrics::count!("bigtable.retries", action = action);
-                    tracing::warn!(
-                        retry_count,
-                        action,
-                        error = &e as &dyn std::error::Error,
-                        "Retrying request"
-                    );
-                }
-            }
-        }
-    }
-
     /// Reads a single row by key, returning parsed row data.
     ///
     /// Returns `None` if the row is absent or has expired.
@@ -605,11 +544,10 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let response = self
-            .with_retry(action, || async {
-                self.bigtable.client().read_rows(request.clone()).await
-            })
-            .await?;
+        let response = retry(action, || async {
+            self.bigtable.client().read_rows(request.clone()).await
+        })
+        .await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((_, cells)) = response.into_iter().next() else {
@@ -645,11 +583,10 @@ impl BigTableBackend {
             ..Default::default()
         };
 
-        let response = self
-            .with_retry(action, || async {
-                self.bigtable.client().mutate_row(request.clone()).await
-            })
-            .await?;
+        let response = retry(action, || async {
+            self.bigtable.client().mutate_row(request.clone()).await
+        })
+        .await?;
 
         Ok(response.into_inner())
     }
@@ -803,15 +740,14 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         for _ in 0..CAS_RETRY_COUNT {
-            let is_tombstone = self
-                .with_retry("put_non_tombstone", || async {
-                    self.bigtable
-                        .client()
-                        .check_and_mutate_row(request.clone())
-                        .await
-                })
-                .await?
-                .predicate_matched;
+            let is_tombstone = retry("put_non_tombstone", || async {
+                self.bigtable
+                    .client()
+                    .check_and_mutate_row(request.clone())
+                    .await
+            })
+            .await?
+            .predicate_matched;
 
             if !is_tombstone {
                 return Ok(None);
@@ -860,15 +796,14 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         for _ in 0..CAS_RETRY_COUNT {
-            let is_tombstone = self
-                .with_retry("delete_non_tombstone", || async {
-                    self.bigtable
-                        .client()
-                        .check_and_mutate_row(request.clone())
-                        .await
-                })
-                .await?
-                .predicate_matched;
+            let is_tombstone = retry("delete_non_tombstone", || async {
+                self.bigtable
+                    .client()
+                    .check_and_mutate_row(request.clone())
+                    .await
+            })
+            .await?
+            .predicate_matched;
 
             if !is_tombstone {
                 return Ok(None);
@@ -996,6 +931,63 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
     let micros = u64::try_from(micros).ok()?;
     let duration = Duration::from_micros(micros);
     SystemTime::UNIX_EPOCH.checked_add(duration)
+}
+
+/// Retries a BigTable RPC on transient errors.
+async fn retry<T, F>(action: &'static str, f: impl Fn() -> F) -> Result<T>
+where
+    F: Future<Output = Result<T, BigTableError>> + Send,
+{
+    let mut retry_count = 0usize;
+
+    loop {
+        match f().await {
+            Ok(res) => return Ok(res),
+            Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
+                objectstore_metrics::count!("bigtable.failures", action = action);
+                return Err(Error::Generic {
+                    context: format!("Bigtable: `{action}` failed"),
+                    cause: Some(Box::new(e)),
+                });
+            }
+            Err(e) => {
+                retry_count += 1;
+                objectstore_metrics::count!("bigtable.retries", action = action);
+                let error = &e as &dyn std::error::Error;
+                tracing::warn!(retry_count, action, error, "Retrying request");
+            }
+        }
+    }
+}
+
+fn is_retryable(error: &BigTableError) -> bool {
+    match error {
+        // Transient errors on auth token refresh
+        BigTableError::GCPAuthError(_) => true,
+        // Transient GRPC network failures
+        BigTableError::TransportError(_) => true,
+        // These could also indicate transient network failures
+        BigTableError::IoError(_) => true,
+        BigTableError::TimeoutError(_) => true,
+
+        // See https://docs.cloud.google.com/bigtable/docs/status-codes
+        BigTableError::RpcError(status) => match status.code() {
+            // Generic retriable status
+            Code::Unavailable => true,
+            // Timeouts
+            Code::Cancelled => true,
+            Code::DeadlineExceeded => true,
+            // Token might have refreshed too late
+            Code::Unauthenticated => true,
+            // Unspecified, attempt to retry anyways
+            Code::Aborted => true,
+            Code::Internal => true,
+            Code::FailedPrecondition => true,
+            Code::Unknown => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 #[cfg(test)]
