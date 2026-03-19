@@ -1,0 +1,23 @@
+clients/rust/src/many.rs
+  3fc544df548afb2d 38-40,522,529-530,534-535,558,582,611-612,614-625,638,640,644
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "0c667fdcf86b8772feb308693efb33cbc5f05bb6",
+  "prompts": {
+    "3fc544df548afb2d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3099e13d-b730-462c-aa46-959b291a5ca5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "lcian <17258265+lcian@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 29,
+      "total_deletions": 26,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  }
+}
