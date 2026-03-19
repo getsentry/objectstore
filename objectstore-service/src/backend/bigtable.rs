@@ -142,6 +142,8 @@ const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"]
 
 /// How often to retry failed requests.
 const REQUEST_RETRY_COUNT: usize = 2;
+/// How many times to retry a CAS mutation before giving up and returning an error.
+const CAS_RETRY_COUNT: usize = 3;
 
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
@@ -800,7 +802,7 @@ impl HighVolumeBackend for BigTableBackend {
             ..Default::default()
         };
 
-        loop {
+        for _ in 0..CAS_RETRY_COUNT {
             let is_tombstone = self
                 .with_retry("put_non_tombstone", || async {
                     self.bigtable
@@ -832,6 +834,8 @@ impl HighVolumeBackend for BigTableBackend {
                 Some(RowData::Object { .. }) | None => continue,
             }
         }
+
+        Err(Error::generic("BigTable: race loop in put_non_tombstone"))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -854,7 +858,7 @@ impl HighVolumeBackend for BigTableBackend {
             ..Default::default()
         };
 
-        loop {
+        for _ in 0..CAS_RETRY_COUNT {
             let is_tombstone = self
                 .with_retry("delete_non_tombstone", || async {
                     self.bigtable
@@ -887,6 +891,10 @@ impl HighVolumeBackend for BigTableBackend {
                 None => return Ok(None),
             }
         }
+
+        Err(Error::generic(
+            "BigTable: race loop in delete_non_tombstone",
+        ))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
