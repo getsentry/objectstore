@@ -37,6 +37,9 @@ use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
 
+/// The fixed path segment that separates scopes from the object key in storage paths.
+const KEY_DELIMITER: &str = "objects";
+
 /// Defines where an object, or batch of objects, belongs within the object store.
 ///
 /// This is part of the full object identifier for single objects, see [`ObjectId`].
@@ -151,7 +154,7 @@ impl ObjectId {
             let (segment, after) = rest.split_once('/')?;
             rest = after;
 
-            if segment == "objects" {
+            if segment == KEY_DELIMITER {
                 break;
             }
 
@@ -228,7 +231,7 @@ impl fmt::Display for AsStoragePath<'_> {
         if !self.inner.context.scopes.is_empty() {
             write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
-        write!(f, "objects/{}", self.inner.key)
+        write!(f, "{}/{}", KEY_DELIMITER, self.inner.key)
     }
 }
 
