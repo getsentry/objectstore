@@ -526,7 +526,7 @@ async fn classify(op: BatchOperation) -> Classified {
 }
 
 /// Classifies all operations, partitioning them into batchable, individual, and failed.
-async fn classify_all(
+async fn partition(
     operations: Vec<BatchOperation>,
 ) -> (
     Vec<BatchOperation>,
@@ -614,7 +614,7 @@ impl ManyBuilder {
         let session = self.session;
 
         // Classify all operations
-        let (batchable, individual, failed) = classify_all(self.operations).await;
+        let (batchable, individual, failed) = partition(self.operations).await;
         let chunks = into_chunks(batchable);
 
         // Execute individual requests for items that are too large, concurrently
