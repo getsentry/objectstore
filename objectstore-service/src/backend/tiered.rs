@@ -2,7 +2,68 @@
 //!
 //! [`TieredStorage`] routes objects to a high-volume or long-term backend based
 //! on size and maintains redirect tombstones so that reads never need to probe
-//! both backends. See the [crate-level documentation](crate) for details.
+//! both backends. See the [crate-level documentation](crate) for the high-level
+//! motivation, and the [`TieredStorage`] struct docs for routing and tombstone
+//! semantics.
+//!
+//! # Cross-Tier Consistency
+//!
+//! A single logical object may span both backends: a tombstone in HV pointing
+//! to a payload in LT. Mutations keep the two in sync through compare-and-swap
+//! on the high-volume backend (see [`HighVolumeBackend::compare_and_write`]).
+//! Each operation reads the current HV revision, performs its work, then
+//! atomically swaps the HV entry only if the revision is still current —
+//! rolling back on conflict.
+//!
+//! ## Revision Keys
+//!
+//! Every large-object write stores its payload at a **revision key** in the
+//! long-term backend: `{original_key}/{uuid}`. The UUID suffix is random (no
+//! monotonicity is guaranteed), so each write targets a distinct LT path
+//! regardless of whether another write to the same logical key is in progress.
+//! The tombstone in HV then points to this specific revision. Because each
+//! writer owns its own LT blob, the compare-and-swap on the tombstone becomes
+//! an atomic pointer swap: the winner's revision is committed and the loser
+//! can safely delete its own blob without affecting the winner.
+//!
+//! See `new_long_term_revision` for the key construction.
+//!
+//! ## Large-Object Write (> 1 MiB)
+//!
+//! 1. **Read HV** to capture the current revision (existing tombstone target,
+//!    or absent).
+//! 2. **Write payload to LT** at a unique revision key.
+//! 3. **Compare-and-swap in HV**: write a tombstone pointing to the new
+//!    revision, only if the current revision still matches step 1.
+//!    - **OK** — delete the old LT blob, if any (best-effort).
+//!    - **Conflict** — another writer won the race; delete our new LT blob.
+//!    - **Error** — delete our new LT blob, then propagate the error.
+//!
+//! ## Small-Object Write (≤ 1 MiB)
+//!
+//! 1. **Write inline to HV**, skipping the write if a tombstone is present.
+//!    - **OK** — done; the object is stored entirely in HV.
+//!    - **Tombstone present** — a large object already occupies this key;
+//!      continue:
+//! 2. **Compare-and-swap in HV**: replace the tombstone with inline data, only
+//!    if the tombstone's revision still matches.
+//!    - **OK** — delete the old LT blob (best-effort).
+//!    - **Conflict** — another writer won the race; they will clean up the
+//!      LT blob and we have no new LT blob to clean up.
+//!
+//! ## Delete
+//!
+//! 1. **Delete from HV** if the entry is not a tombstone.
+//!    - **OK** — done; there is no LT data to clean up.
+//!    - **Tombstone present** — a large object is stored here; continue:
+//! 2. **Compare-and-swap in HV**: remove the tombstone, only if its revision
+//!    still matches.
+//!    - **OK** — delete the LT blob (best-effort).
+//!    - **Conflict** — another writer won the race; they will clean up.
+//!
+//! Tombstone removal is the commit point for deletes. If the subsequent LT
+//! cleanup fails, an orphan blob remains but the object is already unreachable
+//! through the normal read path.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -78,35 +139,36 @@ pub struct TieredStorageConfig {
 ///
 /// Objects are routed at write time based on their size relative to a **1 MiB threshold**:
 ///
-/// - Objects **≤ 1 MiB** go to the `high_volume_backend` — optimized for low-latency reads
+/// - Objects **≤ 1 MiB** go to the `high_volume` backend — optimized for low-latency reads
 ///   and writes of small objects (e.g. BigTable).
-/// - Objects **> 1 MiB** go to the `long_term_backend` — optimized for cost-efficient
+/// - Objects **> 1 MiB** go to the `long_term` backend — optimized for cost-efficient
 ///   storage of large objects (e.g. GCS).
 ///
 /// # Redirect Tombstones
 ///
-/// Because the [`ObjectId`] is backend-independent, reads must be able to find an object without
-/// knowing which backend stores it. A naive approach would check the long-term backend on every
-/// read miss in the high-volume backend — but that is slow and expensive.
+/// Because the [`ObjectId`] is backend-independent, reads must be able to find an object
+/// without knowing which backend stores it. A naive approach would check the long-term
+/// backend on every read miss in the high-volume backend — but that is slow and expensive.
 ///
 /// Instead, when an object is stored in the long-term backend, a **redirect tombstone** is
 /// written in the high-volume backend. It acts as a signpost: "the real data lives in the
-/// other backend." How tombstones are physically stored is determined by the
-/// [`HighVolumeBackend`] implementation — refer to the backend's own documentation for
-/// storage format details.
+/// other backend at this target." On reads, a single high-volume lookup either returns the
+/// object directly or follows the tombstone to long-term storage, without probing both
+/// backends.
 ///
-/// # Consistency Without Locks
+/// How tombstones are physically stored is determined by the [`HighVolumeBackend`]
+/// implementation — refer to the backend's own documentation for storage format details.
 ///
-/// The tombstone system maintains consistency through operation ordering rather than
-/// distributed locks. The invariant is: a redirect tombstone is always the **last thing
-/// written** and the **last thing removed**.
+/// # Consistency
 ///
-/// - On **write**, the real object is persisted before the tombstone. If the tombstone write
-///   fails, the real object is rolled back.
-/// - On **delete**, the real object is removed before the tombstone. If the long-term delete
-///   fails, the tombstone remains and the data stays reachable.
+/// Consistency across the two backends is maintained through compare-and-swap
+/// operations on the high-volume backend (see
+/// [`HighVolumeBackend::compare_and_write`]), not distributed locks. Each
+/// mutating operation reads the current high-volume revision, performs its
+/// work, and then atomically swaps the high-volume entry only if the revision
+/// is still current — rolling back on conflict.
 ///
-/// See the individual methods for per-operation tombstone behavior.
+/// See the [module-level documentation](self) for per-operation diagrams.
 ///
 /// # Usage
 ///

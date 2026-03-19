@@ -55,18 +55,16 @@ panic-isolated — a failure in one request does not bring down the service.
 
 [`TieredStorage`](backend::tiered::TieredStorage) is the
 [`Backend`](backend::common::Backend) implementation that provides the two-tier
-system. Passing it to [`StorageService::new`] enables the two-tier
-configuration. This split exists because no single storage system optimally
-handles both small, frequently-accessed objects and large, infrequently-accessed
-ones:
+system. It is the typical backend passed to [`StorageService::new`], though any
+`Backend` implementation can be used. The two-tier split exists because no
+single storage system optimally handles both small, frequently-accessed objects
+and large, infrequently-accessed ones:
 
 - **High-volume backend** (typically
   [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
-  and writes of small objects. Must implement
-  [`HighVolumeBackend`](backend::common::HighVolumeBackend), which adds atomic
-  operations used by `TieredStorage` to maintain consistency of redirects.
-  Objects in practice are small (metadata blobs, event attachments, etc.), so
-  this path handles the majority of traffic by volume.
+  and writes of small objects. Objects in practice are small (metadata blobs,
+  event attachments, etc.), so this path handles the majority of traffic by
+  volume.
 - **Long-term backend** (typically [GCS](backend::StorageConfig::Gcs)):
   optimized for large objects and long retention periods where per-byte storage
   cost matters more than access latency.
@@ -80,15 +78,28 @@ See [`backend::StorageConfig`] for available backend implementations.
 ## Redirect Tombstones
 
 For large objects, `TieredStorage` stores a **redirect tombstone** in the
-high-volume backend — a marker that signals the real payload lives on the
-long-term backend. This allows reads to check only the high-volume backend and
-follow the tombstone to long-term storage, without scanning both backends on
-every read.
+high-volume backend — a marker that carries the target `ObjectId` where the real
+payload lives in the long-term backend. Reads check only the high-volume
+backend: they either find the object directly (small) or follow the tombstone's
+target to long-term storage (large), without probing both backends.
 
 How tombstones are physically stored is determined by the
 [`HighVolumeBackend`](crate::backend::common::HighVolumeBackend)
 implementation. Refer to the backend's own documentation for storage format
 details.
+
+## Cross-Tier Consistency
+
+Because a single logical object may span both backends (tombstone in HV, payload
+in LT), mutations must keep them in sync without distributed locks. The
+high-volume backend must implement
+[`HighVolumeBackend`](backend::common::HighVolumeBackend), which provides
+compare-and-swap operations that `TieredStorage` uses to atomically commit
+cross-tier state changes — rolling back on conflict so that concurrent writers
+never corrupt each other's data.
+
+See the [`backend::tiered`] module documentation for the per-operation
+sequences.
 
 # Metadata and Payload
 
