@@ -480,16 +480,6 @@ async fn send_batch(
     Ok(results)
 }
 
-/// Splits a `Vec` into owned chunks of at most `MAX_BATCH_OPS` elements.
-fn into_chunks(items: Vec<BatchOperation>) -> Vec<Vec<BatchOperation>> {
-    let mut chunks = Vec::new();
-    let mut iter = items.into_iter().peekable();
-    while iter.peek().is_some() {
-        chunks.push(iter.by_ref().take(MAX_BATCH_OPS).collect());
-    }
-    chunks
-}
-
 /// Classifies a single operation for batch processing.
 ///
 /// Insert operations whose file body exceeds [`MAX_BATCH_PART_SIZE`] are marked
@@ -618,7 +608,6 @@ impl ManyBuilder {
 
         // Classify all operations
         let (batchable, individual, failed) = partition(self.operations).await;
-        let chunks = into_chunks(batchable);
 
         // Execute individual requests for items that are too large, concurrently
         let individual_results = futures_util::stream::iter(individual)
@@ -631,13 +620,20 @@ impl ManyBuilder {
             })
             .buffer_unordered(MAX_INDIVIDUAL_CONCURRENCY);
 
-        // Execute remaining chunks as batch requests
-        let batch_results = futures_util::stream::iter(chunks)
-            .then(move |chunk| {
-                let session = session.clone();
-                async move { execute_batch(chunk, &session).await }
-            })
-            .flat_map(futures_util::stream::iter);
+        // Lazily chunk batchable operations and execute as batch requests
+        let batch_results = futures_util::stream::unfold(batchable, |mut remaining| async {
+            if remaining.is_empty() {
+                return None;
+            }
+            let at = remaining.len().min(MAX_BATCH_OPS);
+            let chunk: Vec<_> = remaining.drain(..at).collect();
+            Some((chunk, remaining))
+        })
+        .then(move |chunk| {
+            let session = session.clone();
+            async move { execute_batch(chunk, &session).await }
+        })
+        .flat_map(futures_util::stream::iter);
 
         let results = futures_util::stream::iter(failed)
             .chain(individual_results)
