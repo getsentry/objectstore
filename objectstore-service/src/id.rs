@@ -134,7 +134,7 @@ impl ObjectId {
         }
     }
 
-    /// Parses an `ObjectId` from a storage path produced by [`as_storage_path`].
+    /// Parses an `ObjectId` from a storage path produced by [`ObjectId::as_storage_path`].
     ///
     /// Returns `None` if the path is not a valid storage path. The inverse of
     /// `as_storage_path().to_string()`: parsing that string back must yield an
