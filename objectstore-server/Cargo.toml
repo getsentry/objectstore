@@ -43,6 +43,7 @@ sentry = { workspace = true, features = [
 ] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
+serde_ignored = "0.1.14"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

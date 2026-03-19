@@ -101,6 +101,9 @@ this precedence (highest wins):
 3. **Defaults** — sensible development defaults (local filesystem backend,
    auth disabled)
 
+Unknown merged config keys are ignored and logged as startup warnings after
+tracing initialization completes.
+
 Key configuration sections:
 - `storage` — backend type and connection parameters; use `type: tiered` for
   two-tier routing with `high_volume` and `long_term` sub-backends

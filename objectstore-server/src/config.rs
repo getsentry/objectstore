@@ -49,6 +49,7 @@ use tracing::level_filters::LevelFilter;
 pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
+use crate::observability;
 use crate::rate_limits::RateLimits;
 
 /// Environment variable prefix for all configuration options.
@@ -729,26 +730,31 @@ impl Config {
         if let Some(path) = path {
             figment = figment.merge(Yaml::file(path));
         }
-        let config = figment
-            .merge(Env::prefixed(ENV_PREFIX).split("__"))
-            .extract()?;
+        let figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
+        let config = figment.extract()?;
+
+        let value: figment::value::Value = figment.extract()?;
+        serde_ignored::deserialize::<_, _, Self>(&value, |unknown_path| {
+            observability::log_or_buffer(
+                tracing::Level::WARN,
+                format!("Ignoring unknown config key `{unknown_path}`"),
+            );
+        })?;
 
         Ok(config)
     }
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::result_large_err,
-    reason = "figment::Error is inherently large"
-)]
 mod tests {
     use std::io::Write;
 
     use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
+    use tracing::Level;
 
     use crate::killswitches::Killswitch;
+    use crate::observability::{TEST_LOG_STATE_LOCK, buffered_logs, reset_buffered_logs};
     use crate::rate_limits::{BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule};
 
     use super::*;
@@ -1155,6 +1161,103 @@ mod tests {
 
             let config = Config::load(Some(tempfile.path())).unwrap();
             assert_eq!(config.rate_limits, expected);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_yaml_key_buffers_warning() {
+        let _guard = TEST_LOG_STATE_LOCK.lock().unwrap();
+        reset_buffered_logs();
+
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                http_addr: 127.0.0.1:9001
+                http:
+                    max_requests: 123
+                    typo: ignored
+                logging:
+                    level: debug
+                    invalid: true
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            assert_eq!(config.http_addr, "127.0.0.1:9001".parse().unwrap());
+            assert_eq!(config.http.max_requests, 123);
+            assert_eq!(config.logging.level, LevelFilter::DEBUG);
+
+            assert_eq!(
+                buffered_logs(),
+                vec![
+                    (
+                        Level::WARN,
+                        "Ignoring unknown config key `http.typo`".to_string(),
+                    ),
+                    (
+                        Level::WARN,
+                        "Ignoring unknown config key `logging.invalid`".to_string(),
+                    ),
+                ]
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_env_key_buffers_warning() {
+        let _guard = TEST_LOG_STATE_LOCK.lock().unwrap();
+        reset_buffered_logs();
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__HTTP_ADDR", "127.0.0.1:9010");
+            jail.set_env("OS__HTTP__MAX_REQUESTS", "321");
+            jail.set_env("OS__HTTP__UNKNOWN_KEY", "1");
+            jail.set_env("OS__LOGGING__LEVEL", "debug");
+            jail.set_env("OS__LOGGING__UNKNOWN_KEY", "2");
+
+            let config = Config::load(None).unwrap();
+
+            assert_eq!(config.http_addr, "127.0.0.1:9010".parse().unwrap());
+            assert_eq!(config.http.max_requests, 321);
+            assert_eq!(config.logging.level, LevelFilter::DEBUG);
+
+            assert_eq!(
+                buffered_logs(),
+                vec![
+                    (
+                        Level::WARN,
+                        "Ignoring unknown config key `http.unknown_key`".to_string(),
+                    ),
+                    (
+                        Level::WARN,
+                        "Ignoring unknown config key `logging.unknown_key`".to_string(),
+                    ),
+                ]
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn known_keys_do_not_buffer_warnings() {
+        let _guard = TEST_LOG_STATE_LOCK.lock().unwrap();
+        reset_buffered_logs();
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__HTTP__MAX_REQUESTS", "123");
+
+            Config::load(None).unwrap();
+
+            assert!(buffered_logs().is_empty());
 
             Ok(())
         });

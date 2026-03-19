@@ -4,6 +4,9 @@
 //! Sentry must be initialized before the Tokio runtime is created so it can
 //! instrument async tasks from the start.
 
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
 use secrecy::ExposeSecret;
 use sentry::integrations::tracing as sentry_tracing;
 use tracing::Level;
@@ -14,6 +17,37 @@ use crate::config::{Config, LogFormat};
 
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BufferedLog {
+    level: Level,
+    message: String,
+}
+
+#[derive(Debug, Default)]
+struct BufferedLogsState {
+    tracing_ready: bool,
+    logs: VecDeque<BufferedLog>,
+}
+
+static BUFFERED_LOGS_STATE: OnceLock<Mutex<BufferedLogsState>> = OnceLock::new();
+
+fn get_buffered_logs_state() -> std::sync::MutexGuard<'static, BufferedLogsState> {
+    BUFFERED_LOGS_STATE
+        .get_or_init(|| Mutex::new(BufferedLogsState::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn emit_log(level: Level, message: &str) {
+    match level {
+        Level::ERROR => tracing::error!("{message}"),
+        Level::WARN => tracing::warn!("{message}"),
+        Level::INFO => tracing::info!("{message}"),
+        Level::DEBUG => tracing::debug!("{message}"),
+        Level::TRACE => tracing::trace!("{message}"),
+    }
+}
 
 /// Initializes the Sentry error-reporting client, if a DSN is configured.
 ///
@@ -111,6 +145,42 @@ pub fn init_tracing(config: &Config) {
         .with(sentry_layer)
         .with(env_filter)
         .init();
+
+    flush_buffered_logs();
+}
+
+/// Emits a log through tracing when ready, or buffers it until tracing is initialized.
+pub fn log_or_buffer(level: Level, message: impl Into<String>) {
+    let buffered_log = BufferedLog {
+        level,
+        message: message.into(),
+    };
+
+    let ready = {
+        let mut state = get_buffered_logs_state();
+        if state.tracing_ready {
+            true
+        } else {
+            state.logs.push_back(buffered_log.clone());
+            false
+        }
+    };
+
+    if ready {
+        emit_log(buffered_log.level, &buffered_log.message);
+    }
+}
+
+fn flush_buffered_logs() {
+    let buffered_logs = {
+        let mut state = get_buffered_logs_state();
+        state.tracing_ready = true;
+        state.logs.drain(..).collect::<Vec<_>>()
+    };
+
+    for log in buffered_logs {
+        emit_log(log.level, &log.message);
+    }
 }
 
 /// Logs an error to the configured logger or `stderr` if not yet configured.
@@ -122,4 +192,22 @@ pub fn ensure_log_error(error: &anyhow::Error) {
     } else {
         eprintln!("{error:?}");
     }
+}
+
+#[cfg(test)]
+pub(crate) static TEST_LOG_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn reset_buffered_logs() {
+    let mut state = get_buffered_logs_state();
+    *state = BufferedLogsState::default();
+}
+
+#[cfg(test)]
+pub(crate) fn buffered_logs() -> Vec<(Level, String)> {
+    get_buffered_logs_state()
+        .logs
+        .iter()
+        .map(|log| (log.level, log.message.clone()))
+        .collect()
 }
