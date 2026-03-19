@@ -35,6 +35,9 @@ const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 /// This determines the maximum number of such requests that can be executed concurrently.
 const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
 
+/// Maximum number of batch chunks to execute concurrently.
+const MAX_BATCH_CONCURRENCY: usize = 5;
+
 // TODO: add limit and logic for whole batch request body size
 
 /// A builder that can be used to enqueue multiple operations.
@@ -620,7 +623,7 @@ impl ManyBuilder {
             })
             .buffer_unordered(MAX_INDIVIDUAL_CONCURRENCY);
 
-        // Lazily chunk batchable operations and execute as batch requests
+        // Lazily chunk batchable operations and execute as batch requests, concurrently
         let batch_results = futures_util::stream::unfold(batchable, |mut remaining| async {
             if remaining.is_empty() {
                 return None;
@@ -629,10 +632,11 @@ impl ManyBuilder {
             let chunk: Vec<_> = remaining.drain(..at).collect();
             Some((chunk, remaining))
         })
-        .then(move |chunk| {
+        .map(move |chunk| {
             let session = session.clone();
             async move { execute_batch(chunk, &session).await }
         })
+        .buffered(MAX_BATCH_CONCURRENCY)
         .flat_map(futures_util::stream::iter);
 
         let results = futures_util::stream::iter(failed)
