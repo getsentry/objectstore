@@ -478,8 +478,6 @@ where
 mod tests {
     use std::time::Duration;
 
-    use bytes::BytesMut;
-    use futures_util::TryStreamExt;
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
@@ -487,20 +485,31 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::error::Error;
     use crate::id::ObjectContext;
-    use crate::stream::{self};
+    use crate::stream;
 
-    // --- revision_id tests ---
+    fn make_context() -> ObjectContext {
+        ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        }
+    }
+
+    fn make_id(key: &str) -> ObjectId {
+        ObjectId::new(make_context(), key.into())
+    }
+
+    fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
+        let hv = InMemoryBackend::new("in-memory-hv");
+        let lt = InMemoryBackend::new("in-memory-lt");
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
+        (storage, hv, lt)
+    }
+
+    // --- new_long_term_revision tests ---
 
     #[test]
     fn revision_id_preserves_context() {
-        let id = ObjectId {
-            context: ObjectContext {
-                usecase: "testing".to_string(),
-                scopes: Scopes::from_iter([Scope::create("org", "17").unwrap()]),
-            },
-            key: "my-key".to_string(),
-        };
-
+        let id = make_id("my-key");
         let revised = new_long_term_revision(&id);
         assert_eq!(revised.context, id.context);
         assert!(
@@ -512,15 +521,7 @@ mod tests {
 
     #[test]
     fn revision_id_roundtrips_storage_path() {
-        use crate::id::ObjectId;
-        let id = ObjectId {
-            context: ObjectContext {
-                usecase: "attachments".to_string(),
-                scopes: Scopes::from_iter([Scope::create("org", "42").unwrap()]),
-            },
-            key: "original".to_string(),
-        };
-
+        let id = make_id("original");
         let revised = new_long_term_revision(&id);
         let path = revised.as_storage_path().to_string();
         let parsed = ObjectId::from_storage_path(&path)
@@ -530,31 +531,10 @@ mod tests {
 
     #[test]
     fn revision_id_is_unique() {
-        let id = ObjectId {
-            context: ObjectContext {
-                usecase: "testing".to_string(),
-                scopes: Scopes::empty(),
-            },
-            key: "base-key".to_string(),
-        };
-
+        let id = make_id("base-key");
         let a = new_long_term_revision(&id);
         let b = new_long_term_revision(&id);
         assert_ne!(a.key, b.key, "two calls should produce different keys");
-    }
-
-    fn make_context() -> ObjectContext {
-        ObjectContext {
-            usecase: "testing".into(),
-            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
-        }
-    }
-
-    fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
-        let hv = InMemoryBackend::new("in-memory-hv");
-        let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
-        (storage, hv, lt)
     }
 
     // --- Basic behavior ---
@@ -562,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn get_nonexistent_returns_none() {
         let (storage, _hv, _lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "does-not-exist".into());
+        let id = make_id("does-not-exist");
 
         assert!(storage.get_object(&id).await.unwrap().is_none());
         assert!(storage.get_metadata(&id).await.unwrap().is_none());
@@ -571,72 +551,85 @@ mod tests {
     #[tokio::test]
     async fn delete_nonexistent_succeeds() {
         let (storage, _hv, _lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "does-not-exist".into());
+        let id = make_id("does-not-exist");
 
         storage.delete_object(&id).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn put_and_get_roundtrip() {
-        let (storage, _hv, _lt) = make_tiered_storage();
-        let id = ObjectId::random(make_context());
-
-        storage
-            .put_object(&id, &Default::default(), stream::single("auto-keyed"))
-            .await
-            .unwrap();
-
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
-        let body: BytesMut = s.try_collect().await.unwrap();
-        assert_eq!(body.as_ref(), b"auto-keyed");
-    }
-
-    // --- Size-based routing tests ---
+    // --- Put routing ---
 
     #[tokio::test]
-    async fn small_object_goes_to_high_volume() {
+    async fn put_small_object_stores_inline() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload = vec![0u8; 100]; // 100 bytes, well under 1 MiB
-        let id = ObjectId::new(make_context(), "small".into());
+        let id = make_id("small");
+        let payload = b"small payload".to_vec();
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Default::default(), stream::single(payload.clone()))
             .await
             .unwrap();
 
         assert!(hv.contains(&id), "expected in high-volume");
         assert!(!lt.contains(&id), "leaked to long-term");
+
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+
+        assert!(
+            storage.get_metadata(&id).await.unwrap().is_some(),
+            "get_metadata should return metadata for inline objects"
+        );
     }
 
     #[tokio::test]
-    async fn large_object_goes_to_long_term_with_tombstone() {
+    async fn put_large_object_creates_tombstone() {
         let (storage, hv, lt) = make_tiered_storage();
-        let payload_len = 2 * 1024 * 1024; // 2 MiB, over threshold
-        let payload = vec![0xABu8; payload_len];
-        let id = ObjectId::new(make_context(), "large".into());
+        let id = make_id("large");
+        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
+        let metadata_in = Metadata {
+            content_type: "image/png".into(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            origin: Some("10.0.0.1".into()),
+            ..Default::default()
+        };
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &metadata_in, stream::single(payload.clone()))
             .await
             .unwrap();
 
-        // A redirect tombstone should exist in high-volume pointing to a revision key.
+        // Tombstone in HV: correct expiration_policy, target is a revision key.
         let tombstone = hv.get(&id).expect_tombstone();
+        assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
         let lt_id = tombstone.target;
         assert!(
             lt_id.key().starts_with(id.key()),
-            "tombstone target key should be a revision of the HV key"
+            "tombstone target key should be a revision of the HV key, got: {}",
+            lt_id.key()
         );
 
-        // Real payload should be in long-term at the revision key.
-        let (_, lt_bytes) = lt.get(&lt_id).expect_object();
-        assert_eq!(lt_bytes.len(), payload_len);
+        // LT object at revision key with correct metadata.
+        let (lt_meta, _) = lt.get(&lt_id).expect_object();
+        assert_eq!(lt_meta.content_type, "image/png");
+        assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
+
+        // get_object follows the tombstone and returns the correct payload.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+
+        // get_metadata follows the tombstone and returns the correct content_type.
+        let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
+        assert_eq!(metadata.content_type, "image/png");
     }
+
+    // --- Put overwrites ---
 
     #[tokio::test]
     async fn reinsert_small_over_large_swaps_to_inline() {
         let (storage, hv, lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "reinsert-key".into());
+        let id = make_id("reinsert-key");
 
         // First: insert a large object → creates tombstone in hv, payload in lt at lt_id
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
@@ -663,192 +656,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tombstone_inherits_expiration_policy() {
+    async fn overwrite_large_with_large_replaces_revision() {
         let (storage, hv, lt) = make_tiered_storage();
+        let id = make_id("overwrite-large");
 
-        let metadata_in = Metadata {
-            content_type: "image/png".into(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
-            origin: Some("10.0.0.1".into()),
-            ..Default::default()
-        };
-        let payload = vec![0u8; 2 * 1024 * 1024]; // force long-term
-        let id = ObjectId::new(make_context(), "expiry-test".into());
-
+        let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &metadata_in, stream::single(payload))
+            .put_object(&id, &Default::default(), stream::single(payload1))
             .await
             .unwrap();
+        let lt_id_1 = hv.get(&id).expect_tombstone().target;
 
-        // The tombstone in hv should have expiration_policy inherited.
-        // The target is a unique revision key, not `id` itself.
-        let tombstone = hv.get(&id).expect_tombstone();
-        assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
-        let lt_id = tombstone.target.clone();
+        let payload2 = vec![0xBBu8; 2 * 1024 * 1024];
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload2.clone()))
+            .await
+            .unwrap();
+        let lt_id_2 = hv.get(&id).expect_tombstone().target;
+
         assert_ne!(
-            lt_id, id,
-            "tombstone target must be a unique revision, not the HV id"
+            lt_id_1, lt_id_2,
+            "second write should create a new revision"
         );
-        assert!(
-            lt_id.key().starts_with(id.key()),
-            "revision key should have original key as prefix"
-        );
+        lt.get(&lt_id_1).expect_not_found();
+        lt.get(&lt_id_2).expect_object();
 
-        // The long-term object should be at the revision key with the full metadata.
-        let (lt_meta, _) = lt.get(&lt_id).expect_object();
-        assert_eq!(lt_meta.content_type, "image/png");
-        assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
-    }
-
-    // --- Tombstone redirect tests ---
-
-    #[tokio::test]
-    async fn reads_follow_tombstone_redirect() {
-        let (storage, _hv, _lt) = make_tiered_storage();
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
-
-        let metadata_in = Metadata {
-            content_type: "image/png".into(),
-            ..Default::default()
-        };
-        let id = ObjectId::new(make_context(), "redirect-read".into());
-
-        storage
-            .put_object(&id, &metadata_in, stream::single(payload.clone()))
-            .await
-            .unwrap();
-
-        // get_object should transparently follow the tombstone
         let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
-        assert_eq!(body, payload);
-
-        // get_metadata should also follow the tombstone
-        let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
-        assert_eq!(metadata.content_type, "image/png");
+        assert_eq!(body, payload2);
     }
 
-    // --- Tombstone inconsistency tests ---
+    // --- Delete ---
 
-    /// A backend where `cas_put` always fails, but all other operations work normally.
-    #[derive(Debug)]
-    struct FailingTombstoneBackend(InMemoryBackend);
-
-    #[async_trait::async_trait]
-    impl Backend for FailingTombstoneBackend {
-        fn name(&self) -> &'static str {
-            "failing-tombstone"
-        }
-
-        async fn put_object(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            stream: ClientStream,
-        ) -> Result<PutResponse> {
-            self.0.put_object(id, metadata, stream).await
-        }
-
-        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-            self.0.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-            self.0.delete_object(id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl HighVolumeBackend for FailingTombstoneBackend {
-        async fn put_non_tombstone(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: bytes::Bytes,
-        ) -> Result<Option<Tombstone>> {
-            self.0.put_non_tombstone(id, metadata, payload).await
-        }
-
-        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-            self.0.get_tiered_object(id).await
-        }
-
-        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-            self.0.get_tiered_metadata(id).await
-        }
-
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.0.delete_non_tombstone(id).await
-        }
-
-        async fn compare_and_write(
-            &self,
-            _id: &ObjectId,
-            _current: Option<&ObjectId>,
-            _write: TieredWrite,
-        ) -> Result<bool> {
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "simulated tombstone write failure",
-            )))
-        }
-    }
-
-    /// If the tombstone write to the high-volume backend fails after the long-term
-    /// write succeeds, the long-term object must be cleaned up so we never leave
-    /// an unreachable orphan in long-term storage.
     #[tokio::test]
-    async fn no_orphan_when_tombstone_write_fails() {
-        let lt = InMemoryBackend::new("lt");
-        let hv = FailingTombstoneBackend(InMemoryBackend::new("hv"));
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
-
-        let id = ObjectId::new(make_context(), "orphan-test".into());
-        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
-        let result = storage
-            .put_object(&id, &Default::default(), stream::single(payload))
-            .await;
-
-        assert!(result.is_err());
-        assert!(lt.is_empty(), "long-term object not cleaned up");
-    }
-
-    /// If a tombstone exists in high-volume but the corresponding object is
-    /// missing from long-term storage (e.g. due to a race condition or partial
-    /// cleanup), reads should gracefully return None rather than error.
-    #[tokio::test]
-    async fn orphan_tombstone_returns_none() {
-        let (storage, hv, lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "orphan-tombstone".into());
-        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+    async fn delete_small_object() {
+        let (storage, hv, _lt) = make_tiered_storage();
+        let id = make_id("delete-small");
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Default::default(), stream::single("tiny"))
             .await
             .unwrap();
 
-        // The object is at the revision key in LT, not at id.
-        let lt_id = hv.get(&id).expect_tombstone().target;
+        storage.delete_object(&id).await.unwrap();
 
-        // Remove the long-term object, leaving an orphan tombstone in hv
-        lt.remove(&lt_id);
-
-        assert!(
-            storage.get_object(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_object"
-        );
-        assert!(
-            storage.get_metadata(&id).await.unwrap().is_none(),
-            "orphan tombstone should resolve to None on get_metadata"
-        );
+        hv.get(&id).expect_not_found();
+        assert!(storage.get_object(&id).await.unwrap().is_none());
     }
 
-    // --- Delete tests ---
-
     #[tokio::test]
-    async fn delete_cleans_up_both_backends() {
+    async fn delete_large_object_cleans_up_both_backends() {
         let (storage, hv, lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "delete-both".into());
+        let id = make_id("delete-both");
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
         storage
@@ -905,10 +764,10 @@ mod tests {
         let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
         let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
 
-        let id = ObjectId::new(make_context(), "fail-delete".into());
+        let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
         storage
-            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -929,7 +788,240 @@ mod tests {
         );
     }
 
-    // --- Redirect target tests ---
+    // --- CAS conflicts ---
+
+    /// A backend wrapper that delegates everything except `compare_and_write`, which always
+    /// returns `Ok(false)` to simulate a lost CAS race.
+    #[derive(Debug)]
+    struct ConflictingCasBackend(InMemoryBackend);
+
+    #[async_trait::async_trait]
+    impl Backend for ConflictingCasBackend {
+        fn name(&self) -> &'static str {
+            "conflicting-cas"
+        }
+
+        async fn put_object(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: ClientStream,
+        ) -> Result<PutResponse> {
+            self.0.put_object(id, metadata, stream).await
+        }
+
+        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+            self.0.get_object(id).await
+        }
+
+        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+            self.0.delete_object(id).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HighVolumeBackend for ConflictingCasBackend {
+        async fn put_non_tombstone(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            payload: bytes::Bytes,
+        ) -> Result<Option<Tombstone>> {
+            self.0.put_non_tombstone(id, metadata, payload).await
+        }
+
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.0.get_tiered_object(id).await
+        }
+
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.0.get_tiered_metadata(id).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+            self.0.delete_non_tombstone(id).await
+        }
+
+        async fn compare_and_write(
+            &self,
+            _id: &ObjectId,
+            _current: Option<&ObjectId>,
+            _write: TieredWrite,
+        ) -> Result<bool> {
+            Ok(false) // always conflict
+        }
+    }
+
+    /// After a large-object write loses the CAS race, the new LT blob must be
+    /// cleaned up. The put still returns `Ok(())` — from the caller's view, a
+    /// concurrent write won.
+    #[tokio::test]
+    async fn put_large_cas_conflict_cleans_up_new_blob() {
+        let hv = ConflictingCasBackend(InMemoryBackend::new("hv"));
+        let lt = InMemoryBackend::new("lt");
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+
+        let id = make_id("cas-conflict-large");
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
+
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            lt.is_empty(),
+            "LT blob should be cleaned up after CAS conflict"
+        );
+    }
+
+    /// When swapping a tombstone for inline data, a CAS conflict means another
+    /// writer won. The put still returns `Ok(())` — no LT blob was written, so
+    /// there is nothing to clean up.
+    #[tokio::test]
+    async fn put_small_over_tombstone_cas_conflict_succeeds() {
+        let inner = InMemoryBackend::new("hv");
+        let id = make_id("cas-conflict-small");
+
+        // Pre-seed a tombstone directly in the inner backend so put_non_tombstone
+        // returns it instead of writing inline.
+        let tombstone = Tombstone {
+            target: make_id("lt-object"),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+        inner
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .await
+            .unwrap();
+
+        let lt = InMemoryBackend::new("lt");
+        let hv = ConflictingCasBackend(inner);
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt));
+
+        // Writing a small object over a tombstone should succeed even when CAS
+        // conflicts — the other writer's write is accepted.
+        storage
+            .put_object(&id, &Default::default(), stream::single("tiny"))
+            .await
+            .unwrap();
+    }
+
+    // --- Failure / inconsistency ---
+
+    /// A backend where `compare_and_write` always errors, but all other operations work normally.
+    #[derive(Debug)]
+    struct FailingCasBackend(InMemoryBackend);
+
+    #[async_trait::async_trait]
+    impl Backend for FailingCasBackend {
+        fn name(&self) -> &'static str {
+            "failing-cas"
+        }
+
+        async fn put_object(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: ClientStream,
+        ) -> Result<PutResponse> {
+            self.0.put_object(id, metadata, stream).await
+        }
+
+        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+            self.0.get_object(id).await
+        }
+
+        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+            self.0.delete_object(id).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HighVolumeBackend for FailingCasBackend {
+        async fn put_non_tombstone(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            payload: bytes::Bytes,
+        ) -> Result<Option<Tombstone>> {
+            self.0.put_non_tombstone(id, metadata, payload).await
+        }
+
+        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+            self.0.get_tiered_object(id).await
+        }
+
+        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+            self.0.get_tiered_metadata(id).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+            self.0.delete_non_tombstone(id).await
+        }
+
+        async fn compare_and_write(
+            &self,
+            _id: &ObjectId,
+            _current: Option<&ObjectId>,
+            _write: TieredWrite,
+        ) -> Result<bool> {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "simulated compare_and_write failure",
+            )))
+        }
+    }
+
+    /// If the tombstone write to the high-volume backend fails after the long-term
+    /// write succeeds, the long-term object must be cleaned up so we never leave
+    /// an unreachable orphan in long-term storage.
+    #[tokio::test]
+    async fn no_orphan_when_tombstone_write_fails() {
+        let lt = InMemoryBackend::new("lt");
+        let hv = FailingCasBackend(InMemoryBackend::new("hv"));
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+
+        let id = make_id("orphan-test");
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
+        let result = storage
+            .put_object(&id, &Default::default(), stream::single(payload))
+            .await;
+
+        assert!(result.is_err());
+        assert!(lt.is_empty(), "long-term object not cleaned up");
+    }
+
+    /// If a tombstone exists in high-volume but the corresponding object is
+    /// missing from long-term storage (e.g. due to a race condition or partial
+    /// cleanup), reads should gracefully return None rather than error.
+    #[tokio::test]
+    async fn orphan_tombstone_returns_none() {
+        let (storage, hv, lt) = make_tiered_storage();
+        let id = make_id("orphan-tombstone");
+        let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
+
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload))
+            .await
+            .unwrap();
+
+        // The object is at the revision key in LT, not at id.
+        let lt_id = hv.get(&id).expect_tombstone().target;
+
+        // Remove the long-term object, leaving an orphan tombstone in hv
+        lt.remove(&lt_id);
+
+        assert!(
+            storage.get_object(&id).await.unwrap().is_none(),
+            "orphan tombstone should resolve to None on get_object"
+        );
+        assert!(
+            storage.get_metadata(&id).await.unwrap().is_none(),
+            "orphan tombstone should resolve to None on get_metadata"
+        );
+    }
+
+    // --- Redirect target ---
 
     /// A tombstone carrying an explicit `target` is followed correctly on reads and deletes,
     /// including when the target ObjectId differs from the HV ObjectId.
@@ -939,8 +1031,8 @@ mod tests {
         let lt = InMemoryBackend::new("lt");
         let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
 
-        let hv_id = ObjectId::new(make_context(), "hv-key".into());
-        let lt_id = ObjectId::new(make_context(), "lt-key".into());
+        let hv_id = make_id("hv-key");
+        let lt_id = make_id("lt-key");
         let payload = vec![0xABu8; 100];
 
         // Write the object under the LT id and a tombstone pointing to it from HV.
@@ -949,7 +1041,7 @@ mod tests {
             .unwrap();
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy: objectstore_types::metadata::ExpirationPolicy::Manual,
+            expiration_policy: ExpirationPolicy::Manual,
         };
         hv.compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await
@@ -966,12 +1058,12 @@ mod tests {
         assert!(!lt.contains(&lt_id), "lt object should be removed");
     }
 
-    // --- Multi-chunk streaming tests ---
+    // --- Multi-chunk ---
 
     #[tokio::test]
     async fn multi_chunk_large_object_chains_buffered_and_remaining() {
         let (storage, hv, lt) = make_tiered_storage();
-        let id = ObjectId::new(make_context(), "multi-chunk".into());
+        let id = make_id("multi-chunk");
 
         // Deliver a 2 MiB payload across multiple chunks that individually
         // fit under the threshold but collectively exceed it.
