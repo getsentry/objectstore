@@ -10,8 +10,12 @@
 //! |--------|-----------|-----------------------------|--------------------|
 //! | `p`    | `fg`/`fm` | Compressed payload bytes    | Object row only    |
 //! | `m`    | `fg`/`fm` | [`Metadata`] JSON           | Object row only    |
-//! | `r`    | `fg`/`fm` | Redirect sentinel (`b""`)   | Tombstone row only |
+//! | `r`    | `fg`/`fm` | Redirect path to LT storage | Tombstone row only |
 //! | `t`    | `fg`/`fm` | [`Tombstone`] metadata JSON | Tombstone row only |
+//!
+//! The `r` column signals a tombstone row: its **value** is the long-term `ObjectId`
+//! serialized via `as_storage_path()`. Callers can resolve the LT object directly from the
+//! `r` value without reconstructing it from the row key.
 //!
 //! `p`/`m` and `r`/`t` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
@@ -330,8 +334,6 @@ fn build_tombstone_mutations(
     let tombstone_meta = TombstoneMeta {
         expiration_policy: tombstone.expiration_policy,
     };
-    let metadata_bytes = serde_json::to_vec(&tombstone_meta)
-        .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?;
 
     Ok([
         mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
@@ -339,13 +341,14 @@ fn build_tombstone_mutations(
             family_name: family.to_owned(),
             column_qualifier: COLUMN_REDIRECT.to_owned(),
             timestamp_micros,
-            value: b"".to_vec(),
+            value: tombstone.target.as_storage_path().to_string().into_bytes(),
         }),
         mutation::Mutation::SetCell(mutation::SetCell {
             family_name: family.to_owned(),
             column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
             timestamp_micros,
-            value: metadata_bytes,
+            value: serde_json::to_vec(&tombstone_meta)
+                .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?,
         }),
     ])
 }
@@ -378,6 +381,7 @@ enum RowData {
     },
     /// A tombstone row indicating the real payload lives on the long-term backend.
     Tombstone {
+        target: Vec<u8>,
         meta: TombstoneMeta,
         time_expires: Option<SystemTime>,
     },
@@ -394,6 +398,7 @@ impl RowData {
         let mut metadata_opt: Option<Metadata> = None;
         let mut tombstone_meta_opt: Option<TombstoneMeta> = None;
         let mut redirect_detected = false;
+        let mut redirect_target = Vec::new();
         let mut expire_at = None;
         let mut payload = Vec::new();
 
@@ -404,6 +409,7 @@ impl RowData {
             match cell.qualifier.as_slice() {
                 COLUMN_REDIRECT => {
                     redirect_detected = true;
+                    redirect_target = cell.value;
                 }
                 COLUMN_PAYLOAD => {
                     payload = cell.value;
@@ -437,6 +443,7 @@ impl RowData {
 
         Ok(if redirect_detected {
             RowData::Tombstone {
+                target: redirect_target,
                 meta: tombstone_meta_opt.unwrap_or_default(),
                 time_expires: expire_at,
             }
@@ -477,6 +484,23 @@ impl RowData {
             self.expiration_policy(),
             ExpirationPolicy::TimeToIdle(tti) if self.expires_before(SystemTime::now() + tti - TTI_DEBOUNCE)
         )
+    }
+}
+
+/// Parses the raw `r` column bytes into a redirect target [`ObjectId`].
+///
+/// For tombstones with an empty `r` value, falls back to the ID of the tombstone
+/// itself and emits a `bigtable.empty_redirect_read` metric so deployments can
+/// track when it is safe to remove the legacy empty-value code path.
+fn parse_redirect_target(redirect_path: &[u8], tombstone_id: &ObjectId) -> Result<ObjectId> {
+    if redirect_path.is_empty() {
+        objectstore_metrics::count!("bigtable.empty_redirect_read");
+        Ok(tombstone_id.clone())
+    } else {
+        let redirect_str = std::str::from_utf8(redirect_path)
+            .map_err(|_| Error::generic("invalid UTF-8 in redirect path"))?;
+        ObjectId::from_storage_path(redirect_str)
+            .ok_or_else(|| Error::generic("corrupt redirect path"))
     }
 }
 
@@ -652,12 +676,26 @@ impl BigTableBackend {
     /// Best-effort TTI bump for a row.
     ///
     /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
-    async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool) {
+    async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
         let expiration_policy = row.expiration_policy();
 
         match row {
-            RowData::Tombstone { .. } => {
-                let tombstone = Tombstone { expiration_policy };
+            RowData::Tombstone { target, .. } => {
+                let target = match parse_redirect_target(target, hv_id) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::error!(
+                            error = &e as &dyn std::error::Error,
+                            "invalid redirect target in tombstone row"
+                        );
+                        return;
+                    }
+                };
+
+                let tombstone = Tombstone {
+                    target,
+                    expiration_policy,
+                };
                 let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
             }
             RowData::Object { metadata, payload } if loaded => {
@@ -839,14 +877,14 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, true).await;
+            self.bump_tti(path.clone(), &row, true, id).await;
         }
 
         Ok(match row {
-            RowData::Tombstone { meta, .. } => {
-                let expiration_policy = meta.expiration_policy;
-                TieredGet::Tombstone(Tombstone { expiration_policy })
-            }
+            RowData::Tombstone { meta, target, .. } => TieredGet::Tombstone(Tombstone {
+                target: parse_redirect_target(&target, id)?,
+                expiration_policy: meta.expiration_policy,
+            }),
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
                 metadata.size = Some(payload.len());
@@ -870,14 +908,14 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, false).await;
+            self.bump_tti(path.clone(), &row, false, id).await;
         }
 
         Ok(match row {
-            RowData::Tombstone { meta, .. } => {
-                let expiration_policy = meta.expiration_policy;
-                TieredMetadata::Tombstone(Tombstone { expiration_policy })
-            }
+            RowData::Tombstone { meta, target, .. } => TieredMetadata::Tombstone(Tombstone {
+                target: parse_redirect_target(&target, id)?,
+                expiration_policy: meta.expiration_policy,
+            }),
             RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
         })
     }
@@ -1142,6 +1180,7 @@ mod tests {
             .create_tombstone(
                 &id,
                 Tombstone {
+                    target: id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 },
             )
@@ -1278,10 +1317,10 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Also verifies that the `r = b""` sentinel (empty byte value) is correctly
-    /// detected by both the `ReadRows` column filter and the `CheckAndMutate`
-    /// `tombstone_predicate` — confirming the Bigtable filter treats empty-value cells
-    /// the same as non-empty ones for column-presence checks.
+    /// Verifies that the `r` column (now holding the LT storage path, or an empty value
+    /// for legacy tombstones) is correctly detected by both the `ReadRows` column filter
+    /// and the `CheckAndMutate` `tombstone_predicate` — confirming Bigtable treats
+    /// non-empty-value cells as column-present in both filter types.
     async fn test_delete_non_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
@@ -1290,6 +1329,7 @@ mod tests {
             .create_tombstone(
                 &id,
                 Tombstone {
+                    target: id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 },
             )
@@ -1484,9 +1524,11 @@ mod tests {
 
         let id = make_id();
         let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
-        backend
-            .create_tombstone(&id, Tombstone { expiration_policy })
-            .await?;
+        let tombstone = Tombstone {
+            target: id.clone(),
+            expiration_policy,
+        };
+        backend.create_tombstone(&id, tombstone).await?;
 
         // Both hv methods must surface the tombstone with the correct expiration_policy.
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
@@ -1507,6 +1549,77 @@ mod tests {
             backend.get_metadata(&id).await,
             Err(Error::UnexpectedTombstone)
         ));
+
+        Ok(())
+    }
+
+    /// The redirect pointer stored in the `r` column survives a Bigtable write and read:
+    /// `target` on write equals `target` on read, and the parsed `ObjectId` matches.
+    #[tokio::test]
+    async fn test_redirect_pointer_round_trip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // Create different IDs for HV and LT
+        let hv_id = make_id();
+        let lt_id = ObjectId::random(hv_id.context().clone());
+        let tombstone = Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+
+        backend.create_tombstone(&hv_id, tombstone).await?;
+
+        match backend.get_tiered_metadata(&hv_id).await? {
+            TieredMetadata::Tombstone(t) => assert_eq!(t.target, lt_id, "target must match"),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
+        match backend.get_tiered_object(&hv_id).await? {
+            TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "target must match"),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    /// A tombstone row with an empty `r` value (written by old code before this change)
+    /// returns `target = hv_id` via the fallback, and emits `bigtable.empty_redirect_read`.
+    #[tokio::test]
+    async fn test_empty_redirect_falls_back_to_hv_id() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        // Write a new-format tombstone row with an empty `r` value directly,
+        // simulating rows written by code before this change.
+        let tombstone_meta = TombstoneMeta {
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+        let meta_bytes = serde_json::to_vec(&tombstone_meta).unwrap();
+        backend
+            .mutate(
+                path,
+                [
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_MANUAL.to_owned(),
+                        column_qualifier: COLUMN_REDIRECT.to_owned(),
+                        timestamp_micros: -1,
+                        value: b"".to_vec(), // empty — legacy format
+                    }),
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_MANUAL.to_owned(),
+                        column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
+                        timestamp_micros: -1,
+                        value: meta_bytes,
+                    }),
+                ],
+                "test-setup",
+            )
+            .await?;
+
+        match backend.get_tiered_metadata(&id).await? {
+            TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must use id"),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
 
         Ok(())
     }

@@ -215,19 +215,22 @@ impl Backend for TieredStorage {
                     .boxed();
 
                 // First write the object to long-term.
-                self.long_term.put_object(id, metadata, stream).await?;
+                let long_term_id = id.clone();
+                self.long_term
+                    .put_object(&long_term_id, metadata, stream)
+                    .await?;
 
                 // Then write the redirect tombstone to high-volume.
                 let tombstone = Tombstone {
+                    target: long_term_id.clone(),
                     expiration_policy: metadata.expiration_policy,
                 };
-                let tombstone_result = self.high_volume.create_tombstone(id, tombstone).await;
 
-                if tombstone_result.is_err() {
+                if let Err(e) = self.high_volume.create_tombstone(id, tombstone).await {
                     // Clean up on any kind of error.
-                    self.long_term.delete_object(id).await?;
+                    self.long_term.delete_object(&long_term_id).await?;
+                    return Err(e);
                 }
-                tombstone_result?;
 
                 (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
             }
@@ -260,8 +263,8 @@ impl Backend for TieredStorage {
             TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
-            TieredGet::Tombstone(_) => (
-                self.long_term.get_object(id).await?,
+            TieredGet::Tombstone(tombstone) => (
+                self.long_term.get_object(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -297,10 +300,10 @@ impl Backend for TieredStorage {
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
-            TieredMetadata::Tombstone(_) => {
-                let result = self.long_term.get_metadata(id).await?;
-                (result, BackendChoice::LongTerm)
-            }
+            TieredMetadata::Tombstone(tombstone) => (
+                self.long_term.get_metadata(&tombstone.target).await?,
+                BackendChoice::LongTerm,
+            ),
         };
 
         objectstore_metrics::record!(
@@ -321,10 +324,21 @@ impl Backend for TieredStorage {
         let outcome = self.high_volume.delete_non_tombstone(id).await?;
         if outcome == ConditionalOutcome::Tombstone {
             backend_choice = BackendChoice::LongTerm;
+
+            // Resolve the LT ObjectId from the tombstone. A separate metadata read is
+            // needed because delete_non_tombstone is a CAS operation that does not return
+            // row data. This extra round trip is acceptable; delete is not on the hot path.
+            let long_term_id = match self.high_volume.get_tiered_metadata(id).await? {
+                TieredMetadata::Tombstone(tombstone) => tombstone.target,
+                // Race: tombstone disappeared between delete_non_tombstone and the read.
+                // Nothing left to delete.
+                TieredMetadata::NotFound | TieredMetadata::Object(_) => return Ok(()),
+            };
+
             // Delete the long-term object first, then clean up the tombstone.
             // This ordering ensures that if the long-term delete fails, the
             // tombstone remains and the data is still reachable (not orphaned).
-            self.long_term.delete_object(id).await?;
+            self.long_term.delete_object(&long_term_id).await?;
             self.high_volume.delete_object(id).await?;
         }
 
@@ -487,9 +501,13 @@ mod tests {
             .await
             .unwrap();
 
-        // The tombstone in hv should have expiration_policy inherited
+        // The tombstone in hv should have expiration_policy inherited and target set to id.
         let tombstone = hv.get(&id).expect_tombstone();
         assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
+        assert_eq!(
+            tombstone.target, id,
+            "tombstone target must point to the LT ObjectId (identical to HV id for now)"
+        );
 
         // The long-term object should have the full metadata
         let (lt_meta, _) = lt.get(&id).expect_object();
@@ -706,6 +724,45 @@ mod tests {
         let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
+    }
+
+    // --- Redirect target tests ---
+
+    /// A tombstone carrying an explicit `target` is followed correctly on reads and deletes,
+    /// including when the target ObjectId differs from the HV ObjectId.
+    #[tokio::test]
+    async fn tombstone_target_is_used_for_reads_and_deletes() {
+        let hv = InMemoryBackend::new("hv");
+        let lt = InMemoryBackend::new("lt");
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
+
+        let hv_id = ObjectId::new(make_context(), "hv-key".into());
+        let lt_id = ObjectId::new(make_context(), "lt-key".into());
+        let payload = vec![0xABu8; 100];
+
+        // Write the object under the LT id and a tombstone pointing to it from HV.
+        lt.put_object(&lt_id, &Default::default(), stream::single(payload.clone()))
+            .await
+            .unwrap();
+        hv.create_tombstone(
+            &hv_id,
+            crate::backend::common::Tombstone {
+                target: lt_id.clone(),
+                expiration_policy: objectstore_types::metadata::ExpirationPolicy::Manual,
+            },
+        )
+        .await
+        .unwrap();
+
+        // get_object must follow the tombstone and find the object via the lt_id target.
+        let (_, s) = storage.get_object(&hv_id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+
+        // delete_object must clean up both backends using the target.
+        storage.delete_object(&hv_id).await.unwrap();
+        assert!(!hv.contains(&hv_id), "tombstone should be removed");
+        assert!(!lt.contains(&lt_id), "lt object should be removed");
     }
 
     // --- Multi-chunk streaming tests ---

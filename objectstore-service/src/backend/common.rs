@@ -11,11 +11,14 @@ use crate::id::ObjectId;
 use crate::stream::{ClientStream, PayloadStream};
 
 /// Information about a redirect tombstone in the high-volume backend.
-///
-/// Currently carries only the `expiration_policy` so the high-volume backend
-/// can GC tombstones when the underlying object expires.
 #[derive(Debug, Clone)]
 pub struct Tombstone {
+    /// The [`ObjectId`] of the object in the long-term backend.
+    ///
+    /// For legacy tombstones with an empty `r` column, the HV backend resolves
+    /// this to the HV `ObjectId` itself before surfacing the tombstone to callers.
+    pub target: ObjectId,
+
     /// The expiration policy copied from the original object.
     pub expiration_policy: ExpirationPolicy,
 }
@@ -154,9 +157,8 @@ pub trait HighVolumeBackend: Backend {
 
     /// Writes a redirect tombstone for the given object.
     ///
-    /// A tombstone signals that the real object lives in the long-term backend.
-    /// Only the `expiration_policy` inside `tombstone` is preserved — it is carried
-    /// so the high-volume backend can GC tombstones when the underlying object expires.
+    /// A tombstone signals that the real object lives in the long-term backend
+    /// identified by the tombstone's [`target`](Tombstone::target) ID.
     async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()>;
 }
 

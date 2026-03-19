@@ -134,6 +134,43 @@ impl ObjectId {
         }
     }
 
+    /// Parses an `ObjectId` from a storage path produced by [`as_storage_path`].
+    ///
+    /// Returns `None` if the path is not a valid storage path. The inverse of
+    /// `as_storage_path().to_string()`: parsing that string back must yield an
+    /// equivalent `ObjectId`.
+    pub fn from_storage_path(path: &str) -> Option<Self> {
+        // Split off the usecase (everything before the first `/`).
+        let (usecase, mut rest) = path.split_once('/')?;
+        if usecase.is_empty() {
+            return None;
+        }
+
+        let mut scopes_vec = Vec::new();
+        loop {
+            let (segment, after) = rest.split_once('/')?;
+            rest = after;
+
+            if segment == "objects" {
+                break;
+            }
+
+            let (name, value) = segment.split_once('.')?;
+            scopes_vec.push(Scope::create(name, value).ok()?);
+        }
+
+        match rest {
+            "" => None,
+            key => Some(ObjectId {
+                context: ObjectContext {
+                    usecase: usecase.to_owned(),
+                    scopes: Scopes::from_iter(scopes_vec),
+                },
+                key: key.to_owned(),
+            }),
+        }
+    }
+
     /// Returns the key of the object.
     ///
     /// See [`key`](field@ObjectId::key) for more information.
@@ -228,5 +265,65 @@ mod tests {
 
         let path = object_id.as_storage_path().to_string();
         assert_eq!(path, "testing/objects/foo/bar");
+    }
+
+    #[test]
+    fn test_storage_path_roundtrip() {
+        let cases = [
+            // Multiple scopes
+            ObjectId {
+                context: ObjectContext {
+                    usecase: "attachments".to_string(),
+                    scopes: Scopes::from_iter([
+                        Scope::create("org", "17").unwrap(),
+                        Scope::create("project", "42").unwrap(),
+                    ]),
+                },
+                key: "abc-123-def".to_string(),
+            },
+            // No scopes
+            ObjectId {
+                context: ObjectContext {
+                    usecase: "debug-files".to_string(),
+                    scopes: Scopes::empty(),
+                },
+                key: "simple-key".to_string(),
+            },
+            // Key containing slashes
+            ObjectId {
+                context: ObjectContext {
+                    usecase: "testing".to_string(),
+                    scopes: Scopes::from_iter([Scope::create("org", "12345").unwrap()]),
+                },
+                key: "foo/bar/baz".to_string(),
+            },
+            // Single scope
+            ObjectId {
+                context: ObjectContext {
+                    usecase: "replays".to_string(),
+                    scopes: Scopes::from_iter([Scope::create("org", "99").unwrap()]),
+                },
+                key: "some-uuid-key".to_string(),
+            },
+        ];
+
+        for id in &cases {
+            let path = id.as_storage_path().to_string();
+            let parsed = ObjectId::from_storage_path(&path)
+                .unwrap_or_else(|| panic!("failed to parse '{path}'"));
+            assert_eq!(&parsed, id, "roundtrip failed for path '{path}'");
+        }
+    }
+
+    #[test]
+    fn test_from_storage_path_invalid() {
+        // Missing "objects" segment
+        assert!(ObjectId::from_storage_path("usecase/org.17/mykey").is_none());
+        // Empty path
+        assert!(ObjectId::from_storage_path("").is_none());
+        // Only "objects" with no key
+        assert!(ObjectId::from_storage_path("usecase/objects").is_none());
+        // Invalid scope (missing dot)
+        assert!(ObjectId::from_storage_path("usecase/noscope/objects/key").is_none());
     }
 }
