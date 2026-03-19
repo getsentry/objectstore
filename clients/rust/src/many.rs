@@ -560,10 +560,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 decompress,
                 accept_encoding,
             };
-            match get.send().await {
-                Ok(response) => OperationResult::Get(key, Ok(response)),
-                Err(err) => OperationResult::Get(key, Err(err)),
-            }
+            OperationResult::Get(key, get.send().await)
         }
         BatchOperation::Insert {
             key,
@@ -587,10 +584,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 session: session.clone(),
                 key: key.clone(),
             };
-            match delete.send().await {
-                Ok(()) => OperationResult::Delete(key, Ok(())),
-                Err(err) => OperationResult::Delete(key, Err(err)),
-            }
+            OperationResult::Delete(key, delete.send().await)
         }
     }
 }
