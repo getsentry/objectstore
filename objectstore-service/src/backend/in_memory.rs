@@ -13,8 +13,7 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    ConditionalOutcome, DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata,
-    Tombstone,
+    DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -122,30 +121,26 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
-    ) -> Result<ConditionalOutcome> {
+    ) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
-        if store
-            .get(id)
-            .is_some_and(|e| matches!(e, StoreEntry::Tombstone(_)))
-        {
-            return Ok(ConditionalOutcome::Tombstone);
+        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
+            return Ok(Some(tombstone));
         }
+
         let mut metadata = metadata.clone();
         metadata.size = Some(payload.len());
         store.insert(id.clone(), StoreEntry::Object(metadata, payload));
-        Ok(ConditionalOutcome::Executed)
+        Ok(None)
     }
 
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
-        if store
-            .get(id)
-            .is_some_and(|e| matches!(e, StoreEntry::Tombstone(_)))
-        {
-            return Ok(ConditionalOutcome::Tombstone);
+        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
+            return Ok(Some(tombstone));
         }
+
         store.remove(id);
-        Ok(ConditionalOutcome::Executed)
+        Ok(None)
     }
 
     async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {

@@ -13,8 +13,8 @@ use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    Backend, ConditionalOutcome, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, TieredGet, TieredMetadata, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
+    TieredGet, TieredMetadata, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
@@ -183,18 +183,18 @@ impl Backend for TieredStorage {
                 let payload = peeked.into_bytes().await?;
                 let stored_size = payload.len() as u64;
 
-                let outcome = self
+                let tombstone_opt = self
                     .high_volume
                     .put_non_tombstone(id, metadata, payload.clone())
                     .await?;
 
-                if outcome == ConditionalOutcome::Tombstone {
+                if let Some(Tombstone { target, .. }) = tombstone_opt {
                     // Tombstone already exists in HV — write to long-term instead.
                     // TODO: The new object's expiry may differ from the tombstone's,
                     // leaving them inconsistent. This is a known gap and will be fixed
                     // in a follow-up.
                     let stream = crate::stream::single(payload).boxed();
-                    self.long_term.put_object(id, metadata, stream).await?;
+                    self.long_term.put_object(&target, metadata, stream).await?;
                     (BackendChoice::LongTerm, stored_size)
                 } else {
                     (BackendChoice::HighVolume, stored_size)
@@ -321,24 +321,13 @@ impl Backend for TieredStorage {
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        let outcome = self.high_volume.delete_non_tombstone(id).await?;
-        if outcome == ConditionalOutcome::Tombstone {
+        if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
-
-            // Resolve the LT ObjectId from the tombstone. A separate metadata read is
-            // needed because delete_non_tombstone is a CAS operation that does not return
-            // row data. This extra round trip is acceptable; delete is not on the hot path.
-            let long_term_id = match self.high_volume.get_tiered_metadata(id).await? {
-                TieredMetadata::Tombstone(tombstone) => tombstone.target,
-                // Race: tombstone disappeared between delete_non_tombstone and the read.
-                // Nothing left to delete.
-                TieredMetadata::NotFound | TieredMetadata::Object(_) => return Ok(()),
-            };
 
             // Delete the long-term object first, then clean up the tombstone.
             // This ordering ensures that if the long-term delete fails, the
             // tombstone remains and the data is still reachable (not orphaned).
-            self.long_term.delete_object(&long_term_id).await?;
+            self.long_term.delete_object(&tombstone.target).await?;
             self.high_volume.delete_object(id).await?;
         }
 
@@ -580,11 +569,11 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             payload: bytes::Bytes,
-        ) -> Result<ConditionalOutcome> {
+        ) -> Result<Option<Tombstone>> {
             self.0.put_non_tombstone(id, metadata, payload).await
         }
 
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
             self.0.delete_non_tombstone(id).await
         }
 

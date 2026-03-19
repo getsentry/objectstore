@@ -235,9 +235,7 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{
-        ConditionalOutcome, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
-    };
+    use crate::backend::common::{HighVolumeBackend, TieredGet, TieredMetadata, Tombstone};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -523,11 +521,11 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             payload: bytes::Bytes,
-        ) -> Result<ConditionalOutcome> {
+        ) -> Result<Option<Tombstone>> {
             self.inner.put_non_tombstone(id, metadata, payload).await
         }
 
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome> {
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
             self.inner.delete_non_tombstone(id).await
         }
 

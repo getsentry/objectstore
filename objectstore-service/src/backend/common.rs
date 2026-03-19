@@ -11,7 +11,7 @@ use crate::id::ObjectId;
 use crate::stream::{ClientStream, PayloadStream};
 
 /// Information about a redirect tombstone in the high-volume backend.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tombstone {
     /// The [`ObjectId`] of the object in the long-term backend.
     ///
@@ -71,19 +71,6 @@ pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub type DeleteResponse = ();
 
-/// Outcome of a tombstone-conditional operation.
-///
-/// Returned by [`HighVolumeBackend::put_non_tombstone`] and
-/// [`HighVolumeBackend::delete_non_tombstone`] to indicate whether the operation
-/// proceeded or was skipped because a redirect tombstone was present.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConditionalOutcome {
-    /// The operation executed normally (write stored, delete removed).
-    Executed,
-    /// A redirect tombstone was found; the operation was skipped.
-    Tombstone,
-}
-
 /// Trait implemented by all storage backends.
 #[async_trait::async_trait]
 pub trait Backend: fmt::Debug + Send + Sync + 'static {
@@ -123,9 +110,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 pub trait HighVolumeBackend: Backend {
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
-    /// Returns [`ConditionalOutcome::Tombstone`] (skipping the write) when a
-    /// redirect tombstone is present, or [`ConditionalOutcome::Executed`] after
-    /// storing the object.
+    /// Returns `None` after storing the object, or `Some(tombstone)` (skipping
+    /// the write) when a redirect tombstone is present. The returned tombstone
+    /// carries the target LT `ObjectId` so the caller can route without a
+    /// second round trip.
     ///
     /// Takes [`Bytes`] instead of a [`ClientStream`] because callers on this
     /// path have already fully buffered the payload.
@@ -134,7 +122,7 @@ pub trait HighVolumeBackend: Backend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
-    ) -> Result<ConditionalOutcome>;
+    ) -> Result<Option<Tombstone>>;
 
     /// Retrieves an object with explicit tombstone awareness.
     ///
@@ -150,10 +138,12 @@ pub trait HighVolumeBackend: Backend {
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
-    /// Returns [`ConditionalOutcome::Tombstone`] (leaving the row intact) when
-    /// the object is a redirect tombstone, or [`ConditionalOutcome::Executed`]
-    /// (after deleting it) for regular objects and non-existent rows.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<ConditionalOutcome>;
+    /// Returns `None` after deleting the row (or if the row was already absent),
+    /// or `Some(tombstone)` (leaving the row intact) when the object is a
+    /// redirect tombstone. The returned tombstone carries the target LT
+    /// `ObjectId` so the caller can delete from long-term storage directly,
+    /// without a second round trip.
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>>;
 
     /// Writes a redirect tombstone for the given object.
     ///
