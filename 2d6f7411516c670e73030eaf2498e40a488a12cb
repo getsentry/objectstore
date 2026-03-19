@@ -1,0 +1,23 @@
+clients/rust/src/many.rs
+  e0e15a2e394af1e4 38-40,626,635,639
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "2d6f7411516c670e73030eaf2498e40a488a12cb",
+  "prompts": {
+    "e0e15a2e394af1e4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "083fe5c3-3b14-4430-954e-194cb2866e3f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "lcian <17258265+lcian@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 2,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  }
+}
