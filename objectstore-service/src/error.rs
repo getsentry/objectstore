@@ -109,6 +109,14 @@ impl Error {
         }
     }
 
+    /// Creates an [`Error::Serde`] from a serde error with context.
+    pub fn serde(context: impl Into<String>, cause: serde_json::Error) -> Self {
+        Self::Serde {
+            context: context.into(),
+            cause,
+        }
+    }
+
     /// Creates an [`Error::Generic`] with a context string and no cause.
     pub fn generic(context: impl Into<String>) -> Self {
         Self::Generic {

@@ -1,4 +1,28 @@
 //! BigTable backend for high-volume, low-latency storage of small objects.
+//!
+//! # Row Format
+//!
+//! Each row key is the object's storage path. A row contains either an **object** or a
+//! **tombstone** — never both. The two layouts are mutually exclusive and distinguished by
+//! column presence:
+//!
+//! | Column | Family    | Content                     | Present when       |
+//! |--------|-----------|-----------------------------|--------------------|
+//! | `p`    | `fg`/`fm` | Compressed payload bytes    | Object row only    |
+//! | `m`    | `fg`/`fm` | [`Metadata`] JSON           | Object row only    |
+//! | `r`    | `fg`/`fm` | Redirect sentinel (`b""`)   | Tombstone row only |
+//! | `t`    | `fg`/`fm` | [`Tombstone`] metadata JSON | Tombstone row only |
+//!
+//! `p`/`m` and `r`/`t` are mutually exclusive. Every write begins with a `DeleteFromRow`
+//! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
+//!
+//! ## Legacy Tombstone Format
+//!
+//! Tombstones written before the `r`/`t` column layout used the object-row format with an
+//! empty `p` column and `"is_redirect_tombstone": true` in the `m` JSON. Both formats are
+//! supported for reading. A `bigtable.legacy_tombstone_read` metric is emitted on each legacy
+//! read. Legacy tombstones expire naturally by TTL/GC; TTI bumps transparently upgrade them
+//! to the new format.
 
 use std::fmt;
 use std::future::Future;
@@ -9,6 +33,7 @@ use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell}
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use serde::{Deserialize, Serialize};
 use tonic::Code;
 
 use bytes::Bytes;
@@ -43,7 +68,7 @@ use crate::stream::{ChunkedBytes, ClientStream};
 ///   instance_name: objectstore
 ///   table_name: objectstore
 /// ```
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BigTableConfig {
     /// Optional custom Bigtable endpoint.
     ///
@@ -118,6 +143,13 @@ const REQUEST_RETRY_COUNT: usize = 2;
 const COLUMN_PAYLOAD: &[u8] = b"p";
 /// Column that stores metadata in JSON.
 const COLUMN_METADATA: &[u8] = b"m";
+/// Column that stores the redirect sentinel for tombstone rows (`b""` for now; a GCS key later).
+const COLUMN_REDIRECT: &[u8] = b"r";
+/// Column that stores [`TombstoneMeta`] JSON for tombstone rows.
+const COLUMN_TOMBSTONE_META: &[u8] = b"t";
+/// Regex to match all non-payload columns (`m`, `r`, `t`) for metadata-only reads.
+const FILTER_META: &[u8] = b"^[mrt]$";
+
 /// Column family that uses timestamp-based garbage collection.
 ///
 /// We require a GC rule on this family to automatically delete rows.
@@ -184,25 +216,49 @@ fn column_filter(column: &[u8]) -> v2::RowFilter {
     }
 }
 
-/// Creates a row filter that matches a redirect tombstone by its metadata JSON.
+/// Creates a row filter that matches any tombstone row, new- or legacy-format.
 ///
-/// The predicate checks the metadata column for the `is_redirect_tombstone` marker.
-/// We cannot use payload-column presence because `put_row` always writes a `p` cell
-/// — even for tombstones (with empty bytes). The RE2 regex is anchored to the JSON
-/// start; the field ordering of [`Metadata`] ensures `is_redirect_tombstone` is
-/// serialized first.
+/// New format: presence of the `r` column.
+/// Legacy format: `is_redirect_tombstone: true` in the `m` column JSON.
+///
+/// Used by [`BigTableBackend::put_non_tombstone`] and [`BigTableBackend::delete_non_tombstone`]
+/// as the `CheckAndMutate` predicate. After legacy tombstones expire naturally, this simplifies
+/// to just `column_filter(COLUMN_REDIRECT)`.
 fn tombstone_predicate() -> v2::RowFilter {
     v2::RowFilter {
-        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-            filters: vec![
-                column_filter(COLUMN_METADATA),
-                v2::RowFilter {
-                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
-                    )),
-                },
-            ],
-        })),
+        filter: Some(v2::row_filter::Filter::Interleave(
+            v2::row_filter::Interleave {
+                filters: vec![
+                    // Current: redirect column is present.
+                    column_filter(COLUMN_REDIRECT),
+                    // Legacy: Metadata starts with `is_redirect_tombstone``.
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                            filters: vec![
+                                column_filter(COLUMN_METADATA),
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
+                                    )),
+                                },
+                            ],
+                        })),
+                    },
+                ],
+            },
+        )),
+    }
+}
+
+/// Creates a row filter that reads all non-payload columns (`m`, `r`, `t`).
+///
+/// Used by metadata-only reads to avoid fetching the (potentially large) payload column
+/// while still being able to detect both new- and legacy-format tombstones.
+fn metadata_filter() -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
+            FILTER_META.to_owned(),
+        )),
     }
 }
 
@@ -222,10 +278,8 @@ fn build_write_mutations(
         ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
     };
 
-    let metadata_bytes = serde_json::to_vec(metadata).map_err(|cause| Error::Serde {
-        context: "failed to serialize metadata".to_string(),
-        cause,
-    })?;
+    let metadata_bytes = serde_json::to_vec(metadata)
+        .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
 
     Ok([
         // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -245,51 +299,182 @@ fn build_write_mutations(
     ])
 }
 
+/// Metadata carried by tombstone rows in the `t` (tombstone-meta) column.
+///
+/// Tombstone-specific metadata evolves independently of object [`Metadata`]. Only fields
+/// that are meaningful on tombstones are included here.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct TombstoneMeta {
+    /// Expiration policy for this tombstone.
+    ///
+    /// Skipped during serialization when set to [`ExpirationPolicy::Manual`].
+    #[serde(default, skip_serializing_if = "ExpirationPolicy::is_manual")]
+    expiration_policy: ExpirationPolicy,
+}
+
+/// Builds the three mutations that write a tombstone row: clear existing data,
+/// then set the redirect sentinel and tombstone-meta cells.
+///
+/// Used by both [`BigTableBackend::put_tombstone_row`] (unconditional write) and the
+/// TTI bump path in tiered reads.
+fn build_tombstone_mutations(
+    tombstone: &Tombstone,
+    now: SystemTime,
+) -> Result<[mutation::Mutation; 3]> {
+    let (family, timestamp_micros) = match tombstone.expiration_policy {
+        ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
+        ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
+        ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+    };
+
+    let tombstone_meta = TombstoneMeta {
+        expiration_policy: tombstone.expiration_policy,
+    };
+    let metadata_bytes = serde_json::to_vec(&tombstone_meta)
+        .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?;
+
+    Ok([
+        mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+        mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: COLUMN_REDIRECT.to_owned(),
+            timestamp_micros,
+            value: b"".to_vec(),
+        }),
+        mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
+            timestamp_micros,
+            value: metadata_bytes,
+        }),
+    ])
+}
+
+/// Subset of [`Metadata`] that indicates a row is a tombstone instead of a real object.
+///
+/// Used to construct [`RowData`].
+#[derive(Debug, Deserialize)]
+struct LegacyTombstoneMeta {
+    /// Internal redirect tombstone marker.
+    ///
+    /// When `true`, this object is a legacy tombstone. This implies:
+    ///  - the payload is empty
+    ///  - metadata other than the expiration policy is not meaningful
+    ///  - the `r` and `t` columns are not present
+    #[serde(default)]
+    is_redirect_tombstone: bool,
+
+    /// Expiration policy for this tombstone.
+    #[serde(default)]
+    expiration_policy: ExpirationPolicy,
+}
+
 /// Parsed data from a BigTable row's cells.
-struct RowData {
-    metadata: Metadata,
-    payload: Vec<u8>,
+enum RowData {
+    /// A regular object row with payload and metadata.
+    Object {
+        metadata: Metadata,
+        payload: Vec<u8>,
+    },
+    /// A tombstone row indicating the real payload lives on the long-term backend.
+    Tombstone {
+        meta: TombstoneMeta,
+        time_expires: Option<SystemTime>,
+    },
 }
 
 impl RowData {
+    /// Parses a set of row cells into a [`RowData`].
+    ///
+    /// New-format tombstones are identified by the presence of the `r` column.
+    /// Legacy tombstones (written before the column migration) are identified by
+    /// `is_redirect_tombstone: true` in the `m` column JSON; a
+    /// `bigtable.legacy_tombstone_read` metric is emitted on each such read.
     fn from_cells(cells: Vec<RowCell>) -> Result<Self> {
-        let mut metadata = Metadata::default();
+        let mut metadata_opt: Option<Metadata> = None;
+        let mut tombstone_meta_opt: Option<TombstoneMeta> = None;
+        let mut redirect_detected = false;
         let mut expire_at = None;
         let mut payload = Vec::new();
 
         for cell in cells {
+            // NB: All cells are written with the same timestamp; last write is safe.
+            expire_at = micros_to_time(cell.timestamp_micros);
+
             match cell.qualifier.as_slice() {
+                COLUMN_REDIRECT => {
+                    redirect_detected = true;
+                }
                 COLUMN_PAYLOAD => {
                     payload = cell.value;
-                    expire_at = micros_to_time(cell.timestamp_micros);
+                }
+                COLUMN_TOMBSTONE_META => {
+                    tombstone_meta_opt =
+                        Some(serde_json::from_slice(&cell.value).map_err(|cause| {
+                            Error::serde("failed to deserialize tombstone meta", cause)
+                        })?);
                 }
                 COLUMN_METADATA => {
-                    expire_at = micros_to_time(cell.timestamp_micros);
-                    metadata =
-                        serde_json::from_slice(&cell.value).map_err(|cause| Error::Serde {
-                            context: "failed to deserialize metadata".to_string(),
-                            cause,
-                        })?;
+                    if let Ok(legacy_meta) =
+                        serde_json::from_slice::<LegacyTombstoneMeta>(&cell.value)
+                        && legacy_meta.is_redirect_tombstone
+                    {
+                        redirect_detected = true;
+                        objectstore_metrics::count!("bigtable.legacy_tombstone_read");
+                        tombstone_meta_opt = Some(TombstoneMeta {
+                            expiration_policy: legacy_meta.expiration_policy,
+                        });
+                    } else {
+                        metadata_opt =
+                            Some(serde_json::from_slice(&cell.value).map_err(|cause| {
+                                Error::serde("failed to deserialize metadata", cause)
+                            })?);
+                    }
                 }
                 _ => {}
             }
         }
 
-        // Both columns carry the same timestamp (set by `put_row`), so it
-        // doesn't matter which cell writes `expire_at` last.
-        metadata.time_expires = expire_at;
-
-        Ok(Self { metadata, payload })
+        Ok(if redirect_detected {
+            RowData::Tombstone {
+                meta: tombstone_meta_opt.unwrap_or_default(),
+                time_expires: expire_at,
+            }
+        } else {
+            // Metadata may have been skipped during read - payload-only read for TTI bump.
+            let mut metadata = metadata_opt.unwrap_or_default();
+            metadata.time_expires = expire_at;
+            RowData::Object { metadata, payload }
+        })
     }
 
+    /// Returns the expiration policy for this row, regardless of variant.
+    fn expiration_policy(&self) -> ExpirationPolicy {
+        match self {
+            RowData::Object { metadata, .. } => metadata.expiration_policy,
+            RowData::Tombstone { meta, .. } => meta.expiration_policy,
+        }
+    }
+
+    /// Returns the resolved expiration timestamp for this row, regardless of variant.
+    fn time_expires(&self) -> Option<SystemTime> {
+        match self {
+            RowData::Object { metadata, .. } => metadata.time_expires,
+            RowData::Tombstone { time_expires, .. } => *time_expires,
+        }
+    }
+
+    /// Returns `true` if this row is expired as of the given `time`.
+    ///
+    /// Only applies to rows with an expiration policy set.
     fn expires_before(&self, time: SystemTime) -> bool {
-        self.metadata.time_expires.is_some_and(|ts| ts < time)
+        self.expiration_policy().is_timeout() && self.time_expires().is_some_and(|ts| ts < time)
     }
 
-    /// Returns `true` if this object's TTI deadline should be bumped.
+    /// Returns `true` if this row's TTI deadline should be bumped.
     fn needs_tti_bump(&self) -> bool {
         matches!(
-            self.metadata.expiration_policy,
+            self.expiration_policy(),
             ExpirationPolicy::TimeToIdle(tti) if self.expires_before(SystemTime::now() + tti - TTI_DEBOUNCE)
         )
     }
@@ -407,11 +592,11 @@ impl BigTableBackend {
         };
 
         let row = RowData::from_cells(cells)?;
-        if row.metadata.expiration_policy.is_timeout() && row.expires_before(SystemTime::now()) {
-            return Ok(None);
-        }
-
-        Ok(Some(row))
+        Ok(if row.expires_before(SystemTime::now()) {
+            None
+        } else {
+            Some(row)
+        })
     }
 
     async fn mutate<I>(
@@ -453,6 +638,44 @@ impl BigTableBackend {
         let mutations = build_write_mutations(metadata, payload, SystemTime::now())?;
         self.mutate(path, mutations, action).await
     }
+
+    async fn put_tombstone_row(
+        &self,
+        path: Vec<u8>,
+        tombstone: &Tombstone,
+        action: &'static str,
+    ) -> Result<v2::MutateRowResponse> {
+        let mutations = build_tombstone_mutations(tombstone, SystemTime::now())?;
+        self.mutate(path, mutations, action).await
+    }
+
+    /// Best-effort TTI bump for a row.
+    ///
+    /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
+    async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool) {
+        let expiration_policy = row.expiration_policy();
+
+        match row {
+            RowData::Tombstone { .. } => {
+                let tombstone = Tombstone { expiration_policy };
+                let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
+            }
+            RowData::Object { metadata, payload } if loaded => {
+                let _ = self
+                    .put_row(path, metadata, payload.clone(), "tti-bump")
+                    .await;
+            }
+            RowData::Object { metadata, .. } => {
+                let payload_read = self
+                    .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
+                    .await;
+
+                if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
+                    let _ = self.put_row(path, metadata, payload, "tti-bump").await;
+                }
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -483,62 +706,20 @@ impl Backend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        tracing::debug!("Reading from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        let Some(row) = self.read_row(&path, None, "get").await? else {
-            return Ok(None);
-        };
-        if row.metadata.is_tombstone() {
-            return Err(Error::UnexpectedTombstone);
+        match self.get_tiered_object(id).await? {
+            TieredGet::Object(metadata, payload) => Ok(Some((metadata, payload))),
+            TieredGet::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredGet::NotFound => Ok(None),
         }
-
-        if row.needs_tti_bump() {
-            // TODO: Schedule into background persistently so this doesn't get lost on restarts
-            let _ = self
-                .put_row(path, &row.metadata, row.payload.clone(), "tti-bump")
-                .await;
-        }
-
-        let mut metadata = row.metadata;
-        metadata.size = Some(row.payload.len());
-
-        let stream = crate::stream::single(row.payload);
-        Ok(Some((metadata, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        tracing::debug!("Reading metadata from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        // Only read the metadata column — skip the (potentially large) payload.
-        // NB: `metadata.size` will not be populated since the payload is not fetched.
-        let row_opt = self
-            .read_row(&path, Some(column_filter(COLUMN_METADATA)), "get_metadata")
-            .await?;
-        let Some(row) = row_opt else {
-            return Ok(None);
-        };
-        if row.metadata.is_tombstone() {
-            return Err(Error::UnexpectedTombstone);
+        match self.get_tiered_metadata(id).await? {
+            TieredMetadata::Object(metadata) => Ok(Some(metadata)),
+            TieredMetadata::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredMetadata::NotFound => Ok(None),
         }
-
-        // Conditional TTI bump: read the payload only when a bump is actually needed.
-        if row.needs_tti_bump() {
-            // TODO: Schedule into background persistently so this doesn't get lost on restarts
-            // Best-effort — failures here should not fail the metadata read.
-            if let Ok(Some(payload_row)) = self
-                .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                .await
-            {
-                let _ = self
-                    .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
-                    .await;
-            }
-        }
-
-        Ok(Some(row.metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -643,15 +824,7 @@ impl HighVolumeBackend for BigTableBackend {
     async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
         tracing::debug!("Writing tombstone to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
-        // TODO: Store tombstones in a dedicated column instead of encoding the marker in
-        // `is_redirect_tombstone` within the metadata JSON. The JSON-regex predicate used by
-        // `put_non_tombstone` / `delete_non_tombstone` is a workaround until that column exists.
-        let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
-            expiration_policy: tombstone.expiration_policy,
-            ..Default::default()
-        };
-        self.put_row(path, &metadata, vec![], "create_tombstone")
+        self.put_tombstone_row(path, &tombstone, "create_tombstone")
             .await?;
         Ok(())
     }
@@ -666,20 +839,19 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         if row.needs_tti_bump() {
-            // TODO: Schedule into background persistently so this doesn't get lost on restarts
-            let _ = self
-                .put_row(path, &row.metadata, row.payload.clone(), "tti-bump")
-                .await;
+            self.bump_tti(path.clone(), &row, true).await;
         }
 
-        Ok(if row.metadata.is_tombstone() {
-            TieredGet::Tombstone(Tombstone {
-                expiration_policy: row.metadata.expiration_policy,
-            })
-        } else {
-            let mut metadata = row.metadata;
-            metadata.size = Some(row.payload.len());
-            TieredGet::Object(metadata, crate::stream::single(row.payload))
+        Ok(match row {
+            RowData::Tombstone { meta, .. } => {
+                let expiration_policy = meta.expiration_policy;
+                TieredGet::Tombstone(Tombstone { expiration_policy })
+            }
+            RowData::Object { metadata, payload } => {
+                let mut metadata = metadata;
+                metadata.size = Some(payload.len());
+                TieredGet::Object(metadata, crate::stream::single(payload))
+            }
         })
     }
 
@@ -688,44 +860,26 @@ impl HighVolumeBackend for BigTableBackend {
         tracing::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
-        // Only read the metadata column — skip the (potentially large) payload.
+        // Read metadata and tombstone columns — skip the (potentially large) payload.
         // NB: `metadata.size` will not be populated since the payload is not fetched.
         let row_opt = self
-            .read_row(
-                &path,
-                Some(column_filter(COLUMN_METADATA)),
-                "get_tiered_metadata",
-            )
+            .read_row(&path, Some(metadata_filter()), "get_tiered_metadata")
             .await?;
         let Some(row) = row_opt else {
             return Ok(TieredMetadata::NotFound);
         };
 
-        if row.metadata.is_tombstone() {
-            if row.needs_tti_bump() {
-                // Tombstone payload is always empty — bump without a separate payload read.
-                let _ = self.put_row(path, &row.metadata, vec![], "tti-bump").await;
-            }
-            return Ok(TieredMetadata::Tombstone(Tombstone {
-                expiration_policy: row.metadata.expiration_policy,
-            }));
-        }
-
-        // Conditional TTI bump: read the payload only when a bump is actually needed.
         if row.needs_tti_bump() {
-            // TODO: Schedule into background persistently so this doesn't get lost on restarts
-            // Best-effort — failures here should not fail the metadata read.
-            if let Ok(Some(payload_row)) = self
-                .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                .await
-            {
-                let _ = self
-                    .put_row(path, &row.metadata, payload_row.payload, "tti-bump")
-                    .await;
-            }
+            self.bump_tti(path.clone(), &row, false).await;
         }
 
-        Ok(TieredMetadata::Object(row.metadata))
+        Ok(match row {
+            RowData::Tombstone { meta, .. } => {
+                let expiration_policy = meta.expiration_policy;
+                TieredMetadata::Tombstone(Tombstone { expiration_policy })
+            }
+            RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
+        })
     }
 }
 
@@ -781,21 +935,6 @@ mod tests {
     // automatically in CI.
     //
     // Refer to the readme for how to set up the emulator.
-
-    #[test]
-    fn tombstone_json_field_ordering() {
-        // The `delete_non_tombstone` regex predicate assumes
-        // `is_redirect_tombstone` is serialized as the first JSON field.
-        let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(
-            json.starts_with(r#"{"is_redirect_tombstone":true"#),
-            "is_redirect_tombstone must be the first JSON field, got: {json}"
-        );
-    }
 
     async fn create_test_backend() -> Result<BigTableBackend> {
         BigTableBackend::new(BigTableConfig {
@@ -999,14 +1138,13 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
-            ..Default::default()
-        };
-
-        // Write a tombstone (no real payload, just metadata)
         backend
-            .put_object(&id, &metadata, stream::single(""))
+            .create_tombstone(
+                &id,
+                Tombstone {
+                    expiration_policy: ExpirationPolicy::Manual,
+                },
+            )
             .await?;
 
         let result = backend.get_metadata(&id).await;
@@ -1140,17 +1278,21 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Also verifies that the `r = b""` sentinel (empty byte value) is correctly
+    /// detected by both the `ReadRows` column filter and the `CheckAndMutate`
+    /// `tombstone_predicate` — confirming the Bigtable filter treats empty-value cells
+    /// the same as non-empty ones for column-presence checks.
     async fn test_delete_non_tombstone_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let metadata = Metadata {
-            is_redirect_tombstone: Some(true),
-            ..Default::default()
-        };
-
         backend
-            .put_object(&id, &metadata, stream::single(""))
+            .create_tombstone(
+                &id,
+                Tombstone {
+                    expiration_policy: ExpirationPolicy::Manual,
+                },
+            )
             .await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
@@ -1190,6 +1332,148 @@ mod tests {
             backend.get_tiered_metadata(&id).await?,
             TieredMetadata::NotFound
         ));
+
+        Ok(())
+    }
+
+    /// Writes a legacy-format tombstone row directly into Bigtable.
+    async fn write_legacy_tombstone(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+        expiration_policy: ExpirationPolicy,
+        time_expires: Option<SystemTime>,
+    ) -> Result<()> {
+        let meta = if expiration_policy.is_manual() {
+            r#"{"is_redirect_tombstone":true}"#.to_owned()
+        } else {
+            let policy_json = serde_json::to_string(&expiration_policy).unwrap();
+            format!(r#"{{"is_redirect_tombstone":true,"expiration_policy":{policy_json}}}"#)
+        };
+
+        let (family, timestamp_micros) = if expiration_policy.is_manual() {
+            (FAMILY_MANUAL, -1)
+        } else {
+            let t =
+                time_expires.unwrap_or(SystemTime::now() + expiration_policy.expires_in().unwrap());
+            let timestamp = t
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            (FAMILY_GC, timestamp as i64 * 1000)
+        };
+
+        backend
+            .mutate(
+                id.as_storage_path().to_string().into_bytes(),
+                [mutation::Mutation::SetCell(mutation::SetCell {
+                    family_name: family.to_owned(),
+                    column_qualifier: COLUMN_METADATA.to_owned(),
+                    timestamp_micros,
+                    value: meta.into_bytes(),
+                })],
+                "test-setup",
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    ///
+    /// Uses `Manual` expiration so `timestamp_micros = -1` (server-assigned ≈ write time) does
+    /// not trigger immediate expiry.
+    #[tokio::test]
+    async fn test_legacy_tombstone_compat() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
+
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected tombstone");
+        };
+        assert_eq!(t.expiration_policy, ExpirationPolicy::Manual);
+        assert!(matches!(
+            backend.get_tiered_object(&id).await?,
+            TieredGet::Tombstone(_)
+        ));
+        assert_eq!(
+            backend
+                .put_non_tombstone(&id, &Metadata::default(), bytes::Bytes::new())
+                .await?,
+            ConditionalOutcome::Tombstone,
+        );
+        assert_eq!(
+            backend.delete_non_tombstone(&id).await?,
+            ConditionalOutcome::Tombstone,
+        );
+
+        Ok(())
+    }
+
+    /// Legacy tombstones with a `TimeToLive` expiration policy have the policy correctly
+    /// deserialized from the `m` column JSON.
+    ///
+    /// A future cell timestamp (now + TTL) is required so `expires_before` does not immediately
+    /// filter the row: the cell timestamp doubles as the GC expiry time.
+    #[tokio::test]
+    async fn test_legacy_tombstone_expiration_policy() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+
+        let ttl = Duration::from_secs(2 * 24 * 3600);
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
+
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected TieredMetadata::Tombstone");
+        };
+        assert_eq!(t.expiration_policy, ExpirationPolicy::TimeToLive(ttl));
+
+        Ok(())
+    }
+
+    /// A legacy tombstone with TTI policy is upgraded to the new `r`/`t` column format on read.
+    ///
+    /// The bump path in both `get_tiered_metadata` and `get_tiered_object` calls
+    /// `put_tombstone_row`, which rewrites the row with `r` + `t` columns. The upgraded
+    /// row has a fresh cell timestamp (≈ now + TTI), so `time_expires` increases.
+    #[tokio::test]
+    async fn test_legacy_tombstone_tti_upgrade() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        let tti = Duration::from_secs(2 * 24 * 3600); // must exceed TTI_DEBOUNCE (1 day)
+
+        // Place time_expires just inside the bump window: past `now + tti - TTI_DEBOUNCE`
+        // but still in the future so `expires_before(now)` does not filter the row.
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        write_legacy_tombstone(
+            &backend,
+            &id,
+            ExpirationPolicy::TimeToIdle(tti),
+            Some(old_deadline),
+        )
+        .await?;
+
+        // First read detects the stale TTI and triggers `put_tombstone_row`.
+        let TieredMetadata::Tombstone(_) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected tombstone");
+        };
+
+        // After the bump, the row is rewritten with a fresh timestamp (≈ now + TTI).
+        // Verify the new time_expires is later than the pre-bump deadline.
+        let Some(RowData::Tombstone {
+            time_expires: Some(new_deadline),
+            ..
+        }) = backend.read_row(&path, None, "test-verify").await?
+        else {
+            panic!("expected tombstone row after bump");
+        };
+
+        assert!(
+            new_deadline > old_deadline,
+            "TTI bump should have extended the tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
+        );
 
         Ok(())
     }
