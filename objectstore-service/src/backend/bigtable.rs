@@ -147,6 +147,8 @@ const COLUMN_METADATA: &[u8] = b"m";
 const COLUMN_REDIRECT: &[u8] = b"r";
 /// Column that stores [`TombstoneMeta`] JSON for tombstone rows.
 const COLUMN_TOMBSTONE_META: &[u8] = b"t";
+/// Regex to match all non-payload columns (`m`, `r`, `t`) for metadata-only reads.
+const FILTER_META: &[u8] = b"^[mrt]$";
 
 /// Column family that uses timestamp-based garbage collection.
 ///
@@ -255,7 +257,7 @@ fn tombstone_predicate() -> v2::RowFilter {
 fn metadata_filter() -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::ColumnQualifierRegexFilter(
-            b"^[mrt]$".to_vec(),
+            FILTER_META.to_owned(),
         )),
     }
 }
