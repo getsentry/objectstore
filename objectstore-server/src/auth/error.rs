@@ -40,10 +40,17 @@ impl AuthError {
     }
 
     /// Increment a counter and emit a debug log for this auth failure.
-    pub fn log(&self, permission: Option<Permission>, usecase: Option<&str>) {
+    ///
+    /// If `enforce` is false, authentication failures will be logged as warnings to ensure they
+    /// are found and fixed to unblock enabling enforcement.
+    pub fn log(&self, permission: Option<Permission>, usecase: Option<&str>, enforce: bool) {
         let code = self.code();
         objectstore_metrics::count!("server.auth.failure", code = code);
         let msg = self.to_string();
-        tracing::debug!(?permission, ?usecase, ?code, ?msg, "Authorization failure");
+        if !enforce {
+            tracing::warn!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+        } else {
+            tracing::debug!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+        }
     }
 }

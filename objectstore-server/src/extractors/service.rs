@@ -20,14 +20,15 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
+        let enforce = state.config.auth.enforce;
         // Attempt to decode / verify the JWT, logging failure
         let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
-            .inspect_err(|err| err.log(None, None));
+            .inspect_err(|err| err.log(None, None, enforce));
 
         // If auth enforcement is enabled, `from_encoded_jwt()` must have succeeded.
         // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
         // still proceed with `None` if it failed.
-        let auth_context = match state.config.auth.enforce {
+        let auth_context = match enforce {
             true => Some(auth_result?),
             false => auth_result.ok(),
         };
