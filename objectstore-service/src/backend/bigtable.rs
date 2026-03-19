@@ -35,12 +35,11 @@ use std::time::{Duration, SystemTime};
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
+use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
-
-use bytes::Bytes;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
@@ -192,6 +191,25 @@ fn column_filter(column: &[u8]) -> v2::RowFilter {
     }
 }
 
+/// Creates a row filter matching the legacy tombstone format: `m` column JSON starts with
+/// `{"is_redirect_tombstone":true`.
+///
+/// After legacy tombstones expire naturally this filter becomes dead code in both callers.
+fn legacy_tombstone_filter() -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_METADATA),
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
+                    )),
+                },
+            ],
+        })),
+    }
+}
+
 /// Creates a row filter that matches any tombstone row, new- or legacy-format.
 ///
 /// New format: presence of the `r` column.
@@ -207,33 +225,27 @@ fn tombstone_predicate() -> v2::RowFilter {
                 filters: vec![
                     // Current: redirect column is present.
                     column_filter(COLUMN_REDIRECT),
-                    // Legacy: Metadata starts with `is_redirect_tombstone``.
-                    v2::RowFilter {
-                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-                            filters: vec![
-                                column_filter(COLUMN_METADATA),
-                                v2::RowFilter {
-                                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                                        b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
-                                    )),
-                                },
-                            ],
-                        })),
-                    },
+                    // Legacy: metadata column JSON format.
+                    legacy_tombstone_filter(),
                 ],
             },
         )),
     }
 }
 
-/// Creates a row filter that matches tombstones whose redirect resolves to `expected_target`.
+/// Creates a row filter that matches tombstones whose redirect resolves to `target`.
 ///
-/// Combines an exact value match on the `r` column with additional fallbacks when
-/// `expected_target == hv_id` (i.e., the caller expects the legacy identity target):
-/// - `r == b""` (empty-sentinel format written before the redirect column stored the path)
-/// - legacy `m` column format (`is_redirect_tombstone: true`)
-fn redirect_target_filter(expected_target: &ObjectId, hv_id: &ObjectId) -> v2::RowFilter {
-    let target_path = expected_target.as_storage_path().to_string().into_bytes();
+/// Always includes an exact match on the `r` (redirect) column:
+/// - Chain: `r` column present AND value == `target` storage path
+///
+/// When `target == own_id` (the caller expects a legacy identity redirect), the
+/// exact match is wrapped in an Interleave with two additional fallbacks:
+/// - Chain: `r` column present AND value == `b""` (empty-sentinel written before the redirect
+///   column stored the path)
+/// - Chain: `m` column present AND value matches `{"is_redirect_tombstone":true...}` regex
+///   (legacy metadata format predating the dedicated `r` column)
+fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
+    let target_path = target.as_storage_path().to_string().into_bytes();
 
     let exact_match = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
@@ -251,48 +263,33 @@ fn redirect_target_filter(expected_target: &ObjectId, hv_id: &ObjectId) -> v2::R
         })),
     };
 
-    if expected_target == hv_id {
-        // Also match legacy tombstones that resolve to the HV id:
-        // - empty `r` value (written before the redirect column stored the path)
-        // - legacy `m` column format (`is_redirect_tombstone: true`)
-        let empty_redirect_match = v2::RowFilter {
-            filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-                filters: vec![
-                    column_filter(COLUMN_REDIRECT),
-                    v2::RowFilter {
-                        filter: Some(v2::row_filter::Filter::ValueRangeFilter(v2::ValueRange {
-                            start_value: Some(v2::value_range::StartValue::StartValueClosed(
-                                vec![],
-                            )),
-                            end_value: Some(v2::value_range::EndValue::EndValueClosed(vec![])),
-                        })),
-                    },
-                ],
-            })),
-        };
+    if target != own_id {
+        return exact_match;
+    }
 
-        let legacy_meta_match = v2::RowFilter {
-            filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
-                filters: vec![
-                    column_filter(COLUMN_METADATA),
-                    v2::RowFilter {
-                        filter: Some(v2::row_filter::Filter::ValueRegexFilter(
-                            b"^\\{\"is_redirect_tombstone\":true[,}].*".to_vec(),
-                        )),
-                    },
-                ],
-            })),
-        };
-
-        v2::RowFilter {
-            filter: Some(v2::row_filter::Filter::Interleave(
-                v2::row_filter::Interleave {
-                    filters: vec![exact_match, empty_redirect_match, legacy_meta_match],
+    let empty_redirect_match = v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_REDIRECT),
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::ValueRangeFilter(v2::ValueRange {
+                        start_value: Some(v2::value_range::StartValue::StartValueClosed(vec![])),
+                        end_value: Some(v2::value_range::EndValue::EndValueClosed(vec![])),
+                    })),
                 },
-            )),
-        }
-    } else {
-        exact_match
+            ],
+        })),
+    };
+
+    // Also match legacy tombstones that resolve to the HV id:
+    // - empty `r` value (written before the redirect column stored the path)
+    // - legacy `m` column format (`is_redirect_tombstone: true`)
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Interleave(
+            v2::row_filter::Interleave {
+                filters: vec![exact_match, empty_redirect_match, legacy_tombstone_filter()],
+            },
+        )),
     }
 }
 
@@ -1338,16 +1335,11 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         let result = backend.get_metadata(&id).await;
         assert!(
@@ -1488,16 +1480,11 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         let result = backend.delete_non_tombstone(&id).await?;
         let tombstone = result.expect("Some(tombstone)");
@@ -1583,6 +1570,33 @@ mod tests {
         Ok(())
     }
 
+    /// Write a new-format tombstone row with an empty `r` value directly,
+    /// simulating rows written by code before this change.
+    async fn write_empty_redirect_tombstone(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+    ) -> Result<()> {
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = [
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_MANUAL.to_owned(),
+                column_qualifier: COLUMN_REDIRECT.to_owned(),
+                timestamp_micros: -1,
+                value: b"".to_vec(), // empty — legacy format
+            }),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_MANUAL.to_owned(),
+                column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
+                timestamp_micros: -1,
+                value: b"{}".to_vec(),
+            }),
+        ];
+
+        backend.mutate(path, mutations, "test-setup").await?;
+
+        Ok(())
+    }
+
     ///
     /// Uses `Manual` expiration so `timestamp_micros = -1` (server-assigned ≈ write time) does
     /// not trigger immediate expiry.
@@ -1604,17 +1618,15 @@ mod tests {
 
         // Recreate a fresh tombstone to test the other conditional operations.
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-
         let t_opt = backend
-            .put_non_tombstone(&id, &Metadata::default(), bytes::Bytes::new())
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::new())
             .await?;
         // Legacy tombstones resolve to hv_id; target should match id.
-        assert_eq!(t_opt.as_ref().map(|t| &t.target), Some(&id));
+        assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
 
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-
         let t_opt = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(t_opt.as_ref().map(|t| &t.target), Some(&id));
+        assert_eq!(t_opt.map(|t| t.target), Some(id));
 
         Ok(())
     }
@@ -1688,21 +1700,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cas_put_create_tombstone() -> Result<()> {
+    async fn test_swap_create_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
         let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
-        let committed = backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: id.clone(),
-                    expiration_policy,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: id.clone(),
+            expiration_policy,
+        });
+        let committed = backend.compare_and_write(&id, None, write).await?;
         assert!(committed, "expected CAS success on empty row");
 
         // Both hv methods must surface the tombstone with the correct expiration_policy.
@@ -1730,7 +1737,7 @@ mod tests {
 
     /// Attempting to create a tombstone when one already exists returns false.
     #[tokio::test]
-    async fn test_cas_put_create_tombstone_conflict() -> Result<()> {
+    async fn test_swap_create_tombstone_conflict() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -1756,31 +1763,25 @@ mod tests {
 
     /// CAS-swapping an existing tombstone for a new one succeeds when the expected target matches.
     #[tokio::test]
-    async fn test_cas_put_swap_tombstone() -> Result<()> {
+    async fn test_swap_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let hv_id = make_id();
         let old_lt_id = ObjectId::random(hv_id.context().clone());
         let new_lt_id = ObjectId::random(hv_id.context().clone());
 
-        let old_tombstone = Tombstone {
+        let old_write = TieredWrite::Tombstone(Tombstone {
             target: old_lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        };
-        backend
-            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(old_tombstone))
-            .await?;
+        });
+        backend.compare_and_write(&hv_id, None, old_write).await?;
 
-        let new_tombstone = Tombstone {
+        let new_write = TieredWrite::Tombstone(Tombstone {
             target: new_lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        };
+        });
         let swapped = backend
-            .compare_and_write(
-                &hv_id,
-                Some(&old_lt_id),
-                TieredWrite::Tombstone(new_tombstone),
-            )
+            .compare_and_write(&hv_id, Some(&old_lt_id), new_write)
             .await?;
         assert!(swapped, "expected CAS success");
 
@@ -1794,7 +1795,7 @@ mod tests {
 
     /// CAS-swapping fails when the expected target does not match the current tombstone.
     #[tokio::test]
-    async fn test_cas_put_swap_tombstone_mismatch() -> Result<()> {
+    async fn test_swap_tombstone_mismatch() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let hv_id = make_id();
@@ -1802,26 +1803,18 @@ mod tests {
         let wrong_lt_id = ObjectId::random(hv_id.context().clone());
         let new_lt_id = ObjectId::random(hv_id.context().clone());
 
-        backend
-            .compare_and_write(
-                &hv_id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: actual_lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let old_write = TieredWrite::Tombstone(Tombstone {
+            target: actual_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&hv_id, None, old_write).await?;
 
+        let new_write = TieredWrite::Tombstone(Tombstone {
+            target: new_lt_id,
+            expiration_policy: ExpirationPolicy::Manual,
+        });
         let swapped = backend
-            .compare_and_write(
-                &hv_id,
-                Some(&wrong_lt_id),
-                TieredWrite::Tombstone(Tombstone {
-                    target: new_lt_id,
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
+            .compare_and_write(&hv_id, Some(&wrong_lt_id), new_write)
             .await?;
         assert!(!swapped, "expected CAS failure due to wrong target");
 
@@ -1836,31 +1829,22 @@ mod tests {
 
     /// CAS-swapping a tombstone for inline data succeeds when the target matches.
     #[tokio::test]
-    async fn test_cas_put_swap_inline() -> Result<()> {
+    async fn test_swap_inline() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
         let lt_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let old_write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, old_write).await?;
 
-        let metadata = Metadata::default();
-        let payload = bytes::Bytes::from(b"hello inline".to_vec());
+        let payload = Bytes::from_static(b"hello inline");
+        let new_write = TieredWrite::Object(Metadata::default(), payload.clone());
         let swapped = backend
-            .compare_and_write(
-                &id,
-                Some(&lt_id),
-                TieredWrite::Object(metadata, payload.clone()),
-            )
+            .compare_and_write(&id, Some(&lt_id), new_write)
             .await?;
         assert!(swapped, "expected CAS success");
 
@@ -1876,30 +1860,22 @@ mod tests {
 
     /// Inline-swap fails when the expected target does not match.
     #[tokio::test]
-    async fn test_cas_put_swap_inline_mismatch() -> Result<()> {
+    async fn test_swap_inline_mismatch() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let old_write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, old_write).await?;
 
+        let new_write = TieredWrite::Object(Metadata::default(), Bytes::new());
         let swapped = backend
-            .compare_and_write(
-                &id,
-                Some(&wrong_id),
-                TieredWrite::Object(Metadata::default(), bytes::Bytes::new()),
-            )
+            .compare_and_write(&id, Some(&wrong_id), new_write)
             .await?;
         assert!(!swapped, "expected CAS failure");
 
@@ -1914,22 +1890,17 @@ mod tests {
 
     /// CAS-delete succeeds when the expected target matches.
     #[tokio::test]
-    async fn test_cas_put_delete() -> Result<()> {
+    async fn test_swap_delete() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
         let lt_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         let deleted = backend
             .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
@@ -1946,23 +1917,18 @@ mod tests {
 
     /// CAS-delete fails when the expected target does not match.
     #[tokio::test]
-    async fn test_cas_put_delete_mismatch() -> Result<()> {
+    async fn test_swap_delete_mismatch() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         let deleted = backend
             .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete)
@@ -1980,7 +1946,7 @@ mod tests {
 
     /// CAS-delete with Some(target) against a regular object returns false.
     #[tokio::test]
-    async fn test_cas_put_delete_regular_object() -> Result<()> {
+    async fn test_swap_delete_regular_object() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -2001,46 +1967,19 @@ mod tests {
         Ok(())
     }
 
-    /// Legacy empty-redirect tombstone (`r=b""`) is matched by `cas_put` when `expected=Some(id)`.
+    /// Legacy empty-redirect tombstone (`r=b""`) is matched when `expected=Some(id)`.
     #[tokio::test]
-    async fn test_cas_put_legacy_empty_redirect() -> Result<()> {
+    async fn test_swap_legacy_empty_redirect() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
-        let path = id.as_storage_path().to_string().into_bytes();
 
-        // Write a tombstone with an empty `r` value (legacy format).
-        backend
-            .mutate(
-                path,
-                [
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_MANUAL.to_owned(),
-                        column_qualifier: COLUMN_REDIRECT.to_owned(),
-                        timestamp_micros: -1,
-                        value: b"".to_vec(),
-                    }),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_MANUAL.to_owned(),
-                        column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
-                        timestamp_micros: -1,
-                        value: serde_json::to_vec(&TombstoneMeta {
-                            expiration_policy: ExpirationPolicy::Manual,
-                        })
-                        .unwrap(),
-                    }),
-                ],
-                "test-setup",
-            )
-            .await?;
+        write_empty_redirect_tombstone(&backend, &id).await?;
 
         // Expected target = id (the legacy fallback resolves to hv_id).
         let deleted = backend
             .compare_and_write(&id, Some(&id), TieredWrite::Delete)
             .await?;
-        assert!(
-            deleted,
-            "cas_put should match legacy empty-redirect tombstone"
-        );
+        assert!(deleted, "should match legacy empty-redirect tombstone");
 
         assert!(matches!(
             backend.get_tiered_metadata(&id).await?,
@@ -2050,9 +1989,9 @@ mod tests {
         Ok(())
     }
 
-    /// Legacy metadata-format tombstone is matched by `cas_put` when `expected=Some(id)`.
+    /// Legacy metadata-format tombstone is matched when `expected=Some(id)`.
     #[tokio::test]
-    async fn test_cas_put_legacy_metadata_format() -> Result<()> {
+    async fn test_swap_legacy_metadata_format() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
 
@@ -2062,7 +2001,7 @@ mod tests {
         let deleted = backend
             .compare_and_write(&id, Some(&id), TieredWrite::Delete)
             .await?;
-        assert!(deleted, "cas_put should match legacy-metadata tombstone");
+        assert!(deleted, "should match legacy-metadata tombstone");
 
         assert!(matches!(
             backend.get_tiered_metadata(&id).await?,
@@ -2102,41 +2041,12 @@ mod tests {
         Ok(())
     }
 
-    /// A tombstone row with an empty `r` value (written by old code before this change)
-    /// returns `target = hv_id` via the fallback, and emits `bigtable.empty_redirect_read`.
     #[tokio::test]
     async fn test_empty_redirect_falls_back_to_hv_id() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
-        let path = id.as_storage_path().to_string().into_bytes();
 
-        // Write a new-format tombstone row with an empty `r` value directly,
-        // simulating rows written by code before this change.
-        let tombstone_meta = TombstoneMeta {
-            expiration_policy: ExpirationPolicy::Manual,
-        };
-        let meta_bytes = serde_json::to_vec(&tombstone_meta).unwrap();
-        backend
-            .mutate(
-                path,
-                [
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_MANUAL.to_owned(),
-                        column_qualifier: COLUMN_REDIRECT.to_owned(),
-                        timestamp_micros: -1,
-                        value: b"".to_vec(), // empty — legacy format
-                    }),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_MANUAL.to_owned(),
-                        column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
-                        timestamp_micros: -1,
-                        value: meta_bytes,
-                    }),
-                ],
-                "test-setup",
-            )
-            .await?;
-
+        write_empty_redirect_tombstone(&backend, &id).await?;
         match backend.get_tiered_metadata(&id).await? {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must use id"),
             other => panic!("expected tombstone, got {other:?}"),
