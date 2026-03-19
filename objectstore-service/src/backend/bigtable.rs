@@ -829,9 +829,10 @@ impl HighVolumeBackend for BigTableBackend {
                         expiration_policy: meta.expiration_policy,
                     }));
                 }
-                // Race: tombstone disappeared between CheckAndMutate and read.
-                // Retry so the write lands.
-                Some(RowData::Object { .. }) | None => continue,
+                // Race: Tombstone was replaced by an object, retry to overwrite
+                Some(RowData::Object { .. }) => continue,
+                // Race: Tombstone was deleted, retry to write.
+                None => continue,
             }
         }
 
@@ -885,7 +886,7 @@ impl HighVolumeBackend for BigTableBackend {
                         expiration_policy: meta.expiration_policy,
                     }));
                 }
-                // Race: An object appeared, try delete again.
+                // Race: An object replaced the tombstone, delete the new object now.
                 Some(RowData::Object { .. }) => continue,
                 // Race: Entry was deleted in the meanwhile, nothing left to do.
                 None => return Ok(None),
