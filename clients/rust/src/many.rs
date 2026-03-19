@@ -526,6 +526,8 @@ async fn classify(op: BatchOperation) -> Classified {
 }
 
 /// Classifies all operations, partitioning them into batchable, individual, and failed.
+///
+/// Classification is parallelized since it may involve FS I/O (e.g., stat calls).
 async fn partition(
     operations: Vec<BatchOperation>,
 ) -> (
@@ -533,11 +535,12 @@ async fn partition(
     Vec<BatchOperation>,
     Vec<OperationResult>,
 ) {
+    let classified = futures_util::future::join_all(operations.into_iter().map(classify)).await;
     let mut batchable = Vec::new();
     let mut individual = Vec::new();
     let mut failed = Vec::new();
-    for op in operations {
-        match classify(op).await {
+    for item in classified {
+        match item {
             Classified::Batchable(op) => batchable.push(op),
             Classified::Individual(op) => individual.push(op),
             Classified::Failed(result) => failed.push(result),
