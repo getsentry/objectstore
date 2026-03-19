@@ -35,7 +35,7 @@ const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 /// This determines the maximum number of such requests that can be executed concurrently.
 const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
 
-/// Maximum number of batch chunks to execute concurrently.
+/// Maximum number of requests to the batch endpoint that can be executed concurrently.
 const MAX_BATCH_CONCURRENCY: usize = 5;
 
 // TODO: add limit and logic for whole batch request body size
@@ -636,7 +636,7 @@ impl ManyBuilder {
             let session = session.clone();
             async move { execute_batch(chunk, &session).await }
         })
-        .buffered(MAX_BATCH_CONCURRENCY)
+        .buffer_unordered(MAX_BATCH_CONCURRENCY)
         .flat_map(futures_util::stream::iter);
 
         let results = futures_util::stream::iter(failed)
