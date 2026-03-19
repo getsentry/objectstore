@@ -100,6 +100,17 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
 }
 
+/// What to write when a [`cas_put`](HighVolumeBackend::cas_put) condition is met.
+#[derive(Debug)]
+pub enum CasMutation {
+    /// Write a redirect tombstone.
+    WriteTombstone(Tombstone),
+    /// Write inline object data.
+    WriteInline(Metadata, Bytes),
+    /// Delete the row entirely.
+    Delete,
+}
+
 /// Trait for backends that support tombstone-conditional operations.
 ///
 /// Only backends suitable for the high-volume tier of
@@ -145,11 +156,21 @@ pub trait HighVolumeBackend: Backend {
     /// without a second round trip.
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>>;
 
-    /// Writes a redirect tombstone for the given object.
+    /// Atomically mutates the row if the current redirect state matches.
     ///
-    /// A tombstone signals that the real object lives in the long-term backend
-    /// identified by the tombstone's [`target`](Tombstone::target) ID.
-    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()>;
+    /// `expected_redirect` determines the precondition:
+    /// - `None`: succeeds only if no tombstone exists (row absent or inline).
+    /// - `Some(target)`: succeeds only if a tombstone exists whose redirect
+    ///   resolves to `target` (handles modern, empty-sentinel, and legacy formats).
+    ///
+    /// On match, applies `mutation`. Returns `true` on success, `false` if the
+    /// precondition was not met (row state changed concurrently).
+    async fn cas_put(
+        &self,
+        id: &ObjectId,
+        expected_redirect: Option<&ObjectId>,
+        mutation: CasMutation,
+    ) -> Result<bool>;
 }
 
 /// Creates a reqwest client with required defaults.

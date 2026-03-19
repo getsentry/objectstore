@@ -13,7 +13,7 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata, Tombstone,
+    CasMutation, DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -143,12 +143,38 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         Ok(None)
     }
 
-    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
-        self.store
-            .lock()
-            .unwrap()
-            .insert(id.clone(), StoreEntry::Tombstone(tombstone));
-        Ok(())
+    async fn cas_put(
+        &self,
+        id: &ObjectId,
+        expected_redirect: Option<&ObjectId>,
+        mutation: CasMutation,
+    ) -> Result<bool> {
+        let mut store = self.store.lock().unwrap();
+        let current = store.get(id);
+
+        let matches = match expected_redirect {
+            None => !matches!(current, Some(StoreEntry::Tombstone(_))),
+            Some(target) => matches!(
+                current,
+                Some(StoreEntry::Tombstone(t)) if t.target == *target
+            ),
+        };
+
+        if matches {
+            match mutation {
+                CasMutation::WriteTombstone(tombstone) => {
+                    store.insert(id.clone(), StoreEntry::Tombstone(tombstone));
+                }
+                CasMutation::WriteInline(metadata, payload) => {
+                    store.insert(id.clone(), StoreEntry::Object(metadata, payload));
+                }
+                CasMutation::Delete => {
+                    store.remove(id);
+                }
+            }
+        }
+
+        Ok(matches)
     }
 
     async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {

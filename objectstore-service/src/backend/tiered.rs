@@ -13,8 +13,8 @@ use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
-    TieredGet, TieredMetadata, Tombstone,
+    Backend, CasMutation, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    PutResponse, TieredGet, TieredMetadata, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
@@ -23,6 +23,18 @@ use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+
+/// Creates a new [`ObjectId`] with the same context but a unique revision key.
+///
+/// The new key has the format `{original_key}/{uuid_v7}`, producing a distinct
+/// storage path for each large-object write. [`ObjectId::from_storage_path`] parses
+/// the result back correctly because the key portion may contain `/`.
+fn revision_id(id: &ObjectId) -> ObjectId {
+    ObjectId {
+        context: id.context.clone(),
+        key: format!("{}/{}", id.key, uuid::Uuid::now_v7()),
+    }
+}
 
 /// Configuration for [`TieredStorage`].
 ///
@@ -188,17 +200,23 @@ impl Backend for TieredStorage {
                     .put_non_tombstone(id, metadata, payload.clone())
                     .await?;
 
-                if let Some(Tombstone { target, .. }) = tombstone_opt {
-                    // Tombstone already exists in HV — write to long-term instead.
-                    // TODO: The new object's expiry may differ from the tombstone's,
-                    // leaving them inconsistent. This is a known gap and will be fixed
-                    // in a follow-up.
-                    let stream = crate::stream::single(payload).boxed();
-                    self.long_term.put_object(&target, metadata, stream).await?;
-                    (BackendChoice::LongTerm, stored_size)
-                } else {
-                    (BackendChoice::HighVolume, stored_size)
+                if let Some(tombstone) = tombstone_opt {
+                    // Tombstone exists — CAS-swap it for inline data so the object
+                    // ends up in HV with consistent expiry.
+                    let cas_mutation = CasMutation::WriteInline(metadata.clone(), payload.clone());
+                    let swapped = self
+                        .high_volume
+                        .cas_put(id, Some(&tombstone.target), cas_mutation)
+                        .await?;
+
+                    if swapped {
+                        // Commit succeeded. Best-effort cleanup of old GCS blob.
+                        let _ = self.long_term.delete_object(&tombstone.target).await;
+                    }
+                    // If CAS failed, someone else won the race — their write is committed.
                 }
+
+                (BackendChoice::HighVolume, stored_size)
             }
             BackendChoice::LongTerm => {
                 let stored_size = Arc::new(AtomicU64::new(0));
@@ -214,22 +232,45 @@ impl Backend for TieredStorage {
                     })
                     .boxed();
 
-                // First write the object to long-term.
-                let long_term_id = id.clone();
-                self.long_term
-                    .put_object(&long_term_id, metadata, stream)
-                    .await?;
-
-                // Then write the redirect tombstone to high-volume.
-                let tombstone = Tombstone {
-                    target: long_term_id.clone(),
-                    expiration_policy: metadata.expiration_policy,
+                // 1. Read current HV state to establish the CAS precondition.
+                let expected_old = match self.high_volume.get_tiered_metadata(id).await? {
+                    TieredMetadata::Tombstone(t) => Some(t),
+                    _ => None,
                 };
 
-                if let Err(e) = self.high_volume.create_tombstone(id, tombstone).await {
-                    // Clean up on any kind of error.
-                    self.long_term.delete_object(&long_term_id).await?;
-                    return Err(e);
+                // 2. Write payload to GCS at a unique revision key.
+                let lt_id = revision_id(id);
+                self.long_term.put_object(&lt_id, metadata, stream).await?;
+
+                // 3. CAS commit: write tombstone only if HV state matches what we saw.
+                let expected_target = expected_old.as_ref().map(|t| &t.target);
+                let new_tombstone = Tombstone {
+                    target: lt_id.clone(),
+                    expiration_policy: metadata.expiration_policy,
+                };
+                let cas_mutation = CasMutation::WriteTombstone(new_tombstone);
+                let commit_result = self
+                    .high_volume
+                    .cas_put(id, expected_target, cas_mutation)
+                    .await;
+
+                match commit_result {
+                    Ok(true) => {
+                        // Tombstone committed. Clean up old GCS blob if overwriting.
+                        if let Some(old) = expected_old {
+                            let _ = self.long_term.delete_object(&old.target).await;
+                        }
+                    }
+                    Ok(false) => {
+                        // Someone else won the race. Clean up our GCS blob.
+                        let _ = self.long_term.delete_object(&lt_id).await;
+                        // Return OK — from the caller's perspective, a write happened.
+                    }
+                    Err(e) => {
+                        // CAS error. Clean up our GCS blob before propagating.
+                        let _ = self.long_term.delete_object(&lt_id).await;
+                        return Err(e);
+                    }
                 }
 
                 (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
@@ -324,11 +365,20 @@ impl Backend for TieredStorage {
         if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
-            // Delete the long-term object first, then clean up the tombstone.
-            // This ordering ensures that if the long-term delete fails, the
-            // tombstone remains and the data is still reachable (not orphaned).
-            self.long_term.delete_object(&tombstone.target).await?;
-            self.high_volume.delete_object(id).await?;
+            // CAS-delete the tombstone first (commit point), then clean up GCS.
+            // This is the inverse of the old ordering: if GCS cleanup fails,
+            // an orphan blob remains (accepted) but the tombstone is gone.
+            let cas_mutation = CasMutation::Delete;
+            let deleted = self
+                .high_volume
+                .cas_put(id, Some(&tombstone.target), cas_mutation)
+                .await?;
+
+            if deleted {
+                // Tombstone removed. Best-effort GCS cleanup.
+                let _ = self.long_term.delete_object(&tombstone.target).await;
+            }
+            // If CAS failed, someone else changed the tombstone — nothing to do.
         }
 
         objectstore_metrics::record!(
@@ -356,6 +406,60 @@ mod tests {
     use crate::error::Error;
     use crate::id::ObjectContext;
     use crate::stream::{self};
+
+    // --- revision_id tests ---
+
+    #[test]
+    fn revision_id_preserves_context() {
+        let id = ObjectId {
+            context: ObjectContext {
+                usecase: "testing".to_string(),
+                scopes: Scopes::from_iter([Scope::create("org", "17").unwrap()]),
+            },
+            key: "my-key".to_string(),
+        };
+
+        let revised = revision_id(&id);
+        assert_eq!(revised.context, id.context);
+        assert!(
+            revised.key.starts_with("my-key/"),
+            "revised key should have /<uuid> suffix, got: {}",
+            revised.key
+        );
+    }
+
+    #[test]
+    fn revision_id_roundtrips_storage_path() {
+        use crate::id::ObjectId;
+        let id = ObjectId {
+            context: ObjectContext {
+                usecase: "attachments".to_string(),
+                scopes: Scopes::from_iter([Scope::create("org", "42").unwrap()]),
+            },
+            key: "original".to_string(),
+        };
+
+        let revised = revision_id(&id);
+        let path = revised.as_storage_path().to_string();
+        let parsed = ObjectId::from_storage_path(&path)
+            .unwrap_or_else(|| panic!("failed to parse '{path}'"));
+        assert_eq!(parsed, revised);
+    }
+
+    #[test]
+    fn revision_id_is_unique() {
+        let id = ObjectId {
+            context: ObjectContext {
+                usecase: "testing".to_string(),
+                scopes: Scopes::empty(),
+            },
+            key: "base-key".to_string(),
+        };
+
+        let a = revision_id(&id);
+        let b = revision_id(&id);
+        assert_ne!(a.key, b.key, "two calls should produce different keys");
+    }
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -434,42 +538,46 @@ mod tests {
             .await
             .unwrap();
 
-        // Real payload should be in long-term
-        let (_, lt_bytes) = lt.get(&id).expect_object();
-        assert_eq!(lt_bytes.len(), payload_len);
+        // A redirect tombstone should exist in high-volume pointing to a revision key.
+        let tombstone = hv.get(&id).expect_tombstone();
+        let lt_id = tombstone.target;
+        assert!(
+            lt_id.key().starts_with(id.key()),
+            "tombstone target key should be a revision of the HV key"
+        );
 
-        // A redirect tombstone should exist in high-volume
-        hv.get(&id).expect_tombstone();
+        // Real payload should be in long-term at the revision key.
+        let (_, lt_bytes) = lt.get(&lt_id).expect_object();
+        assert_eq!(lt_bytes.len(), payload_len);
     }
 
     #[tokio::test]
-    async fn reinsert_with_existing_tombstone_routes_to_long_term() {
+    async fn reinsert_small_over_large_swaps_to_inline() {
         let (storage, hv, lt) = make_tiered_storage();
         let id = ObjectId::new(make_context(), "reinsert-key".into());
 
-        // First: insert a large object → creates tombstone in hv, payload in lt
+        // First: insert a large object → creates tombstone in hv, payload in lt at lt_id
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
         storage
             .put_object(&id, &Default::default(), stream::single(large_payload))
             .await
             .unwrap();
 
-        hv.get(&id).expect_tombstone();
+        let lt_id = hv.get(&id).expect_tombstone().target;
 
-        // Now re-insert a SMALL payload with the same key. The service should
-        // detect the existing tombstone and route to long-term anyway.
+        // Re-insert a SMALL payload with the same key.
+        // The CAS-swap puts the small object inline in HV and cleans up the old GCS blob.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         storage
             .put_object(&id, &Default::default(), stream::single(small_payload))
             .await
             .unwrap();
 
-        // The small object should be in long-term (not high-volume)
-        let (_, lt_bytes) = lt.get(&id).expect_object();
-        assert_eq!(lt_bytes.len(), 100);
+        // The small object is now inline in high-volume.
+        hv.get(&id).expect_object();
 
-        // The tombstone in hv should still be present
-        hv.get(&id).expect_tombstone();
+        // The old long-term blob was cleaned up.
+        lt.get(&lt_id).expect_not_found();
     }
 
     #[tokio::test]
@@ -490,16 +598,22 @@ mod tests {
             .await
             .unwrap();
 
-        // The tombstone in hv should have expiration_policy inherited and target set to id.
+        // The tombstone in hv should have expiration_policy inherited.
+        // The target is a unique revision key, not `id` itself.
         let tombstone = hv.get(&id).expect_tombstone();
         assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
-        assert_eq!(
-            tombstone.target, id,
-            "tombstone target must point to the LT ObjectId (identical to HV id for now)"
+        let lt_id = tombstone.target.clone();
+        assert_ne!(
+            lt_id, id,
+            "tombstone target must be a unique revision, not the HV id"
+        );
+        assert!(
+            lt_id.key().starts_with(id.key()),
+            "revision key should have original key as prefix"
         );
 
-        // The long-term object should have the full metadata
-        let (lt_meta, _) = lt.get(&id).expect_object();
+        // The long-term object should be at the revision key with the full metadata.
+        let (lt_meta, _) = lt.get(&lt_id).expect_object();
         assert_eq!(lt_meta.content_type, "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
     }
@@ -534,7 +648,7 @@ mod tests {
 
     // --- Tombstone inconsistency tests ---
 
-    /// A backend where `create_tombstone` always fails, but all other operations work normally.
+    /// A backend where `cas_put` always fails, but all other operations work normally.
     #[derive(Debug)]
     struct FailingTombstoneBackend(InMemoryBackend);
 
@@ -577,7 +691,12 @@ mod tests {
             self.0.delete_non_tombstone(id).await
         }
 
-        async fn create_tombstone(&self, _id: &ObjectId, _tombstone: Tombstone) -> Result<()> {
+        async fn cas_put(
+            &self,
+            _id: &ObjectId,
+            _expected_redirect: Option<&ObjectId>,
+            _mutation: CasMutation,
+        ) -> Result<bool> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "simulated tombstone write failure",
@@ -617,7 +736,7 @@ mod tests {
     /// cleanup), reads should gracefully return None rather than error.
     #[tokio::test]
     async fn orphan_tombstone_returns_none() {
-        let (storage, _hv, lt) = make_tiered_storage();
+        let (storage, hv, lt) = make_tiered_storage();
         let id = ObjectId::new(make_context(), "orphan-tombstone".into());
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
@@ -626,8 +745,11 @@ mod tests {
             .await
             .unwrap();
 
+        // The object is at the revision key in LT, not at id.
+        let lt_id = hv.get(&id).expect_tombstone().target;
+
         // Remove the long-term object, leaving an orphan tombstone in hv
-        lt.remove(&id);
+        lt.remove(&lt_id);
 
         assert!(
             storage.get_object(&id).await.unwrap().is_none(),
@@ -652,10 +774,13 @@ mod tests {
             .await
             .unwrap();
 
+        // Capture lt_id before deleting (it lives at the revision key, not at id).
+        let lt_id = hv.get(&id).expect_tombstone().target;
+
         storage.delete_object(&id).await.unwrap();
 
         assert!(!hv.contains(&id), "tombstone not cleaned up");
-        assert!(!lt.contains(&id), "object not cleaned up");
+        assert!(!lt.contains(&lt_id), "long-term object not cleaned up");
     }
 
     /// A backend wrapper that delegates everything except `delete_object`, which always fails.
@@ -689,10 +814,11 @@ mod tests {
         }
     }
 
-    /// When the long-term delete fails, the tombstone must be preserved so the
-    /// object remains reachable and no data is orphaned.
+    /// When the long-term GCS cleanup fails after the tombstone is deleted, the
+    /// delete still succeeds (GCS cleanup is best-effort). An orphan blob may
+    /// remain in LT storage, which is accepted.
     #[tokio::test]
-    async fn tombstone_preserved_when_long_term_delete_fails() {
+    async fn delete_succeeds_when_gcs_cleanup_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
         let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
@@ -704,15 +830,21 @@ mod tests {
             .await
             .unwrap();
 
+        // Delete succeeds even though GCS cleanup fails (it is best-effort).
         let result = storage.delete_object(&id).await;
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "delete should succeed despite GCS cleanup failure"
+        );
 
-        hv.get(&id).expect_tombstone();
+        // The tombstone in HV is gone (CAS-deleted first, before GCS cleanup).
+        hv.get(&id).expect_not_found();
 
-        // The object should still be reachable through the service
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
-        let body = stream::read_to_vec(s).await.unwrap();
-        assert_eq!(body, payload);
+        // The orphaned GCS blob remains but the object is unreachable through the service.
+        assert!(
+            storage.get_object(&id).await.unwrap().is_none(),
+            "object should be unreachable after tombstone is deleted"
+        );
     }
 
     // --- Redirect target tests ---
@@ -733,15 +865,13 @@ mod tests {
         lt.put_object(&lt_id, &Default::default(), stream::single(payload.clone()))
             .await
             .unwrap();
-        hv.create_tombstone(
-            &hv_id,
-            crate::backend::common::Tombstone {
-                target: lt_id.clone(),
-                expiration_policy: objectstore_types::metadata::ExpirationPolicy::Manual,
-            },
-        )
-        .await
-        .unwrap();
+        let tombstone = crate::backend::common::Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: objectstore_types::metadata::ExpirationPolicy::Manual,
+        };
+        hv.cas_put(&hv_id, None, CasMutation::WriteTombstone(tombstone))
+            .await
+            .unwrap();
 
         // get_object must follow the tombstone and find the object via the lt_id target.
         let (_, s) = storage.get_object(&hv_id).await.unwrap().unwrap();
@@ -758,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_chunk_large_object_chains_buffered_and_remaining() {
-        let (storage, _hv, lt) = make_tiered_storage();
+        let (storage, hv, lt) = make_tiered_storage();
         let id = ObjectId::new(make_context(), "multi-chunk".into());
 
         // Deliver a 2 MiB payload across multiple chunks that individually
@@ -775,8 +905,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Should have been routed to long-term (over 1 MiB).
-        let (_, lt_bytes) = lt.get(&id).expect_object();
+        // Should have been routed to long-term (over 1 MiB) at the revision key.
+        let lt_id = hv.get(&id).expect_tombstone().target;
+        let (_, lt_bytes) = lt.get(&lt_id).expect_object();
         assert_eq!(lt_bytes.len(), chunk_size * chunk_count);
 
         // Verify data integrity — each chunk's fill byte should appear in order.

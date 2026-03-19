@@ -235,7 +235,9 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{HighVolumeBackend, TieredGet, TieredMetadata, Tombstone};
+    use crate::backend::common::{
+        CasMutation, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
+    };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -529,10 +531,21 @@ mod tests {
             self.inner.delete_non_tombstone(id).await
         }
 
-        async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
-            self.inner.create_tombstone(id, tombstone).await?;
-            self.on_put.notify_one();
-            Ok(())
+        async fn cas_put(
+            &self,
+            id: &ObjectId,
+            expected_redirect: Option<&ObjectId>,
+            mutation: CasMutation,
+        ) -> Result<bool> {
+            let notify = matches!(
+                mutation,
+                CasMutation::WriteTombstone(_) | CasMutation::WriteInline(_, _)
+            );
+            let result = self.inner.cas_put(id, expected_redirect, mutation).await?;
+            if notify {
+                self.on_put.notify_one();
+            }
+            Ok(result)
         }
 
         async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
@@ -579,9 +592,11 @@ mod tests {
             .expect("timed out waiting for tombstone write");
 
         // Verify the object was fully written despite the caller being dropped.
+        // The tombstone in HV points to the revision key in LT.
         let id = ObjectId::new(make_context(), "completion-test".into());
-        assert!(lt.inner.contains(&id), "long-term object missing");
-        hv.inner.get(&id).expect_tombstone();
+        let tombstone = hv.inner.get(&id).expect_tombstone();
+        let lt_id = tombstone.target;
+        assert!(lt.inner.contains(&lt_id), "long-term object missing");
     }
 
     // --- Concurrency limit tests ---
