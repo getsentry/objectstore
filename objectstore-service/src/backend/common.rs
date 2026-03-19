@@ -10,53 +10,6 @@ use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, PayloadStream};
 
-/// Information about a redirect tombstone in the high-volume backend.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tombstone {
-    /// The [`ObjectId`] of the object in the long-term backend.
-    ///
-    /// For legacy tombstones with an empty `r` column, the HV backend resolves
-    /// this to the HV `ObjectId` itself before surfacing the tombstone to callers.
-    pub target: ObjectId,
-
-    /// The expiration policy copied from the original object.
-    pub expiration_policy: ExpirationPolicy,
-}
-
-/// Typed response from [`HighVolumeBackend::get_tiered_object`].
-pub enum TieredGet {
-    /// A real object was found.
-    Object(Metadata, PayloadStream),
-    /// A redirect tombstone was found; the real object lives in the long-term backend.
-    Tombstone(Tombstone),
-    /// No entry exists at this key.
-    NotFound,
-}
-
-impl fmt::Debug for TieredGet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TieredGet::Object(metadata, _stream) => f
-                .debug_tuple("Object")
-                .field(metadata)
-                .finish_non_exhaustive(),
-            TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
-            TieredGet::NotFound => write!(f, "NotFound"),
-        }
-    }
-}
-
-/// Typed metadata-only response from [`HighVolumeBackend::get_tiered_metadata`].
-#[derive(Debug)]
-pub enum TieredMetadata {
-    /// Metadata for a real object was found.
-    Object(Metadata),
-    /// A redirect tombstone was found; the real object lives in the long-term backend.
-    Tombstone(Tombstone),
-    /// No entry exists at this key.
-    NotFound,
-}
-
 /// User agent string used for outgoing requests.
 ///
 /// This intentionally has a "sentry" prefix so that it can easily be traced back to us.
@@ -98,17 +51,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
-}
-
-/// What to write when a [`cas_put`](HighVolumeBackend::cas_put) condition is met.
-#[derive(Debug)]
-pub enum CasMutation {
-    /// Write a redirect tombstone.
-    WriteTombstone(Tombstone),
-    /// Write inline object data.
-    WriteInline(Metadata, Bytes),
-    /// Delete the row entirely.
-    Delete,
 }
 
 /// Trait for backends that support tombstone-conditional operations.
@@ -158,19 +100,77 @@ pub trait HighVolumeBackend: Backend {
 
     /// Atomically mutates the row if the current redirect state matches.
     ///
-    /// `expected_redirect` determines the precondition:
+    /// `current` determines the precondition:
     /// - `None`: succeeds only if no tombstone exists (row absent or inline).
     /// - `Some(target)`: succeeds only if a tombstone exists whose redirect
-    ///   resolves to `target` (handles modern, empty-sentinel, and legacy formats).
+    ///   resolves to `target`.
     ///
-    /// On match, applies `mutation`. Returns `true` on success, `false` if the
+    /// On match, applies `write`. Returns `true` on success, `false` if the
     /// precondition was not met (row state changed concurrently).
-    async fn cas_put(
+    async fn compare_and_write(
         &self,
         id: &ObjectId,
-        expected_redirect: Option<&ObjectId>,
-        mutation: CasMutation,
+        current: Option<&ObjectId>,
+        write: TieredWrite,
     ) -> Result<bool>;
+}
+
+/// Information about a redirect tombstone in the high-volume backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tombstone {
+    /// The [`ObjectId`] of the object in the long-term backend.
+    ///
+    /// For legacy tombstones with an empty `r` column, the HV backend resolves
+    /// this to the HV `ObjectId` itself before surfacing the tombstone to callers.
+    pub target: ObjectId,
+
+    /// The expiration policy copied from the original object.
+    pub expiration_policy: ExpirationPolicy,
+}
+
+/// Typed response from [`HighVolumeBackend::get_tiered_object`].
+pub enum TieredGet {
+    /// A real object was found.
+    Object(Metadata, PayloadStream),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
+
+impl fmt::Debug for TieredGet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TieredGet::Object(metadata, _stream) => f
+                .debug_tuple("Object")
+                .field(metadata)
+                .finish_non_exhaustive(),
+            TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
+            TieredGet::NotFound => write!(f, "NotFound"),
+        }
+    }
+}
+
+/// Typed metadata-only response from [`HighVolumeBackend::get_tiered_metadata`].
+#[derive(Debug)]
+pub enum TieredMetadata {
+    /// Metadata for a real object was found.
+    Object(Metadata),
+    /// A redirect tombstone was found; the real object lives in the long-term backend.
+    Tombstone(Tombstone),
+    /// No entry exists at this key.
+    NotFound,
+}
+
+/// The write operation performed by [`HighVolumeBackend::tiered_write`].
+#[derive(Debug)]
+pub enum TieredWrite {
+    /// Write a redirect tombstone.
+    Tombstone(Tombstone),
+    /// Write inline object data.
+    Object(Metadata, Bytes),
+    /// Delete the row entirely.
+    Delete,
 }
 
 /// Creates a reqwest client with required defaults.

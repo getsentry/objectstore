@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    Backend, CasMutation, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, TieredGet, TieredMetadata, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
+    TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
@@ -29,7 +30,7 @@ const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 /// The new key has the format `{original_key}/{uuid_v7}`, producing a distinct
 /// storage path for each large-object write. [`ObjectId::from_storage_path`] parses
 /// the result back correctly because the key portion may contain `/`.
-fn revision_id(id: &ObjectId) -> ObjectId {
+fn new_long_term_revision(id: &ObjectId) -> ObjectId {
     ObjectId {
         context: id.context.clone(),
         key: format!("{}/{}", id.key, uuid::Uuid::now_v7()),
@@ -65,27 +66,6 @@ pub struct TieredStorageConfig {
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
-}
-
-#[derive(Debug)]
-enum BackendChoice {
-    HighVolume,
-    LongTerm,
-}
-
-impl BackendChoice {
-    fn as_str(&self) -> &'static str {
-        match self {
-            BackendChoice::HighVolume => "high-volume",
-            BackendChoice::LongTerm => "long-term",
-        }
-    }
-}
-
-impl std::fmt::Display for BackendChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 /// Two-tier storage backend that routes objects by size.
@@ -157,6 +137,94 @@ impl TieredStorage {
             BackendChoice::LongTerm => self.long_term.name(),
         }
     }
+
+    /// Puts an object into the high-volume backend.
+    ///
+    /// If a tombstone already exists, attempts to swap it for the new object and delete the old
+    /// long-term object.
+    async fn put_high_volume(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: Bytes,
+    ) -> Result<()> {
+        let tombstone_opt = self
+            .high_volume
+            .put_non_tombstone(id, metadata, payload.clone())
+            .await?;
+
+        let Some(Tombstone { target, .. }) = tombstone_opt else {
+            // No tombstone exists - write succeeded
+            return Ok(());
+        };
+
+        // Tombstone exists — Swap it for inline data
+        let write = TieredWrite::Object(metadata.clone(), payload.clone());
+        let written = self
+            .high_volume
+            .compare_and_write(id, Some(&target), write)
+            .await?;
+
+        // TODO: Schedule cleanups into background to ensure eventual cleanup
+        if written {
+            let _ = self.long_term.delete_object(&target).await;
+        }
+
+        Ok(())
+    }
+
+    /// Puts an object into the long-term backend with a redirect tombstone in front.
+    ///
+    /// Deletes the previous long-term object if overwriting an existing tombstone. If the tombstone
+    /// write fails, the new long-term object is cleaned up.
+    async fn put_long_term(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        stream: ClientStream,
+    ) -> Result<()> {
+        // 1. Read current HV revision to establish the write precondition
+        let current = match self.high_volume.get_tiered_metadata(id).await? {
+            TieredMetadata::Tombstone(t) => Some(t.target),
+            _ => None,
+        };
+
+        // 2. Write payload to long-term at a unique revision key.
+        let new = new_long_term_revision(id);
+        self.long_term.put_object(&new, metadata, stream).await?;
+
+        // 3. CAS commit: write tombstone only if HV state matches what we saw.
+        let tombstone = Tombstone {
+            target: new.clone(),
+            expiration_policy: metadata.expiration_policy,
+        };
+        let written = self
+            .high_volume
+            .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
+            .await;
+
+        // TODO: Schedule cleanups into background to ensure eventual cleanup
+        match written {
+            Ok(true) => {
+                // Tombstone committed. Clean up old GCS blob if overwriting.
+                if let Some(current) = current {
+                    let _ = self.long_term.delete_object(&current).await;
+                }
+            }
+            Ok(false) => {
+                // Someone else won the race. Clean up our GCS blob.
+                let _ = self.long_term.delete_object(&new).await;
+                // Return OK — from the caller's perspective, a write happened.
+            }
+            Err(e) => {
+                // CAS error. Clean up our GCS blob before propagating.
+                let _ = self.long_term.delete_object(&new).await;
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -171,124 +239,39 @@ impl Backend for TieredStorage {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
+        let start = Instant::now();
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
         }
 
-        let start = Instant::now();
-
         let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
-        let backend_choice = if peeked.is_exhausted() {
-            BackendChoice::HighVolume
-        } else {
-            BackendChoice::LongTerm
-        };
-
         objectstore_metrics::record!(
             "put.first_chunk.latency" = start.elapsed(),
             usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice.as_str(),
+            complete = if peeked.is_exhausted() { "yes" } else { "no" },
         );
 
-        let (final_choice, stored_size) = match backend_choice {
-            BackendChoice::HighVolume => {
-                let payload = peeked.into_bytes().await?;
-                let stored_size = payload.len() as u64;
-
-                let tombstone_opt = self
-                    .high_volume
-                    .put_non_tombstone(id, metadata, payload.clone())
-                    .await?;
-
-                if let Some(tombstone) = tombstone_opt {
-                    // Tombstone exists — CAS-swap it for inline data so the object
-                    // ends up in HV with consistent expiry.
-                    let cas_mutation = CasMutation::WriteInline(metadata.clone(), payload.clone());
-                    let swapped = self
-                        .high_volume
-                        .cas_put(id, Some(&tombstone.target), cas_mutation)
-                        .await?;
-
-                    if swapped {
-                        // Commit succeeded. Best-effort cleanup of old GCS blob.
-                        let _ = self.long_term.delete_object(&tombstone.target).await;
-                    }
-                    // If CAS failed, someone else won the race — their write is committed.
-                }
-
-                (BackendChoice::HighVolume, stored_size)
-            }
-            BackendChoice::LongTerm => {
-                let stored_size = Arc::new(AtomicU64::new(0));
-                let stream = peeked
-                    .into_stream()
-                    .inspect({
-                        let stored_size = Arc::clone(&stored_size);
-                        move |res| {
-                            if let Ok(chunk) = res {
-                                stored_size.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                            }
-                        }
-                    })
-                    .boxed();
-
-                // 1. Read current HV state to establish the CAS precondition.
-                let expected_old = match self.high_volume.get_tiered_metadata(id).await? {
-                    TieredMetadata::Tombstone(t) => Some(t),
-                    _ => None,
-                };
-
-                // 2. Write payload to GCS at a unique revision key.
-                let lt_id = revision_id(id);
-                self.long_term.put_object(&lt_id, metadata, stream).await?;
-
-                // 3. CAS commit: write tombstone only if HV state matches what we saw.
-                let expected_target = expected_old.as_ref().map(|t| &t.target);
-                let new_tombstone = Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: metadata.expiration_policy,
-                };
-                let cas_mutation = CasMutation::WriteTombstone(new_tombstone);
-                let commit_result = self
-                    .high_volume
-                    .cas_put(id, expected_target, cas_mutation)
-                    .await;
-
-                match commit_result {
-                    Ok(true) => {
-                        // Tombstone committed. Clean up old GCS blob if overwriting.
-                        if let Some(old) = expected_old {
-                            let _ = self.long_term.delete_object(&old.target).await;
-                        }
-                    }
-                    Ok(false) => {
-                        // Someone else won the race. Clean up our GCS blob.
-                        let _ = self.long_term.delete_object(&lt_id).await;
-                        // Return OK — from the caller's perspective, a write happened.
-                    }
-                    Err(e) => {
-                        // CAS error. Clean up our GCS blob before propagating.
-                        let _ = self.long_term.delete_object(&lt_id).await;
-                        return Err(e);
-                    }
-                }
-
-                (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
-            }
+        let (backend_choice, stored_size) = if peeked.is_exhausted() {
+            let payload = peeked.into_bytes().await?;
+            self.put_high_volume(id, metadata, payload.clone()).await?;
+            (BackendChoice::HighVolume, payload.len() as u64)
+        } else {
+            let (stored_size, stream) = counting_stream(peeked.into_stream());
+            self.put_long_term(id, metadata, stream.boxed()).await?;
+            (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
         };
 
-        let backend_ty = self.backend_type(&final_choice);
-
+        let backend_ty = self.backend_type(&backend_choice);
         objectstore_metrics::record!(
             "put.latency" = start.elapsed(),
             usecase = id.usecase().to_owned(),
-            backend_choice = final_choice.as_str(),
+            backend_choice = backend_choice.as_str(),
             backend_type = backend_ty,
         );
         objectstore_metrics::record!(
             "put.size" = stored_size,
             usecase = id.usecase().to_owned(),
-            backend_choice = final_choice.as_str(),
+            backend_choice = backend_choice.as_str(),
             backend_type = backend_ty,
         );
 
@@ -365,20 +348,16 @@ impl Backend for TieredStorage {
         if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
-            // CAS-delete the tombstone first (commit point), then clean up GCS.
-            // This is the inverse of the old ordering: if GCS cleanup fails,
-            // an orphan blob remains (accepted) but the tombstone is gone.
-            let cas_mutation = CasMutation::Delete;
+            // Delete the tombstone first, then clean up GCS.
             let deleted = self
                 .high_volume
-                .cas_put(id, Some(&tombstone.target), cas_mutation)
+                .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
                 .await?;
 
+            // TODO: Schedule cleanups into background to ensure eventual cleanup
             if deleted {
-                // Tombstone removed. Best-effort GCS cleanup.
                 let _ = self.long_term.delete_object(&tombstone.target).await;
             }
-            // If CAS failed, someone else changed the tombstone — nothing to do.
         }
 
         objectstore_metrics::record!(
@@ -390,6 +369,47 @@ impl Backend for TieredStorage {
 
         Ok(())
     }
+}
+
+#[derive(Debug)]
+enum BackendChoice {
+    HighVolume,
+    LongTerm,
+}
+
+impl BackendChoice {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BackendChoice::HighVolume => "high-volume",
+            BackendChoice::LongTerm => "long-term",
+        }
+    }
+}
+
+impl std::fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Wraps a stream to count the total bytes yielded by successful chunks.
+///
+/// Returns the shared counter and the wrapped stream. The counter is incremented
+/// as the stream is consumed, so read it only after the stream is exhausted.
+fn counting_stream<S, E>(stream: S) -> (Arc<AtomicU64>, impl Stream<Item = Result<Bytes, E>>)
+where
+    S: Stream<Item = Result<Bytes, E>>,
+{
+    let counter = Arc::new(AtomicU64::new(0));
+
+    (
+        counter.clone(),
+        stream.inspect(move |res| {
+            if let Ok(chunk) = res {
+                counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -419,7 +439,7 @@ mod tests {
             key: "my-key".to_string(),
         };
 
-        let revised = revision_id(&id);
+        let revised = new_long_term_revision(&id);
         assert_eq!(revised.context, id.context);
         assert!(
             revised.key.starts_with("my-key/"),
@@ -439,7 +459,7 @@ mod tests {
             key: "original".to_string(),
         };
 
-        let revised = revision_id(&id);
+        let revised = new_long_term_revision(&id);
         let path = revised.as_storage_path().to_string();
         let parsed = ObjectId::from_storage_path(&path)
             .unwrap_or_else(|| panic!("failed to parse '{path}'"));
@@ -456,8 +476,8 @@ mod tests {
             key: "base-key".to_string(),
         };
 
-        let a = revision_id(&id);
-        let b = revision_id(&id);
+        let a = new_long_term_revision(&id);
+        let b = new_long_term_revision(&id);
         assert_ne!(a.key, b.key, "two calls should produce different keys");
     }
 
@@ -687,28 +707,28 @@ mod tests {
             self.0.put_non_tombstone(id, metadata, payload).await
         }
 
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.0.delete_non_tombstone(id).await
-        }
-
-        async fn cas_put(
-            &self,
-            _id: &ObjectId,
-            _expected_redirect: Option<&ObjectId>,
-            _mutation: CasMutation,
-        ) -> Result<bool> {
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "simulated tombstone write failure",
-            )))
-        }
-
         async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
             self.0.get_tiered_object(id).await
         }
 
         async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
             self.0.get_tiered_metadata(id).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+            self.0.delete_non_tombstone(id).await
+        }
+
+        async fn compare_and_write(
+            &self,
+            _id: &ObjectId,
+            _current: Option<&ObjectId>,
+            _write: TieredWrite,
+        ) -> Result<bool> {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "simulated tombstone write failure",
+            )))
         }
     }
 
@@ -865,11 +885,11 @@ mod tests {
         lt.put_object(&lt_id, &Default::default(), stream::single(payload.clone()))
             .await
             .unwrap();
-        let tombstone = crate::backend::common::Tombstone {
+        let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: objectstore_types::metadata::ExpirationPolicy::Manual,
         };
-        hv.cas_put(&hv_id, None, CasMutation::WriteTombstone(tombstone))
+        hv.compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await
             .unwrap();
 

@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::common::{
-        CasMutation, HighVolumeBackend, TieredGet, TieredMetadata, Tombstone,
+        HighVolumeBackend, TieredGet, TieredMetadata, TieredWrite, Tombstone,
     };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
@@ -527,33 +527,30 @@ mod tests {
             self.inner.put_non_tombstone(id, metadata, payload).await
         }
 
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.inner.delete_non_tombstone(id).await
-        }
-
-        async fn cas_put(
-            &self,
-            id: &ObjectId,
-            expected_redirect: Option<&ObjectId>,
-            mutation: CasMutation,
-        ) -> Result<bool> {
-            let notify = matches!(
-                mutation,
-                CasMutation::WriteTombstone(_) | CasMutation::WriteInline(_, _)
-            );
-            let result = self.inner.cas_put(id, expected_redirect, mutation).await?;
-            if notify {
-                self.on_put.notify_one();
-            }
-            Ok(result)
-        }
-
         async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
             self.inner.get_tiered_object(id).await
         }
 
         async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
             self.inner.get_tiered_metadata(id).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+            self.inner.delete_non_tombstone(id).await
+        }
+
+        async fn compare_and_write(
+            &self,
+            id: &ObjectId,
+            current: Option<&ObjectId>,
+            write: TieredWrite,
+        ) -> Result<bool> {
+            let notify = matches!(write, TieredWrite::Tombstone(_) | TieredWrite::Object(_, _));
+            let result = self.inner.compare_and_write(id, current, write).await?;
+            if notify {
+                self.on_put.notify_one();
+            }
+            Ok(result)
         }
     }
 

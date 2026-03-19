@@ -43,8 +43,8 @@ use tonic::Code;
 use bytes::Bytes;
 
 use crate::backend::common::{
-    Backend, CasMutation, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, TieredGet, TieredMetadata, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
+    TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -846,6 +846,59 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+        tracing::debug!("Reading from Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        let Some(row) = self.read_row(&path, None, "get_tiered_object").await? else {
+            return Ok(TieredGet::NotFound);
+        };
+
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, true, id).await;
+        }
+
+        Ok(match row {
+            RowData::Tombstone { meta, target, .. } => TieredGet::Tombstone(Tombstone {
+                target: parse_redirect_target(&target, id)?,
+                expiration_policy: meta.expiration_policy,
+            }),
+            RowData::Object { metadata, payload } => {
+                let mut metadata = metadata;
+                metadata.size = Some(payload.len());
+                TieredGet::Object(metadata, crate::stream::single(payload))
+            }
+        })
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+        tracing::debug!("Reading metadata from Bigtable backend");
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        // Read metadata and tombstone columns — skip the (potentially large) payload.
+        // NB: `metadata.size` will not be populated since the payload is not fetched.
+        let row_opt = self
+            .read_row(&path, Some(metadata_filter()), "get_tiered_metadata")
+            .await?;
+        let Some(row) = row_opt else {
+            return Ok(TieredMetadata::NotFound);
+        };
+
+        if row.needs_tti_bump() {
+            self.bump_tti(path.clone(), &row, false, id).await;
+        }
+
+        Ok(match row {
+            RowData::Tombstone { meta, target, .. } => TieredMetadata::Tombstone(Tombstone {
+                target: parse_redirect_target(&target, id)?,
+                expiration_policy: meta.expiration_policy,
+            }),
+            RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
+        })
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         tracing::debug!("Conditional delete from Bigtable backend");
 
@@ -904,33 +957,33 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn cas_put(
+    async fn compare_and_write(
         &self,
         id: &ObjectId,
-        expected_redirect: Option<&ObjectId>,
-        mutation: CasMutation,
+        current: Option<&ObjectId>,
+        write: TieredWrite,
     ) -> Result<bool> {
         tracing::debug!("CAS put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
 
-        let write_mutations: Vec<v2::Mutation> = match mutation {
-            CasMutation::WriteTombstone(tombstone) => {
+        let write_mutations: Vec<v2::Mutation> = match write {
+            TieredWrite::Tombstone(tombstone) => {
                 let mutations = build_tombstone_mutations(&tombstone, now)?;
                 mutations
                     .into_iter()
                     .map(|m| v2::Mutation { mutation: Some(m) })
                     .collect()
             }
-            CasMutation::WriteInline(metadata, payload) => {
+            TieredWrite::Object(metadata, payload) => {
                 let mutations = build_write_mutations(&metadata, payload.to_vec(), now)?;
                 mutations
                     .into_iter()
                     .map(|m| v2::Mutation { mutation: Some(m) })
                     .collect()
             }
-            CasMutation::Delete => {
+            TieredWrite::Delete => {
                 let delete = mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {});
                 vec![v2::Mutation {
                     mutation: Some(delete),
@@ -938,23 +991,18 @@ impl HighVolumeBackend for BigTableBackend {
             }
         };
 
-        let (predicate_filter, true_mutations, false_mutations, success_on_match) =
-            match expected_redirect {
-                None => {
-                    // Success = no tombstone. tombstone_predicate matches = tombstone found = fail.
-                    // Write on false_mutations (no tombstone); noop on true_mutations (tombstone).
-                    (tombstone_predicate(), vec![], write_mutations, false)
-                }
-                Some(target) => {
-                    // Success = redirect matches target. Predicate match = CAS success.
-                    (
-                        redirect_target_filter(target, id),
-                        write_mutations,
-                        vec![],
-                        true,
-                    )
-                }
-            };
+        let (predicate_filter, true_mutations, false_mutations, success_on_match) = match current {
+            // Success = no tombstone. tombstone_predicate matches = tombstone found = fail.
+            // Write on false_mutations (no tombstone); noop on true_mutations (tombstone).
+            None => (tombstone_predicate(), vec![], write_mutations, false),
+            // Success = redirect matches target. Predicate match = CAS success.
+            Some(target) => (
+                redirect_target_filter(target, id),
+                write_mutations,
+                vec![],
+                true,
+            ),
+        };
 
         let request = v2::CheckAndMutateRowRequest {
             table_name: self.table_path.clone(),
@@ -965,7 +1013,7 @@ impl HighVolumeBackend for BigTableBackend {
             ..Default::default()
         };
 
-        let predicate_matched = retry("cas_put", || async {
+        let predicate_matched = retry("compare_and_write", || async {
             self.bigtable
                 .client()
                 .check_and_mutate_row(request.clone())
@@ -975,59 +1023,6 @@ impl HighVolumeBackend for BigTableBackend {
         .predicate_matched;
 
         Ok(predicate_matched == success_on_match)
-    }
-
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-        tracing::debug!("Reading from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        let Some(row) = self.read_row(&path, None, "get_tiered_object").await? else {
-            return Ok(TieredGet::NotFound);
-        };
-
-        if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, true, id).await;
-        }
-
-        Ok(match row {
-            RowData::Tombstone { meta, target, .. } => TieredGet::Tombstone(Tombstone {
-                target: parse_redirect_target(&target, id)?,
-                expiration_policy: meta.expiration_policy,
-            }),
-            RowData::Object { metadata, payload } => {
-                let mut metadata = metadata;
-                metadata.size = Some(payload.len());
-                TieredGet::Object(metadata, crate::stream::single(payload))
-            }
-        })
-    }
-
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-        tracing::debug!("Reading metadata from Bigtable backend");
-        let path = id.as_storage_path().to_string().into_bytes();
-
-        // Read metadata and tombstone columns — skip the (potentially large) payload.
-        // NB: `metadata.size` will not be populated since the payload is not fetched.
-        let row_opt = self
-            .read_row(&path, Some(metadata_filter()), "get_tiered_metadata")
-            .await?;
-        let Some(row) = row_opt else {
-            return Ok(TieredMetadata::NotFound);
-        };
-
-        if row.needs_tti_bump() {
-            self.bump_tti(path.clone(), &row, false, id).await;
-        }
-
-        Ok(match row {
-            RowData::Tombstone { meta, target, .. } => TieredMetadata::Tombstone(Tombstone {
-                target: parse_redirect_target(&target, id)?,
-                expiration_policy: meta.expiration_policy,
-            }),
-            RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
-        })
     }
 }
 
@@ -1344,10 +1339,10 @@ mod tests {
 
         let id = make_id();
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1494,10 +1489,10 @@ mod tests {
 
         let id = make_id();
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1699,10 +1694,10 @@ mod tests {
         let id = make_id();
         let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
         let committed = backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: id.clone(),
                     expiration_policy,
                 }),
@@ -1744,12 +1739,12 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
         };
         let first = backend
-            .cas_put(&id, None, CasMutation::WriteTombstone(tombstone.clone()))
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone.clone()))
             .await?;
         assert!(first, "first write should succeed");
 
         let second = backend
-            .cas_put(&id, None, CasMutation::WriteTombstone(tombstone))
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
             .await?;
         assert!(
             !second,
@@ -1773,7 +1768,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
         };
         backend
-            .cas_put(&hv_id, None, CasMutation::WriteTombstone(old_tombstone))
+            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(old_tombstone))
             .await?;
 
         let new_tombstone = Tombstone {
@@ -1781,10 +1776,10 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
         };
         let swapped = backend
-            .cas_put(
+            .compare_and_write(
                 &hv_id,
                 Some(&old_lt_id),
-                CasMutation::WriteTombstone(new_tombstone),
+                TieredWrite::Tombstone(new_tombstone),
             )
             .await?;
         assert!(swapped, "expected CAS success");
@@ -1808,10 +1803,10 @@ mod tests {
         let new_lt_id = ObjectId::random(hv_id.context().clone());
 
         backend
-            .cas_put(
+            .compare_and_write(
                 &hv_id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: actual_lt_id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1819,10 +1814,10 @@ mod tests {
             .await?;
 
         let swapped = backend
-            .cas_put(
+            .compare_and_write(
                 &hv_id,
                 Some(&wrong_lt_id),
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: new_lt_id,
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1848,10 +1843,10 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
 
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: lt_id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1861,10 +1856,10 @@ mod tests {
         let metadata = Metadata::default();
         let payload = bytes::Bytes::from(b"hello inline".to_vec());
         let swapped = backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 Some(&lt_id),
-                CasMutation::WriteInline(metadata, payload.clone()),
+                TieredWrite::Object(metadata, payload.clone()),
             )
             .await?;
         assert!(swapped, "expected CAS success");
@@ -1889,10 +1884,10 @@ mod tests {
         let wrong_id = ObjectId::random(id.context().clone());
 
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: lt_id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1900,10 +1895,10 @@ mod tests {
             .await?;
 
         let swapped = backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 Some(&wrong_id),
-                CasMutation::WriteInline(Metadata::default(), bytes::Bytes::new()),
+                TieredWrite::Object(Metadata::default(), bytes::Bytes::new()),
             )
             .await?;
         assert!(!swapped, "expected CAS failure");
@@ -1926,10 +1921,10 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
 
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: lt_id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1937,7 +1932,7 @@ mod tests {
             .await?;
 
         let deleted = backend
-            .cas_put(&id, Some(&lt_id), CasMutation::Delete)
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
             .await?;
         assert!(deleted, "expected CAS delete success");
 
@@ -1959,10 +1954,10 @@ mod tests {
         let wrong_id = ObjectId::random(id.context().clone());
 
         backend
-            .cas_put(
+            .compare_and_write(
                 &id,
                 None,
-                CasMutation::WriteTombstone(Tombstone {
+                TieredWrite::Tombstone(Tombstone {
                     target: lt_id.clone(),
                     expiration_policy: ExpirationPolicy::Manual,
                 }),
@@ -1970,7 +1965,7 @@ mod tests {
             .await?;
 
         let deleted = backend
-            .cas_put(&id, Some(&wrong_id), CasMutation::Delete)
+            .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete)
             .await?;
         assert!(!deleted, "expected CAS failure");
 
@@ -1996,7 +1991,7 @@ mod tests {
             .await?;
 
         let deleted = backend
-            .cas_put(&id, Some(&fake_lt_id), CasMutation::Delete)
+            .compare_and_write(&id, Some(&fake_lt_id), TieredWrite::Delete)
             .await?;
         assert!(!deleted, "expected false: row is not a tombstone");
 
@@ -2039,7 +2034,9 @@ mod tests {
             .await?;
 
         // Expected target = id (the legacy fallback resolves to hv_id).
-        let deleted = backend.cas_put(&id, Some(&id), CasMutation::Delete).await?;
+        let deleted = backend
+            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
+            .await?;
         assert!(
             deleted,
             "cas_put should match legacy empty-redirect tombstone"
@@ -2062,7 +2059,9 @@ mod tests {
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
 
         // Legacy tombstones resolve to hv_id, so expected target = id.
-        let deleted = backend.cas_put(&id, Some(&id), CasMutation::Delete).await?;
+        let deleted = backend
+            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
+            .await?;
         assert!(deleted, "cas_put should match legacy-metadata tombstone");
 
         assert!(matches!(
@@ -2088,7 +2087,7 @@ mod tests {
         };
 
         backend
-            .cas_put(&hv_id, None, CasMutation::WriteTombstone(tombstone))
+            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await?;
 
         match backend.get_tiered_metadata(&hv_id).await? {
