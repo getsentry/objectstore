@@ -147,7 +147,7 @@ const REQUEST_RETRY_COUNT: usize = 2;
 const COLUMN_PAYLOAD: &[u8] = b"p";
 /// Column that stores metadata in JSON.
 const COLUMN_METADATA: &[u8] = b"m";
-/// Column that stores the redirect sentinel for tombstone rows (`b""` for now; a GCS key later).
+/// Column that stores the redirect path for tombstone rows.
 const COLUMN_REDIRECT: &[u8] = b"r";
 /// Column that stores [`TombstoneMeta`] JSON for tombstone rows.
 const COLUMN_TOMBSTONE_META: &[u8] = b"t";
