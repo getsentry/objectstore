@@ -494,7 +494,6 @@ fn into_chunks(items: Vec<BatchOperation>) -> Vec<Vec<BatchOperation>> {
 ///
 /// Insert operations whose file body exceeds [`MAX_BATCH_PART_SIZE`] are marked
 /// as [`Classified::Individual`]. Everything else is [`Classified::Batchable`].
-/// No HTTP requests are made — this only inspects file metadata.
 async fn classify(op: BatchOperation) -> Classified {
     match op {
         BatchOperation::Insert {
