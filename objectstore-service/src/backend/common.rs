@@ -162,7 +162,7 @@ pub enum TieredMetadata {
     NotFound,
 }
 
-/// The write operation performed by [`HighVolumeBackend::tiered_write`].
+/// The write operation performed by [`HighVolumeBackend::compare_and_write`].
 #[derive(Debug)]
 pub enum TieredWrite {
     /// Write a redirect tombstone.
