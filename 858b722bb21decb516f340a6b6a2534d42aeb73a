@@ -1,0 +1,29 @@
+objectstore-server/docs/architecture.md
+  ee52be913820c2f5 104-106
+objectstore-server/src/config.rs
+  ee52be913820c2f5 52,733-742,754,757,1168-1260
+objectstore-server/Cargo.toml
+  ee52be913820c2f5 46
+objectstore-server/src/observability.rs
+  ee52be913820c2f5 7-9,21-50,148-183,196-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "858b722bb21decb516f340a6b6a2534d42aeb73a",
+  "prompts": {
+    "ee52be913820c2f5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d05a2-d97b-71f1-b2d8-3b7c6922bf9c",
+        "model": "gpt-5.4"
+      },
+      "human_author": "lcian <17258265+lcian@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 338,
+      "total_deletions": 143,
+      "accepted_lines": 208,
+      "overriden_lines": 0
+    }
+  }
+}
