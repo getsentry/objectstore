@@ -1128,7 +1128,7 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
-    // NB: Not run most of these tests, you need to have a BigTable emulator running. This is done
+    // NB: Most of these tests require a BigTable emulator running. This is done
     // automatically in CI.
     //
     // Refer to the readme for how to set up the emulator.
@@ -1149,383 +1149,6 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
-    }
-
-    #[tokio::test]
-    async fn test_roundtrip() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            time_created: Some(SystemTime::now()),
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
-
-        let payload = stream::read_to_vec(stream).await?;
-        let str_payload = str::from_utf8(&payload).unwrap();
-        assert_eq!(str_payload, "hello, world");
-        assert_eq!(meta.content_type, metadata.content_type);
-        assert_eq!(meta.custom, metadata.custom);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_nonexistent() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let result = backend.get_object(&id).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_delete_nonexistent() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        backend.delete_object(&id).await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_overwrite() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata {
-            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello"))
-            .await?;
-
-        let metadata = Metadata {
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("world"))
-            .await?;
-
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
-
-        let payload = stream::read_to_vec(stream).await?;
-        let str_payload = str::from_utf8(&payload).unwrap();
-        assert_eq!(str_payload, "world");
-        assert_eq!(meta.custom, metadata.custom);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_read_after_delete() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        backend.delete_object(&id).await?;
-
-        let result = backend.get_object(&id).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_ttl_immediate() -> Result<()> {
-        // NB: We create a TTL that immediately expires in this tests. This might be optimized away
-        // in a future implementation, so we will have to update this test accordingly.
-
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        let result = backend.get_object(&id).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_tti_immediate() -> Result<()> {
-        // NB: We create a TTI that immediately expires in this tests. This might be optimized away
-        // in a future implementation, so we will have to update this test accordingly.
-
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        let result = backend.get_object(&id).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_metadata_returns_metadata() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        let meta = backend.get_metadata(&id).await?.unwrap();
-        assert_eq!(meta.content_type, metadata.content_type);
-        assert_eq!(meta.custom, metadata.custom);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_metadata_nonexistent() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let result = backend.get_metadata(&id).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_metadata_tombstone_returns_error() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
-
-        let result = backend.get_metadata(&id).await;
-        assert!(
-            matches!(result, Err(Error::UnexpectedTombstone)),
-            "expected UnexpectedTombstone, got {result:?}"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_metadata_bumps_tti() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        // Manually rewrite the row with a timestamp that will trigger a bump.
-        // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
-        // Set the expiry to just under the threshold but still in the future
-        // (so it doesn't get filtered as expired).
-        let path = id.as_storage_path().to_string().into_bytes();
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
-        let old_micros = old_deadline
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            * 1000;
-
-        let mutations = [
-            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                timestamp_micros: old_micros,
-                value: b"hello, world".to_vec(),
-            }),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_METADATA.to_owned(),
-                timestamp_micros: old_micros,
-                value: serde_json::to_vec(&metadata).unwrap(),
-            }),
-        ];
-        backend
-            .mutate(path.clone(), mutations, "test-setup")
-            .await?;
-
-        // First get_metadata sees the old timestamp and triggers a TTI bump.
-        let pre_meta = backend.get_metadata(&id).await?.unwrap();
-        let pre_expiry = pre_meta.time_expires.unwrap();
-
-        // Second get_metadata sees the bumped timestamp.
-        let post_meta = backend.get_metadata(&id).await?.unwrap();
-        let post_expiry = post_meta.time_expires.unwrap();
-        assert!(
-            post_expiry > pre_expiry,
-            "TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
-        );
-
-        // Verify the payload is still intact after the bump.
-        let (_, stream) = backend.get_object(&id).await?.unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(&payload, b"hello, world");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        // A freshly written object has time_expires ≈ now + 2d, which is well outside
-        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
-        let first = backend.get_metadata(&id).await?.unwrap();
-        let first_expiry = first.time_expires.unwrap();
-
-        let second = backend.get_metadata(&id).await?.unwrap();
-        let second_expiry = second.time_expires.unwrap();
-
-        assert_eq!(
-            first_expiry, second_expiry,
-            "Fresh TTI object should not have its expiry bumped"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_delete_non_tombstone_real_object() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, None);
-
-        let get_result = backend.get_object(&id).await?;
-        assert!(get_result.is_none());
-
-        Ok(())
-    }
-
-    /// Verifies that the `r` column (now holding the LT storage path, or an empty value
-    /// for legacy tombstones) is correctly detected by both the `ReadRows` column filter
-    /// and the `CheckAndMutate` `tombstone_predicate` — confirming Bigtable treats
-    /// non-empty-value cells as column-present in both filter types.
-    #[tokio::test]
-    async fn test_delete_non_tombstone_tombstone() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
-
-        let result = backend.delete_non_tombstone(&id).await?;
-        let tombstone = result.expect("Some(tombstone)");
-        assert_eq!(tombstone.target, id, "tombstone target must be returned");
-
-        // Tombstone should still exist — delete_non_tombstone leaves it intact.
-        let get_result = backend.get_tiered_metadata(&id).await?;
-        assert!(
-            matches!(get_result, TieredMetadata::Tombstone(_)),
-            "tombstone should still exist after delete_non_tombstone"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_delete_non_tombstone_nonexistent() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let result = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(result, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_hv_get_not_found() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        assert!(matches!(
-            backend.get_tiered_object(&id).await?,
-            TieredGet::NotFound
-        ));
-        assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
-            TieredMetadata::NotFound
-        ));
-
-        Ok(())
     }
 
     /// Writes a legacy-format tombstone row directly into Bigtable.
@@ -1570,7 +1193,7 @@ mod tests {
         Ok(())
     }
 
-    /// Write a new-format tombstone row with an empty `r` value directly,
+    /// Writes a new-format tombstone row with an empty `r` value directly,
     /// simulating rows written by code before this change.
     async fn write_empty_redirect_tombstone(
         backend: &BigTableBackend,
@@ -1597,14 +1220,737 @@ mod tests {
         Ok(())
     }
 
-    ///
-    /// Uses `Manual` expiration so `timestamp_micros = -1` (server-assigned ≈ write time) does
-    /// not trigger immediate expiry.
-    #[tokio::test]
-    async fn test_legacy_tombstone_compat() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
+    // --- Section 1: Object Operations ---
 
+    /// Verifies the full roundtrip: put → get_object (payload + metadata) → get_metadata (metadata).
+    #[tokio::test]
+    async fn test_roundtrip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            time_created: Some(SystemTime::now()),
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        let (obj_meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+        assert_eq!(str::from_utf8(&payload).unwrap(), "hello, world");
+        assert_eq!(obj_meta.content_type, metadata.content_type);
+        assert_eq!(obj_meta.custom, metadata.custom);
+
+        let head_meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(head_meta.content_type, metadata.content_type);
+        assert_eq!(head_meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    /// Verifies that absent rows return None or succeed silently for all read/delete operations.
+    #[tokio::test]
+    async fn test_nonexistent() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_metadata(&id).await?.is_none());
+        backend.delete_object(&id).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let first_metadata = Metadata {
+            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &first_metadata, stream::single("hello"))
+            .await?;
+
+        let second_metadata = Metadata {
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &second_metadata, stream::single("world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+        assert_eq!(str::from_utf8(&payload).unwrap(), "world");
+        assert_eq!(meta.custom, second_metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_after_delete() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        backend
+            .put_object(&id, &Metadata::default(), stream::single("hello, world"))
+            .await?;
+        backend.delete_object(&id).await?;
+
+        assert!(backend.get_object(&id).await?.is_none());
+
+        Ok(())
+    }
+
+    /// Verifies TTI bump via both `get_object` (loaded=true path) and `get_metadata` (loaded=false path).
+    ///
+    /// The bump condition is: `expire_at < now + tti - TTI_DEBOUNCE`. We write a stale
+    /// timestamp just inside the bump window (still in the future, so the row is not GC'd)
+    /// and confirm that a subsequent read returns a later expiry.
+    #[tokio::test]
+    async fn test_tti_bump() -> Result<()> {
+        let backend = create_test_backend().await?;
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        // Compute a stale timestamp just inside the bump window.
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_micros = old_deadline
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            * 1000;
+
+        // Sub-sequence 1: get_object triggers bump (loaded=true path).
+        let id1 = make_id();
+        backend
+            .put_object(&id1, &metadata, stream::single("hello, world"))
+            .await?;
+        let path1 = id1.as_storage_path().to_string().into_bytes();
+        backend
+            .mutate(
+                path1,
+                [
+                    mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_GC.to_owned(),
+                        column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                        timestamp_micros: old_micros,
+                        value: b"hello, world".to_vec(),
+                    }),
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_GC.to_owned(),
+                        column_qualifier: COLUMN_METADATA.to_owned(),
+                        timestamp_micros: old_micros,
+                        value: serde_json::to_vec(&metadata).unwrap(),
+                    }),
+                ],
+                "test-setup",
+            )
+            .await?;
+        // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
+        let (pre_obj_meta, _) = backend.get_object(&id1).await?.unwrap();
+        let pre_obj_expiry = pre_obj_meta.time_expires.unwrap();
+        // A second get_metadata reads the freshly bumped row.
+        let post_obj_meta = backend.get_metadata(&id1).await?.unwrap();
+        let post_obj_expiry = post_obj_meta.time_expires.unwrap();
+        assert!(
+            post_obj_expiry > pre_obj_expiry,
+            "get_object bump should extend expiry: {pre_obj_expiry:?} -> {post_obj_expiry:?}"
+        );
+
+        // Sub-sequence 2: get_metadata triggers bump (loaded=false path).
+        let id2 = make_id();
+        backend
+            .put_object(&id2, &metadata, stream::single("hello, world"))
+            .await?;
+        let path2 = id2.as_storage_path().to_string().into_bytes();
+        backend
+            .mutate(
+                path2,
+                [
+                    mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_GC.to_owned(),
+                        column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                        timestamp_micros: old_micros,
+                        value: b"hello, world".to_vec(),
+                    }),
+                    mutation::Mutation::SetCell(mutation::SetCell {
+                        family_name: FAMILY_GC.to_owned(),
+                        column_qualifier: COLUMN_METADATA.to_owned(),
+                        timestamp_micros: old_micros,
+                        value: serde_json::to_vec(&metadata).unwrap(),
+                    }),
+                ],
+                "test-setup",
+            )
+            .await?;
+        // First get_metadata sees the stale row and triggers a bump.
+        let pre_meta = backend.get_metadata(&id2).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+        // Second get_metadata reads the freshly bumped row.
+        let post_meta = backend.get_metadata(&id2).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "get_metadata bump should extend expiry: {pre_expiry:?} -> {post_expiry:?}"
+        );
+        // Payload must be intact after the loaded=false bump (which re-fetches the payload).
+        let (_, stream) = backend.get_object(&id2).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+        assert_eq!(&payload, b"hello, world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_no_bump_when_fresh() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        // A freshly written object has time_expires ≈ now + 2d, well outside the bump
+        // window (now + 2d - 1d = now + 1d). No bump should occur.
+        let first_expiry = backend
+            .get_metadata(&id)
+            .await?
+            .unwrap()
+            .time_expires
+            .unwrap();
+        let second_expiry = backend
+            .get_metadata(&id)
+            .await?
+            .unwrap()
+            .time_expires
+            .unwrap();
+
+        assert_eq!(
+            first_expiry, second_expiry,
+            "fresh TTI object must not be bumped"
+        );
+
+        Ok(())
+    }
+
+    // --- Section 2: Expiration ---
+
+    #[tokio::test]
+    async fn test_ttl_immediate() -> Result<()> {
+        // NB: We create a TTL that immediately expires in this test. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        assert!(backend.get_object(&id).await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_immediate() -> Result<()> {
+        // NB: We create a TTI that immediately expires in this test. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        assert!(backend.get_object(&id).await?.is_none());
+
+        Ok(())
+    }
+
+    // --- Section 3: Tiered Operations ---
+
+    /// Covers all three row states for `get_tiered_object` and `get_tiered_metadata`.
+    ///
+    /// - **empty**: both return NotFound.
+    /// - **object**: put_object, both return the Object variant with correct payload/metadata.
+    /// - **tombstone**: CAS-write with a distinct `lt_id`, both return the Tombstone variant
+    ///   with `target == lt_id`.
+    #[tokio::test]
+    async fn test_tiered_get() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // empty
+        let id = make_id();
+        assert!(matches!(
+            backend.get_tiered_object(&id).await?,
+            TieredGet::NotFound
+        ));
+        assert!(matches!(
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::NotFound
+        ));
+
+        // object
+        let id = make_id();
+        let put_meta = Metadata {
+            content_type: "text/plain".into(),
+            custom: BTreeMap::from_iter([("k".into(), "v".into())]),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &put_meta, stream::single("tiered payload"))
+            .await?;
+
+        let TieredGet::Object(obj_meta, obj_stream) = backend.get_tiered_object(&id).await? else {
+            panic!("expected TieredGet::Object");
+        };
+        let obj_payload = stream::read_to_vec(obj_stream).await?;
+        assert_eq!(str::from_utf8(&obj_payload).unwrap(), "tiered payload");
+        assert_eq!(obj_meta.content_type, put_meta.content_type);
+        assert_eq!(obj_meta.custom, put_meta.custom);
+
+        let TieredMetadata::Object(head_meta) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected TieredMetadata::Object");
+        };
+        assert_eq!(head_meta.content_type, put_meta.content_type);
+        assert_eq!(head_meta.custom, put_meta.custom);
+
+        // tombstone
+        let hv_id = make_id();
+        let lt_id = ObjectId::random(hv_id.context().clone());
+        backend
+            .compare_and_write(
+                &hv_id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+
+        let TieredGet::Tombstone(get_t) = backend.get_tiered_object(&hv_id).await? else {
+            panic!("expected TieredGet::Tombstone");
+        };
+        assert_eq!(
+            get_t.target, lt_id,
+            "get_tiered_object target must match lt_id"
+        );
+
+        let TieredMetadata::Tombstone(meta_t) = backend.get_tiered_metadata(&hv_id).await? else {
+            panic!("expected TieredMetadata::Tombstone");
+        };
+        assert_eq!(
+            meta_t.target, lt_id,
+            "get_tiered_metadata target must match lt_id"
+        );
+
+        Ok(())
+    }
+
+    /// Covers all three row states for `put_non_tombstone`.
+    ///
+    /// - **empty**: returns None, object is readable.
+    /// - **object**: overwrites with new payload, returns None.
+    /// - **tombstone**: returns Some(Tombstone) with the correct target; tombstone still intact.
+    #[tokio::test]
+    async fn test_put_non_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // empty: put_non_tombstone on absent row succeeds and makes object readable.
+        let id = make_id();
+        let result = backend
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"first"))
+            .await?;
+        assert_eq!(result, None, "expected None on empty row");
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"first");
+
+        // object: put_non_tombstone on existing object replaces payload, returns None.
+        let id = make_id();
+        backend
+            .put_object(&id, &Metadata::default(), stream::single("old"))
+            .await?;
+        let result = backend
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"new"))
+            .await?;
+        assert_eq!(result, None, "expected None when overwriting object");
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"new");
+
+        // tombstone: put_non_tombstone returns Some(Tombstone) and leaves tombstone intact.
+        let hv_id = make_id();
+        let lt_id = ObjectId::random(hv_id.context().clone());
+        backend
+            .compare_and_write(
+                &hv_id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+        let result = backend
+            .put_non_tombstone(&hv_id, &Metadata::default(), Bytes::new())
+            .await?;
+        let returned = result.expect("expected Some(Tombstone) when row is a tombstone");
+        assert_eq!(
+            returned.target, lt_id,
+            "returned tombstone target must be lt_id"
+        );
+        assert!(
+            matches!(
+                backend.get_tiered_metadata(&hv_id).await?,
+                TieredMetadata::Tombstone(_)
+            ),
+            "tombstone must still exist after put_non_tombstone"
+        );
+
+        Ok(())
+    }
+
+    /// Covers all three row states for `delete_non_tombstone`.
+    ///
+    /// - **empty**: returns None.
+    /// - **object**: returns None, row gone.
+    /// - **tombstone**: returns Some(Tombstone) with correct target; tombstone still intact.
+    ///
+    /// Verifies that the `r` column is correctly detected by both the `ReadRows` column
+    /// filter and the `CheckAndMutate` `tombstone_predicate`.
+    #[tokio::test]
+    async fn test_delete_non_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // empty
+        let id = make_id();
+        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+
+        // object
+        let id = make_id();
+        backend
+            .put_object(&id, &Metadata::default(), stream::single("hello, world"))
+            .await?;
+        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+        assert!(backend.get_object(&id).await?.is_none());
+
+        // tombstone
+        let id = make_id();
+        backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+        let tombstone = backend
+            .delete_non_tombstone(&id)
+            .await?
+            .expect("expected Some(tombstone)");
+        assert_eq!(tombstone.target, id, "tombstone target must be returned");
+        assert!(
+            matches!(
+                backend.get_tiered_metadata(&id).await?,
+                TieredMetadata::Tombstone(_)
+            ),
+            "tombstone must still exist after delete_non_tombstone"
+        );
+
+        Ok(())
+    }
+
+    // --- Section 4: Compare-and-Write ---
+
+    /// Creating a tombstone on an empty row succeeds; a second attempt fails.
+    ///
+    /// After creation, both tiered and legacy APIs reflect the tombstone.
+    #[tokio::test]
+    async fn test_cas_create_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
+        let tombstone = Tombstone {
+            target: id.clone(),
+            expiration_policy,
+        };
+
+        // First create succeeds.
+        let committed = backend
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone.clone()))
+            .await?;
+        assert!(committed, "expected CAS success on empty row");
+
+        // Tiered reads must see the tombstone with correct policy.
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected TieredMetadata::Tombstone");
+        };
+        assert_eq!(t.expiration_policy, expiration_policy);
+        assert!(matches!(
+            backend.get_tiered_object(&id).await?,
+            TieredGet::Tombstone(_)
+        ));
+
+        // Legacy reads must error rather than leak tombstone data.
+        assert!(matches!(
+            backend.get_object(&id).await,
+            Err(Error::UnexpectedTombstone)
+        ));
+        assert!(matches!(
+            backend.get_metadata(&id).await,
+            Err(Error::UnexpectedTombstone)
+        ));
+
+        // Second create fails: tombstone already exists.
+        let second = backend
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .await?;
+        assert!(!second, "second create must fail: tombstone already exists");
+
+        Ok(())
+    }
+
+    /// Swapping a tombstone target: wrong expected → false, correct expected → true.
+    #[tokio::test]
+    async fn test_cas_swap_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let hv_id = make_id();
+        let old_lt_id = ObjectId::random(hv_id.context().clone());
+        let wrong_lt_id = ObjectId::random(hv_id.context().clone());
+        let new_lt_id = ObjectId::random(hv_id.context().clone());
+
+        backend
+            .compare_and_write(
+                &hv_id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: old_lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+
+        // Wrong target: CAS fails, tombstone unchanged.
+        let swapped = backend
+            .compare_and_write(
+                &hv_id,
+                Some(&wrong_lt_id),
+                TieredWrite::Tombstone(Tombstone {
+                    target: new_lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+        assert!(!swapped, "expected CAS failure due to wrong target");
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
+            panic!("expected tombstone");
+        };
+        assert_eq!(
+            t.target, old_lt_id,
+            "target must be unchanged after mismatch"
+        );
+
+        // Correct target: CAS succeeds, target updated.
+        let swapped = backend
+            .compare_and_write(
+                &hv_id,
+                Some(&old_lt_id),
+                TieredWrite::Tombstone(Tombstone {
+                    target: new_lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+        assert!(swapped, "expected CAS success with correct target");
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
+            panic!("expected tombstone");
+        };
+        assert_eq!(
+            t.target, new_lt_id,
+            "target must be updated after successful swap"
+        );
+
+        Ok(())
+    }
+
+    /// Swapping a tombstone for inline object data: wrong expected → false, correct → true.
+    #[tokio::test]
+    async fn test_cas_swap_inline() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let lt_id = ObjectId::random(id.context().clone());
+        let wrong_id = ObjectId::random(id.context().clone());
+
+        backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+
+        // Wrong target: CAS fails, tombstone intact.
+        let swapped = backend
+            .compare_and_write(
+                &id,
+                Some(&wrong_id),
+                TieredWrite::Object(Metadata::default(), Bytes::new()),
+            )
+            .await?;
+        assert!(!swapped, "expected CAS failure with wrong target");
+        assert!(matches!(
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::Tombstone(_)
+        ));
+
+        // Correct target: CAS succeeds, row becomes an inline object.
+        let payload = Bytes::from_static(b"hello inline");
+        let swapped = backend
+            .compare_and_write(
+                &id,
+                Some(&lt_id),
+                TieredWrite::Object(Metadata::default(), payload.clone()),
+            )
+            .await?;
+        assert!(swapped, "expected CAS success with correct target");
+        let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
+            panic!("expected inline object after swap");
+        };
+        assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
+
+        Ok(())
+    }
+
+    /// CAS-write an object onto an empty row (expected=None, write=Object) succeeds.
+    #[tokio::test]
+    async fn test_cas_create_object_on_empty_row() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let payload = Bytes::from_static(b"cas object");
+        let committed = backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Object(Metadata::default(), payload.clone()),
+            )
+            .await?;
+        assert!(committed, "expected CAS success on empty row");
+
+        let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
+            panic!("expected Object after CAS-create");
+        };
+        assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
+
+        Ok(())
+    }
+
+    /// CAS-delete: wrong expected → false; correct expected → true, row gone.
+    /// CAS-delete with Some(target) against a regular object also returns false.
+    #[tokio::test]
+    async fn test_cas_delete() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let lt_id = ObjectId::random(id.context().clone());
+        let wrong_id = ObjectId::random(id.context().clone());
+
+        backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: lt_id.clone(),
+                    expiration_policy: ExpirationPolicy::Manual,
+                }),
+            )
+            .await?;
+
+        // Wrong target: fails, row preserved.
+        let deleted = backend
+            .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete)
+            .await?;
+        assert!(!deleted, "expected CAS failure with wrong target");
+        assert!(matches!(
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::Tombstone(_)
+        ));
+
+        // Correct target: succeeds, row gone.
+        let deleted = backend
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
+            .await?;
+        assert!(deleted, "expected CAS delete success");
+        assert!(matches!(
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::NotFound
+        ));
+
+        // Regular object: CAS-delete with Some(target) returns false, object preserved.
+        let id2 = make_id();
+        let fake_lt_id = ObjectId::random(id2.context().clone());
+        backend
+            .put_object(&id2, &Metadata::default(), stream::single("data"))
+            .await?;
+        let deleted = backend
+            .compare_and_write(&id2, Some(&fake_lt_id), TieredWrite::Delete)
+            .await?;
+        assert!(!deleted, "expected false: row is not a tombstone");
+        assert!(backend.get_object(&id2).await?.is_some());
+
+        Ok(())
+    }
+
+    // --- Section 5: Legacy Tombstone Compatibility ---
+
+    /// Legacy Manual and TTL tombstones are correctly read via the tiered APIs.
+    ///
+    /// Uses `Manual` expiration so `timestamp_micros = -1` (server-assigned ≈ write time)
+    /// does not trigger immediate expiry.
+    #[tokio::test]
+    async fn test_legacy_tombstone_reads() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // Manual policy: get_tiered_metadata returns Tombstone(Manual), get_tiered_object returns Tombstone.
+        let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
@@ -1616,31 +1962,11 @@ mod tests {
             TieredGet::Tombstone(_)
         ));
 
-        // Recreate a fresh tombstone to test the other conditional operations.
-        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-        let t_opt = backend
-            .put_non_tombstone(&id, &Metadata::default(), Bytes::new())
-            .await?;
-        // Legacy tombstones resolve to hv_id; target should match id.
-        assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
-
-        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-        let t_opt = backend.delete_non_tombstone(&id).await?;
-        assert_eq!(t_opt.map(|t| t.target), Some(id));
-
-        Ok(())
-    }
-
-    /// Legacy tombstones with a `TimeToLive` expiration policy have the policy correctly
-    /// deserialized from the `m` column JSON.
-    ///
-    /// A future cell timestamp (now + TTL) is required so `expires_before` does not immediately
-    /// filter the row: the cell timestamp doubles as the GC expiry time.
-    #[tokio::test]
-    async fn test_legacy_tombstone_expiration_policy() -> Result<()> {
-        let backend = create_test_backend().await?;
+        // TTL policy: get_tiered_metadata returns Tombstone with the correct TTL policy.
+        //
+        // A future cell timestamp (now + TTL) is required so `expires_before` does not
+        // immediately filter the row.
         let id = make_id();
-
         let ttl = Duration::from_secs(2 * 24 * 3600);
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
 
@@ -1654,9 +1980,8 @@ mod tests {
 
     /// A legacy tombstone with TTI policy is upgraded to the new `r`/`t` column format on read.
     ///
-    /// The bump path in both `get_tiered_metadata` and `get_tiered_object` calls
-    /// `put_tombstone_row`, which rewrites the row with `r` + `t` columns. The upgraded
-    /// row has a fresh cell timestamp (≈ now + TTI), so `time_expires` increases.
+    /// The bump path calls `put_tombstone_row`, which rewrites the row with `r` + `t` columns.
+    /// The upgraded row has a fresh cell timestamp (≈ now + TTI), so `time_expires` increases.
     #[tokio::test]
     async fn test_legacy_tombstone_tti_upgrade() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -1682,7 +2007,6 @@ mod tests {
         };
 
         // After the bump, the row is rewritten with a fresh timestamp (≈ now + TTI).
-        // Verify the new time_expires is later than the pre-bump deadline.
         let Some(RowData::Tombstone {
             time_expires: Some(new_deadline),
             ..
@@ -1693,294 +2017,59 @@ mod tests {
 
         assert!(
             new_deadline > old_deadline,
-            "TTI bump should have extended the tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
+            "TTI bump should extend tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
         );
 
         Ok(())
     }
 
+    /// Legacy tombstones are handled correctly by all conditional write operations.
+    ///
+    /// Covers: `put_non_tombstone`, `delete_non_tombstone`, CAS-delete for both the
+    /// legacy-metadata format and the empty-redirect format.
     #[tokio::test]
-    async fn test_swap_create_tombstone() -> Result<()> {
+    async fn test_legacy_tombstone_conditional_ops() -> Result<()> {
         let backend = create_test_backend().await?;
 
+        // put_non_tombstone returns Some(target == id) for a legacy tombstone.
         let id = make_id();
-        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: id.clone(),
-            expiration_policy,
-        });
-        let committed = backend.compare_and_write(&id, None, write).await?;
-        assert!(committed, "expected CAS success on empty row");
-
-        // Both hv methods must surface the tombstone with the correct expiration_policy.
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
-            panic!("expected TieredMetadataResponse::Tombstone");
-        };
-        assert_eq!(t.expiration_policy, expiration_policy);
-        assert!(matches!(
-            backend.get_tiered_object(&id).await?,
-            TieredGet::Tombstone(_)
-        ));
-
-        // Legacy get_object / get_metadata must error rather than leak tombstone data.
-        assert!(matches!(
-            backend.get_object(&id).await,
-            Err(Error::UnexpectedTombstone)
-        ));
-        assert!(matches!(
-            backend.get_metadata(&id).await,
-            Err(Error::UnexpectedTombstone)
-        ));
-
-        Ok(())
-    }
-
-    /// Attempting to create a tombstone when one already exists returns false.
-    #[tokio::test]
-    async fn test_swap_create_tombstone_conflict() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let tombstone = Tombstone {
-            target: id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        };
-        let first = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone.clone()))
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
+        let t_opt = backend
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::new())
             .await?;
-        assert!(first, "first write should succeed");
+        assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
 
-        let second = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+        // delete_non_tombstone returns Some(target == id) for a legacy tombstone.
+        let id = make_id();
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
+        let t_opt = backend.delete_non_tombstone(&id).await?;
+        assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
+
+        // CAS-delete succeeds on a legacy-metadata tombstone (target resolves to hv_id).
+        let id = make_id();
+        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
+        let deleted = backend
+            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
             .await?;
         assert!(
-            !second,
-            "second write should fail: tombstone already exists"
+            deleted,
+            "CAS-delete must succeed on legacy-metadata tombstone"
         );
-
-        Ok(())
-    }
-
-    /// CAS-swapping an existing tombstone for a new one succeeds when the expected target matches.
-    #[tokio::test]
-    async fn test_swap_tombstone() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let hv_id = make_id();
-        let old_lt_id = ObjectId::random(hv_id.context().clone());
-        let new_lt_id = ObjectId::random(hv_id.context().clone());
-
-        let old_write = TieredWrite::Tombstone(Tombstone {
-            target: old_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&hv_id, None, old_write).await?;
-
-        let new_write = TieredWrite::Tombstone(Tombstone {
-            target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        let swapped = backend
-            .compare_and_write(&hv_id, Some(&old_lt_id), new_write)
-            .await?;
-        assert!(swapped, "expected CAS success");
-
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
-            panic!("expected tombstone");
-        };
-        assert_eq!(t.target, new_lt_id, "tombstone target must be updated");
-
-        Ok(())
-    }
-
-    /// CAS-swapping fails when the expected target does not match the current tombstone.
-    #[tokio::test]
-    async fn test_swap_tombstone_mismatch() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let hv_id = make_id();
-        let actual_lt_id = ObjectId::random(hv_id.context().clone());
-        let wrong_lt_id = ObjectId::random(hv_id.context().clone());
-        let new_lt_id = ObjectId::random(hv_id.context().clone());
-
-        let old_write = TieredWrite::Tombstone(Tombstone {
-            target: actual_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&hv_id, None, old_write).await?;
-
-        let new_write = TieredWrite::Tombstone(Tombstone {
-            target: new_lt_id,
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        let swapped = backend
-            .compare_and_write(&hv_id, Some(&wrong_lt_id), new_write)
-            .await?;
-        assert!(!swapped, "expected CAS failure due to wrong target");
-
-        // Row unchanged.
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
-            panic!("expected tombstone");
-        };
-        assert_eq!(t.target, actual_lt_id, "tombstone target must be unchanged");
-
-        Ok(())
-    }
-
-    /// CAS-swapping a tombstone for inline data succeeds when the target matches.
-    #[tokio::test]
-    async fn test_swap_inline() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let lt_id = ObjectId::random(id.context().clone());
-
-        let old_write = TieredWrite::Tombstone(Tombstone {
-            target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, old_write).await?;
-
-        let payload = Bytes::from_static(b"hello inline");
-        let new_write = TieredWrite::Object(Metadata::default(), payload.clone());
-        let swapped = backend
-            .compare_and_write(&id, Some(&lt_id), new_write)
-            .await?;
-        assert!(swapped, "expected CAS success");
-
-        // Row is now an inline object.
-        let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
-            panic!("expected inline object after swap");
-        };
-        let body = crate::stream::read_to_vec(stream).await?;
-        assert_eq!(body, payload.as_ref());
-
-        Ok(())
-    }
-
-    /// Inline-swap fails when the expected target does not match.
-    #[tokio::test]
-    async fn test_swap_inline_mismatch() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let lt_id = ObjectId::random(id.context().clone());
-        let wrong_id = ObjectId::random(id.context().clone());
-
-        let old_write = TieredWrite::Tombstone(Tombstone {
-            target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, old_write).await?;
-
-        let new_write = TieredWrite::Object(Metadata::default(), Bytes::new());
-        let swapped = backend
-            .compare_and_write(&id, Some(&wrong_id), new_write)
-            .await?;
-        assert!(!swapped, "expected CAS failure");
-
-        // Tombstone still present.
-        assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
-            TieredMetadata::Tombstone(_)
-        ));
-
-        Ok(())
-    }
-
-    /// CAS-delete succeeds when the expected target matches.
-    #[tokio::test]
-    async fn test_swap_delete() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let lt_id = ObjectId::random(id.context().clone());
-
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
-
-        let deleted = backend
-            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
-            .await?;
-        assert!(deleted, "expected CAS delete success");
-
         assert!(matches!(
             backend.get_tiered_metadata(&id).await?,
             TieredMetadata::NotFound
         ));
 
-        Ok(())
-    }
-
-    /// CAS-delete fails when the expected target does not match.
-    #[tokio::test]
-    async fn test_swap_delete_mismatch() -> Result<()> {
-        let backend = create_test_backend().await?;
-
+        // CAS-delete succeeds on an empty-redirect tombstone (target resolves to hv_id).
         let id = make_id();
-        let lt_id = ObjectId::random(id.context().clone());
-        let wrong_id = ObjectId::random(id.context().clone());
-
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
-
-        let deleted = backend
-            .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete)
-            .await?;
-        assert!(!deleted, "expected CAS failure");
-
-        // Row preserved.
-        assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
-            TieredMetadata::Tombstone(_)
-        ));
-
-        Ok(())
-    }
-
-    /// CAS-delete with Some(target) against a regular object returns false.
-    #[tokio::test]
-    async fn test_swap_delete_regular_object() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let fake_lt_id = ObjectId::random(id.context().clone());
-
-        backend
-            .put_object(&id, &Metadata::default(), crate::stream::single("data"))
-            .await?;
-
-        let deleted = backend
-            .compare_and_write(&id, Some(&fake_lt_id), TieredWrite::Delete)
-            .await?;
-        assert!(!deleted, "expected false: row is not a tombstone");
-
-        // Object preserved.
-        assert!(backend.get_object(&id).await?.is_some());
-
-        Ok(())
-    }
-
-    /// Legacy empty-redirect tombstone (`r=b""`) is matched when `expected=Some(id)`.
-    #[tokio::test]
-    async fn test_swap_legacy_empty_redirect() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-
         write_empty_redirect_tombstone(&backend, &id).await?;
-
-        // Expected target = id (the legacy fallback resolves to hv_id).
         let deleted = backend
             .compare_and_write(&id, Some(&id), TieredWrite::Delete)
             .await?;
-        assert!(deleted, "should match legacy empty-redirect tombstone");
-
+        assert!(
+            deleted,
+            "CAS-delete must succeed on empty-redirect tombstone"
+        );
         assert!(matches!(
             backend.get_tiered_metadata(&id).await?,
             TieredMetadata::NotFound
@@ -1989,58 +2078,7 @@ mod tests {
         Ok(())
     }
 
-    /// Legacy metadata-format tombstone is matched when `expected=Some(id)`.
-    #[tokio::test]
-    async fn test_swap_legacy_metadata_format() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-
-        write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-
-        // Legacy tombstones resolve to hv_id, so expected target = id.
-        let deleted = backend
-            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
-            .await?;
-        assert!(deleted, "should match legacy-metadata tombstone");
-
-        assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
-            TieredMetadata::NotFound
-        ));
-
-        Ok(())
-    }
-
-    /// The redirect pointer stored in the `r` column survives a Bigtable write and read:
-    /// `target` on write equals `target` on read, and the parsed `ObjectId` matches.
-    #[tokio::test]
-    async fn test_redirect_pointer_round_trip() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        // Create different IDs for HV and LT
-        let hv_id = make_id();
-        let lt_id = ObjectId::random(hv_id.context().clone());
-        let tombstone = Tombstone {
-            target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        };
-
-        backend
-            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
-            .await?;
-
-        match backend.get_tiered_metadata(&hv_id).await? {
-            TieredMetadata::Tombstone(t) => assert_eq!(t.target, lt_id, "target must match"),
-            other => panic!("expected tombstone, got {other:?}"),
-        }
-        match backend.get_tiered_object(&hv_id).await? {
-            TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "target must match"),
-            other => panic!("expected tombstone, got {other:?}"),
-        }
-
-        Ok(())
-    }
-
+    /// An empty `r` value falls back to the HV id when resolving the tombstone target.
     #[tokio::test]
     async fn test_empty_redirect_falls_back_to_hv_id() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2048,7 +2086,7 @@ mod tests {
 
         write_empty_redirect_tombstone(&backend, &id).await?;
         match backend.get_tiered_metadata(&id).await? {
-            TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must use id"),
+            TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
 
