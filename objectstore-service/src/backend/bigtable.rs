@@ -308,10 +308,6 @@ fn interleave_filter(filters: Vec<v2::RowFilter>) -> v2::RowFilter {
 /// Equivalent to `!t || t == target`. Both safe states produce 0 output cells,
 /// so `predicate_matched` is `false` in both cases — pair this filter with
 /// `false_mutations`.
-///
-/// Note: `!t` includes both absent rows and inline-object rows. This is safe
-/// for tombstone and object writes (write is a no-op or overwrites with the
-/// same data), but NOT for deletes — use [`delete_compatible_filter`] instead.
 fn redirect_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
@@ -324,40 +320,6 @@ fn redirect_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFi
                 // !t → tombstone_predicate → 0 cells (safe, no tombstone)
                 // t != target → tombstone_predicate → 1+ cells (conflict)
                 false_filter: Some(Box::new(tombstone_predicate())),
-            },
-        ))),
-    }
-}
-
-/// Matches rows that are safe targets for a CAS-delete when the expected state
-/// is a tombstone pointing to `target`.
-///
-/// Safe states (produce 0 cells, write fires):
-/// - `t == target`: the expected tombstone exists — delete it.
-/// - Row absent: the tombstone was already deleted — delete is a no-op.
-///
-/// Conflict states (produce 1+ cells, write does not fire):
-/// - Inline object (`m` column present): another writer replaced the tombstone.
-/// - Wrong tombstone (`r` column present): a different redirect is in place.
-///
-/// Unlike [`redirect_compatible_filter`], this never fires on inline objects,
-/// making it safe to use with `TieredWrite::Delete`.
-fn delete_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
-    v2::RowFilter {
-        filter: Some(v2::row_filter::Filter::Condition(Box::new(
-            v2::row_filter::Condition {
-                predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
-                // t == target → block all → 0 cells (safe, delete should fire)
-                true_filter: Some(Box::new(v2::RowFilter {
-                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
-                })),
-                // Not t == target: check whether the row has any real content.
-                // Inline objects have `m`; wrong tombstones have `r`.
-                // Absent rows have neither → 0 cells → delete fires as a no-op.
-                false_filter: Some(Box::new(interleave_filter(vec![
-                    column_filter(COLUMN_METADATA),
-                    column_filter(COLUMN_REDIRECT),
-                ]))),
             },
         ))),
     }
@@ -1028,12 +990,11 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
 
-        // Capture write characteristics before consuming `write` for mutations.
+        // Clone the next target before consuming `write` for mutations.
         let next_target = match &write {
             TieredWrite::Tombstone(t) => Some(t.target.clone()),
             _ => None,
         };
-        let is_delete = matches!(write, TieredWrite::Delete);
 
         let write_mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
@@ -1052,13 +1013,8 @@ impl HighVolumeBackend for BigTableBackend {
                 redirect_target_filter(old, id),
                 redirect_target_filter(new, id),
             ]),
-            // !t || t == new  (empty row → safe)
-            (None, Some(new)) => redirect_compatible_filter(new, id),
-            // t == old OR absent row (inline object or wrong tombstone → conflict).
-            // Uses delete_compatible_filter to avoid firing on inline objects.
-            (Some(old), None) if is_delete => delete_compatible_filter(old, id),
-            // !t || t == old  (empty row → safe; inline object → safe, overwrite)
-            (Some(target), None) => redirect_compatible_filter(target, id),
+            // !t || t == target  (empty row → safe)
+            (Some(target), None) | (None, Some(target)) => redirect_compatible_filter(target, id),
             // !t  (empty row → safe)
             (None, None) => tombstone_predicate(),
         };
@@ -1852,7 +1808,6 @@ mod tests {
     }
 
     /// CAS-delete: wrong expected → false; correct expected → true, row gone.
-    /// CAS-delete with Some(target) against a regular object also returns false.
     #[tokio::test]
     async fn test_cas_delete() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -1893,7 +1848,7 @@ mod tests {
             .await?;
         assert!(retry, "idempotent retry");
 
-        // Regular object: CAS-delete with Some(target) returns false, object preserved.
+        // Inline object replaced tombstone: Safe to delete since it is an idempotent operation.
         let id2 = make_id();
         let fake_lt_id = ObjectId::random(id2.context().clone());
         let metadata = Metadata::default();
@@ -1901,8 +1856,7 @@ mod tests {
         let deleted = backend
             .compare_and_write(&id2, Some(&fake_lt_id), TieredWrite::Delete)
             .await?;
-        assert!(!deleted, "expected false: row is not a tombstone");
-        assert!(backend.get_object(&id2).await?.is_some());
+        assert!(deleted, "expected idempotent deletion");
 
         Ok(())
     }
