@@ -13,7 +13,8 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    DeleteResponse, GetResponse, PutResponse, TieredGet, TieredMetadata, Tombstone,
+    DeleteResponse, GetResponse, HighVolumeBackend, PutResponse, TieredGet, TieredMetadata,
+    TieredWrite, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -115,7 +116,7 @@ impl super::common::Backend for InMemoryBackend {
 }
 
 #[async_trait::async_trait]
-impl super::common::HighVolumeBackend for InMemoryBackend {
+impl HighVolumeBackend for InMemoryBackend {
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -131,24 +132,6 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
         metadata.size = Some(payload.len());
         store.insert(id.clone(), StoreEntry::Object(metadata, payload));
         Ok(None)
-    }
-
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
-            return Ok(Some(tombstone));
-        }
-
-        store.remove(id);
-        Ok(None)
-    }
-
-    async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
-        self.store
-            .lock()
-            .unwrap()
-            .insert(id.clone(), StoreEntry::Tombstone(tombstone));
-        Ok(())
     }
 
     async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
@@ -170,6 +153,50 @@ impl super::common::HighVolumeBackend for InMemoryBackend {
             Some(StoreEntry::Tombstone(tombstone)) => TieredMetadata::Tombstone(tombstone),
             Some(StoreEntry::Object(metadata, _bytes)) => TieredMetadata::Object(metadata),
         })
+    }
+
+    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
+            return Ok(Some(tombstone));
+        }
+
+        store.remove(id);
+        Ok(None)
+    }
+
+    async fn compare_and_write(
+        &self,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        write: TieredWrite,
+    ) -> Result<bool> {
+        let mut store = self.store.lock().unwrap();
+        let actual = store.get(id);
+
+        let matches = match current {
+            None => !matches!(actual, Some(StoreEntry::Tombstone(_))),
+            Some(target) => matches!(
+                actual,
+                Some(StoreEntry::Tombstone(t)) if t.target == *target
+            ),
+        };
+
+        if matches {
+            match write {
+                TieredWrite::Tombstone(tombstone) => {
+                    store.insert(id.clone(), StoreEntry::Tombstone(tombstone));
+                }
+                TieredWrite::Object(metadata, payload) => {
+                    store.insert(id.clone(), StoreEntry::Object(metadata, payload));
+                }
+                TieredWrite::Delete => {
+                    store.remove(id);
+                }
+            }
+        }
+
+        Ok(matches)
     }
 }
 

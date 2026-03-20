@@ -235,7 +235,9 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{HighVolumeBackend, TieredGet, TieredMetadata, Tombstone};
+    use crate::backend::common::{
+        HighVolumeBackend, TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    };
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::tiered::TieredStorage;
@@ -525,22 +527,30 @@ mod tests {
             self.inner.put_non_tombstone(id, metadata, payload).await
         }
 
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.inner.delete_non_tombstone(id).await
-        }
-
-        async fn create_tombstone(&self, id: &ObjectId, tombstone: Tombstone) -> Result<()> {
-            self.inner.create_tombstone(id, tombstone).await?;
-            self.on_put.notify_one();
-            Ok(())
-        }
-
         async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
             self.inner.get_tiered_object(id).await
         }
 
         async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
             self.inner.get_tiered_metadata(id).await
+        }
+
+        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+            self.inner.delete_non_tombstone(id).await
+        }
+
+        async fn compare_and_write(
+            &self,
+            id: &ObjectId,
+            current: Option<&ObjectId>,
+            write: TieredWrite,
+        ) -> Result<bool> {
+            let notify = matches!(write, TieredWrite::Tombstone(_) | TieredWrite::Object(_, _));
+            let result = self.inner.compare_and_write(id, current, write).await?;
+            if notify {
+                self.on_put.notify_one();
+            }
+            Ok(result)
         }
     }
 
@@ -579,9 +589,11 @@ mod tests {
             .expect("timed out waiting for tombstone write");
 
         // Verify the object was fully written despite the caller being dropped.
+        // The tombstone in HV points to the revision key in LT.
         let id = ObjectId::new(make_context(), "completion-test".into());
-        assert!(lt.inner.contains(&id), "long-term object missing");
-        hv.inner.get(&id).expect_tombstone();
+        let tombstone = hv.inner.get(&id).expect_tombstone();
+        let lt_id = tombstone.target;
+        assert!(lt.inner.contains(&lt_id), "long-term object missing");
     }
 
     // --- Concurrency limit tests ---
