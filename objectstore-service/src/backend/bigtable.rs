@@ -1507,7 +1507,7 @@ mod tests {
         create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
         match backend.get_tiered_object(&hv_id).await? {
-            TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id,),
+            TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
         }
         match backend.get_tiered_metadata(&hv_id).await? {
@@ -1626,42 +1626,44 @@ mod tests {
     async fn test_cas_create_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        let id = make_id();
+        let hv_id = make_id();
+        let lt_id = ObjectId::random(hv_id.context().clone());
         let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
         let tombstone = Tombstone {
-            target: id.clone(),
+            target: lt_id.clone(),
             expiration_policy,
         };
 
         // First create succeeds.
         let committed = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone.clone()))
+            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone.clone()))
             .await?;
         assert!(committed, "expected CAS success on empty row");
 
-        // Tiered reads must see the tombstone with correct policy.
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+        // Tiered reads must see the tombstone with correct target and policy.
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
             panic!("expected TieredMetadata::Tombstone");
         };
+        assert_eq!(t.target, lt_id, "target must round-trip via r column");
         assert_eq!(t.expiration_policy, expiration_policy);
-        assert!(matches!(
-            backend.get_tiered_object(&id).await?,
-            TieredGet::Tombstone(_)
-        ));
+        match backend.get_tiered_object(&hv_id).await? {
+            TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "round-trip via r column"),
+            other => panic!("expected TieredGet::Tombstone, got {other:?}"),
+        }
 
         // Legacy reads must error rather than leak tombstone data.
         assert!(matches!(
-            backend.get_object(&id).await,
+            backend.get_object(&hv_id).await,
             Err(Error::UnexpectedTombstone)
         ));
         assert!(matches!(
-            backend.get_metadata(&id).await,
+            backend.get_metadata(&hv_id).await,
             Err(Error::UnexpectedTombstone)
         ));
 
         // Second create fails: tombstone already exists.
         let second = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await?;
         assert!(!second, "second create must fail: tombstone already exists");
 
