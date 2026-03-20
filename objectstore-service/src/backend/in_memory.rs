@@ -172,17 +172,17 @@ impl HighVolumeBackend for InMemoryBackend {
         write: TieredWrite,
     ) -> Result<bool> {
         let mut store = self.store.lock().unwrap();
-        let actual = store.get(id);
 
-        let matches = match current {
-            None => !matches!(actual, Some(StoreEntry::Tombstone(_))),
-            Some(target) => matches!(
-                actual,
-                Some(StoreEntry::Tombstone(t)) if t.target == *target
-            ),
+        let actual = store.get(id);
+        let next = match write {
+            TieredWrite::Tombstone(ref t) => Some(&t.target),
+            _ => None,
         };
 
-        if matches {
+        let matches_current = matches_redirect(actual, current);
+        let matches_next = matches_redirect(actual, next);
+
+        if matches_current {
             match write {
                 TieredWrite::Tombstone(tombstone) => {
                     store.insert(id.clone(), StoreEntry::Tombstone(tombstone));
@@ -196,7 +196,18 @@ impl HighVolumeBackend for InMemoryBackend {
             }
         }
 
-        Ok(matches)
+        Ok(matches_current || matches_next)
+    }
+}
+
+/// Returns `true` if `entry` matches the expected tombstone redirect state.
+///
+/// - `expected = None`: matches any non-tombstone (absent or inline object).
+/// - `expected = Some(target)`: matches a tombstone whose redirect target equals `target`.
+fn matches_redirect(entry: Option<&StoreEntry>, expected: Option<&ObjectId>) -> bool {
+    match expected {
+        None => matches!(entry, Some(StoreEntry::Object { .. }) | None),
+        Some(target) => matches!(entry, Some(StoreEntry::Tombstone(t)) if t.target == *target),
     }
 }
 

@@ -105,8 +105,12 @@ pub trait HighVolumeBackend: Backend {
     /// - `Some(target)`: succeeds only if a tombstone exists whose redirect
     ///   resolves to `target`.
     ///
-    /// On match, applies `write`. Returns `true` on success, `false` if the
-    /// precondition was not met (row state changed concurrently).
+    /// **This operation is idempotent:** if the object is already in the target
+    /// state, it returns `true`. Whether the mutation runs again is up to the
+    /// implementation.
+    ///
+    /// Returns `true` on success or idempotent match, `false` if a conflicting
+    /// state was found (another writer won the race).
     async fn compare_and_write(
         &self,
         id: &ObjectId,
@@ -163,7 +167,7 @@ pub enum TieredMetadata {
 }
 
 /// The write operation performed by [`HighVolumeBackend::compare_and_write`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TieredWrite {
     /// Write a redirect tombstone.
     Tombstone(Tombstone),

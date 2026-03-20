@@ -293,6 +293,76 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     }
 }
 
+/// Combines multiple filters with OR semantics: passes cells if any sub-filter matches.
+fn interleave_filter(filters: Vec<v2::RowFilter>) -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Interleave(
+            v2::row_filter::Interleave { filters },
+        )),
+    }
+}
+
+/// Matches rows where no conflicting tombstone exists: either no tombstone,
+/// or the redirect already points to `target`.
+///
+/// Equivalent to `!t || t == target`. Both safe states produce 0 output cells,
+/// so `predicate_matched` is `false` in both cases — pair this filter with
+/// `false_mutations`.
+///
+/// Note: `!t` includes both absent rows and inline-object rows. This is safe
+/// for tombstone and object writes (write is a no-op or overwrites with the
+/// same data), but NOT for deletes — use [`delete_compatible_filter`] instead.
+fn redirect_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Condition(Box::new(
+            v2::row_filter::Condition {
+                predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
+                // t == target → block all → 0 cells (safe, already in target state)
+                true_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
+                })),
+                // !t → tombstone_predicate → 0 cells (safe, no tombstone)
+                // t != target → tombstone_predicate → 1+ cells (conflict)
+                false_filter: Some(Box::new(tombstone_predicate())),
+            },
+        ))),
+    }
+}
+
+/// Matches rows that are safe targets for a CAS-delete when the expected state
+/// is a tombstone pointing to `target`.
+///
+/// Safe states (produce 0 cells, write fires):
+/// - `t == target`: the expected tombstone exists — delete it.
+/// - Row absent: the tombstone was already deleted — delete is a no-op.
+///
+/// Conflict states (produce 1+ cells, write does not fire):
+/// - Inline object (`m` column present): another writer replaced the tombstone.
+/// - Wrong tombstone (`r` column present): a different redirect is in place.
+///
+/// Unlike [`redirect_compatible_filter`], this never fires on inline objects,
+/// making it safe to use with `TieredWrite::Delete`.
+fn delete_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Condition(Box::new(
+            v2::row_filter::Condition {
+                predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
+                // t == target → block all → 0 cells (safe, delete should fire)
+                true_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
+                })),
+                // Not t == target: check whether the row has any real content.
+                // Inline objects have `m`; wrong tombstones have `r`.
+                // Absent rows have neither → 0 cells → delete fires as a no-op.
+                false_filter: Some(Box::new(interleave_filter(vec![
+                    column_filter(COLUMN_METADATA),
+                    column_filter(COLUMN_REDIRECT),
+                ]))),
+            },
+        ))),
+    }
+}
+
 /// Creates a row filter that reads all non-payload columns (`m`, `r`, `t`).
 ///
 /// Used by metadata-only reads to avoid fetching the (potentially large) payload column
@@ -958,23 +1028,45 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
 
+        // Capture write characteristics before consuming `write` for mutations.
+        let next_target = match &write {
+            TieredWrite::Tombstone(t) => Some(t.target.clone()),
+            _ => None,
+        };
+        let is_delete = matches!(write, TieredWrite::Delete);
+
         let write_mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
             TieredWrite::Object(m, p) => object_mutations(&m, p.to_vec(), now)?.into(),
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
-        let (predicate_filter, true_mutations, false_mutations, success_on_match) = match current {
-            // Success = no tombstone. tombstone_predicate matches = tombstone found = fail.
-            // Write on false_mutations (no tombstone); noop on true_mutations (tombstone).
-            None => (tombstone_predicate(), vec![], write_mutations, false),
-            // Success = redirect matches target. Predicate match = CAS success.
-            Some(target) => (
-                redirect_target_filter(target, id),
-                write_mutations,
-                vec![],
-                true,
-            ),
+        // An empty row always yields 0 cells, so predicate_matched is always false for
+        // absent rows. When that is the safe state, write in false_mutations; when it is a
+        // conflict, write in true_mutations.
+        let empty_row_is_safe = current.is_none() || next_target.is_none();
+
+        let predicate_filter = match (current, next_target.as_ref()) {
+            // t == old || t == new  (empty row → conflict)
+            (Some(old), Some(new)) => interleave_filter(vec![
+                redirect_target_filter(old, id),
+                redirect_target_filter(new, id),
+            ]),
+            // !t || t == new  (empty row → safe)
+            (None, Some(new)) => redirect_compatible_filter(new, id),
+            // t == old OR absent row (inline object or wrong tombstone → conflict).
+            // Uses delete_compatible_filter to avoid firing on inline objects.
+            (Some(old), None) if is_delete => delete_compatible_filter(old, id),
+            // !t || t == old  (empty row → safe; inline object → safe, overwrite)
+            (Some(target), None) => redirect_compatible_filter(target, id),
+            // !t  (empty row → safe)
+            (None, None) => tombstone_predicate(),
+        };
+
+        let (true_mutations, false_mutations) = if empty_row_is_safe {
+            (vec![], write_mutations)
+        } else {
+            (write_mutations, vec![])
         };
 
         let request = v2::CheckAndMutateRowRequest {
@@ -995,7 +1087,7 @@ impl HighVolumeBackend for BigTableBackend {
         .await?
         .predicate_matched;
 
-        Ok(predicate_matched == success_on_match)
+        Ok(predicate_matched != empty_row_is_safe)
     }
 }
 
@@ -1595,7 +1687,7 @@ mod tests {
 
     // --- Section 4: Compare-and-Write ---
 
-    /// Creating a tombstone on an empty row succeeds; a second attempt fails.
+    /// Creating a tombstone on an empty row succeeds; a retry of the same CAS also succeeds.
     ///
     /// After creation, both tiered and legacy APIs reflect the tombstone.
     #[tokio::test]
@@ -1637,11 +1729,11 @@ mod tests {
             Err(Error::UnexpectedTombstone)
         ));
 
-        // Second create fails: tombstone already exists.
+        // Idempotent retry: retry with the same target succeeds
         let second = backend
             .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await?;
-        assert!(!second, "second create must fail: tombstone already exists");
+        assert!(second, "idempotent retry");
 
         Ok(())
     }
@@ -1668,7 +1760,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
         });
         let swapped = backend
-            .compare_and_write(&hv_id, Some(&wrong_lt_id), write)
+            .compare_and_write(&hv_id, Some(&wrong_lt_id), write.clone())
             .await?;
         assert!(!swapped, "expected CAS failure due to wrong target");
         match backend.get_tiered_metadata(&hv_id).await? {
@@ -1677,18 +1769,20 @@ mod tests {
         }
 
         // Correct target: CAS succeeds, target updated.
-        let write = TieredWrite::Tombstone(Tombstone {
-            target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        });
         let swapped = backend
-            .compare_and_write(&hv_id, Some(&old_lt_id), write)
+            .compare_and_write(&hv_id, Some(&old_lt_id), write.clone())
             .await?;
         assert!(swapped, "expected CAS success with correct target");
         match backend.get_tiered_metadata(&hv_id).await? {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, new_lt_id),
             other => panic!("expected tombstone, got {other:?}"),
         }
+
+        // Idempotent retry: same A→B swap returns true.
+        let retry = backend
+            .compare_and_write(&hv_id, Some(&old_lt_id), write)
+            .await?;
+        assert!(retry, "idempotent retry");
 
         Ok(())
     }
@@ -1722,12 +1816,18 @@ mod tests {
         // Correct target: CAS succeeds, row becomes an inline object.
         let payload = Bytes::from_static(b"hello inline");
         let write = TieredWrite::Object(Metadata::default(), payload.clone());
-        let swapped = backend.compare_and_write(&id, Some(&lt_id), write).await?;
+        let swapped = backend
+            .compare_and_write(&id, Some(&lt_id), write.clone())
+            .await?;
         assert!(swapped, "expected CAS success with correct target");
         let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
             panic!("expected inline object after swap");
         };
         assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
+
+        // Idempotent retry: row is already inline (no tombstone), same CAS returns true.
+        let retry = backend.compare_and_write(&id, Some(&lt_id), write).await?;
+        assert!(retry, "idempotent retry");
 
         Ok(())
     }
@@ -1786,6 +1886,12 @@ mod tests {
             backend.get_tiered_metadata(&id).await?,
             TieredMetadata::NotFound
         ));
+
+        // Idempotent retry: row is already absent (no tombstone), same delete returns true.
+        let retry = backend
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
+            .await?;
+        assert!(retry, "idempotent retry");
 
         // Regular object: CAS-delete with Some(target) returns false, object preserved.
         let id2 = make_id();
