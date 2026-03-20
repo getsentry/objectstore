@@ -177,6 +177,16 @@ pub enum TieredWrite {
     Delete,
 }
 
+impl TieredWrite {
+    /// Returns the tombstone target if this is a tombstone write, or `None` otherwise.
+    pub fn target(&self) -> Option<&ObjectId> {
+        match self {
+            TieredWrite::Tombstone(t) => Some(&t.target),
+            _ => None,
+        }
+    }
+}
+
 /// Creates a reqwest client with required defaults.
 ///
 /// Automatic decompression is disabled because backends store pre-compressed

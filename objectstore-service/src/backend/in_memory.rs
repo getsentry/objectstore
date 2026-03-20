@@ -174,13 +174,8 @@ impl HighVolumeBackend for InMemoryBackend {
         let mut store = self.store.lock().unwrap();
 
         let actual = store.get(id);
-        let next = match write {
-            TieredWrite::Tombstone(ref t) => Some(&t.target),
-            _ => None,
-        };
-
         let matches_current = matches_redirect(actual, current);
-        let matches_next = matches_redirect(actual, next);
+        let matches_next = matches_redirect(actual, write.target());
 
         if matches_current {
             match write {

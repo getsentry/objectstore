@@ -212,6 +212,12 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
 
 /// Creates a row filter that matches any tombstone row, new- or legacy-format.
 ///
+/// ## Predicate Matches
+///
+/// Must be used with `false_mutations` and `predicate_matched == false`.
+///
+/// ## Details
+///
 /// New format: presence of the `r` column.
 /// Legacy format: `is_redirect_tombstone: true` in the `m` column JSON.
 ///
@@ -241,7 +247,13 @@ fn exact_value_regex(value: &str) -> Vec<u8> {
     format!("^{}$", regex::escape(value)).into_bytes()
 }
 
-/// Creates a row filter that matches tombstones whose redirect resolves to `target`.
+/// Matches tombstones whose redirect resolves to `target`.
+///
+/// ## Predicate Matches
+///
+/// Must be used with `true_mutations` and `predicate_matched == true`.
+///
+/// ## Details
 ///
 /// Always includes an exact match on the `r` (redirect) column:
 /// - Chain: `r` column present AND value == `target` storage path
@@ -293,32 +305,56 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     }
 }
 
-/// Combines multiple filters with OR semantics: passes cells if any sub-filter matches.
-fn interleave_filter(filters: Vec<v2::RowFilter>) -> v2::RowFilter {
+/// Matches tombstones whose redirect resolves to either `old` or `new`.
+///
+/// ## Predicate Matches
+///
+/// Must be used with `true_mutations` and `predicate_matched == true`.
+///
+/// ## Details
+///
+/// Equivalent to `t == old || t == new`. Built as an Interleave of two
+/// [`redirect_target_filter`] calls — yields cells iff at least one branch
+/// matches. An absent row or non-tombstone row yields 0 cells, so
+/// `predicate_matched = false` (conflict).
+fn update_filter(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
-            v2::row_filter::Interleave { filters },
+            v2::row_filter::Interleave {
+                filters: vec![
+                    redirect_target_filter(old, own_id),
+                    redirect_target_filter(new, own_id),
+                ],
+            },
         )),
     }
 }
 
-/// Matches rows where no conflicting tombstone exists: either no tombstone,
-/// or the redirect already points to `target`.
+/// Matches rows where no conflicting tombstone exists:
 ///
-/// Equivalent to `!t || t == target`. Both safe states produce 0 output cells,
-/// so `predicate_matched` is `false` in both cases — pair this filter with
-/// `false_mutations`.
-fn redirect_compatible_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
+/// ## Predicate Matches
+///
+/// Must be used with `false_mutations` and `predicate_matched == false`.
+///
+/// ## Details
+///
+/// Matches either no tombstone, or the redirect already points to `target`.
+/// Built as an inverted `Condition` filter:
+///
+/// - Predicate: [`redirect_target_filter`]`(target)` — does the row have a
+///   tombstone pointing to `target`?
+/// - True branch: `BlockAllFilter` → 0 cells.
+/// - False branch: [`tombstone_predicate`] → 0 cells when no tombstone
+///
+/// Both safe states yield 0 cells, so `predicate_matched = false` in both cases.
+fn optional_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
                 predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
-                // t == target → block all → 0 cells (safe, already in target state)
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
-                // !t → tombstone_predicate → 0 cells (safe, no tombstone)
-                // t != target → tombstone_predicate → 1+ cells (conflict)
                 false_filter: Some(Box::new(tombstone_predicate())),
             },
         ))),
@@ -990,10 +1026,12 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
 
-        // Clone the next target before consuming `write` for mutations.
-        let next_target = match &write {
-            TieredWrite::Tombstone(t) => Some(t.target.clone()),
-            _ => None,
+        // `invert`: filters that use false_mutations (predicate_matched == false means safe).
+        let (predicate_filter, invert) = match (current, write.target()) {
+            (Some(old), Some(new)) => (update_filter(old, new, id), false),
+            (Some(target), None) => (optional_target_filter(target, id), true),
+            (None, Some(target)) => (optional_target_filter(target, id), true),
+            (None, None) => (tombstone_predicate(), true),
         };
 
         let write_mutations = match write {
@@ -1002,27 +1040,9 @@ impl HighVolumeBackend for BigTableBackend {
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
-        // An empty row always yields 0 cells, so predicate_matched is always false for
-        // absent rows. When that is the safe state, write in false_mutations; when it is a
-        // conflict, write in true_mutations.
-        let empty_row_is_safe = current.is_none() || next_target.is_none();
-
-        let predicate_filter = match (current, next_target.as_ref()) {
-            // t == old || t == new  (empty row → conflict)
-            (Some(old), Some(new)) => interleave_filter(vec![
-                redirect_target_filter(old, id),
-                redirect_target_filter(new, id),
-            ]),
-            // !t || t == target  (empty row → safe)
-            (Some(target), None) | (None, Some(target)) => redirect_compatible_filter(target, id),
-            // !t  (empty row → safe)
-            (None, None) => tombstone_predicate(),
-        };
-
-        let (true_mutations, false_mutations) = if empty_row_is_safe {
-            (vec![], write_mutations)
-        } else {
-            (write_mutations, vec![])
+        let (true_mutations, false_mutations) = match invert {
+            true => (vec![], write_mutations),
+            false => (write_mutations, vec![]),
         };
 
         let request = v2::CheckAndMutateRowRequest {
@@ -1043,7 +1063,7 @@ impl HighVolumeBackend for BigTableBackend {
         .await?
         .predicate_matched;
 
-        Ok(predicate_matched != empty_row_is_safe)
+        Ok(predicate_matched != invert)
     }
 }
 
