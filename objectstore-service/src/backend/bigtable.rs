@@ -1321,13 +1321,9 @@ mod tests {
             ..Default::default()
         };
 
-        // Compute a stale timestamp just inside the bump window.
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
-        let old_micros = old_deadline
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            * 1000;
+        // Compute a fake `now` such that build_write_mutations produces a stale timestamp
+        // just inside the bump window: expire_at = fake_now + tti = now - TTI_DEBOUNCE - 60s.
+        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_secs(60);
 
         // Sub-sequence 1: get_object triggers bump (loaded=true path).
         let id1 = make_id();
@@ -1335,22 +1331,9 @@ mod tests {
             .put_object(&id1, &metadata, stream::single("hello, world"))
             .await?;
         let path1 = id1.as_storage_path().to_string().into_bytes();
-        let mutations = [
-            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                timestamp_micros: old_micros,
-                value: b"hello, world".to_vec(),
-            }),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_METADATA.to_owned(),
-                timestamp_micros: old_micros,
-                value: serde_json::to_vec(&metadata).unwrap(),
-            }),
-        ];
-        backend.mutate(path1, mutations, "test-setup").await?;
+        let mutations1 =
+            build_write_mutations(&metadata, b"hello, world".to_vec(), past_now).unwrap();
+        backend.mutate(path1, mutations1, "test-setup").await?;
 
         // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
         let (pre_obj_meta, _) = backend.get_object(&id1).await?.unwrap();
@@ -1370,22 +1353,9 @@ mod tests {
             .put_object(&id2, &metadata, stream::single("hello, world"))
             .await?;
         let path2 = id2.as_storage_path().to_string().into_bytes();
-        let mutations = [
-            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                timestamp_micros: old_micros,
-                value: b"hello, world".to_vec(),
-            }),
-            mutation::Mutation::SetCell(mutation::SetCell {
-                family_name: FAMILY_GC.to_owned(),
-                column_qualifier: COLUMN_METADATA.to_owned(),
-                timestamp_micros: old_micros,
-                value: serde_json::to_vec(&metadata).unwrap(),
-            }),
-        ];
-        backend.mutate(path2, mutations, "test-setup").await?;
+        let mutations2 =
+            build_write_mutations(&metadata, b"hello, world".to_vec(), past_now).unwrap();
+        backend.mutate(path2, mutations2, "test-setup").await?;
 
         // First get_metadata sees the stale row and triggers a bump.
         let pre_meta = backend.get_metadata(&id2).await?.unwrap();
