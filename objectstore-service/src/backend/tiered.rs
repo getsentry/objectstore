@@ -64,6 +64,17 @@
 //! Tombstone removal is the commit point for deletes. If the subsequent LT
 //! cleanup fails, an orphan blob remains but the object is already unreachable
 //! through the normal read path.
+//!
+//! ## Last-Writer-Wins
+//!
+//! Concurrent mutations on the same key are inherently a race. Even a write
+//! that returns `Ok` may be immediately overwritten by another caller — there
+//! is no ordering guarantee and objectstore cannot provide a read-your-writes
+//! promise.
+//!
+//! CAS conflicts are therefore **not errors**: the losing writer's data is
+//! cleaned up and `Ok` is returned, because the result is indistinguishable
+//! from having succeeded a moment earlier and then been overwritten.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -232,6 +243,9 @@ impl TieredStorage {
             let _ = self.long_term.delete_object(&target).await;
         }
 
+        // Else: Another writer won the race. This is not an error -
+        // see "Last-Writer-Wins" in module docs.
+
         Ok(())
     }
 
@@ -274,9 +288,9 @@ impl TieredStorage {
                 }
             }
             Ok(false) => {
-                // Someone else won the race. Clean up our GCS blob.
+                // Another writer won the race. Clean up our GCS blob.
+                // This is not an error - see "Last-Writer-Wins" in module docs.
                 let _ = self.long_term.delete_object(&new).await;
-                // Return OK — from the caller's perspective, a write happened.
             }
             Err(e) => {
                 // CAS error. Clean up our GCS blob before propagating.
@@ -420,6 +434,9 @@ impl Backend for TieredStorage {
             if deleted {
                 let _ = self.long_term.delete_object(&tombstone.target).await;
             }
+
+            // Else: Another writer won the race. This is not an error -
+            // see "Last-Writer-Wins" in module docs.
         }
 
         objectstore_metrics::record!(
