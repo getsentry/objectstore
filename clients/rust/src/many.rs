@@ -36,7 +36,7 @@ const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
 
 /// Maximum number of requests to the batch endpoint that can be executed concurrently.
-const MAX_BATCH_CONCURRENCY: usize = 5;
+const MAX_BATCH_CONCURRENCY: usize = 3;
 
 // TODO: add limit and logic for whole batch request body size
 
