@@ -12,7 +12,6 @@ publish = true
 
 [dependencies]
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
-async-stream = "0.3.6"
 percent-encoding = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }

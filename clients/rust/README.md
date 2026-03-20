@@ -149,7 +149,8 @@ async fn example_batch() -> Result<()> {
         .push(session.put("file1 contents").key("file1"))
         .push(session.put("file2 contents").key("file2"))
         .push(session.put("file3 contents").key("file3"))
-        .send();
+        .send()
+        .await;
 
     while let Some(result) = results.next().await {
         match result {
@@ -177,6 +178,7 @@ session
     .push(session.put("file2 contents").key("file2"))
     .push(session.put("file3 contents").key("file3"))
     .send()
+    .await
     .error_for_failures()
     .await
     .map_err(|errors| { /* errors: Vec<Error> */ })?;

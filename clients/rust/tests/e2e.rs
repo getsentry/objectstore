@@ -352,6 +352,7 @@ async fn batch_operations() {
         .push(session.put("third object").compression(None).key("key-3"))
         .push(session.put("fourth object").compression(None).key("key-4"))
         .send()
+        .await
         .collect()
         .await;
 
@@ -379,6 +380,7 @@ async fn batch_operations() {
                 .key("key-4"),
         )
         .send()
+        .await
         .collect()
         .await;
 
@@ -455,6 +457,7 @@ async fn batch_insert_without_key() {
         .many()
         .push(session.put("keyless object").compression(None))
         .send()
+        .await
         .collect()
         .await;
 
@@ -499,6 +502,7 @@ async fn batch_partial_failures() {
         .push(session.get("nonexistent-key-2"))
         .push(session.get("nonexistent-key-3"))
         .send()
+        .await
         .collect()
         .await;
 
@@ -597,7 +601,7 @@ async fn batch_put_files() {
     let large_file = tokio::fs::File::open(&large_path).await.unwrap();
     many = many.push(session.put_file(large_file).compression(None).key("large"));
 
-    let results: Vec<_> = many.send().collect().await;
+    let results: Vec<_> = many.send().await.collect().await;
 
     assert_eq!(results.len(), 4);
 
