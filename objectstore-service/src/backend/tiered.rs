@@ -28,7 +28,13 @@
 //!
 //! See `new_long_term_revision` for the key construction.
 //!
-//! ## Large-Object Write (> 1 MiB)
+//! ## Compare-and-Swap
+//!
+//! All mutating operations follow a common pattern of reading the current
+//! revision, performing the upload, atomically swapping the revision (commit
+//! point), and finally cleaning up old objects:
+//!
+//! ### Large-Object Write (> 1 MiB)
 //!
 //! 1. **Read HV** to capture the current revision (existing tombstone target,
 //!    or absent).
@@ -39,7 +45,7 @@
 //!    - **Conflict** — another writer won the race; delete our new LT blob.
 //!    - **Error** — delete our new LT blob, then propagate the error.
 //!
-//! ## Small-Object Write (≤ 1 MiB)
+//! ### Small-Object Write (≤ 1 MiB)
 //!
 //! 1. **Write inline to HV**, skipping the write if a tombstone is present.
 //!    - **OK** — done; the object is stored entirely in HV.
@@ -51,7 +57,7 @@
 //!    - **Conflict** — another writer won the race; they will clean up the
 //!      LT blob and we have no new LT blob to clean up.
 //!
-//! ## Delete
+//! ### Delete
 //!
 //! 1. **Delete from HV** if the entry is not a tombstone.
 //!    - **OK** — done; there is no LT data to clean up.
