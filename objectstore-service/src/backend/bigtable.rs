@@ -233,6 +233,14 @@ fn tombstone_predicate() -> v2::RowFilter {
     }
 }
 
+/// Builds an anchored regex pattern (`^…$`) that matches `value` literally.
+///
+/// Uses [`regex::escape`] so that metacharacters in storage paths (`.`, `/`, etc.)
+/// are treated as literal bytes.
+fn exact_value_regex(value: &str) -> Vec<u8> {
+    format!("^{}$", regex::escape(value)).into_bytes()
+}
+
 /// Creates a row filter that matches tombstones whose redirect resolves to `target`.
 ///
 /// Always includes an exact match on the `r` (redirect) column:
@@ -245,19 +253,14 @@ fn tombstone_predicate() -> v2::RowFilter {
 /// - Chain: `m` column present AND value matches `{"is_redirect_tombstone":true...}` regex
 ///   (legacy metadata format predating the dedicated `r` column)
 fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
-    let target_path = target.as_storage_path().to_string().into_bytes();
+    let target_path = exact_value_regex(&target.as_storage_path().to_string());
 
     let exact_match = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
             filters: vec![
                 column_filter(COLUMN_REDIRECT),
                 v2::RowFilter {
-                    filter: Some(v2::row_filter::Filter::ValueRangeFilter(v2::ValueRange {
-                        start_value: Some(v2::value_range::StartValue::StartValueClosed(
-                            target_path.clone(),
-                        )),
-                        end_value: Some(v2::value_range::EndValue::EndValueClosed(target_path)),
-                    })),
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(target_path)),
                 },
             ],
         })),
@@ -272,10 +275,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
             filters: vec![
                 column_filter(COLUMN_REDIRECT),
                 v2::RowFilter {
-                    filter: Some(v2::row_filter::Filter::ValueRangeFilter(v2::ValueRange {
-                        start_value: Some(v2::value_range::StartValue::StartValueClosed(vec![])),
-                        end_value: Some(v2::value_range::EndValue::EndValueClosed(vec![])),
-                    })),
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(b"^$".to_vec())),
                 },
             ],
         })),
