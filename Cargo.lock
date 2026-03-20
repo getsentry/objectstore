@@ -2608,6 +2608,7 @@ dependencies = [
  "humantime-serde",
  "objectstore-metrics",
  "objectstore-types",
+ "regex",
  "reqwest 0.12.28",
  "sentry",
  "serde",
