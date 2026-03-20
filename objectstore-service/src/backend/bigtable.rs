@@ -1177,18 +1177,15 @@ mod tests {
             (FAMILY_GC, timestamp as i64 * 1000)
         };
 
-        backend
-            .mutate(
-                id.as_storage_path().to_string().into_bytes(),
-                [mutation::Mutation::SetCell(mutation::SetCell {
-                    family_name: family.to_owned(),
-                    column_qualifier: COLUMN_METADATA.to_owned(),
-                    timestamp_micros,
-                    value: meta.into_bytes(),
-                })],
-                "test-setup",
-            )
-            .await?;
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = [mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: family.to_owned(),
+            column_qualifier: COLUMN_METADATA.to_owned(),
+            timestamp_micros,
+            value: meta.into_bytes(),
+        })];
+
+        backend.mutate(path, mutations, "test-setup").await?;
 
         Ok(())
     }
@@ -1338,36 +1335,33 @@ mod tests {
             .put_object(&id1, &metadata, stream::single("hello, world"))
             .await?;
         let path1 = id1.as_storage_path().to_string().into_bytes();
-        backend
-            .mutate(
-                path1,
-                [
-                    mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_GC.to_owned(),
-                        column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                        timestamp_micros: old_micros,
-                        value: b"hello, world".to_vec(),
-                    }),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_GC.to_owned(),
-                        column_qualifier: COLUMN_METADATA.to_owned(),
-                        timestamp_micros: old_micros,
-                        value: serde_json::to_vec(&metadata).unwrap(),
-                    }),
-                ],
-                "test-setup",
-            )
-            .await?;
+        let mutations = [
+            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                timestamp_micros: old_micros,
+                value: b"hello, world".to_vec(),
+            }),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_METADATA.to_owned(),
+                timestamp_micros: old_micros,
+                value: serde_json::to_vec(&metadata).unwrap(),
+            }),
+        ];
+        backend.mutate(path1, mutations, "test-setup").await?;
+
         // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
         let (pre_obj_meta, _) = backend.get_object(&id1).await?.unwrap();
         let pre_obj_expiry = pre_obj_meta.time_expires.unwrap();
+
         // A second get_metadata reads the freshly bumped row.
         let post_obj_meta = backend.get_metadata(&id1).await?.unwrap();
         let post_obj_expiry = post_obj_meta.time_expires.unwrap();
         assert!(
             post_obj_expiry > pre_obj_expiry,
-            "get_object bump should extend expiry: {pre_obj_expiry:?} -> {post_obj_expiry:?}"
+            "bump should extend expiry"
         );
 
         // Sub-sequence 2: get_metadata triggers bump (loaded=false path).
@@ -1376,37 +1370,32 @@ mod tests {
             .put_object(&id2, &metadata, stream::single("hello, world"))
             .await?;
         let path2 = id2.as_storage_path().to_string().into_bytes();
-        backend
-            .mutate(
-                path2,
-                [
-                    mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_GC.to_owned(),
-                        column_qualifier: COLUMN_PAYLOAD.to_owned(),
-                        timestamp_micros: old_micros,
-                        value: b"hello, world".to_vec(),
-                    }),
-                    mutation::Mutation::SetCell(mutation::SetCell {
-                        family_name: FAMILY_GC.to_owned(),
-                        column_qualifier: COLUMN_METADATA.to_owned(),
-                        timestamp_micros: old_micros,
-                        value: serde_json::to_vec(&metadata).unwrap(),
-                    }),
-                ],
-                "test-setup",
-            )
-            .await?;
+        let mutations = [
+            mutation::Mutation::DeleteFromRow(mutation::DeleteFromRow {}),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                timestamp_micros: old_micros,
+                value: b"hello, world".to_vec(),
+            }),
+            mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: FAMILY_GC.to_owned(),
+                column_qualifier: COLUMN_METADATA.to_owned(),
+                timestamp_micros: old_micros,
+                value: serde_json::to_vec(&metadata).unwrap(),
+            }),
+        ];
+        backend.mutate(path2, mutations, "test-setup").await?;
+
         // First get_metadata sees the stale row and triggers a bump.
         let pre_meta = backend.get_metadata(&id2).await?.unwrap();
         let pre_expiry = pre_meta.time_expires.unwrap();
+
         // Second get_metadata reads the freshly bumped row.
         let post_meta = backend.get_metadata(&id2).await?.unwrap();
         let post_expiry = post_meta.time_expires.unwrap();
-        assert!(
-            post_expiry > pre_expiry,
-            "get_metadata bump should extend expiry: {pre_expiry:?} -> {post_expiry:?}"
-        );
+        assert!(post_expiry > pre_expiry, "bump should extend expiry");
+
         // Payload must be intact after the loaded=false bump (which re-fetches the payload).
         let (_, stream) = backend.get_object(&id2).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
@@ -1432,21 +1421,12 @@ mod tests {
 
         // A freshly written object has time_expires ≈ now + 2d, well outside the bump
         // window (now + 2d - 1d = now + 1d). No bump should occur.
-        let first_expiry = backend
-            .get_metadata(&id)
-            .await?
-            .unwrap()
-            .time_expires
-            .unwrap();
-        let second_expiry = backend
-            .get_metadata(&id)
-            .await?
-            .unwrap()
-            .time_expires
-            .unwrap();
+        let first = backend.get_metadata(&id).await?.unwrap();
+        let second = backend.get_metadata(&id).await?.unwrap();
 
         assert_eq!(
-            first_expiry, second_expiry,
+            first.time_expires.unwrap(),
+            second.time_expires.unwrap(),
             "fresh TTI object must not be bumped"
         );
 
@@ -1535,7 +1515,7 @@ mod tests {
             panic!("expected TieredGet::Object");
         };
         let obj_payload = stream::read_to_vec(obj_stream).await?;
-        assert_eq!(str::from_utf8(&obj_payload).unwrap(), "tiered payload");
+        assert_eq!(obj_payload, b"tiered payload");
         assert_eq!(obj_meta.content_type, put_meta.content_type);
         assert_eq!(obj_meta.custom, put_meta.custom);
 
@@ -1548,32 +1528,20 @@ mod tests {
         // tombstone
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        backend
-            .compare_and_write(
-                &hv_id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&hv_id, None, write).await?;
 
-        let TieredGet::Tombstone(get_t) = backend.get_tiered_object(&hv_id).await? else {
-            panic!("expected TieredGet::Tombstone");
-        };
-        assert_eq!(
-            get_t.target, lt_id,
-            "get_tiered_object target must match lt_id"
-        );
-
-        let TieredMetadata::Tombstone(meta_t) = backend.get_tiered_metadata(&hv_id).await? else {
-            panic!("expected TieredMetadata::Tombstone");
-        };
-        assert_eq!(
-            meta_t.target, lt_id,
-            "get_tiered_metadata target must match lt_id"
-        );
+        match backend.get_tiered_object(&hv_id).await? {
+            TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id,),
+            other => panic!("expected TieredGet::Tombstone, got {other:?}"),
+        }
+        match backend.get_tiered_metadata(&hv_id).await? {
+            TieredMetadata::Tombstone(meta_t) => assert_eq!(meta_t.target, lt_id,),
+            other => panic!("expected TieredMetadata::Tombstone, got {other:?}"),
+        }
 
         Ok(())
     }
@@ -1611,24 +1579,16 @@ mod tests {
         // tombstone: put_non_tombstone returns Some(Tombstone) and leaves tombstone intact.
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        backend
-            .compare_and_write(
-                &hv_id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&hv_id, None, write).await?;
         let result = backend
             .put_non_tombstone(&hv_id, &Metadata::default(), Bytes::new())
             .await?;
         let returned = result.expect("expected Some(Tombstone) when row is a tombstone");
-        assert_eq!(
-            returned.target, lt_id,
-            "returned tombstone target must be lt_id"
-        );
+        assert_eq!(returned.target, lt_id);
         assert!(
             matches!(
                 backend.get_tiered_metadata(&hv_id).await?,
@@ -1666,16 +1626,11 @@ mod tests {
 
         // tombstone
         let id = make_id();
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
         let tombstone = backend
             .delete_non_tombstone(&id)
             .await?
@@ -1753,56 +1708,39 @@ mod tests {
         let wrong_lt_id = ObjectId::random(hv_id.context().clone());
         let new_lt_id = ObjectId::random(hv_id.context().clone());
 
-        backend
-            .compare_and_write(
-                &hv_id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: old_lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: old_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&hv_id, None, write).await?;
 
         // Wrong target: CAS fails, tombstone unchanged.
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: new_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
         let swapped = backend
-            .compare_and_write(
-                &hv_id,
-                Some(&wrong_lt_id),
-                TieredWrite::Tombstone(Tombstone {
-                    target: new_lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
+            .compare_and_write(&hv_id, Some(&wrong_lt_id), write)
             .await?;
         assert!(!swapped, "expected CAS failure due to wrong target");
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
-            panic!("expected tombstone");
-        };
-        assert_eq!(
-            t.target, old_lt_id,
-            "target must be unchanged after mismatch"
-        );
+        match backend.get_tiered_metadata(&hv_id).await? {
+            TieredMetadata::Tombstone(t) => assert_eq!(t.target, old_lt_id),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
 
         // Correct target: CAS succeeds, target updated.
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: new_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
         let swapped = backend
-            .compare_and_write(
-                &hv_id,
-                Some(&old_lt_id),
-                TieredWrite::Tombstone(Tombstone {
-                    target: new_lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
+            .compare_and_write(&hv_id, Some(&old_lt_id), write)
             .await?;
         assert!(swapped, "expected CAS success with correct target");
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
-            panic!("expected tombstone");
-        };
-        assert_eq!(
-            t.target, new_lt_id,
-            "target must be updated after successful swap"
-        );
+        match backend.get_tiered_metadata(&hv_id).await? {
+            TieredMetadata::Tombstone(t) => assert_eq!(t.target, new_lt_id),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
 
         Ok(())
     }
@@ -1816,24 +1754,16 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         // Wrong target: CAS fails, tombstone intact.
+        let write = TieredWrite::Object(Metadata::default(), Bytes::new());
         let swapped = backend
-            .compare_and_write(
-                &id,
-                Some(&wrong_id),
-                TieredWrite::Object(Metadata::default(), Bytes::new()),
-            )
+            .compare_and_write(&id, Some(&wrong_id), write)
             .await?;
         assert!(!swapped, "expected CAS failure with wrong target");
         assert!(matches!(
@@ -1843,13 +1773,8 @@ mod tests {
 
         // Correct target: CAS succeeds, row becomes an inline object.
         let payload = Bytes::from_static(b"hello inline");
-        let swapped = backend
-            .compare_and_write(
-                &id,
-                Some(&lt_id),
-                TieredWrite::Object(Metadata::default(), payload.clone()),
-            )
-            .await?;
+        let write = TieredWrite::Object(Metadata::default(), payload.clone());
+        let swapped = backend.compare_and_write(&id, Some(&lt_id), write).await?;
         assert!(swapped, "expected CAS success with correct target");
         let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
             panic!("expected inline object after swap");
@@ -1866,13 +1791,8 @@ mod tests {
 
         let id = make_id();
         let payload = Bytes::from_static(b"cas object");
-        let committed = backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Object(Metadata::default(), payload.clone()),
-            )
-            .await?;
+        let write = TieredWrite::Object(Metadata::default(), payload.clone());
+        let committed = backend.compare_and_write(&id, None, write).await?;
         assert!(committed, "expected CAS success on empty row");
 
         let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
@@ -1893,16 +1813,11 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        backend
-            .compare_and_write(
-                &id,
-                None,
-                TieredWrite::Tombstone(Tombstone {
-                    target: lt_id.clone(),
-                    expiration_policy: ExpirationPolicy::Manual,
-                }),
-            )
-            .await?;
+        let write = TieredWrite::Tombstone(Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        });
+        backend.compare_and_write(&id, None, write).await?;
 
         // Wrong target: fails, row preserved.
         let deleted = backend
@@ -2007,12 +1922,9 @@ mod tests {
         };
 
         // After the bump, the row is rewritten with a fresh timestamp (≈ now + TTI).
-        let Some(RowData::Tombstone {
-            time_expires: Some(new_deadline),
-            ..
-        }) = backend.read_row(&path, None, "test-verify").await?
-        else {
-            panic!("expected tombstone row after bump");
+        let new_deadline = match backend.read_row(&path, None, "test-verify").await? {
+            Some(RowData::Tombstone { time_expires, .. }) => time_expires.unwrap(),
+            _ => panic!("expected tombstone row after bump"),
         };
 
         assert!(
