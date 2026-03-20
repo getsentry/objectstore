@@ -1151,6 +1151,31 @@ mod tests {
         })
     }
 
+    async fn create_object(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: &[u8],
+        now: SystemTime,
+    ) -> Result<()> {
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = build_write_mutations(metadata, payload.to_vec(), now)?;
+        backend.mutate(path, mutations, "test-setup").await?;
+        Ok(())
+    }
+
+    async fn create_tombstone(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+        tombstone: &Tombstone,
+        now: SystemTime,
+    ) -> Result<()> {
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = build_tombstone_mutations(tombstone, now)?;
+        backend.mutate(path, mutations, "test-setup").await?;
+        Ok(())
+    }
+
     /// Writes a legacy-format tombstone row directly into Bigtable.
     async fn write_legacy_tombstone(
         backend: &BigTableBackend,
@@ -1238,7 +1263,7 @@ mod tests {
 
         let (obj_meta, stream) = backend.get_object(&id).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(str::from_utf8(&payload).unwrap(), "hello, world");
+        assert_eq!(payload, b"hello, world");
         assert_eq!(obj_meta.content_type, metadata.content_type);
         assert_eq!(obj_meta.custom, metadata.custom);
 
@@ -1271,9 +1296,7 @@ mod tests {
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
             ..Default::default()
         };
-        backend
-            .put_object(&id, &first_metadata, stream::single("hello"))
-            .await?;
+        create_object(&backend, &id, &first_metadata, b"hello", SystemTime::now()).await?;
 
         let second_metadata = Metadata {
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -1285,7 +1308,7 @@ mod tests {
 
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(str::from_utf8(&payload).unwrap(), "world");
+        assert_eq!(payload, b"world");
         assert_eq!(meta.custom, second_metadata.custom);
 
         Ok(())
@@ -1296,9 +1319,8 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        backend
-            .put_object(&id, &Metadata::default(), stream::single("hello, world"))
-            .await?;
+        let metadata = Metadata::default();
+        create_object(&backend, &id, &metadata, b"hello", SystemTime::now()).await?;
         backend.delete_object(&id).await?;
 
         assert!(backend.get_object(&id).await?.is_none());
@@ -1321,19 +1343,13 @@ mod tests {
             ..Default::default()
         };
 
-        // Compute a fake `now` such that build_write_mutations produces a stale timestamp
-        // just inside the bump window: expire_at = fake_now + tti = now - TTI_DEBOUNCE - 60s.
+        // Pass a backdated `now` so the written expiry is inside the bump window:
+        // expire_at = past_now + tti = now - TTI_DEBOUNCE - 60s (stale but not yet expired).
         let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_secs(60);
 
         // Sub-sequence 1: get_object triggers bump (loaded=true path).
         let id1 = make_id();
-        backend
-            .put_object(&id1, &metadata, stream::single("hello, world"))
-            .await?;
-        let path1 = id1.as_storage_path().to_string().into_bytes();
-        let mutations1 =
-            build_write_mutations(&metadata, b"hello, world".to_vec(), past_now).unwrap();
-        backend.mutate(path1, mutations1, "test-setup").await?;
+        create_object(&backend, &id1, &metadata, b"hello, world", past_now).await?;
 
         // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
         let (pre_obj_meta, _) = backend.get_object(&id1).await?.unwrap();
@@ -1349,13 +1365,7 @@ mod tests {
 
         // Sub-sequence 2: get_metadata triggers bump (loaded=false path).
         let id2 = make_id();
-        backend
-            .put_object(&id2, &metadata, stream::single("hello, world"))
-            .await?;
-        let path2 = id2.as_storage_path().to_string().into_bytes();
-        let mutations2 =
-            build_write_mutations(&metadata, b"hello, world".to_vec(), past_now).unwrap();
-        backend.mutate(path2, mutations2, "test-setup").await?;
+        create_object(&backend, &id2, &metadata, b"hello, world", past_now).await?;
 
         // First get_metadata sees the stale row and triggers a bump.
         let pre_meta = backend.get_metadata(&id2).await?.unwrap();
@@ -1369,7 +1379,7 @@ mod tests {
         // Payload must be intact after the loaded=false bump (which re-fetches the payload).
         let (_, stream) = backend.get_object(&id2).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(&payload, b"hello, world");
+        assert_eq!(payload, b"hello, world");
 
         Ok(())
     }
@@ -1385,9 +1395,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
         };
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
+        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
 
         // A freshly written object has time_expires ≈ now + 2d, well outside the bump
         // window (now + 2d - 1d = now + 1d). No bump should occur.
@@ -1417,9 +1425,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
             ..Default::default()
         };
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
+        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
 
         assert!(backend.get_object(&id).await?.is_none());
 
@@ -1438,9 +1444,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
             ..Default::default()
         };
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
+        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
 
         assert!(backend.get_object(&id).await?.is_none());
 
@@ -1477,15 +1481,13 @@ mod tests {
             custom: BTreeMap::from_iter([("k".into(), "v".into())]),
             ..Default::default()
         };
-        backend
-            .put_object(&id, &put_meta, stream::single("tiered payload"))
-            .await?;
+        create_object(&backend, &id, &put_meta, b"payload", SystemTime::now()).await?;
 
         let TieredGet::Object(obj_meta, obj_stream) = backend.get_tiered_object(&id).await? else {
             panic!("expected TieredGet::Object");
         };
         let obj_payload = stream::read_to_vec(obj_stream).await?;
-        assert_eq!(obj_payload, b"tiered payload");
+        assert_eq!(obj_payload, b"payload");
         assert_eq!(obj_meta.content_type, put_meta.content_type);
         assert_eq!(obj_meta.custom, put_meta.custom);
 
@@ -1498,11 +1500,11 @@ mod tests {
         // tombstone
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&hv_id, None, write).await?;
+        };
+        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
         match backend.get_tiered_object(&hv_id).await? {
             TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id,),
@@ -1527,8 +1529,9 @@ mod tests {
 
         // empty: put_non_tombstone on absent row succeeds and makes object readable.
         let id = make_id();
+        let metadata = Metadata::default();
         let result = backend
-            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"first"))
+            .put_non_tombstone(&id, &metadata, Bytes::from_static(b"first"))
             .await?;
         assert_eq!(result, None, "expected None on empty row");
         let (_, stream) = backend.get_object(&id).await?.unwrap();
@@ -1536,11 +1539,9 @@ mod tests {
 
         // object: put_non_tombstone on existing object replaces payload, returns None.
         let id = make_id();
-        backend
-            .put_object(&id, &Metadata::default(), stream::single("old"))
-            .await?;
+        create_object(&backend, &id, &metadata, b"old", SystemTime::now()).await?;
         let result = backend
-            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"new"))
+            .put_non_tombstone(&id, &metadata, Bytes::from_static(b"new"))
             .await?;
         assert_eq!(result, None, "expected None when overwriting object");
         let (_, stream) = backend.get_object(&id).await?.unwrap();
@@ -1549,13 +1550,13 @@ mod tests {
         // tombstone: put_non_tombstone returns Some(Tombstone) and leaves tombstone intact.
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&hv_id, None, write).await?;
+        };
+        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
         let result = backend
-            .put_non_tombstone(&hv_id, &Metadata::default(), Bytes::new())
+            .put_non_tombstone(&hv_id, &metadata, Bytes::new())
             .await?;
         let returned = result.expect("expected Some(Tombstone) when row is a tombstone");
         assert_eq!(returned.target, lt_id);
@@ -1588,19 +1589,18 @@ mod tests {
 
         // object
         let id = make_id();
-        backend
-            .put_object(&id, &Metadata::default(), stream::single("hello, world"))
-            .await?;
+        let metadata = Metadata::default();
+        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
         assert_eq!(backend.delete_non_tombstone(&id).await?, None);
         assert!(backend.get_object(&id).await?.is_none());
 
         // tombstone
         let id = make_id();
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
         let tombstone = backend
             .delete_non_tombstone(&id)
             .await?
@@ -1678,11 +1678,11 @@ mod tests {
         let wrong_lt_id = ObjectId::random(hv_id.context().clone());
         let new_lt_id = ObjectId::random(hv_id.context().clone());
 
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: old_lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&hv_id, None, write).await?;
+        };
+        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
         // Wrong target: CAS fails, tombstone unchanged.
         let write = TieredWrite::Tombstone(Tombstone {
@@ -1724,11 +1724,11 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
 
         // Wrong target: CAS fails, tombstone intact.
         let write = TieredWrite::Object(Metadata::default(), Bytes::new());
@@ -1783,11 +1783,11 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let wrong_id = ObjectId::random(id.context().clone());
 
-        let write = TieredWrite::Tombstone(Tombstone {
+        let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
-        });
-        backend.compare_and_write(&id, None, write).await?;
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
 
         // Wrong target: fails, row preserved.
         let deleted = backend
@@ -1812,9 +1812,8 @@ mod tests {
         // Regular object: CAS-delete with Some(target) returns false, object preserved.
         let id2 = make_id();
         let fake_lt_id = ObjectId::random(id2.context().clone());
-        backend
-            .put_object(&id2, &Metadata::default(), stream::single("data"))
-            .await?;
+        let metadata = Metadata::default();
+        create_object(&backend, &id2, &metadata, b"data", SystemTime::now()).await?;
         let deleted = backend
             .compare_and_write(&id2, Some(&fake_lt_id), TieredWrite::Delete)
             .await?;
