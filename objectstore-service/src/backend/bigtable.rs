@@ -272,10 +272,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
             filters: vec![
                 column_filter(COLUMN_REDIRECT),
                 v2::RowFilter {
-                    filter: Some(v2::row_filter::Filter::ValueRangeFilter(v2::ValueRange {
-                        start_value: Some(v2::value_range::StartValue::StartValueClosed(vec![])),
-                        end_value: Some(v2::value_range::EndValue::EndValueClosed(vec![])),
-                    })),
+                    filter: Some(v2::row_filter::Filter::ValueRegexFilter(b"^$".to_vec())),
                 },
             ],
         })),
