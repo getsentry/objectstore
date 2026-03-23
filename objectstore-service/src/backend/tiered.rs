@@ -426,7 +426,10 @@ impl TieredStorage {
         }
     }
 
-    /// Creates an [`ChangeGuard`] for the given operation.
+    /// Creates an `ChangeGuard` for the given operation.
+    ///
+    /// This guard will clean up unreferenced objects in long-term storage when it drops based on
+    /// the last known phase of the change was in.
     fn change_guard(&self, change: Change) -> ChangeGuard {
         ChangeGuard {
             state: Some(ChangeState::new(
@@ -447,8 +450,8 @@ impl TieredStorage {
 
     /// Puts an object into the high-volume backend.
     ///
-    /// If a tombstone already exists, attempts to swap it for the new object.
-    /// On success, the old long-term blob is cleaned up in the background.
+    /// If a tombstone already exists, attempts to swap it for the new object and delete the old
+    /// long-term object.
     async fn put_high_volume(
         &self,
         id: &ObjectId,
@@ -461,11 +464,11 @@ impl TieredStorage {
             .await?;
 
         let Some(Tombstone { target, .. }) = tombstone_opt else {
-            // No tombstone exists — write succeeded inline, no LT blob to manage.
+            // No tombstone exists - write succeeded
             return Ok(());
         };
 
-        // A tombstone exists — swap it for inline data.
+        // Tombstone exists — Swap it for inline data
         let mut guard = self.change_guard(Change {
             new: None,
             old: Some(target.clone()),
@@ -485,8 +488,8 @@ impl TieredStorage {
 
     /// Puts an object into the long-term backend with a redirect tombstone in front.
     ///
-    /// On success, the old long-term blob (if any) is cleaned up in the background.
-    /// On failure or CAS conflict, the newly written LT blob is cleaned up in the background.
+    /// Deletes the previous long-term object if overwriting an existing tombstone. If the tombstone
+    /// write fails, the new long-term object is cleaned up.
     async fn put_long_term(
         &self,
         id: &ObjectId,
@@ -501,11 +504,6 @@ impl TieredStorage {
 
         // 2. Write payload to long-term at a unique revision key.
         let new = new_long_term_revision(id);
-        let tombstone = Tombstone {
-            target: new.clone(),
-            expiration_policy: metadata.expiration_policy,
-        };
-
         let mut guard = self.change_guard(Change {
             new: Some(new.clone()),
             old: current.clone(),
@@ -515,6 +513,10 @@ impl TieredStorage {
         guard.advance(ChangePhase::Written);
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
+        let tombstone = Tombstone {
+            target: new.clone(),
+            expiration_policy: metadata.expiration_policy,
+        };
         let written = self
             .high_volume
             .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
