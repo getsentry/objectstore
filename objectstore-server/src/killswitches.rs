@@ -21,7 +21,7 @@ pub struct Killswitches(pub Vec<Killswitch>);
 impl Killswitches {
     /// Returns `true` if any of the contained killswitches matches the given context.
     ///
-    /// On match, emits a `server.request.killswitched` metric counter and a `tracing::warn!` log.
+    /// On match, emits a `server.request.killswitched` metric counter and a `warn!` log.
     pub fn matches(&self, context: &ObjectContext, service: Option<&str>) -> bool {
         let Some(killswitch) = self.find(context, service) else {
             return false;

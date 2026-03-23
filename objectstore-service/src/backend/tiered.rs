@@ -221,11 +221,7 @@ impl TieredStorage {
     /// Deletes an object from the long-term backend, logging an error on failure.
     async fn cleanup_lt(&self, target: &ObjectId) {
         if let Err(e) = self.long_term.delete_object(target).await {
-            tracing::error!(
-                error = &e as &dyn std::error::Error,
-                target = %target.as_storage_path(),
-                "Long-term object cleanup failed"
-            );
+            objectstore_log::exception!(&e, target = %target.as_storage_path(), "Long-term object cleanup failed");
         }
     }
 
