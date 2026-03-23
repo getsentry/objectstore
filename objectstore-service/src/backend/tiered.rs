@@ -92,14 +92,14 @@
 //! persisted.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio_util::task::task_tracker::{TaskTracker, TaskTrackerToken};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
@@ -112,71 +112,6 @@ use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
-
-/// Timeout for joining outstanding background cleanup operations on shutdown.
-const BACKGROUND_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Counts outstanding background cleanup operations for graceful shutdown.
-///
-/// The counter is incremented when an [`ChangeState`] is created and
-/// decremented when it is dropped. [`BackgroundCounter::join`] waits until the
-/// counter reaches zero or the timeout elapses.
-#[derive(Debug, Clone)]
-struct BackgroundCounter {
-    inner: Arc<BackgroundCounterInner>,
-}
-
-#[derive(Debug)]
-struct BackgroundCounterInner {
-    outstanding: AtomicUsize,
-    drained: Notify,
-}
-
-impl BackgroundCounter {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(BackgroundCounterInner {
-                outstanding: AtomicUsize::new(0),
-                drained: Notify::new(),
-            }),
-        }
-    }
-
-    fn increment(&self) {
-        self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn decrement(&self) {
-        let prev = self.inner.outstanding.fetch_sub(1, Ordering::Release);
-        if prev == 1 {
-            self.inner.drained.notify_waiters();
-        }
-    }
-
-    async fn join(&self, timeout: Duration) {
-        if self.inner.outstanding.load(Ordering::Acquire) == 0 {
-            return;
-        }
-        let _ = tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.inner.drained.notified();
-                if self.inner.outstanding.load(Ordering::Acquire) == 0 {
-                    return;
-                }
-                notified.await;
-            }
-        })
-        .await;
-
-        let remaining = self.inner.outstanding.load(Ordering::Acquire);
-        if remaining > 0 {
-            objectstore_log::error!(
-                remaining,
-                "Cleanup operations still outstanding at shutdown"
-            );
-        }
-    }
-}
 
 /// Phase of a multi-step storage operation.
 ///
@@ -220,24 +155,22 @@ struct Change {
 
 /// Internal state for an [`ChangeGuard`].
 ///
-/// Increments the counter on construction and decrements it on drop. Logs an
-/// error if dropped in any phase other than [`ChangePhase::Completed`].
+/// Logs an error if dropped in any phase other than `Completed`.
 #[derive(Debug)]
 struct ChangeState {
     change: Change,
     phase: ChangePhase,
     lt: Arc<dyn Backend>,
-    counter: BackgroundCounter,
+    _token: TaskTrackerToken,
 }
 
 impl ChangeState {
-    fn new(change: Change, lt: Arc<dyn Backend>, counter: BackgroundCounter) -> Self {
-        counter.increment();
+    fn new(change: Change, lt: Arc<dyn Backend>, token: TaskTrackerToken) -> Self {
         Self {
             change,
             phase: ChangePhase::Registered,
             lt,
-            counter,
+            _token: token,
         }
     }
 
@@ -289,8 +222,6 @@ impl Drop for ChangeState {
                 "Operation dropped without completing cleanup"
             );
         }
-
-        self.counter.decrement();
     }
 }
 
@@ -416,7 +347,7 @@ pub struct TieredStorage {
     /// The backend for large objects (> 1 MiB).
     long_term: Arc<dyn Backend>,
     /// Tracks outstanding background cleanup operations for graceful shutdown.
-    counter: BackgroundCounter,
+    tracker: TaskTracker,
 }
 
 impl TieredStorage {
@@ -425,7 +356,7 @@ impl TieredStorage {
         Self {
             high_volume: Arc::from(high_volume),
             long_term: Arc::from(long_term),
-            counter: BackgroundCounter::new(),
+            tracker: TaskTracker::new(),
         }
     }
 
@@ -438,7 +369,7 @@ impl TieredStorage {
             state: Some(ChangeState::new(
                 change,
                 Arc::clone(&self.long_term),
-                self.counter.clone(),
+                self.tracker.token(),
             )),
         }
     }
@@ -680,10 +611,11 @@ impl Backend for TieredStorage {
     }
 
     async fn join(&self) {
+        self.tracker.close();
         tokio::join!(
             self.high_volume.join(),
             self.long_term.join(),
-            self.counter.join(BACKGROUND_JOIN_TIMEOUT),
+            self.tracker.wait()
         );
     }
 }
@@ -1375,7 +1307,7 @@ mod tests {
     #[test]
     fn guard_dropped_outside_runtime_does_not_panic() {
         let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = BackgroundCounter::new();
+        let tracker = TaskTracker::new();
 
         // Construct a guard that would schedule cleanup (new_target is Some).
         // No tokio runtime is active in this plain #[test].
@@ -1385,89 +1317,36 @@ mod tests {
         };
 
         let guard = ChangeGuard {
-            state: Some(ChangeState::new(change, lt, tracker)),
+            state: Some(ChangeState::new(change, lt, tracker.token())),
         };
 
         drop(guard); // Must not panic.
     }
 
-    /// Dropping a guard with no cleanup needed (phase requires no action)
-    /// marks the state Completed without spawning a background task.
-    #[tokio::test]
-    async fn guard_dropped_with_no_cleanup_needed_marks_completed() {
-        let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = BackgroundCounter::new();
-
-        // InlineSwap + CasLost → no cleanup needed.
-        let change = Change {
+    /// `join` blocks until all in-flight guards have completed cleanup.
+    ///
+    /// Time is advanced manually so the test runs at virtual speed. The guard
+    /// completes after 10 s; `join` must still be waiting at 9 s and done by 11 s.
+    #[tokio::test(start_paused = true)]
+    async fn join_waits_for_cleanup_to_complete() {
+        let (storage, _hv, _lt) = make_tiered_storage();
+        let mut guard = storage.change_guard(Change {
             new: None,
-            old: Some(make_id("old")),
-        };
-
-        let guard = ChangeGuard {
-            state: Some(ChangeState::new(change, lt, tracker.clone())),
-        };
-
-        // Advance to Lost (no cleanup target for this combination).
-        let mut guard = guard;
-        guard.advance(ChangePhase::Lost);
-        drop(guard);
-
-        // Counter must be back to zero immediately (no background task spawned).
-        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
-    }
-
-    // --- BackgroundCounter drain tests ---
-
-    /// `drain()` returns immediately when there are no outstanding operations.
-    #[tokio::test]
-    async fn join_returns_immediately_when_empty() {
-        let tracker = BackgroundCounter::new();
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            tracker.join(Duration::from_secs(5)),
-        )
-        .await
-        .expect("drain should return immediately with no outstanding ops");
-    }
-
-    /// `drain()` waits until all outstanding operations complete.
-    #[tokio::test]
-    async fn join_waits_for_outstanding_operations() {
-        let tracker = BackgroundCounter::new();
-        tracker.increment();
-
-        // Spawn a task that decrements after a brief delay.
-        let tracker_clone = tracker.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            tracker_clone.decrement();
+            old: None,
         });
 
-        // drain() should wait for the decrement before returning.
-        tokio::time::timeout(Duration::from_secs(1), tracker.join(Duration::from_secs(5)))
-            .await
-            .expect("drain should complete after decrement");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            guard.advance(ChangePhase::Completed);
+            drop(guard);
+        });
 
-        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
-    }
+        let join_future = tokio::spawn(async move { storage.join().await });
 
-    /// `drain()` returns after the timeout even if operations are still outstanding.
-    #[tokio::test]
-    async fn join_returns_after_timeout_with_remaining() {
-        let tracker = BackgroundCounter::new();
-        tracker.increment(); // Never decremented.
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        assert!(!join_future.is_finished(), "finished before guard dropped");
 
-        // Use a very short timeout.
-        let short = Duration::from_millis(50);
-        tokio::time::timeout(Duration::from_secs(1), tracker.join(short))
-            .await
-            .expect("drain should return after timeout");
-
-        // Outstanding count still non-zero — operation was never completed.
-        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 1);
-
-        // Clean up to avoid poisoning other tests.
-        tracker.decrement();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(join_future.is_finished(), "finish after guard drops");
     }
 }
