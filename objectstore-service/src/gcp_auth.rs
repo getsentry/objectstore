@@ -156,7 +156,7 @@ impl gcp_auth::TokenProvider for PrefetchingTokenProvider {
             }
 
             // A refresh is in progress; wait for the next update and re-validate.
-            tracing::debug!("token near expiry, waiting for refresh");
+            objectstore_log::debug!("token near expiry, waiting for refresh");
             if rx.changed().await.is_err() {
                 // Background task was aborted; return whatever is in the channel now.
                 return rx.borrow().clone().map(|c| c.token).map_err(From::from);
@@ -187,13 +187,13 @@ async fn refresh_loop(
 
         match provider.token(scopes).await {
             Ok(new_token) => {
-                tracing::debug!("prefetching token refresh succeeded");
+                objectstore_log::debug!("prefetching token refresh succeeded");
                 let cached = CachedToken::new(new_token);
                 deadline = cached.deadline;
                 let _ = tx.send(Ok(cached));
             }
             Err(err) => {
-                tracing::warn!(error = %err, "token prefetch failed");
+                objectstore_log::warn!(!!&err, "token prefetch failed");
 
                 // Only broadcast the error if the token is expired.
                 if deadline <= Instant::now() {

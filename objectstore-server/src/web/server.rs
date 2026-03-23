@@ -16,7 +16,7 @@ const TCP_LISTEN_BACKLOG: u32 = 1024;
 /// This function initializes the server, binds to the configured address, and runs until
 /// termination is requested.
 pub async fn server(config: Config) -> Result<()> {
-    tracing::info!("Starting server");
+    objectstore_log::info!("Starting server");
     objectstore_metrics::count!("server.start");
 
     let listener = listen(&config).context("failed to start TCP listener")?;
@@ -31,7 +31,7 @@ pub async fn server(config: Config) -> Result<()> {
 
     tokio::spawn(async move {
         elegant_departure::get_shutdown_guard().wait().await;
-        tracing::info!("Shutting down ...");
+        objectstore_log::info!("Shutting down ...");
     });
 
     elegant_departure::tokio::depart()
@@ -42,7 +42,7 @@ pub async fn server(config: Config) -> Result<()> {
         .await;
 
     let server_result = server_handle.await.map_err(From::from).flatten();
-    tracing::info!("Shutdown complete");
+    objectstore_log::info!("Shutdown complete");
     server_result
 }
 
@@ -58,7 +58,7 @@ fn listen(config: &Config) -> Result<TcpListener> {
     socket.bind(addr)?;
 
     let listener = socket.listen(TCP_LISTEN_BACKLOG)?;
-    tracing::info!("HTTP server listening on {addr}");
+    objectstore_log::info!("HTTP server listening on {addr}");
 
     Ok(listener)
 }

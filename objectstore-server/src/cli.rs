@@ -111,8 +111,8 @@ pub fn execute() -> Result<()> {
         .build()?;
     let _runtime_guard = runtime.enter();
 
-    observability::init_tracing(&config);
-    tracing::debug!(?config);
+    objectstore_log::init(&config.logging);
+    objectstore_log::debug!(?config);
 
     objectstore_metrics::init(&config.metrics)?;
 

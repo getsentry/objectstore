@@ -85,7 +85,7 @@ impl AuthContext {
             .ok_or_else(|| AuthError::InternalError(format!("Key `{key_id}` not configured")))?;
 
         if jwt_header.alg != Algorithm::EdDSA {
-            tracing::warn!(
+            objectstore_log::warn!(
                 algorithm = ?jwt_header.alg,
                 "JWT signed with unexpected algorithm",
             );

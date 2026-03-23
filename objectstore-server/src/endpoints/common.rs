@@ -74,10 +74,7 @@ impl ApiError {
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Batch(BatchError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
-                tracing::error!(
-                    error = self as &dyn Error,
-                    "error serializing batch response"
-                );
+                objectstore_log::error!(!!self, "error serializing batch response");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
@@ -86,7 +83,7 @@ impl ApiError {
             | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => {
-                tracing::error!(error = self as &dyn Error, "auth system error");
+                objectstore_log::error!(!!self, "auth system error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
@@ -94,7 +91,7 @@ impl ApiError {
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(_) => {
-                tracing::error!(error = self as &dyn Error, "error handling request");
+                objectstore_log::error!(!!self, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }

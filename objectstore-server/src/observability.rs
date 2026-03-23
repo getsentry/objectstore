@@ -1,16 +1,12 @@
-//! Initialization of error reporting and distributed tracing.
+//! Initialization of Sentry error reporting.
 //!
-//! Call [`init_sentry`] and [`init_tracing`] during server startup.
-//! Sentry must be initialized before the Tokio runtime is created so it can
-//! instrument async tasks from the start.
+//! Call [`init_sentry`] during server startup before creating the Tokio runtime so it can
+//! instrument async tasks from the start. Tracing subscriber initialization (including the
+//! Sentry tracing layer) is handled by [`objectstore_log::init`].
 
 use secrecy::ExposeSecret;
-use sentry::integrations::tracing as sentry_tracing;
-use tracing::Level;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{EnvFilter, prelude::*};
 
-use crate::config::{Config, LogFormat};
+use crate::config::Config;
 
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
@@ -55,71 +51,4 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     });
 
     Some(guard)
-}
-
-/// Initializes the global tracing subscriber with structured logging and optional Sentry integration.
-///
-/// Reads `RUST_LOG` for filter directives; falls back to `INFO`-level logging with `TRACE`-level
-/// for internal objectstore crates. Log format (`pretty`, `simplified`, or `json`) is determined
-/// by `config.logging.format`, defaulting to pretty when a terminal is attached.
-pub fn init_tracing(config: &Config) {
-    // Same as the default filter, except it converts warnings into events
-    // and also sends everything at or above INFO as logs instead of breadcrumbs.
-    let sentry_layer = config.sentry.is_enabled().then(|| {
-        sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
-            Level::ERROR | Level::WARN => {
-                sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
-            }
-            Level::INFO | Level::DEBUG => sentry_tracing::EventFilter::Log,
-            Level::TRACE => sentry_tracing::EventFilter::Ignore,
-        })
-    });
-
-    let format = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(true);
-
-    let format = match (config.logging.format, console::user_attended()) {
-        (LogFormat::Auto, true) | (LogFormat::Pretty, _) => format.compact().without_time().boxed(),
-        (LogFormat::Auto, false) | (LogFormat::Simplified, _) => format.with_ansi(false).boxed(),
-        (LogFormat::Json, _) => format
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_file(true)
-            .with_line_number(true)
-            .boxed(),
-    };
-
-    let env_filter = match EnvFilter::try_from_default_env() {
-        Ok(env_filter) => env_filter,
-        // INFO by default. Use stricter levels for noisy crates. Use looser levels
-        // for internal crates and essential dependencies.
-        Err(_) => EnvFilter::new(
-            "INFO,\
-            tower_http=DEBUG,\
-            objectstore=TRACE,\
-            objectstore_service=TRACE,\
-            objectstore_types=TRACE,\
-            ",
-        ),
-    };
-
-    tracing_subscriber::registry()
-        .with(format.with_filter(config.logging.level))
-        .with(sentry_layer)
-        .with(env_filter)
-        .init();
-}
-
-/// Logs an error to the configured logger or `stderr` if not yet configured.
-pub fn ensure_log_error(error: &anyhow::Error) {
-    if tracing::Level::ERROR <= tracing::level_filters::STATIC_MAX_LEVEL
-        && tracing::Level::ERROR <= LevelFilter::current()
-    {
-        tracing::error!(error = error.as_ref() as &dyn std::error::Error);
-    } else {
-        eprintln!("{error:?}");
-    }
 }

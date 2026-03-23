@@ -177,7 +177,7 @@ where
             })?;
 
         if response.status() == StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
+            objectstore_log::debug!("Object not found");
             return Ok(None);
         }
 
@@ -274,7 +274,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        tracing::debug!("Writing to s3_compatible backend");
+        objectstore_log::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
@@ -295,7 +295,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        tracing::debug!("Reading from s3_compatible backend");
+        objectstore_log::debug!("Reading from s3_compatible backend");
 
         let Some((metadata, response)) = self.request_object(Method::GET, id).await? else {
             return Ok(None);
@@ -307,14 +307,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        tracing::debug!("Reading metadata from s3_compatible backend");
+        objectstore_log::debug!("Reading metadata from s3_compatible backend");
         let response = self.request_object(Method::HEAD, id).await?;
         Ok(response.map(|(metadata, _)| metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        tracing::debug!("Deleting from s3_compatible backend");
+        objectstore_log::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
             .await?
@@ -327,7 +327,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
-            tracing::debug!("Object not found");
+            objectstore_log::debug!("Object not found");
             response
                 .error_for_status()
                 .map_err(|cause| Error::Reqwest {

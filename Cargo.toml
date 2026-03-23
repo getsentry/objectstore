@@ -22,6 +22,7 @@ lto = "thin"
 
 [workspace.dependencies]
 objectstore-client = { path = "clients/rust" }
+objectstore-log = { path = "objectstore-log" }
 objectstore-metrics = { path = "objectstore-metrics" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }

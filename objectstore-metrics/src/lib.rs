@@ -206,7 +206,7 @@ pub fn init(config: &MetricsConfig) -> Result<(), Error> {
         return Ok(());
     };
 
-    tracing::info!("reporting metrics to statsd at {addr}");
+    objectstore_log::info!("reporting metrics to statsd at {addr}");
 
     let global_labels: Vec<metrics::Label> = config
         .tags

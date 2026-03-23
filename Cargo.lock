@@ -2536,14 +2536,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectstore-log"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "console 0.16.2",
+ "sentry",
+ "serde",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "objectstore-metrics"
 version = "0.1.0"
 dependencies = [
  "metrics",
  "metrics-exporter-dogstatsd",
+ "objectstore-log",
  "serde",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -2556,7 +2568,6 @@ dependencies = [
  "axum",
  "axum-extra",
  "bytes",
- "console 0.16.2",
  "elegant-departure",
  "figment",
  "futures",
@@ -2569,6 +2580,7 @@ dependencies = [
  "mimalloc",
  "nix",
  "num_cpus",
+ "objectstore-log",
  "objectstore-metrics",
  "objectstore-service",
  "objectstore-test",
@@ -2588,8 +2600,6 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2606,6 +2616,7 @@ dependencies = [
  "gcp_auth",
  "humantime",
  "humantime-serde",
+ "objectstore-log",
  "objectstore-metrics",
  "objectstore-types",
  "regex",

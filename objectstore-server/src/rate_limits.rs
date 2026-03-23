@@ -214,10 +214,9 @@ impl RateLimiter {
 
     /// Checks if the given context is within the rate limits.
     ///
-    /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection,
-    /// emits a `server.request.rate_limited` metric counter and a `tracing::warn!` log.
-    /// Bandwidth is checked before throughput so that rejected requests are never counted
-    /// toward admitted traffic.
+    /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection, emits a
+    /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked before
+    /// throughput so that rejected requests are never counted toward admitted traffic.
     pub fn check(&self, context: &ObjectContext) -> bool {
         // Bandwidth is checked first because it is a pure read (no token consumption).
         // Throughput increments the EWMA accumulator only on success, so checking it
@@ -232,7 +231,7 @@ impl RateLimiter {
         };
 
         objectstore_metrics::count!("server.request.rate_limited", reason = rejection.as_str());
-        tracing::warn!(
+        objectstore_log::warn!(
             reason = rejection.as_str(),
             "Request rejected: rate limit exceeded"
         );

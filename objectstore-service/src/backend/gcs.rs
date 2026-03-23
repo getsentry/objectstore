@@ -399,12 +399,7 @@ impl GcsBackend {
                 Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
                     objectstore_metrics::count!("gcs.retries", action = action);
-                    tracing::warn!(
-                        retry_count,
-                        action,
-                        error = e as &dyn std::error::Error,
-                        "Retrying request"
-                    );
+                    objectstore_log::warn!(!!e, retry_count, action, "Retrying request");
                 }
                 Err(e) => {
                     objectstore_metrics::count!("gcs.failures", action = action);
@@ -442,7 +437,7 @@ impl GcsBackend {
             .await?;
 
         let Some(gcs_metadata) = metadata_opt else {
-            tracing::debug!("Object not found");
+            objectstore_log::debug!("Object not found");
             return Ok(None);
         };
 
@@ -454,7 +449,7 @@ impl GcsBackend {
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
-            tracing::debug!("Object found but past expiry");
+            objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
 
@@ -514,7 +509,7 @@ impl Backend for GcsBackend {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        tracing::debug!("Writing to GCS backend");
+        objectstore_log::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
@@ -563,7 +558,7 @@ impl Backend for GcsBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        tracing::debug!("Reading from GCS backend");
+        objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
         let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
@@ -594,14 +589,14 @@ impl Backend for GcsBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        tracing::debug!("Reading metadata from GCS backend");
+        objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
         self.fetch_gcs_metadata(&object_url).await
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        tracing::debug!("Deleting from GCS backend");
+        objectstore_log::debug!("Deleting from GCS backend");
         let object_url = self.object_url(id)?;
 
         self.with_retry("delete", || async {
