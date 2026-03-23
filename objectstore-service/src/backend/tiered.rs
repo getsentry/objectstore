@@ -250,6 +250,9 @@ impl ChangeState {
     fn complete(self) {
         let target_opt = match self.phase {
             ChangePhase::Registered => self.change.new.clone(),
+            // TODO(before merge, flag in review): If we drop during "Written", the CAS may have
+            // gone through and we just got an error. We must check the state before deleting to
+            // ensure we don't delete the winner.
             ChangePhase::Written => self.change.new.clone(),
             ChangePhase::Lost => self.change.new.clone(),
             ChangePhase::Updated => self.change.old.clone(),
