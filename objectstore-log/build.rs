@@ -31,6 +31,7 @@ fn list_crates() -> Vec<String> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=../");
     let crates = list_crates();
 
     let out_dir = env::var("OUT_DIR").unwrap();
