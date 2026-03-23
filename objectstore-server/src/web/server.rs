@@ -21,6 +21,7 @@ pub async fn server(config: Config) -> Result<()> {
 
     let listener = listen(&config).context("failed to start TCP listener")?;
     let state = Services::spawn(config).await?;
+    let service = state.service.clone();
 
     let server_handle = tokio::spawn(async move {
         App::new(state)
@@ -42,6 +43,7 @@ pub async fn server(config: Config) -> Result<()> {
         .await;
 
     let server_result = server_handle.await.map_err(From::from).flatten();
+    service.drain().await;
     objectstore_log::info!("Shutdown complete");
     server_result
 }

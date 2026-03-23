@@ -221,6 +221,16 @@ impl StorageService {
         self.spawn("delete", async move { inner.delete_object(&id).await })
             .await
     }
+
+    /// Drains outstanding background cleanup operations.
+    ///
+    /// Waits for any pending background LT cleanup tasks to finish before
+    /// returning, up to the backend's configured timeout. Should be called
+    /// during graceful shutdown after the HTTP server has stopped accepting
+    /// new requests.
+    pub async fn drain(&self) {
+        self.inner.drain().await;
+    }
 }
 
 #[cfg(test)]
@@ -332,9 +342,12 @@ mod tests {
             bucket: "test-bucket".into(),
         };
 
-        let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
-        let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
-        let service = StorageService::new(Box::new(TieredStorage::new(high_volume, long_term)));
+        let high_volume = BigTableBackend::new(bigtable_config).await.unwrap();
+        let long_term = GcsBackend::new(gcs_config.clone()).await.unwrap();
+        let service = StorageService::new(Box::new(TieredStorage::new(
+            Arc::new(high_volume),
+            Arc::new(long_term),
+        )));
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
@@ -556,9 +569,11 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_drop_does_not_prevent_completion() {
-        let hv = Box::new(GatedBackend::new("gated-hv"));
-        let lt = Box::new(GatedBackend::new("gated-lt").with_pause());
-        let service = StorageService::new(Box::new(TieredStorage::new(hv.clone(), lt.clone())));
+        let hv = Arc::new(GatedBackend::new("gated-hv"));
+        let lt = Arc::new(GatedBackend::new("gated-lt").with_pause());
+        let hv_dyn: Arc<dyn HighVolumeBackend> = hv.clone();
+        let lt_dyn: Arc<dyn crate::backend::common::Backend> = lt.clone();
+        let service = StorageService::new(Box::new(TieredStorage::new(hv_dyn, lt_dyn)));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(

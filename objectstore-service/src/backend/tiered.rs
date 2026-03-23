@@ -92,13 +92,14 @@
 //! persisted.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
@@ -111,6 +112,213 @@ use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+
+/// Timeout for draining outstanding cleanup operations on shutdown.
+const CLEANUP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Tracks outstanding background cleanup operations for graceful shutdown.
+///
+/// The counter is incremented when an [`OperationState`] is created and
+/// decremented when it is dropped. [`CleanupTracker::drain`] waits until the
+/// counter reaches zero or the timeout elapses.
+#[derive(Debug, Clone)]
+struct CleanupTracker {
+    inner: Arc<CleanupTrackerInner>,
+}
+
+#[derive(Debug)]
+struct CleanupTrackerInner {
+    outstanding: AtomicUsize,
+    drained: Notify,
+}
+
+impl CleanupTracker {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(CleanupTrackerInner {
+                outstanding: AtomicUsize::new(0),
+                drained: Notify::new(),
+            }),
+        }
+    }
+
+    fn increment(&self) {
+        self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement(&self) {
+        let prev = self.inner.outstanding.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            self.inner.drained.notify_waiters();
+        }
+    }
+
+    async fn drain(&self, timeout: Duration) {
+        if self.inner.outstanding.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.inner.drained.notified();
+                if self.inner.outstanding.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await;
+
+        let remaining = self.inner.outstanding.load(Ordering::Acquire);
+        if remaining > 0 {
+            objectstore_log::error!(
+                remaining,
+                "Cleanup operations still outstanding at shutdown"
+            );
+        }
+    }
+}
+
+/// Phase of a multi-step storage operation.
+///
+/// Phases are ordered — the ordering determines which LT blob to clean up on drop.
+#[derive(Debug, PartialEq, PartialOrd)]
+enum OperationPhase {
+    Registered = 0,
+    LtWritten = 1,
+    CasLost = 2,
+    CasWon = 3,
+    Completed = 4,
+}
+
+/// Describes the LT blobs involved in a multi-step storage operation.
+///
+/// Every mutating flow maps to: "I may have written a `new_target` LT blob and I
+/// may be replacing an `old_target` LT blob."
+#[derive(Debug)]
+struct Operation {
+    /// The new LT blob written by this operation.
+    ///
+    /// Needs cleanup on failure (phase < [`OperationPhase::CasWon`]).
+    new_target: Option<ObjectId>,
+    /// The old LT blob being replaced.
+    ///
+    /// Needs cleanup on success (phase >= [`OperationPhase::CasWon`]).
+    old_target: Option<ObjectId>,
+}
+
+/// Internal state for an [`OperationGuard`].
+///
+/// Increments the tracker on construction and decrements it on drop. Logs an
+/// error if dropped in any phase other than [`OperationPhase::Completed`].
+#[derive(Debug)]
+struct OperationState {
+    operation: Operation,
+    phase: OperationPhase,
+    lt: Arc<dyn Backend>,
+    tracker: CleanupTracker,
+}
+
+impl OperationState {
+    fn new(operation: Operation, lt: Arc<dyn Backend>, tracker: CleanupTracker) -> Self {
+        tracker.increment();
+        Self {
+            operation,
+            phase: OperationPhase::Registered,
+            lt,
+            tracker,
+        }
+    }
+
+    /// Returns the LT blob that should be deleted based on the current phase.
+    ///
+    /// Returns `None` if the phase is `Completed` or if no cleanup is needed.
+    fn cleanup_target(&self) -> Option<ObjectId> {
+        if self.phase == OperationPhase::Completed {
+            return None;
+        }
+        if self.phase < OperationPhase::CasWon {
+            return self.operation.new_target.clone();
+        }
+        self.operation.old_target.clone()
+    }
+
+    /// Marks the operation as completed, suppressing the incomplete-cleanup error on drop.
+    fn complete(mut self) {
+        self.phase = OperationPhase::Completed;
+    }
+}
+
+impl Drop for OperationState {
+    fn drop(&mut self) {
+        if self.phase != OperationPhase::Completed {
+            objectstore_log::error!(
+                operation = ?self.operation,
+                phase = ?self.phase,
+                "Operation dropped without completing cleanup"
+            );
+        }
+        self.tracker.decrement();
+    }
+}
+
+/// RAII guard that tracks cleanup state for a multi-step storage operation.
+///
+/// When dropped in a non-`Completed` phase, determines the LT blob to clean up
+/// and spawns a background task to delete it. If no tokio runtime is available
+/// (e.g., during shutdown), the drop logs an error instead of panicking.
+struct OperationGuard {
+    state: Option<OperationState>,
+}
+
+impl OperationGuard {
+    /// Advances the operation to the given phase. Zero-cost, no I/O.
+    fn advance(&mut self, phase: OperationPhase) {
+        if let Some(ref mut state) = self.state {
+            state.phase = phase;
+        }
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        let Some(mut state) = self.state.take() else {
+            return;
+        };
+
+        if state.phase == OperationPhase::Completed {
+            return;
+        }
+
+        let target = state.cleanup_target();
+
+        let Some(target) = target else {
+            // No LT blob to clean up for this (flow, phase) combination.
+            state.phase = OperationPhase::Completed;
+            return;
+        };
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime available (e.g., dropped during shutdown).
+            // state drops without Completed → logs error in OperationState::drop.
+            return;
+        };
+
+        handle.spawn(async move {
+            match state.lt.delete_object(&target).await {
+                Ok(()) => state.complete(),
+                Err(e) => {
+                    objectstore_log::error!(
+                        !!&e,
+                        target = %target.as_storage_path(),
+                        "Background LT cleanup failed"
+                    );
+                    // state drops without Completed → logs error in OperationState::drop
+                }
+            }
+            // state drops here → decrements tracker
+        });
+    }
+}
 
 /// Creates a new [`ObjectId`] with the same context but a unique revision key.
 ///
@@ -204,39 +412,46 @@ pub struct TieredStorageConfig {
 #[derive(Debug)]
 pub struct TieredStorage {
     /// The backend for small objects (≤ 1 MiB).
-    high_volume: Box<dyn HighVolumeBackend>,
+    hv: Arc<dyn HighVolumeBackend>,
     /// The backend for large objects (> 1 MiB).
-    long_term: Box<dyn Backend>,
+    lt: Arc<dyn Backend>,
+    /// Tracks outstanding background cleanup operations for graceful shutdown.
+    cleanup_tracker: CleanupTracker,
 }
 
 impl TieredStorage {
     /// Creates a new `TieredStorage` with the given backends.
-    pub fn new(high_volume: Box<dyn HighVolumeBackend>, long_term: Box<dyn Backend>) -> Self {
+    pub fn new(high_volume: Arc<dyn HighVolumeBackend>, long_term: Arc<dyn Backend>) -> Self {
         Self {
-            high_volume,
-            long_term,
+            hv: high_volume,
+            lt: long_term,
+            cleanup_tracker: CleanupTracker::new(),
         }
     }
 
-    /// Deletes an object from the long-term backend, logging an error on failure.
-    async fn cleanup_lt(&self, target: &ObjectId) {
-        if let Err(e) = self.long_term.delete_object(target).await {
-            objectstore_log::error!(!!&e, target = %target.as_storage_path(), "Long-term object cleanup failed");
+    /// Creates an [`OperationGuard`] for the given operation.
+    fn operation_guard(&self, operation: Operation) -> OperationGuard {
+        OperationGuard {
+            state: Some(OperationState::new(
+                operation,
+                Arc::clone(&self.lt),
+                self.cleanup_tracker.clone(),
+            )),
         }
     }
 
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
-            BackendChoice::HighVolume => self.high_volume.name(),
-            BackendChoice::LongTerm => self.long_term.name(),
+            BackendChoice::HighVolume => self.hv.name(),
+            BackendChoice::LongTerm => self.lt.name(),
         }
     }
 
     /// Puts an object into the high-volume backend.
     ///
-    /// If a tombstone already exists, attempts to swap it for the new object and delete the old
-    /// long-term object.
+    /// If a tombstone already exists, attempts to swap it for the new object.
+    /// On success, the old long-term blob is cleaned up in the background.
     async fn put_high_volume(
         &self,
         id: &ObjectId,
@@ -244,84 +459,86 @@ impl TieredStorage {
         payload: Bytes,
     ) -> Result<()> {
         let tombstone_opt = self
-            .high_volume
+            .hv
             .put_non_tombstone(id, metadata, payload.clone())
             .await?;
 
         let Some(Tombstone { target, .. }) = tombstone_opt else {
-            // No tombstone exists - write succeeded
+            // No tombstone exists — write succeeded inline, no LT blob to manage.
             return Ok(());
         };
 
-        // Tombstone exists — Swap it for inline data
-        let write = TieredWrite::Object(metadata.clone(), payload.clone());
-        let written = self
-            .high_volume
-            .compare_and_write(id, Some(&target), write)
-            .await?;
+        // A tombstone exists — swap it for inline data.
+        let mut guard = self.operation_guard(Operation {
+            new_target: None,
+            old_target: Some(target.clone()),
+        });
 
-        // TODO: Schedule cleanups into background to ensure eventual cleanup
-        if written {
-            self.cleanup_lt(&target).await;
-        }
-
-        // Else: Another writer won the race. This is not an error -
-        // see "Last-Writer-Wins" in module docs.
+        let write = TieredWrite::Object(metadata.clone(), payload);
+        let won = self.hv.compare_and_write(id, Some(&target), write).await?;
+        guard.advance(if won {
+            OperationPhase::CasWon
+        } else {
+            OperationPhase::CasLost
+        });
 
         Ok(())
+        // guard dropped → background cleanup of old LT blob if CasWon
     }
 
     /// Puts an object into the long-term backend with a redirect tombstone in front.
     ///
-    /// Deletes the previous long-term object if overwriting an existing tombstone. If the tombstone
-    /// write fails, the new long-term object is cleaned up.
+    /// On success, the old long-term blob (if any) is cleaned up in the background.
+    /// On failure or CAS conflict, the newly written LT blob is cleaned up in the background.
     async fn put_long_term(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<()> {
-        // 1. Read current HV revision to establish the write precondition
-        let current = match self.high_volume.get_tiered_metadata(id).await? {
+        // 1. Read current HV revision to establish the write precondition.
+        let current = match self.hv.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
 
         // 2. Write payload to long-term at a unique revision key.
-        let new = new_long_term_revision(id);
-        self.long_term.put_object(&new, metadata, stream).await?;
-
-        // 3. CAS commit: write tombstone only if HV state matches what we saw.
+        let new_target = new_long_term_revision(id);
         let tombstone = Tombstone {
-            target: new.clone(),
+            target: new_target.clone(),
             expiration_policy: metadata.expiration_policy,
         };
+
+        let mut guard = self.operation_guard(Operation {
+            new_target: Some(new_target.clone()),
+            old_target: current.clone(),
+        });
+
+        self.lt.put_object(&new_target, metadata, stream).await?;
+        guard.advance(OperationPhase::LtWritten);
+
+        // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let written = self
-            .high_volume
+            .hv
             .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
             .await;
 
-        // TODO: Schedule cleanups into background to ensure eventual cleanup
         match written {
-            Ok(true) => {
-                // Tombstone committed. Clean up old GCS blob if overwriting.
-                if let Some(current) = current {
-                    self.cleanup_lt(&current).await;
-                }
-            }
-            Ok(false) => {
-                // Another writer won the race. Clean up our GCS blob.
-                // This is not an error - see "Last-Writer-Wins" in module docs.
-                self.cleanup_lt(&new).await;
+            Ok(won) => {
+                guard.advance(if won {
+                    OperationPhase::CasWon
+                } else {
+                    OperationPhase::CasLost
+                });
             }
             Err(e) => {
-                // CAS error. Clean up our GCS blob before propagating.
-                self.cleanup_lt(&new).await;
+                // CAS error — guard remains at LtWritten and cleans up new_target in background.
                 return Err(e);
             }
         }
 
         Ok(())
+        // guard dropped → background cleanup
     }
 }
 
@@ -351,8 +568,9 @@ impl Backend for TieredStorage {
 
         let (backend_choice, stored_size) = if peeked.is_exhausted() {
             let payload = peeked.into_bytes().await?;
-            self.put_high_volume(id, metadata, payload.clone()).await?;
-            (BackendChoice::HighVolume, payload.len() as u64)
+            let payload_len = payload.len() as u64;
+            self.put_high_volume(id, metadata, payload).await?;
+            (BackendChoice::HighVolume, payload_len)
         } else {
             let (stored_size, stream) = counting_stream(peeked.into_stream());
             self.put_long_term(id, metadata, stream.boxed()).await?;
@@ -379,14 +597,14 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_object(id).await?;
+        let hv_result = self.hv.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
             TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
             TieredGet::Tombstone(tombstone) => (
-                self.long_term.get_object(&tombstone.target).await?,
+                self.lt.get_object(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -418,12 +636,12 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_metadata(id).await?;
+        let hv_result = self.hv.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
-                self.long_term.get_metadata(&tombstone.target).await?,
+                self.lt.get_metadata(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -443,22 +661,26 @@ impl Backend for TieredStorage {
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
+        if let Some(tombstone) = self.hv.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
-            // Delete the tombstone first, then clean up GCS.
+            let mut guard = self.operation_guard(Operation {
+                new_target: None,
+                old_target: Some(tombstone.target.clone()),
+            });
+
+            // Remove the tombstone; the LT blob becomes unreachable at this point.
             let deleted = self
-                .high_volume
+                .hv
                 .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
                 .await?;
+            guard.advance(if deleted {
+                OperationPhase::CasWon
+            } else {
+                OperationPhase::CasLost
+            });
 
-            // TODO: Schedule cleanups into background to ensure eventual cleanup
-            if deleted {
-                self.cleanup_lt(&tombstone.target).await;
-            }
-
-            // Else: Another writer won the race. This is not an error -
-            // see "Last-Writer-Wins" in module docs.
+            // guard dropped → background cleanup of LT blob if CasWon
         }
 
         objectstore_metrics::record!(
@@ -469,6 +691,10 @@ impl Backend for TieredStorage {
         );
 
         Ok(())
+    }
+
+    async fn drain(&self) {
+        self.cleanup_tracker.drain(CLEANUP_DRAIN_TIMEOUT).await;
     }
 }
 
@@ -540,7 +766,7 @@ mod tests {
     fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
+        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt.clone()));
         (storage, hv, lt)
     }
 
@@ -680,7 +906,7 @@ mod tests {
         let lt_id = hv.get(&id).expect_tombstone().target;
 
         // Re-insert a SMALL payload with the same key.
-        // The CAS-swap puts the small object inline in HV and cleans up the old GCS blob.
+        // The CAS-swap puts the small object inline in HV and schedules background cleanup.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         storage
             .put_object(&id, &Default::default(), stream::single(small_payload))
@@ -689,6 +915,9 @@ mod tests {
 
         // The small object is now inline in high-volume.
         hv.get(&id).expect_object();
+
+        // Drain background cleanup tasks before asserting LT state.
+        storage.drain().await;
 
         // The old long-term blob was cleaned up.
         lt.get(&lt_id).expect_not_found();
@@ -717,6 +946,10 @@ mod tests {
             lt_id_1, lt_id_2,
             "second write should create a new revision"
         );
+
+        // Drain background cleanup tasks before asserting LT state.
+        storage.drain().await;
+
         lt.get(&lt_id_1).expect_not_found();
         lt.get(&lt_id_2).expect_object();
 
@@ -758,6 +991,9 @@ mod tests {
         let lt_id = hv.get(&id).expect_tombstone().target;
 
         storage.delete_object(&id).await.unwrap();
+
+        // Drain background cleanup tasks before asserting LT state.
+        storage.drain().await;
 
         assert!(!hv.contains(&id), "tombstone not cleaned up");
         assert!(!lt.contains(&lt_id), "long-term object not cleaned up");
@@ -801,7 +1037,7 @@ mod tests {
     async fn delete_succeeds_when_gcs_cleanup_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
+        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt));
 
         let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
@@ -898,7 +1134,7 @@ mod tests {
     async fn put_large_cas_conflict_cleans_up_new_blob() {
         let hv = ConflictingCasBackend(InMemoryBackend::new("hv"));
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt.clone()));
 
         let id = make_id("cas-conflict-large");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -907,6 +1143,9 @@ mod tests {
             .put_object(&id, &Default::default(), stream::single(payload))
             .await
             .unwrap();
+
+        // Drain background cleanup tasks before asserting LT state.
+        storage.drain().await;
 
         assert!(
             lt.is_empty(),
@@ -935,7 +1174,7 @@ mod tests {
 
         let lt = InMemoryBackend::new("lt");
         let hv = ConflictingCasBackend(inner);
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt));
+        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt));
 
         // Writing a small object over a tombstone should succeed even when CAS
         // conflicts — the other writer's write is accepted.
@@ -1018,7 +1257,7 @@ mod tests {
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
         let hv = FailingCasBackend(InMemoryBackend::new("hv"));
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt.clone()));
 
         let id = make_id("orphan-test");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -1027,6 +1266,10 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+
+        // Drain background cleanup tasks before asserting LT state.
+        storage.drain().await;
+
         assert!(lt.is_empty(), "long-term object not cleaned up");
     }
 
@@ -1068,7 +1311,7 @@ mod tests {
     async fn tombstone_target_is_used_for_reads_and_deletes() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
+        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt.clone()));
 
         let hv_id = make_id("hv-key");
         let lt_id = make_id("lt-key");
@@ -1093,6 +1336,7 @@ mod tests {
 
         // delete_object must clean up both backends using the target.
         storage.delete_object(&hv_id).await.unwrap();
+        storage.drain().await;
         assert!(!hv.contains(&hv_id), "tombstone should be removed");
         assert!(!lt.contains(&lt_id), "lt object should be removed");
     }
@@ -1133,5 +1377,216 @@ mod tests {
                 "data mismatch in chunk {i}"
             );
         }
+    }
+
+    // --- OperationState::cleanup_target unit tests ---
+
+    fn make_operation_state(
+        new_target: Option<ObjectId>,
+        old_target: Option<ObjectId>,
+        phase: OperationPhase,
+    ) -> OperationState {
+        let lt = Arc::new(InMemoryBackend::new("lt"));
+        let tracker = CleanupTracker::new();
+        let mut state = OperationState::new(
+            Operation {
+                new_target,
+                old_target,
+            },
+            lt,
+            tracker,
+        );
+        state.phase = phase;
+        state
+    }
+
+    #[test]
+    fn cleanup_target_write_large_registered_returns_new() {
+        let new = make_id("new");
+        let state = make_operation_state(Some(new.clone()), None, OperationPhase::Registered);
+        assert_eq!(state.cleanup_target(), Some(new));
+    }
+
+    #[test]
+    fn cleanup_target_write_large_lt_written_returns_new() {
+        let new = make_id("new");
+        let state = make_operation_state(Some(new.clone()), None, OperationPhase::LtWritten);
+        assert_eq!(state.cleanup_target(), Some(new));
+    }
+
+    #[test]
+    fn cleanup_target_write_large_cas_lost_returns_new() {
+        let new = make_id("new");
+        let state = make_operation_state(
+            Some(new.clone()),
+            Some(make_id("old")),
+            OperationPhase::CasLost,
+        );
+        assert_eq!(state.cleanup_target(), Some(new));
+    }
+
+    #[test]
+    fn cleanup_target_write_large_cas_won_returns_old() {
+        let old = make_id("old");
+        let state = make_operation_state(
+            Some(make_id("new")),
+            Some(old.clone()),
+            OperationPhase::CasWon,
+        );
+        assert_eq!(state.cleanup_target(), Some(old));
+    }
+
+    #[test]
+    fn cleanup_target_fresh_write_cas_won_returns_none() {
+        // WriteLarge (fresh, no old blob) + CasWon → no cleanup needed.
+        let state = make_operation_state(Some(make_id("new")), None, OperationPhase::CasWon);
+        assert_eq!(state.cleanup_target(), None);
+    }
+
+    #[test]
+    fn cleanup_target_inline_swap_cas_lost_returns_none() {
+        // InlineSwap + CasLost → old blob still referenced by winner, no cleanup.
+        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::CasLost);
+        assert_eq!(state.cleanup_target(), None);
+    }
+
+    #[test]
+    fn cleanup_target_inline_swap_cas_won_returns_old() {
+        let old = make_id("old");
+        let state = make_operation_state(None, Some(old.clone()), OperationPhase::CasWon);
+        assert_eq!(state.cleanup_target(), Some(old));
+    }
+
+    #[test]
+    fn cleanup_target_delete_large_cas_won_returns_old() {
+        let old = make_id("old");
+        let state = make_operation_state(None, Some(old.clone()), OperationPhase::CasWon);
+        assert_eq!(state.cleanup_target(), Some(old));
+    }
+
+    #[test]
+    fn cleanup_target_delete_large_cas_lost_returns_none() {
+        // DeleteLarge + CasLost → winner handles old blob, nothing to do.
+        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::CasLost);
+        assert_eq!(state.cleanup_target(), None);
+    }
+
+    #[test]
+    fn cleanup_target_completed_returns_none() {
+        let state = make_operation_state(
+            Some(make_id("new")),
+            Some(make_id("old")),
+            OperationPhase::Completed,
+        );
+        assert_eq!(state.cleanup_target(), None);
+    }
+
+    // --- OperationGuard drop safety tests ---
+
+    /// Dropping a guard outside any tokio runtime must not panic.
+    #[test]
+    fn guard_dropped_outside_runtime_does_not_panic() {
+        let lt = Arc::new(InMemoryBackend::new("lt"));
+        let tracker = CleanupTracker::new();
+
+        // Construct a guard that would schedule cleanup (new_target is Some).
+        // No tokio runtime is active in this plain #[test].
+        let guard = OperationGuard {
+            state: Some(OperationState::new(
+                Operation {
+                    new_target: Some(make_id("cleanup-target")),
+                    old_target: None,
+                },
+                lt,
+                tracker,
+            )),
+        };
+
+        drop(guard); // Must not panic.
+    }
+
+    /// Dropping a guard with no cleanup needed (phase requires no action)
+    /// marks the state Completed without spawning a background task.
+    #[tokio::test]
+    async fn guard_dropped_with_no_cleanup_needed_marks_completed() {
+        let lt = Arc::new(InMemoryBackend::new("lt"));
+        let tracker = CleanupTracker::new();
+
+        // InlineSwap + CasLost → no cleanup needed.
+        let guard = OperationGuard {
+            state: Some(OperationState::new(
+                Operation {
+                    new_target: None,
+                    old_target: Some(make_id("old")),
+                },
+                lt,
+                tracker.clone(),
+            )),
+        };
+
+        // Advance to CasLost (no cleanup target for this combination).
+        let mut guard = guard;
+        guard.advance(OperationPhase::CasLost);
+        drop(guard);
+
+        // Counter must be back to zero immediately (no background task spawned).
+        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
+    }
+
+    // --- CleanupTracker drain tests ---
+
+    /// `drain()` returns immediately when there are no outstanding operations.
+    #[tokio::test]
+    async fn drain_returns_immediately_when_empty() {
+        let tracker = CleanupTracker::new();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tracker.drain(Duration::from_secs(5)),
+        )
+        .await
+        .expect("drain should return immediately with no outstanding ops");
+    }
+
+    /// `drain()` waits until all outstanding operations complete.
+    #[tokio::test]
+    async fn drain_waits_for_outstanding_operations() {
+        let tracker = CleanupTracker::new();
+        tracker.increment();
+
+        // Spawn a task that decrements after a brief delay.
+        let tracker_clone = tracker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tracker_clone.decrement();
+        });
+
+        // drain() should wait for the decrement before returning.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tracker.drain(Duration::from_secs(5)),
+        )
+        .await
+        .expect("drain should complete after decrement");
+
+        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
+    }
+
+    /// `drain()` returns after the timeout even if operations are still outstanding.
+    #[tokio::test]
+    async fn drain_returns_after_timeout_with_remaining() {
+        let tracker = CleanupTracker::new();
+        tracker.increment(); // Never decremented.
+
+        // Use a very short timeout.
+        let short = Duration::from_millis(50);
+        tokio::time::timeout(Duration::from_secs(1), tracker.drain(short))
+            .await
+            .expect("drain should return after timeout");
+
+        // Outstanding count still non-zero — operation was never completed.
+        assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 1);
+
+        // Clean up to avoid poisoning other tests.
+        tracker.decrement();
     }
 }

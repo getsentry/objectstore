@@ -51,6 +51,13 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
+
+    /// Drains any outstanding background operations before shutdown.
+    ///
+    /// The default implementation is a no-op. Backends that spawn background tasks
+    /// (such as [`TieredStorage`](super::tiered::TieredStorage)) should override this
+    /// to wait for those tasks to complete.
+    async fn drain(&self) {}
 }
 
 /// Trait for backends that support tombstone-conditional operations.
