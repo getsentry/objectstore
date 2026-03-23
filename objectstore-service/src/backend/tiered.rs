@@ -118,9 +118,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Phase of a multi-step storage operation.
-///
-/// Phases are ordered — the ordering determines which LT blob to clean up on drop.
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq)]
 enum ChangePhase {
     // The change is registered and LT upload has started.
     Registered,
@@ -211,7 +209,7 @@ impl ChangeState {
                 ChangePhase::Written => self.read_tombstone().await,
                 ChangePhase::Lost => self.change.old.clone(),
                 ChangePhase::Updated => self.change.new.clone(),
-                ChangePhase::Completed => return,
+                ChangePhase::Completed => return, // unreachable
             };
 
             if current != self.change.old
@@ -405,7 +403,7 @@ impl TieredStorage {
         }
     }
 
-    /// Creates an `ChangeGuard` for the given operation.
+    /// Creates a `ChangeGuard` for the given operation.
     ///
     /// This guard will clean up unreferenced objects in long-term storage when it drops based on
     /// the last known phase of the change was in.
