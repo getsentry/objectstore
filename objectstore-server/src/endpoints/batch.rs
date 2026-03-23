@@ -273,7 +273,7 @@ fn create_error_part(idx: usize, error: &ApiError) -> Part {
     insert_status_header(&mut headers, error.status());
 
     let error_body = serde_json::to_vec(&ApiErrorResponse::from_error(error))
-        .inspect_err(|err| objectstore_log::exception!(err, "Failed to serialize ApiErrorResponse"))
+        .inspect_err(|err| objectstore_log::error!(!!err, "Failed to serialize ApiErrorResponse"))
         .unwrap_or_default();
     Part::new(Bytes::from(error_body), headers, None)
 }

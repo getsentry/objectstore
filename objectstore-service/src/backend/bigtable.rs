@@ -761,7 +761,7 @@ impl BigTableBackend {
                 let target = match parse_redirect_target(target, hv_id) {
                     Ok(target) => target,
                     Err(e) => {
-                        objectstore_log::exception!(&e, "invalid redirect target in tombstone row");
+                        objectstore_log::error!(!!&e, "invalid redirect target in tombstone row");
                         return;
                     }
                 };
@@ -1121,7 +1121,7 @@ where
             Err(e) => {
                 retry_count += 1;
                 objectstore_metrics::count!("bigtable.retries", action = action);
-                objectstore_log::warn_exception!(&e, retry_count, action, "Retrying request");
+                objectstore_log::warn!(!!&e, retry_count, action, "Retrying request");
             }
         }
     }

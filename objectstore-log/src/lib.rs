@@ -8,28 +8,24 @@
 //!    (behind the `init` feature) an [`init`] function to wire up a `tracing-subscriber` stack.
 //!    When built with the `sentry` feature, `init` also attaches a Sentry tracing layer if the
 //!    Sentry client has already been initialized.
-//! 3. [`event_dyn!`] for runtime-dispatched log levels and [`exception!`] for ergonomic error logging.
+//! 3. Custom level macros (`error!`, `warn!`, etc.) that extend their `tracing` equivalents with
+//!    an optional `!<error>` first argument for ergonomic error field attachment, plus [`event_dyn!`]
+//!    for runtime-dispatched log levels.
 //!
 //! # Usage
 //!
 //! ## Logging macros
 //!
-//! ```rust
-//! objectstore_log::info!("server starting");
-//! objectstore_log::warn!(status = "degraded", "storage unavailable");
-//! objectstore_log::debug!(value = 42, "loaded configuration");
-//! ```
-//!
-//! ## `exception!` — log an error at ERROR level
-//!
-//! Casts the expression to `&dyn std::error::Error` internally; any additional tracing fields or
-//! message may follow:
+//! All standard tracing levels are available. Prefix an error expression with `!!` to attach it as
+//! a typed `error` field without a manual cast:
 //!
 //! ```rust
 //! # fn example() -> anyhow::Result<()> {
 //! let err = anyhow::anyhow!("something broke");
-//! objectstore_log::exception!(err.as_ref());
-//! objectstore_log::exception!(err.as_ref(), "fatal startup error");
+//! objectstore_log::info!("server starting");
+//! objectstore_log::warn!(status = "degraded", "storage unavailable");
+//! objectstore_log::error!(!!err.as_ref(), "fatal startup error");
+//! objectstore_log::warn!(!!err.as_ref(), component = "storage", "retrying");
 //! # Ok(())
 //! # }
 //! ```
@@ -80,8 +76,8 @@ pub use subscriber::init;
 /// let _span: tracing::Span = tracing::debug_span!("op");
 /// ```
 pub use tracing;
+pub use tracing::Level;
 pub use tracing::level_filters::LevelFilter;
-pub use tracing::{Level, debug, error, info, trace, warn};
 
 /// Logs `error` via the tracing subscriber if one is configured, or prints to `stderr` otherwise.
 ///
@@ -91,7 +87,7 @@ pub fn ensure_log_error(error: &anyhow::Error) {
     if Level::ERROR <= tracing::level_filters::STATIC_MAX_LEVEL
         && Level::ERROR <= LevelFilter::current()
     {
-        exception!(error.as_ref());
+        error!(!!error.as_ref());
     } else {
         eprintln!("{error:?}");
     }

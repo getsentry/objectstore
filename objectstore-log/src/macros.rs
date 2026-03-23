@@ -1,60 +1,73 @@
-/// Logs an error at `ERROR` level, casting the expression to `&dyn std::error::Error`
-/// automatically.
+/// Logs a message at a given static level.
 ///
-/// The error is recorded as the `error` structured field. Any additional tracing key-value fields
-/// or a log message may follow after the error expression.
+/// The first argument must be a [`tracing::Level`] constant. An optional `!!<error>` second
+/// argument casts the expression to `&dyn std::error::Error` and records it as the `error` field.
+/// All remaining arguments are forwarded verbatim to [`tracing::event!`].
+///
+/// The level-specific macros (`error!`, `warn!`, `info!`, `debug!`, `trace!`) are thin wrappers
+/// around this macro and are the preferred call form.
 ///
 /// # Examples
 ///
 /// ```rust
+/// # use objectstore_log::Level;
 /// # fn example() -> anyhow::Result<()> {
 /// let err = anyhow::anyhow!("something broke");
-/// objectstore_log::exception!(err.as_ref());
-/// objectstore_log::exception!(err.as_ref(), "fatal startup error");
-/// objectstore_log::exception!(err.as_ref(), component = "storage", "write failed");
+/// objectstore_log::event!(Level::ERROR, !!err.as_ref(), "fatal error");
+/// objectstore_log::event!(Level::WARN, field = "value", "plain event");
 /// # Ok(())
 /// # }
 /// ```
 #[macro_export]
-macro_rules! exception {
-    ($error:expr $(,)?) => {
-        $crate::error!(error = $error as &dyn ::std::error::Error)
+macro_rules! event {
+    ($level:expr, !!$error:expr $(,)?) => {
+        $crate::tracing::event!($level, error = $error as &dyn ::std::error::Error)
     };
-    ($error:expr, $($args:tt)*) => {
-        $crate::error!(error = $error as &dyn ::std::error::Error, $($args)*)
+    ($level:expr, !!$error:expr, $($args:tt)+) => {
+        $crate::tracing::event!($level, error = $error as &dyn ::std::error::Error, $($args)+)
+    };
+    ($level:expr, $($args:tt)*) => {
+        $crate::tracing::event!($level, $($args)*)
     };
 }
 
-/// Logs an error at `WARN` level, casting the expression to `&dyn std::error::Error`
-/// automatically.
-///
-/// Identical to [`exception!`] but uses `warn!` instead of `error!`. Use for recoverable
-/// errors where the operation can continue (e.g. retries).
-///
-/// # Examples
-///
-/// ```rust
-/// # fn example() -> anyhow::Result<()> {
-/// let err = anyhow::anyhow!("transient failure");
-/// objectstore_log::warn_exception!(err.as_ref(), "retrying request");
-/// objectstore_log::warn_exception!(err.as_ref(), attempt = 2, "retry");
-/// # Ok(())
-/// # }
-/// ```
+/// Logs a message at `ERROR` level. See [`event!`] for full syntax.
 #[macro_export]
-macro_rules! warn_exception {
-    ($error:expr $(,)?) => {
-        $crate::warn!(error = $error as &dyn ::std::error::Error)
-    };
-    ($error:expr, $($args:tt)*) => {
-        $crate::warn!(error = $error as &dyn ::std::error::Error, $($args)*)
-    };
+macro_rules! error {
+    ($($args:tt)*) => { $crate::event!($crate::tracing::Level::ERROR, $($args)*) };
+}
+
+/// Logs a message at `WARN` level. See [`event!`] for full syntax.
+#[macro_export]
+macro_rules! warn {
+    ($($args:tt)*) => { $crate::event!($crate::tracing::Level::WARN, $($args)*) };
+}
+
+/// Logs a message at `INFO` level. See [`event!`] for full syntax.
+#[macro_export]
+macro_rules! info {
+    ($($args:tt)*) => { $crate::event!($crate::tracing::Level::INFO, $($args)*) };
+}
+
+/// Logs a message at `DEBUG` level. See [`event!`] for full syntax.
+#[macro_export]
+macro_rules! debug {
+    ($($args:tt)*) => { $crate::event!($crate::tracing::Level::DEBUG, $($args)*) };
+}
+
+/// Logs a message at `TRACE` level. See [`event!`] for full syntax.
+#[macro_export]
+macro_rules! trace {
+    ($($args:tt)*) => { $crate::event!($crate::tracing::Level::TRACE, $($args)*) };
 }
 
 /// Dispatches a log event at a level determined at runtime.
 ///
-/// The first argument is a [`tracing::Level`] expression; all remaining arguments are forwarded to
-/// the appropriate level macro (`trace!`, `debug!`, `info!`, `warn!`, or `error!`).
+/// The first argument is a [`tracing::Level`] value resolved at runtime; all remaining arguments
+/// (including an optional `!!<error>`) are forwarded to the appropriate level macro.
+///
+/// Prefer the level-specific macros (`error!`, `warn!`, …) when the level is known at compile
+/// time. Use this macro only when the level is dynamic.
 ///
 /// # Examples
 ///

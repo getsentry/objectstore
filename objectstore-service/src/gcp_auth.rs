@@ -193,7 +193,7 @@ async fn refresh_loop(
                 let _ = tx.send(Ok(cached));
             }
             Err(err) => {
-                objectstore_log::warn_exception!(&err, "token prefetch failed");
+                objectstore_log::warn!(!!&err, "token prefetch failed");
 
                 // Only broadcast the error if the token is expired.
                 if deadline <= Instant::now() {

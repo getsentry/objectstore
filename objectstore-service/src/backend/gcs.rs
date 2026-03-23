@@ -399,7 +399,7 @@ impl GcsBackend {
                 Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
                     retry_count += 1;
                     objectstore_metrics::count!("gcs.retries", action = action);
-                    objectstore_log::warn_exception!(e, retry_count, action, "Retrying request");
+                    objectstore_log::warn!(!!e, retry_count, action, "Retrying request");
                 }
                 Err(e) => {
                     objectstore_metrics::count!("gcs.failures", action = action);
