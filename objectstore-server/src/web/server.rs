@@ -43,7 +43,7 @@ pub async fn server(config: Config) -> Result<()> {
         .await;
 
     let server_result = server_handle.await.map_err(From::from).flatten();
-    service.drain().await;
+    service.join().await;
     objectstore_log::info!("Shutdown complete");
     server_result
 }

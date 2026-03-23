@@ -222,14 +222,13 @@ impl StorageService {
             .await
     }
 
-    /// Drains outstanding background cleanup operations.
+    /// Waits for all outstanding background operations to complete.
     ///
-    /// Waits for any pending background LT cleanup tasks to finish before
-    /// returning, up to the backend's configured timeout. Should be called
-    /// during graceful shutdown after the HTTP server has stopped accepting
-    /// new requests.
-    pub async fn drain(&self) {
-        self.inner.drain().await;
+    /// Blocks until any pending background cleanup tasks finish, up to the
+    /// backend's configured timeout. Should be called during graceful shutdown
+    /// after the HTTP server has stopped accepting new requests.
+    pub async fn join(&self) {
+        self.inner.join().await;
     }
 }
 

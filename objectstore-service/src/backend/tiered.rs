@@ -113,29 +113,29 @@ use crate::stream::{ClientStream, SizedPeek};
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
-/// Timeout for draining outstanding cleanup operations on shutdown.
-const CLEANUP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for joining outstanding background cleanup operations on shutdown.
+const BACKGROUND_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Tracks outstanding background cleanup operations for graceful shutdown.
+/// Counts outstanding background cleanup operations for graceful shutdown.
 ///
 /// The counter is incremented when an [`OperationState`] is created and
-/// decremented when it is dropped. [`CleanupTracker::drain`] waits until the
+/// decremented when it is dropped. [`BackgroundCounter::join`] waits until the
 /// counter reaches zero or the timeout elapses.
 #[derive(Debug, Clone)]
-struct CleanupTracker {
-    inner: Arc<CleanupTrackerInner>,
+struct BackgroundCounter {
+    inner: Arc<BackgroundCounterInner>,
 }
 
 #[derive(Debug)]
-struct CleanupTrackerInner {
+struct BackgroundCounterInner {
     outstanding: AtomicUsize,
     drained: Notify,
 }
 
-impl CleanupTracker {
+impl BackgroundCounter {
     fn new() -> Self {
         Self {
-            inner: Arc::new(CleanupTrackerInner {
+            inner: Arc::new(BackgroundCounterInner {
                 outstanding: AtomicUsize::new(0),
                 drained: Notify::new(),
             }),
@@ -153,7 +153,7 @@ impl CleanupTracker {
         }
     }
 
-    async fn drain(&self, timeout: Duration) {
+    async fn join(&self, timeout: Duration) {
         if self.inner.outstanding.load(Ordering::Acquire) == 0 {
             return;
         }
@@ -215,11 +215,11 @@ struct OperationState {
     operation: Operation,
     phase: OperationPhase,
     lt: Arc<dyn Backend>,
-    tracker: CleanupTracker,
+    tracker: BackgroundCounter,
 }
 
 impl OperationState {
-    fn new(operation: Operation, lt: Arc<dyn Backend>, tracker: CleanupTracker) -> Self {
+    fn new(operation: Operation, lt: Arc<dyn Backend>, tracker: BackgroundCounter) -> Self {
         tracker.increment();
         Self {
             operation,
@@ -416,7 +416,7 @@ pub struct TieredStorage {
     /// The backend for large objects (> 1 MiB).
     lt: Arc<dyn Backend>,
     /// Tracks outstanding background cleanup operations for graceful shutdown.
-    cleanup_tracker: CleanupTracker,
+    counter: BackgroundCounter,
 }
 
 impl TieredStorage {
@@ -425,7 +425,7 @@ impl TieredStorage {
         Self {
             hv: high_volume,
             lt: long_term,
-            cleanup_tracker: CleanupTracker::new(),
+            counter: BackgroundCounter::new(),
         }
     }
 
@@ -435,7 +435,7 @@ impl TieredStorage {
             state: Some(OperationState::new(
                 operation,
                 Arc::clone(&self.lt),
-                self.cleanup_tracker.clone(),
+                self.counter.clone(),
             )),
         }
     }
@@ -693,8 +693,12 @@ impl Backend for TieredStorage {
         Ok(())
     }
 
-    async fn drain(&self) {
-        self.cleanup_tracker.drain(CLEANUP_DRAIN_TIMEOUT).await;
+    async fn join(&self) {
+        tokio::join!(
+            self.hv.join(),
+            self.lt.join(),
+            self.counter.join(BACKGROUND_JOIN_TIMEOUT),
+        );
     }
 }
 
@@ -917,7 +921,7 @@ mod tests {
         hv.get(&id).expect_object();
 
         // Drain background cleanup tasks before asserting LT state.
-        storage.drain().await;
+        storage.join().await;
 
         // The old long-term blob was cleaned up.
         lt.get(&lt_id).expect_not_found();
@@ -948,7 +952,7 @@ mod tests {
         );
 
         // Drain background cleanup tasks before asserting LT state.
-        storage.drain().await;
+        storage.join().await;
 
         lt.get(&lt_id_1).expect_not_found();
         lt.get(&lt_id_2).expect_object();
@@ -993,7 +997,7 @@ mod tests {
         storage.delete_object(&id).await.unwrap();
 
         // Drain background cleanup tasks before asserting LT state.
-        storage.drain().await;
+        storage.join().await;
 
         assert!(!hv.contains(&id), "tombstone not cleaned up");
         assert!(!lt.contains(&lt_id), "long-term object not cleaned up");
@@ -1145,7 +1149,7 @@ mod tests {
             .unwrap();
 
         // Drain background cleanup tasks before asserting LT state.
-        storage.drain().await;
+        storage.join().await;
 
         assert!(
             lt.is_empty(),
@@ -1268,7 +1272,7 @@ mod tests {
         assert!(result.is_err());
 
         // Drain background cleanup tasks before asserting LT state.
-        storage.drain().await;
+        storage.join().await;
 
         assert!(lt.is_empty(), "long-term object not cleaned up");
     }
@@ -1336,7 +1340,7 @@ mod tests {
 
         // delete_object must clean up both backends using the target.
         storage.delete_object(&hv_id).await.unwrap();
-        storage.drain().await;
+        storage.join().await;
         assert!(!hv.contains(&hv_id), "tombstone should be removed");
         assert!(!lt.contains(&lt_id), "lt object should be removed");
     }
@@ -1387,7 +1391,7 @@ mod tests {
         phase: OperationPhase,
     ) -> OperationState {
         let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = CleanupTracker::new();
+        let tracker = BackgroundCounter::new();
         let mut state = OperationState::new(
             Operation {
                 new_target,
@@ -1487,7 +1491,7 @@ mod tests {
     #[test]
     fn guard_dropped_outside_runtime_does_not_panic() {
         let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = CleanupTracker::new();
+        let tracker = BackgroundCounter::new();
 
         // Construct a guard that would schedule cleanup (new_target is Some).
         // No tokio runtime is active in this plain #[test].
@@ -1510,7 +1514,7 @@ mod tests {
     #[tokio::test]
     async fn guard_dropped_with_no_cleanup_needed_marks_completed() {
         let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = CleanupTracker::new();
+        let tracker = BackgroundCounter::new();
 
         // InlineSwap + CasLost → no cleanup needed.
         let guard = OperationGuard {
@@ -1533,15 +1537,15 @@ mod tests {
         assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
     }
 
-    // --- CleanupTracker drain tests ---
+    // --- BackgroundCounter drain tests ---
 
     /// `drain()` returns immediately when there are no outstanding operations.
     #[tokio::test]
-    async fn drain_returns_immediately_when_empty() {
-        let tracker = CleanupTracker::new();
+    async fn join_returns_immediately_when_empty() {
+        let tracker = BackgroundCounter::new();
         tokio::time::timeout(
             Duration::from_millis(100),
-            tracker.drain(Duration::from_secs(5)),
+            tracker.join(Duration::from_secs(5)),
         )
         .await
         .expect("drain should return immediately with no outstanding ops");
@@ -1549,8 +1553,8 @@ mod tests {
 
     /// `drain()` waits until all outstanding operations complete.
     #[tokio::test]
-    async fn drain_waits_for_outstanding_operations() {
-        let tracker = CleanupTracker::new();
+    async fn join_waits_for_outstanding_operations() {
+        let tracker = BackgroundCounter::new();
         tracker.increment();
 
         // Spawn a task that decrements after a brief delay.
@@ -1561,25 +1565,22 @@ mod tests {
         });
 
         // drain() should wait for the decrement before returning.
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            tracker.drain(Duration::from_secs(5)),
-        )
-        .await
-        .expect("drain should complete after decrement");
+        tokio::time::timeout(Duration::from_secs(1), tracker.join(Duration::from_secs(5)))
+            .await
+            .expect("drain should complete after decrement");
 
         assert_eq!(tracker.inner.outstanding.load(Ordering::Acquire), 0);
     }
 
     /// `drain()` returns after the timeout even if operations are still outstanding.
     #[tokio::test]
-    async fn drain_returns_after_timeout_with_remaining() {
-        let tracker = CleanupTracker::new();
+    async fn join_returns_after_timeout_with_remaining() {
+        let tracker = BackgroundCounter::new();
         tracker.increment(); // Never decremented.
 
         // Use a very short timeout.
         let short = Duration::from_millis(50);
-        tokio::time::timeout(Duration::from_secs(1), tracker.drain(short))
+        tokio::time::timeout(Duration::from_secs(1), tracker.join(short))
             .await
             .expect("drain should return after timeout");
 
