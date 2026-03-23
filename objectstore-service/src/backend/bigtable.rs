@@ -210,21 +210,14 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
     }
 }
 
-/// Creates a row filter that matches any tombstone row, new- or legacy-format.
-///
-/// ## Predicate Matches
-///
-/// Must be used with `false_mutations` and `predicate_matched == false`.
-///
-/// ## Details
+/// Builds a raw row filter that matches any tombstone row, new- or legacy-format.
 ///
 /// New format: presence of the `r` column.
 /// Legacy format: `is_redirect_tombstone: true` in the `m` column JSON.
 ///
-/// Used by [`BigTableBackend::put_non_tombstone`] and [`BigTableBackend::delete_non_tombstone`]
-/// as the `CheckAndMutate` predicate. After legacy tombstones expire naturally, this simplifies
-/// to just `column_filter(COLUMN_REDIRECT)`.
-fn tombstone_predicate() -> v2::RowFilter {
+/// After legacy tombstones expire naturally this simplifies to just
+/// `column_filter(COLUMN_REDIRECT)`.
+fn tombstone_filter() -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
@@ -237,6 +230,15 @@ fn tombstone_predicate() -> v2::RowFilter {
             },
         )),
     }
+}
+
+/// Returns a [`CasPredicate`] that matches any tombstone row.
+///
+/// Mutations run only when no tombstone is present (`predicate_matched == false`).
+/// Used by [`BigTableBackend::put_non_tombstone`], [`BigTableBackend::delete_non_tombstone`],
+/// and [`BigTableBackend::compare_and_write`] as the `CheckAndMutateRow` predicate.
+fn tombstone_predicate() -> MutatePredicate {
+    MutatePredicate::Exclude(tombstone_filter())
 }
 
 /// Builds an anchored regex pattern (`^…$`) that matches `value` literally.
@@ -305,20 +307,14 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     }
 }
 
-/// Matches tombstones whose redirect resolves to either `old` or `new`.
+/// Returns a [`CasPredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
 ///
-/// ## Predicate Matches
-///
-/// Must be used with `true_mutations` and `predicate_matched == true`.
-///
-/// ## Details
-///
-/// Equivalent to `t == old || t == new`. Built as an Interleave of two
-/// [`redirect_target_filter`] calls — yields cells iff at least one branch
-/// matches. An absent row or non-tombstone row yields 0 cells, so
-/// `predicate_matched = false` (conflict).
-fn update_filter(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
-    v2::RowFilter {
+/// Mutations run only when the predicate matches (`predicate_matched == true`):
+/// equivalent to `t == old || t == new`. Built as an Interleave of two
+/// [`redirect_target_filter`] calls — yields cells iff at least one branch matches.
+/// An absent row or non-tombstone row yields 0 cells, so `predicate_matched = false` (conflict).
+fn update_predicate(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> MutatePredicate {
+    MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![
@@ -327,38 +323,48 @@ fn update_filter(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> v2::RowFi
                 ],
             },
         )),
-    }
+    })
 }
 
-/// Matches rows where no conflicting tombstone exists:
+/// Returns a [`CasPredicate`] that matches rows where no conflicting tombstone exists.
 ///
-/// ## Predicate Matches
+/// Mutations run only when the row is conflict-free (`predicate_matched == false`):
+/// no tombstone is present, or the tombstone's redirect already points to `target`.
 ///
-/// Must be used with `false_mutations` and `predicate_matched == false`.
-///
-/// ## Details
-///
-/// Matches either no tombstone, or the redirect already points to `target`.
 /// Built as an inverted `Condition` filter:
-///
-/// - Predicate: [`redirect_target_filter`]`(target)` — does the row have a
-///   tombstone pointing to `target`?
-/// - True branch: `BlockAllFilter` → 0 cells.
-/// - False branch: [`tombstone_predicate`] → 0 cells when no tombstone
+/// - Predicate: [`redirect_target_filter`]`(target)` — tombstone already points to `target`?
+/// - True branch: `BlockAllFilter` → 0 cells (already at target, safe state).
+/// - False branch: [`tombstone_filter`] → 0 cells when no tombstone exists.
 ///
 /// Both safe states yield 0 cells, so `predicate_matched = false` in both cases.
-fn optional_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
-    v2::RowFilter {
+fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePredicate {
+    MutatePredicate::Exclude(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
                 predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
-                false_filter: Some(Box::new(tombstone_predicate())),
+                false_filter: Some(Box::new(tombstone_filter())),
             },
         ))),
-    }
+    })
+}
+
+/// The condition under which a [`BigTableBackend::check_and_mutate`] write proceeds.
+///
+/// Each variant pairs a row filter with the state that makes the write safe:
+/// `Include` writes when the row matches; `Exclude` writes when it does not.
+#[derive(Clone, Debug)]
+enum MutatePredicate {
+    /// Write proceeds when the filter matches the row.
+    ///
+    /// Mutations run in `true_mutations`; succeeds when `predicate_matched == true`.
+    Include(v2::RowFilter),
+    /// Write proceeds when the filter does not match the row.
+    ///
+    /// Mutations run in `false_mutations`; succeeds when `predicate_matched == false`.
+    Exclude(v2::RowFilter),
 }
 
 /// Creates a row filter that reads all non-payload columns (`m`, `r`, `t`).
@@ -788,6 +794,38 @@ impl BigTableBackend {
             }
         }
     }
+
+    /// Executes a `CheckAndMutateRow` request.
+    async fn check_and_mutate(
+        &self,
+        row_key: Vec<u8>,
+        predicate: MutatePredicate,
+        mutations: impl Into<Vec<v2::Mutation>>,
+        context: &'static str,
+    ) -> Result<bool> {
+        let (filter, true_mutations, false_mutations, success_on_match) = match predicate {
+            MutatePredicate::Include(f) => (f, mutations.into(), vec![], true),
+            MutatePredicate::Exclude(f) => (f, vec![], mutations.into(), false),
+        };
+
+        let request = v2::CheckAndMutateRowRequest {
+            table_name: self.table_path.clone(),
+            row_key,
+            predicate_filter: Some(filter),
+            true_mutations,
+            false_mutations,
+            ..Default::default()
+        };
+
+        let future = retry(context, || async {
+            self.bigtable
+                .client()
+                .check_and_mutate_row(request.clone())
+                .await
+        });
+
+        Ok(future.await?.predicate_matched == success_on_match)
+    }
 }
 
 #[async_trait::async_trait]
@@ -857,29 +895,19 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let false_mutations =
-            object_mutations(metadata, payload.to_vec(), SystemTime::now())?.into();
-
-        let request = v2::CheckAndMutateRowRequest {
-            table_name: self.table_path.clone(),
-            row_key: path.clone(),
-            predicate_filter: Some(tombstone_predicate()),
-            true_mutations: vec![], // Tombstone matched → skip write.
-            false_mutations,        // No tombstone → write the object.
-            ..Default::default()
-        };
+        let mutations = object_mutations(metadata, payload.to_vec(), SystemTime::now())?;
 
         for _ in 0..CAS_RETRY_COUNT {
-            let is_tombstone = retry("put_non_tombstone", || async {
-                self.bigtable
-                    .client()
-                    .check_and_mutate_row(request.clone())
-                    .await
-            })
-            .await?
-            .predicate_matched;
+            let write_succeeded = self
+                .check_and_mutate(
+                    path.clone(),
+                    tombstone_predicate(),
+                    mutations.clone(),
+                    "put_non_tombstone",
+                )
+                .await?;
 
-            if !is_tombstone {
+            if write_succeeded {
                 return Ok(None);
             }
 
@@ -964,26 +992,17 @@ impl HighVolumeBackend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let request = v2::CheckAndMutateRowRequest {
-            table_name: self.table_path.clone(),
-            row_key: path.clone(),
-            predicate_filter: Some(tombstone_predicate()),
-            true_mutations: vec![], // Tombstone matched → leave intact.
-            false_mutations: vec![delete_row_mutation()], // No tombstone → delete.
-            ..Default::default()
-        };
-
         for _ in 0..CAS_RETRY_COUNT {
-            let is_tombstone = retry("delete_non_tombstone", || async {
-                self.bigtable
-                    .client()
-                    .check_and_mutate_row(request.clone())
-                    .await
-            })
-            .await?
-            .predicate_matched;
+            let write_succeeded = self
+                .check_and_mutate(
+                    path.clone(),
+                    tombstone_predicate(),
+                    [delete_row_mutation()],
+                    "delete_non_tombstone",
+                )
+                .await?;
 
-            if !is_tombstone {
+            if write_succeeded {
                 return Ok(None);
             }
 
@@ -1023,44 +1042,21 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
 
-        // `invert`: filters that use false_mutations (predicate_matched == false means safe).
-        let (predicate_filter, invert) = match (current, write.target()) {
-            (Some(old), Some(new)) => (update_filter(old, new, id), false),
-            (Some(target), None) => (optional_target_filter(target, id), true),
-            (None, Some(target)) => (optional_target_filter(target, id), true),
-            (None, None) => (tombstone_predicate(), true),
+        let predicate = match (current, write.target()) {
+            (Some(old), Some(new)) => update_predicate(old, new, id),
+            (Some(target), None) => optional_target_predicate(target, id),
+            (None, Some(target)) => optional_target_predicate(target, id),
+            (None, None) => tombstone_predicate(),
         };
 
-        let write_mutations = match write {
+        let mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
             TieredWrite::Object(m, p) => object_mutations(&m, p.to_vec(), now)?.into(),
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
-        let (true_mutations, false_mutations) = match invert {
-            true => (vec![], write_mutations),
-            false => (write_mutations, vec![]),
-        };
-
-        let request = v2::CheckAndMutateRowRequest {
-            table_name: self.table_path.clone(),
-            row_key: path,
-            predicate_filter: Some(predicate_filter),
-            true_mutations,
-            false_mutations,
-            ..Default::default()
-        };
-
-        let predicate_matched = retry("compare_and_write", || async {
-            self.bigtable
-                .client()
-                .check_and_mutate_row(request.clone())
-                .await
-        })
-        .await?
-        .predicate_matched;
-
-        Ok(predicate_matched != invert)
+        self.check_and_mutate(path, predicate, mutations, "compare_and_write")
+            .await
     }
 }
 
@@ -1102,7 +1098,7 @@ fn micros_to_time(micros: i64) -> Option<SystemTime> {
 }
 
 /// Retries a BigTable RPC on transient errors.
-async fn retry<T, F>(action: &'static str, f: impl Fn() -> F) -> Result<T>
+async fn retry<T, F>(context: &'static str, f: impl Fn() -> F) -> Result<T>
 where
     F: Future<Output = Result<T, BigTableError>> + Send,
 {
@@ -1112,16 +1108,16 @@ where
         match f().await {
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
-                objectstore_metrics::count!("bigtable.failures", action = action);
+                objectstore_metrics::count!("bigtable.failures", action = context);
                 return Err(Error::Generic {
-                    context: format!("Bigtable: `{action}` failed"),
+                    context: format!("Bigtable: `{context}` failed"),
                     cause: Some(Box::new(e)),
                 });
             }
             Err(e) => {
                 retry_count += 1;
-                objectstore_metrics::count!("bigtable.retries", action = action);
-                objectstore_log::warn!(!!&e, retry_count, action, "Retrying request");
+                objectstore_metrics::count!("bigtable.retries", action = context);
+                objectstore_log::warn!(!!&e, retry_count, context, "Retrying request");
             }
         }
     }
