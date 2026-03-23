@@ -424,7 +424,7 @@ pub struct Config {
 
     /// Logging configuration.
     ///
-    /// Controls log verbosity and output format. See [`Logging`] for configuration options.
+    /// Controls log verbosity and output format. See [`LoggingConfig`] for configuration options.
     pub logging: LoggingConfig,
 
     /// Sentry error tracking configuration.

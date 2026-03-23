@@ -2,7 +2,7 @@
 //!
 //! Call [`init_sentry`] during server startup before creating the Tokio runtime so it can
 //! instrument async tasks from the start. Tracing subscriber initialization (including the
-//! Sentry tracing layer) is handled by [`objectstore_log::init_with_sentry`].
+//! Sentry tracing layer) is handled by [`objectstore_log::init`].
 
 use secrecy::ExposeSecret;
 

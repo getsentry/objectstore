@@ -31,6 +31,10 @@ fn list_crates() -> Vec<String> {
 }
 
 fn main() {
+    // Re-run when workspace membership changes. Cargo.lock is updated whenever a crate is added
+    // or removed from the workspace, making it a reliable trigger without watching recursively.
+    println!("cargo:rerun-if-changed=../Cargo.lock");
+
     let crates = list_crates();
 
     let out_dir = env::var("OUT_DIR").unwrap();
