@@ -8,8 +8,6 @@
 //! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
 //! and can be configured via [`StorageConfig::Tiered`].
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -57,9 +55,8 @@ pub enum StorageConfig {
 pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::Tiered(c) => {
-            let hv: Arc<dyn common::HighVolumeBackend> =
-                Arc::from(hv_from_config(c.high_volume).await?);
-            let lt: Arc<dyn common::Backend> = Arc::from(from_leaf_config(*c.long_term).await?);
+            let hv = hv_from_config(c.high_volume).await?;
+            let lt = from_leaf_config(*c.long_term).await?;
             Box::new(tiered::TieredStorage::new(hv, lt))
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard

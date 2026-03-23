@@ -184,10 +184,17 @@ impl BackgroundCounter {
 #[derive(Debug, PartialEq, PartialOrd)]
 enum OperationPhase {
     Registered = 0,
-    LtWritten = 1,
-    CasLost = 2,
-    CasWon = 3,
+    Written = 1,
+    Lost = 2,
+    Updated = 3,
     Completed = 4,
+}
+
+impl OperationPhase {
+    /// Returns the phase corresponding to the outcome of a compare-and-write operation.
+    fn compare_and_write(succeeded: bool) -> Self {
+        if succeeded { Self::Updated } else { Self::Lost }
+    }
 }
 
 /// Describes the LT blobs involved in a multi-step storage operation.
@@ -236,7 +243,7 @@ impl OperationState {
         if self.phase == OperationPhase::Completed {
             return None;
         }
-        if self.phase < OperationPhase::CasWon {
+        if self.phase < OperationPhase::Updated {
             return self.operation.new_target.clone();
         }
         self.operation.old_target.clone()
@@ -412,19 +419,19 @@ pub struct TieredStorageConfig {
 #[derive(Debug)]
 pub struct TieredStorage {
     /// The backend for small objects (≤ 1 MiB).
-    hv: Arc<dyn HighVolumeBackend>,
+    high_volume: Arc<dyn HighVolumeBackend>,
     /// The backend for large objects (> 1 MiB).
-    lt: Arc<dyn Backend>,
+    long_term: Arc<dyn Backend>,
     /// Tracks outstanding background cleanup operations for graceful shutdown.
     counter: BackgroundCounter,
 }
 
 impl TieredStorage {
     /// Creates a new `TieredStorage` with the given backends.
-    pub fn new(high_volume: Arc<dyn HighVolumeBackend>, long_term: Arc<dyn Backend>) -> Self {
+    pub fn new(high_volume: Box<dyn HighVolumeBackend>, long_term: Box<dyn Backend>) -> Self {
         Self {
-            hv: high_volume,
-            lt: long_term,
+            high_volume: Arc::from(high_volume),
+            long_term: Arc::from(long_term),
             counter: BackgroundCounter::new(),
         }
     }
@@ -434,7 +441,7 @@ impl TieredStorage {
         OperationGuard {
             state: Some(OperationState::new(
                 operation,
-                Arc::clone(&self.lt),
+                Arc::clone(&self.long_term),
                 self.counter.clone(),
             )),
         }
@@ -443,8 +450,8 @@ impl TieredStorage {
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
-            BackendChoice::HighVolume => self.hv.name(),
-            BackendChoice::LongTerm => self.lt.name(),
+            BackendChoice::HighVolume => self.high_volume.name(),
+            BackendChoice::LongTerm => self.long_term.name(),
         }
     }
 
@@ -459,7 +466,7 @@ impl TieredStorage {
         payload: Bytes,
     ) -> Result<()> {
         let tombstone_opt = self
-            .hv
+            .high_volume
             .put_non_tombstone(id, metadata, payload.clone())
             .await?;
 
@@ -475,15 +482,15 @@ impl TieredStorage {
         });
 
         let write = TieredWrite::Object(metadata.clone(), payload);
-        let won = self.hv.compare_and_write(id, Some(&target), write).await?;
-        guard.advance(if won {
-            OperationPhase::CasWon
-        } else {
-            OperationPhase::CasLost
-        });
+        let written = self
+            .high_volume
+            .compare_and_write(id, Some(&target), write)
+            .await?;
+
+        // Update guard and let it schedule cleanup in the background.
+        guard.advance(OperationPhase::compare_and_write(written));
 
         Ok(())
-        // guard dropped → background cleanup of old LT blob if CasWon
     }
 
     /// Puts an object into the long-term backend with a redirect tombstone in front.
@@ -497,48 +504,36 @@ impl TieredStorage {
         stream: ClientStream,
     ) -> Result<()> {
         // 1. Read current HV revision to establish the write precondition
-        let current = match self.hv.get_tiered_metadata(id).await? {
+        let current = match self.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
 
         // 2. Write payload to long-term at a unique revision key.
-        let new_target = new_long_term_revision(id);
+        let new = new_long_term_revision(id);
         let tombstone = Tombstone {
-            target: new_target.clone(),
+            target: new.clone(),
             expiration_policy: metadata.expiration_policy,
         };
 
         let mut guard = self.operation_guard(Operation {
-            new_target: Some(new_target.clone()),
+            new_target: Some(new.clone()),
             old_target: current.clone(),
         });
 
-        self.lt.put_object(&new_target, metadata, stream).await?;
-        guard.advance(OperationPhase::LtWritten);
+        self.long_term.put_object(&new, metadata, stream).await?;
+        guard.advance(OperationPhase::Written);
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let written = self
-            .hv
+            .high_volume
             .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
-            .await;
+            .await?;
 
-        match written {
-            Ok(won) => {
-                guard.advance(if won {
-                    OperationPhase::CasWon
-                } else {
-                    OperationPhase::CasLost
-                });
-            }
-            Err(e) => {
-                // CAS error — guard remains at LtWritten and cleans up new_target in background.
-                return Err(e);
-            }
-        }
+        // Update guard and let it schedule cleanup in the background.
+        guard.advance(OperationPhase::compare_and_write(written));
 
         Ok(())
-        // guard dropped → background cleanup
     }
 }
 
@@ -597,14 +592,14 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.hv.get_tiered_object(id).await?;
+        let hv_result = self.high_volume.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
             TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
             TieredGet::Tombstone(tombstone) => (
-                self.lt.get_object(&tombstone.target).await?,
+                self.long_term.get_object(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -636,12 +631,12 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let hv_result = self.hv.get_tiered_metadata(id).await?;
+        let hv_result = self.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
-                self.lt.get_metadata(&tombstone.target).await?,
+                self.long_term.get_metadata(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -661,7 +656,7 @@ impl Backend for TieredStorage {
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        if let Some(tombstone) = self.hv.delete_non_tombstone(id).await? {
+        if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
             let mut guard = self.operation_guard(Operation {
@@ -671,16 +666,12 @@ impl Backend for TieredStorage {
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
             let deleted = self
-                .hv
+                .high_volume
                 .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
                 .await?;
-            guard.advance(if deleted {
-                OperationPhase::CasWon
-            } else {
-                OperationPhase::CasLost
-            });
 
-            // guard dropped → background cleanup of LT blob if CasWon
+            // Update guard and let it schedule cleanup in the background.
+            guard.advance(OperationPhase::compare_and_write(deleted));
         }
 
         objectstore_metrics::record!(
@@ -695,8 +686,8 @@ impl Backend for TieredStorage {
 
     async fn join(&self) {
         tokio::join!(
-            self.hv.join(),
-            self.lt.join(),
+            self.high_volume.join(),
+            self.long_term.join(),
             self.counter.join(BACKGROUND_JOIN_TIMEOUT),
         );
     }
@@ -770,7 +761,7 @@ mod tests {
     fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt.clone()));
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
         (storage, hv, lt)
     }
 
@@ -1041,7 +1032,7 @@ mod tests {
     async fn delete_succeeds_when_gcs_cleanup_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
-        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt));
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
 
         let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
@@ -1138,7 +1129,7 @@ mod tests {
     async fn put_large_cas_conflict_cleans_up_new_blob() {
         let hv = ConflictingCasBackend(InMemoryBackend::new("hv"));
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt.clone()));
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
         let id = make_id("cas-conflict-large");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -1178,7 +1169,7 @@ mod tests {
 
         let lt = InMemoryBackend::new("lt");
         let hv = ConflictingCasBackend(inner);
-        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt));
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt));
 
         // Writing a small object over a tombstone should succeed even when CAS
         // conflicts — the other writer's write is accepted.
@@ -1261,7 +1252,7 @@ mod tests {
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
         let hv = FailingCasBackend(InMemoryBackend::new("hv"));
-        let storage = TieredStorage::new(Arc::new(hv), Arc::new(lt.clone()));
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
         let id = make_id("orphan-test");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -1315,7 +1306,7 @@ mod tests {
     async fn tombstone_target_is_used_for_reads_and_deletes() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Arc::new(hv.clone()), Arc::new(lt.clone()));
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
 
         let hv_id = make_id("hv-key");
         let lt_id = make_id("lt-key");
@@ -1414,7 +1405,7 @@ mod tests {
     #[test]
     fn cleanup_target_write_large_lt_written_returns_new() {
         let new = make_id("new");
-        let state = make_operation_state(Some(new.clone()), None, OperationPhase::LtWritten);
+        let state = make_operation_state(Some(new.clone()), None, OperationPhase::Written);
         assert_eq!(state.cleanup_target(), Some(new));
     }
 
@@ -1424,7 +1415,7 @@ mod tests {
         let state = make_operation_state(
             Some(new.clone()),
             Some(make_id("old")),
-            OperationPhase::CasLost,
+            OperationPhase::Lost,
         );
         assert_eq!(state.cleanup_target(), Some(new));
     }
@@ -1435,7 +1426,7 @@ mod tests {
         let state = make_operation_state(
             Some(make_id("new")),
             Some(old.clone()),
-            OperationPhase::CasWon,
+            OperationPhase::Updated,
         );
         assert_eq!(state.cleanup_target(), Some(old));
     }
@@ -1443,35 +1434,35 @@ mod tests {
     #[test]
     fn cleanup_target_fresh_write_cas_won_returns_none() {
         // WriteLarge (fresh, no old blob) + CasWon → no cleanup needed.
-        let state = make_operation_state(Some(make_id("new")), None, OperationPhase::CasWon);
+        let state = make_operation_state(Some(make_id("new")), None, OperationPhase::Updated);
         assert_eq!(state.cleanup_target(), None);
     }
 
     #[test]
     fn cleanup_target_inline_swap_cas_lost_returns_none() {
         // InlineSwap + CasLost → old blob still referenced by winner, no cleanup.
-        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::CasLost);
+        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::Lost);
         assert_eq!(state.cleanup_target(), None);
     }
 
     #[test]
     fn cleanup_target_inline_swap_cas_won_returns_old() {
         let old = make_id("old");
-        let state = make_operation_state(None, Some(old.clone()), OperationPhase::CasWon);
+        let state = make_operation_state(None, Some(old.clone()), OperationPhase::Updated);
         assert_eq!(state.cleanup_target(), Some(old));
     }
 
     #[test]
     fn cleanup_target_delete_large_cas_won_returns_old() {
         let old = make_id("old");
-        let state = make_operation_state(None, Some(old.clone()), OperationPhase::CasWon);
+        let state = make_operation_state(None, Some(old.clone()), OperationPhase::Updated);
         assert_eq!(state.cleanup_target(), Some(old));
     }
 
     #[test]
     fn cleanup_target_delete_large_cas_lost_returns_none() {
         // DeleteLarge + CasLost → winner handles old blob, nothing to do.
-        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::CasLost);
+        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::Lost);
         assert_eq!(state.cleanup_target(), None);
     }
 
@@ -1530,7 +1521,7 @@ mod tests {
 
         // Advance to CasLost (no cleanup target for this combination).
         let mut guard = guard;
-        guard.advance(OperationPhase::CasLost);
+        guard.advance(OperationPhase::Lost);
         drop(guard);
 
         // Counter must be back to zero immediately (no background task spawned).
