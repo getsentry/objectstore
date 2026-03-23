@@ -32,7 +32,7 @@
 //!
 //! All mutating operations follow a common pattern of reading the current
 //! revision, performing the upload, atomically swapping the revision (commit
-//! point), and finally cleaning up old objects:
+//! point), and cleaning up the now-unreferenced LT blob in the background:
 //!
 //! ### Large-Object Write (> 1 MiB)
 //!
@@ -41,9 +41,11 @@
 //! 2. **Write payload to LT** at a unique revision key.
 //! 3. **Compare-and-swap in HV**: write a tombstone pointing to the new
 //!    revision, only if the current revision still matches step 1.
-//!    - **OK** — delete the old LT blob, if any (best-effort).
-//!    - **Conflict** — another writer won the race; delete our new LT blob.
-//!    - **Error** — delete our new LT blob, then propagate the error.
+//!    - **OK** — schedule background deletion of the old LT blob, if any.
+//!    - **Conflict** — another writer won the race; schedule background deletion
+//!      of our new LT blob.
+//!    - **Error** — reload the tombstone and delete the unreferenced blob or
+//!      blobs.
 //!
 //! ### Small-Object Write (≤ 1 MiB)
 //!
@@ -53,9 +55,11 @@
 //!      continue:
 //! 2. **Compare-and-swap in HV**: replace the tombstone with inline data, only
 //!    if the tombstone's revision still matches.
-//!    - **OK** — delete the old LT blob (best-effort).
+//!    - **OK** — schedule background deletion of the old LT blob.
 //!    - **Conflict** — another writer won the race; they will clean up the
 //!      LT blob and we have no new LT blob to clean up.
+//!    - **Error** — reload the tombstone and delete the unreferenced blob if
+//!      the write went through.
 //!
 //! ### Delete
 //!
@@ -64,8 +68,10 @@
 //!    - **Tombstone present** — a large object is stored here; continue:
 //! 2. **Compare-and-swap in HV**: remove the tombstone, only if its revision
 //!    still matches.
-//!    - **OK** — delete the LT blob (best-effort).
+//!    - **OK** — schedule background deletion of the LT blob.
 //!    - **Conflict** — another writer won the race; they will clean up.
+//!    - **Error** — reload the tombstone and delete the unreferenced blob if
+//!      the write went through.
 //!
 //! Tombstone removal is the commit point for deletes. If the subsequent LT
 //! cleanup fails, an orphan blob remains but the object is already unreachable
@@ -159,7 +165,7 @@ struct Change {
     old: Option<ObjectId>,
 }
 
-/// Internal state for an [`ChangeGuard`].
+/// Internal state for a [`ChangeGuard`].
 ///
 /// Logs an error if dropped in any phase other than `Completed`.
 #[derive(Debug)]
@@ -374,7 +380,10 @@ pub struct TieredStorageConfig {
 /// [`HighVolumeBackend::compare_and_write`]), not distributed locks. Each
 /// mutating operation reads the current high-volume revision, performs its
 /// work, and then atomically swaps the high-volume entry only if the revision
-/// is still current — rolling back on conflict.
+/// is still current — rolling back on conflict. Cleanup of unreferenced LT
+/// blobs runs in background tasks so the caller returns as soon as the commit
+/// point is reached. Call [`Backend::join`] during shutdown to wait for
+/// outstanding cleanup.
 ///
 /// See the [module-level documentation](self) for per-operation diagrams.
 ///

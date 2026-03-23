@@ -48,8 +48,10 @@ footprint minimal.
 
 Each storage operation runs to completion even if the caller is cancelled (e.g.,
 due to a client disconnect). This ensures that multi-step operations such as
-writing redirect tombstones are never left partially applied. Operations are also
-panic-isolated — a failure in one request does not bring down the service.
+writing redirect tombstones are never left partially applied. Post-commit
+cleanup of unreferenced long-term blobs runs in background tasks so it does not
+block the caller. Operations are also panic-isolated — a failure in one request
+does not bring down the service.
 
 # Two-Tier Backend System
 
@@ -96,7 +98,10 @@ high-volume backend must implement
 [`HighVolumeBackend`](backend::common::HighVolumeBackend), which provides
 compare-and-swap operations that `TieredStorage` uses to atomically commit
 cross-tier state changes — rolling back on conflict so that concurrent writers
-never corrupt each other's data.
+never corrupt each other's data. After the commit point, cleanup of the
+now-unreferenced LT blob is performed in the background so the caller is not
+blocked by cross-backend I/O. [`Backend::join`](backend::common::Backend::join)
+waits for outstanding cleanup during graceful shutdown.
 
 See the [`backend::tiered`] module documentation for the per-operation
 sequences.
