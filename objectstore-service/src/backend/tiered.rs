@@ -183,11 +183,11 @@ impl BackgroundCounter {
 /// Phases are ordered — the ordering determines which LT blob to clean up on drop.
 #[derive(Debug, PartialEq, PartialOrd)]
 enum OperationPhase {
-    Registered = 0,
-    Written = 1,
-    Lost = 2,
-    Updated = 3,
-    Completed = 4,
+    Registered,
+    Written,
+    Lost,
+    Updated,
+    Completed,
 }
 
 impl OperationPhase {
