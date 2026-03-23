@@ -53,8 +53,8 @@ macro_rules! warn_exception {
 
 /// Dispatches a log event at a level determined at runtime.
 ///
-/// The first argument is a [`Level`] expression; all remaining arguments are forwarded to the
-/// appropriate level macro (`trace!`, `debug!`, `info!`, `warn!`, or `error!`).
+/// The first argument is a [`tracing::Level`] expression; all remaining arguments are forwarded to
+/// the appropriate level macro (`trace!`, `debug!`, `info!`, `warn!`, or `error!`).
 ///
 /// # Examples
 ///

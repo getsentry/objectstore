@@ -17,7 +17,7 @@
 //! ```rust
 //! objectstore_log::info!("server starting");
 //! objectstore_log::warn!(status = "degraded", "storage unavailable");
-//! objectstore_log::debug!(?config, "loaded configuration");
+//! objectstore_log::debug!(value = 42, "loaded configuration");
 //! ```
 //!
 //! ## `exception!` — log an error at ERROR level
