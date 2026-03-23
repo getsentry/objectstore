@@ -218,6 +218,17 @@ impl TieredStorage {
         }
     }
 
+    /// Deletes an object from the long-term backend, logging an error on failure.
+    async fn cleanup_lt(&self, target: &ObjectId) {
+        if let Err(e) = self.long_term.delete_object(target).await {
+            tracing::error!(
+                error = &e as &dyn std::error::Error,
+                target = %target.as_storage_path(),
+                "Long-term object cleanup failed"
+            );
+        }
+    }
+
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
@@ -255,7 +266,7 @@ impl TieredStorage {
 
         // TODO: Schedule cleanups into background to ensure eventual cleanup
         if written {
-            let _ = self.long_term.delete_object(&target).await;
+            self.cleanup_lt(&target).await;
         }
 
         // Else: Another writer won the race. This is not an error -
@@ -299,17 +310,17 @@ impl TieredStorage {
             Ok(true) => {
                 // Tombstone committed. Clean up old GCS blob if overwriting.
                 if let Some(current) = current {
-                    let _ = self.long_term.delete_object(&current).await;
+                    self.cleanup_lt(&current).await;
                 }
             }
             Ok(false) => {
                 // Another writer won the race. Clean up our GCS blob.
                 // This is not an error - see "Last-Writer-Wins" in module docs.
-                let _ = self.long_term.delete_object(&new).await;
+                self.cleanup_lt(&new).await;
             }
             Err(e) => {
                 // CAS error. Clean up our GCS blob before propagating.
-                let _ = self.long_term.delete_object(&new).await;
+                self.cleanup_lt(&new).await;
                 return Err(e);
             }
         }
@@ -447,7 +458,7 @@ impl Backend for TieredStorage {
 
             // TODO: Schedule cleanups into background to ensure eventual cleanup
             if deleted {
-                let _ = self.long_term.delete_object(&tombstone.target).await;
+                self.cleanup_lt(&tombstone.target).await;
             }
 
             // Else: Another writer won the race. This is not an error -
