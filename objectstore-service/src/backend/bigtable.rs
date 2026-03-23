@@ -232,7 +232,7 @@ fn tombstone_filter() -> v2::RowFilter {
     }
 }
 
-/// Returns a [`CasPredicate`] that matches any tombstone row.
+/// Returns a [`MutatePredicate`] that matches any tombstone row.
 ///
 /// Mutations run only when no tombstone is present (`predicate_matched == false`).
 /// Used by [`BigTableBackend::put_non_tombstone`], [`BigTableBackend::delete_non_tombstone`],
@@ -307,7 +307,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     }
 }
 
-/// Returns a [`CasPredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
+/// Returns a [`MutatePredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
 ///
 /// Mutations run only when the predicate matches (`predicate_matched == true`):
 /// equivalent to `t == old || t == new`. Built as an Interleave of two
@@ -326,7 +326,7 @@ fn update_predicate(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> Mutate
     })
 }
 
-/// Returns a [`CasPredicate`] that matches rows where no conflicting tombstone exists.
+/// Returns a [`MutatePredicate`] that matches rows where no conflicting tombstone exists.
 ///
 /// Mutations run only when the row is conflict-free (`predicate_matched == false`):
 /// no tombstone is present, or the tombstone's redirect already points to `target`.
