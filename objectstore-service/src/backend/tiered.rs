@@ -118,7 +118,7 @@ const BACKGROUND_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Counts outstanding background cleanup operations for graceful shutdown.
 ///
-/// The counter is incremented when an [`OperationState`] is created and
+/// The counter is incremented when an [`ChangeState`] is created and
 /// decremented when it is dropped. [`BackgroundCounter::join`] waits until the
 /// counter reaches zero or the timeout elapses.
 #[derive(Debug, Clone)]
@@ -182,15 +182,20 @@ impl BackgroundCounter {
 ///
 /// Phases are ordered — the ordering determines which LT blob to clean up on drop.
 #[derive(Debug, PartialEq, PartialOrd)]
-enum OperationPhase {
+enum ChangePhase {
+    // The change is registered and LT upload has started.
     Registered,
+    // LT upload has succeeded and the tombstone is being updated.
     Written,
+    // The tombstone update failed due to a conflict.
     Lost,
+    // The tombstone update succeeded.
     Updated,
+    // Cleanup complete.
     Completed,
 }
 
-impl OperationPhase {
+impl ChangePhase {
     /// Returns the phase corresponding to the outcome of a compare-and-write operation.
     fn compare_and_write(succeeded: bool) -> Self {
         if succeeded { Self::Updated } else { Self::Lost }
@@ -202,68 +207,86 @@ impl OperationPhase {
 /// Every mutating flow maps to: "I may have written a `new_target` LT blob and I
 /// may be replacing an `old_target` LT blob."
 #[derive(Debug)]
-struct Operation {
+struct Change {
     /// The new LT blob written by this operation.
     ///
-    /// Needs cleanup on failure (phase < [`OperationPhase::CasWon`]).
-    new_target: Option<ObjectId>,
+    /// Needs cleanup on failure (phase < [`ChangePhase::Updated`]).
+    new: Option<ObjectId>,
     /// The old LT blob being replaced.
     ///
-    /// Needs cleanup on success (phase >= [`OperationPhase::CasWon`]).
-    old_target: Option<ObjectId>,
+    /// Needs cleanup on success (phase >= [`ChangePhase::Updated`]).
+    old: Option<ObjectId>,
 }
 
-/// Internal state for an [`OperationGuard`].
+/// Internal state for an [`ChangeGuard`].
 ///
 /// Increments the counter on construction and decrements it on drop. Logs an
-/// error if dropped in any phase other than [`OperationPhase::Completed`].
+/// error if dropped in any phase other than [`ChangePhase::Completed`].
 #[derive(Debug)]
-struct OperationState {
-    operation: Operation,
-    phase: OperationPhase,
+struct ChangeState {
+    change: Change,
+    phase: ChangePhase,
     lt: Arc<dyn Backend>,
     counter: BackgroundCounter,
 }
 
-impl OperationState {
-    fn new(operation: Operation, lt: Arc<dyn Backend>, counter: BackgroundCounter) -> Self {
+impl ChangeState {
+    fn new(change: Change, lt: Arc<dyn Backend>, counter: BackgroundCounter) -> Self {
         counter.increment();
         Self {
-            operation,
-            phase: OperationPhase::Registered,
+            change,
+            phase: ChangePhase::Registered,
             lt,
             counter,
         }
     }
 
-    /// Returns the LT blob that should be deleted based on the current phase.
-    ///
-    /// Returns `None` if the phase is `Completed` or if no cleanup is needed.
-    fn cleanup_target(&self) -> Option<ObjectId> {
-        if self.phase == OperationPhase::Completed {
-            return None;
-        }
-        if self.phase < OperationPhase::Updated {
-            return self.operation.new_target.clone();
-        }
-        self.operation.old_target.clone()
+    /// Marks the operation as completed, preventing any cleanup on drop.
+    fn mark_completed(mut self) {
+        self.phase = ChangePhase::Completed;
     }
 
-    /// Marks the operation as completed, suppressing the incomplete-cleanup error on drop.
-    fn complete(mut self) {
-        self.phase = OperationPhase::Completed;
+    /// Run asynchronous cleanup to complete the operation, if necessary.
+    fn complete(self) {
+        let target_opt = match self.phase {
+            ChangePhase::Registered => self.change.new.clone(),
+            ChangePhase::Written => self.change.new.clone(),
+            ChangePhase::Lost => self.change.new.clone(),
+            ChangePhase::Updated => self.change.old.clone(),
+            ChangePhase::Completed => None,
+        };
+
+        let Some(target) = target_opt else {
+            return self.mark_completed();
+        };
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return; // Error logged in Drop
+        };
+
+        handle.spawn(async move {
+            // TODO: Exponential backoff and backpressure.
+            match self.lt.delete_object(&target).await {
+                Ok(()) => self.mark_completed(),
+                Err(ref e) => objectstore_log::error!(!!e,
+                    target = %target.as_storage_path(),
+                    "Background LT cleanup failed"
+                ),
+            }
+        });
     }
 }
 
-impl Drop for OperationState {
+impl Drop for ChangeState {
     fn drop(&mut self) {
-        if self.phase != OperationPhase::Completed {
+        if self.phase != ChangePhase::Completed {
             objectstore_log::error!(
-                operation = ?self.operation,
+                change = ?self.change,
                 phase = ?self.phase,
                 "Operation dropped without completing cleanup"
             );
         }
+
         self.counter.decrement();
     }
 }
@@ -273,57 +296,24 @@ impl Drop for OperationState {
 /// When dropped in a non-`Completed` phase, determines the LT blob to clean up
 /// and spawns a background task to delete it. If no tokio runtime is available
 /// (e.g., during shutdown), the drop logs an error instead of panicking.
-struct OperationGuard {
-    state: Option<OperationState>,
+struct ChangeGuard {
+    state: Option<ChangeState>,
 }
 
-impl OperationGuard {
+impl ChangeGuard {
     /// Advances the operation to the given phase. Zero-cost, no I/O.
-    fn advance(&mut self, phase: OperationPhase) {
+    fn advance(&mut self, phase: ChangePhase) {
         if let Some(ref mut state) = self.state {
             state.phase = phase;
         }
     }
 }
 
-impl Drop for OperationGuard {
+impl Drop for ChangeGuard {
     fn drop(&mut self) {
-        let Some(mut state) = self.state.take() else {
-            return;
+        if let Some(state) = self.state.take() {
+            state.complete();
         };
-
-        if state.phase == OperationPhase::Completed {
-            return;
-        }
-
-        let target = state.cleanup_target();
-
-        let Some(target) = target else {
-            // No LT blob to clean up for this (flow, phase) combination.
-            state.phase = OperationPhase::Completed;
-            return;
-        };
-
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            // No runtime available (e.g., dropped during shutdown).
-            // state drops without Completed → logs error in OperationState::drop.
-            return;
-        };
-
-        handle.spawn(async move {
-            match state.lt.delete_object(&target).await {
-                Ok(()) => state.complete(),
-                Err(e) => {
-                    objectstore_log::error!(
-                        !!&e,
-                        target = %target.as_storage_path(),
-                        "Background LT cleanup failed"
-                    );
-                    // state drops without Completed → logs error in OperationState::drop
-                }
-            }
-            // state drops here → decrements counter
-        });
     }
 }
 
@@ -436,11 +426,11 @@ impl TieredStorage {
         }
     }
 
-    /// Creates an [`OperationGuard`] for the given operation.
-    fn operation_guard(&self, operation: Operation) -> OperationGuard {
-        OperationGuard {
-            state: Some(OperationState::new(
-                operation,
+    /// Creates an [`ChangeGuard`] for the given operation.
+    fn change_guard(&self, change: Change) -> ChangeGuard {
+        ChangeGuard {
+            state: Some(ChangeState::new(
+                change,
                 Arc::clone(&self.long_term),
                 self.counter.clone(),
             )),
@@ -476,9 +466,9 @@ impl TieredStorage {
         };
 
         // A tombstone exists — swap it for inline data.
-        let mut guard = self.operation_guard(Operation {
-            new_target: None,
-            old_target: Some(target.clone()),
+        let mut guard = self.change_guard(Change {
+            new: None,
+            old: Some(target.clone()),
         });
 
         let write = TieredWrite::Object(metadata.clone(), payload);
@@ -488,7 +478,7 @@ impl TieredStorage {
             .await?;
 
         // Update guard and let it schedule cleanup in the background.
-        guard.advance(OperationPhase::compare_and_write(written));
+        guard.advance(ChangePhase::compare_and_write(written));
 
         Ok(())
     }
@@ -516,13 +506,13 @@ impl TieredStorage {
             expiration_policy: metadata.expiration_policy,
         };
 
-        let mut guard = self.operation_guard(Operation {
-            new_target: Some(new.clone()),
-            old_target: current.clone(),
+        let mut guard = self.change_guard(Change {
+            new: Some(new.clone()),
+            old: current.clone(),
         });
 
         self.long_term.put_object(&new, metadata, stream).await?;
-        guard.advance(OperationPhase::Written);
+        guard.advance(ChangePhase::Written);
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let written = self
@@ -531,7 +521,7 @@ impl TieredStorage {
             .await?;
 
         // Update guard and let it schedule cleanup in the background.
-        guard.advance(OperationPhase::compare_and_write(written));
+        guard.advance(ChangePhase::compare_and_write(written));
 
         Ok(())
     }
@@ -659,9 +649,9 @@ impl Backend for TieredStorage {
         if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
-            let mut guard = self.operation_guard(Operation {
-                new_target: None,
-                old_target: Some(tombstone.target.clone()),
+            let mut guard = self.change_guard(Change {
+                new: None,
+                old: Some(tombstone.target.clone()),
             });
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
@@ -671,7 +661,7 @@ impl Backend for TieredStorage {
                 .await?;
 
             // Update guard and let it schedule cleanup in the background.
-            guard.advance(OperationPhase::compare_and_write(deleted));
+            guard.advance(ChangePhase::compare_and_write(deleted));
         }
 
         objectstore_metrics::record!(
@@ -1374,109 +1364,7 @@ mod tests {
         }
     }
 
-    // --- OperationState::cleanup_target unit tests ---
-
-    fn make_operation_state(
-        new_target: Option<ObjectId>,
-        old_target: Option<ObjectId>,
-        phase: OperationPhase,
-    ) -> OperationState {
-        let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = BackgroundCounter::new();
-        let mut state = OperationState::new(
-            Operation {
-                new_target,
-                old_target,
-            },
-            lt,
-            tracker,
-        );
-        state.phase = phase;
-        state
-    }
-
-    #[test]
-    fn cleanup_target_write_large_registered_returns_new() {
-        let new = make_id("new");
-        let state = make_operation_state(Some(new.clone()), None, OperationPhase::Registered);
-        assert_eq!(state.cleanup_target(), Some(new));
-    }
-
-    #[test]
-    fn cleanup_target_write_large_lt_written_returns_new() {
-        let new = make_id("new");
-        let state = make_operation_state(Some(new.clone()), None, OperationPhase::Written);
-        assert_eq!(state.cleanup_target(), Some(new));
-    }
-
-    #[test]
-    fn cleanup_target_write_large_cas_lost_returns_new() {
-        let new = make_id("new");
-        let state = make_operation_state(
-            Some(new.clone()),
-            Some(make_id("old")),
-            OperationPhase::Lost,
-        );
-        assert_eq!(state.cleanup_target(), Some(new));
-    }
-
-    #[test]
-    fn cleanup_target_write_large_cas_won_returns_old() {
-        let old = make_id("old");
-        let state = make_operation_state(
-            Some(make_id("new")),
-            Some(old.clone()),
-            OperationPhase::Updated,
-        );
-        assert_eq!(state.cleanup_target(), Some(old));
-    }
-
-    #[test]
-    fn cleanup_target_fresh_write_cas_won_returns_none() {
-        // WriteLarge (fresh, no old blob) + CasWon → no cleanup needed.
-        let state = make_operation_state(Some(make_id("new")), None, OperationPhase::Updated);
-        assert_eq!(state.cleanup_target(), None);
-    }
-
-    #[test]
-    fn cleanup_target_inline_swap_cas_lost_returns_none() {
-        // InlineSwap + CasLost → old blob still referenced by winner, no cleanup.
-        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::Lost);
-        assert_eq!(state.cleanup_target(), None);
-    }
-
-    #[test]
-    fn cleanup_target_inline_swap_cas_won_returns_old() {
-        let old = make_id("old");
-        let state = make_operation_state(None, Some(old.clone()), OperationPhase::Updated);
-        assert_eq!(state.cleanup_target(), Some(old));
-    }
-
-    #[test]
-    fn cleanup_target_delete_large_cas_won_returns_old() {
-        let old = make_id("old");
-        let state = make_operation_state(None, Some(old.clone()), OperationPhase::Updated);
-        assert_eq!(state.cleanup_target(), Some(old));
-    }
-
-    #[test]
-    fn cleanup_target_delete_large_cas_lost_returns_none() {
-        // DeleteLarge + CasLost → winner handles old blob, nothing to do.
-        let state = make_operation_state(None, Some(make_id("old")), OperationPhase::Lost);
-        assert_eq!(state.cleanup_target(), None);
-    }
-
-    #[test]
-    fn cleanup_target_completed_returns_none() {
-        let state = make_operation_state(
-            Some(make_id("new")),
-            Some(make_id("old")),
-            OperationPhase::Completed,
-        );
-        assert_eq!(state.cleanup_target(), None);
-    }
-
-    // --- OperationGuard drop safety tests ---
+    // --- ChangeGuard drop safety tests ---
 
     /// Dropping a guard outside any tokio runtime must not panic.
     #[test]
@@ -1486,15 +1374,13 @@ mod tests {
 
         // Construct a guard that would schedule cleanup (new_target is Some).
         // No tokio runtime is active in this plain #[test].
-        let guard = OperationGuard {
-            state: Some(OperationState::new(
-                Operation {
-                    new_target: Some(make_id("cleanup-target")),
-                    old_target: None,
-                },
-                lt,
-                tracker,
-            )),
+        let change = Change {
+            new: Some(make_id("cleanup-target")),
+            old: None,
+        };
+
+        let guard = ChangeGuard {
+            state: Some(ChangeState::new(change, lt, tracker)),
         };
 
         drop(guard); // Must not panic.
@@ -1508,20 +1394,18 @@ mod tests {
         let tracker = BackgroundCounter::new();
 
         // InlineSwap + CasLost → no cleanup needed.
-        let guard = OperationGuard {
-            state: Some(OperationState::new(
-                Operation {
-                    new_target: None,
-                    old_target: Some(make_id("old")),
-                },
-                lt,
-                tracker.clone(),
-            )),
+        let change = Change {
+            new: None,
+            old: Some(make_id("old")),
         };
 
-        // Advance to CasLost (no cleanup target for this combination).
+        let guard = ChangeGuard {
+            state: Some(ChangeState::new(change, lt, tracker.clone())),
+        };
+
+        // Advance to Lost (no cleanup target for this combination).
         let mut guard = guard;
-        guard.advance(OperationPhase::Lost);
+        guard.advance(ChangePhase::Lost);
         drop(guard);
 
         // Counter must be back to zero immediately (no background task spawned).
