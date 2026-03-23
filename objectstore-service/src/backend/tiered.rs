@@ -208,24 +208,24 @@ struct Operation {
 
 /// Internal state for an [`OperationGuard`].
 ///
-/// Increments the tracker on construction and decrements it on drop. Logs an
+/// Increments the counter on construction and decrements it on drop. Logs an
 /// error if dropped in any phase other than [`OperationPhase::Completed`].
 #[derive(Debug)]
 struct OperationState {
     operation: Operation,
     phase: OperationPhase,
     lt: Arc<dyn Backend>,
-    tracker: BackgroundCounter,
+    counter: BackgroundCounter,
 }
 
 impl OperationState {
-    fn new(operation: Operation, lt: Arc<dyn Backend>, tracker: BackgroundCounter) -> Self {
-        tracker.increment();
+    fn new(operation: Operation, lt: Arc<dyn Backend>, counter: BackgroundCounter) -> Self {
+        counter.increment();
         Self {
             operation,
             phase: OperationPhase::Registered,
             lt,
-            tracker,
+            counter,
         }
     }
 
@@ -257,7 +257,7 @@ impl Drop for OperationState {
                 "Operation dropped without completing cleanup"
             );
         }
-        self.tracker.decrement();
+        self.counter.decrement();
     }
 }
 
@@ -315,7 +315,7 @@ impl Drop for OperationGuard {
                     // state drops without Completed → logs error in OperationState::drop
                 }
             }
-            // state drops here → decrements tracker
+            // state drops here → decrements counter
         });
     }
 }
@@ -496,7 +496,7 @@ impl TieredStorage {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<()> {
-        // 1. Read current HV revision to establish the write precondition.
+        // 1. Read current HV revision to establish the write precondition
         let current = match self.hv.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
