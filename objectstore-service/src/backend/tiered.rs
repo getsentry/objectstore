@@ -81,6 +81,15 @@
 //! CAS conflicts are therefore **not errors**: the losing writer's data is
 //! cleaned up and `Ok` is returned, because the result is indistinguishable
 //! from having succeeded a moment earlier and then been overwritten.
+//!
+//! ### Idempotency
+//!
+//! `compare_and_write` is idempotent: if the row is already in the target state, it
+//! returns `true` without re-applying the mutation. This is critical for retry
+//! safety. If the server commits a write but the response is lost, a retry sees the
+//! already-mutated state and still returns `true` — so callers do not mistakenly
+//! treat a successful commit as a lost race and clean up data that was actually
+//! persisted.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
