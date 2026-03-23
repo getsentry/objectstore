@@ -23,12 +23,12 @@ impl Killswitches {
     ///
     /// On match, emits a `server.request.killswitched` metric counter and a `tracing::warn!` log.
     pub fn matches(&self, context: &ObjectContext, service: Option<&str>) -> bool {
-        let Some(switch) = self.find(context, service) else {
+        let Some(killswitch) = self.find(context, service) else {
             return false;
         };
 
         objectstore_metrics::count!("server.request.killswitched");
-        tracing::warn!(killswitch = ?switch, "Request rejected: killswitch active");
+        objectstore_log::warn!(?killswitch, "Request rejected: killswitch active");
         true
     }
 

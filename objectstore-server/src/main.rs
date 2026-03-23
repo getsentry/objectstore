@@ -6,7 +6,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-use objectstore_server::{cli, observability};
+use objectstore_server::cli;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -15,7 +15,7 @@ fn main() {
     match cli::execute() {
         Ok(()) => std::process::exit(0),
         Err(error) => {
-            observability::ensure_log_error(&error);
+            objectstore_log::ensure_log_error(&error);
             std::process::exit(1);
         }
     }

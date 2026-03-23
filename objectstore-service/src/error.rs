@@ -5,6 +5,7 @@
 
 use std::any::Any;
 
+use objectstore_log::Level;
 use thiserror::Error as ThisError;
 
 use crate::stream::ClientError;
@@ -126,22 +127,22 @@ impl Error {
     }
 
     /// Returns the appropriate log level for this error.
-    pub fn level(&self) -> tracing::Level {
+    pub fn level(&self) -> Level {
         match self {
             // Malformed client input at DEBUG level
-            Self::Client(_) => tracing::Level::DEBUG,
-            Self::Metadata(_) => tracing::Level::DEBUG,
+            Self::Client(_) => Level::DEBUG,
+            Self::Metadata(_) => Level::DEBUG,
             // Like rate limits, we treat capacity errors as warnings
-            Self::AtCapacity => tracing::Level::WARN,
+            Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures
-            Self::Io(_) => tracing::Level::ERROR,
-            Self::Serde { .. } => tracing::Level::ERROR,
-            Self::Reqwest { .. } => tracing::Level::ERROR,
-            Self::GcpAuth(_) => tracing::Level::ERROR,
-            Self::Panic(_) => tracing::Level::ERROR,
-            Self::Dropped => tracing::Level::ERROR,
-            Self::UnexpectedTombstone => tracing::Level::ERROR,
-            Self::Generic { .. } => tracing::Level::ERROR,
+            Self::Io(_) => Level::ERROR,
+            Self::Serde { .. } => Level::ERROR,
+            Self::Reqwest { .. } => Level::ERROR,
+            Self::GcpAuth(_) => Level::ERROR,
+            Self::Panic(_) => Level::ERROR,
+            Self::Dropped => Level::ERROR,
+            Self::UnexpectedTombstone => Level::ERROR,
+            Self::Generic { .. } => Level::ERROR,
         }
     }
 }

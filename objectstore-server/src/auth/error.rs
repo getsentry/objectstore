@@ -48,9 +48,9 @@ impl AuthError {
         objectstore_metrics::count!("server.auth.failure", code = code);
         let msg = self.to_string();
         if !enforce {
-            tracing::warn!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+            objectstore_log::warn!(?permission, ?usecase, ?code, ?msg, "Auth failure");
         } else {
-            tracing::debug!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+            objectstore_log::debug!(?permission, ?usecase, ?code, ?msg, "Auth failure");
         }
     }
 }

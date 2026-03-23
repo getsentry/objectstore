@@ -19,6 +19,7 @@ futures-util = { workspace = true }
 gcp_auth = "0.12.3"
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
+objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
 regex = { workspace = true }

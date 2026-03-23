@@ -6,6 +6,7 @@ use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use objectstore_log::tracing;
 use tokio::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -32,7 +33,7 @@ pub async fn limit_web_concurrency(
     if !is_internal_route(route) && counter.count() >= counter.limit() {
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
         objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
-        tracing::warn!("Request rejected: web concurrency limit reached");
+        objectstore_log::warn!("Request rejected: web concurrency limit reached");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
@@ -78,7 +79,7 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
         "no error details".to_owned()
     };
 
-    tracing::error!("panic in web handler: {detail}");
+    objectstore_log::error!("panic in web handler: {detail}");
 
     let response = (StatusCode::INTERNAL_SERVER_ERROR, detail);
     response.into_response()

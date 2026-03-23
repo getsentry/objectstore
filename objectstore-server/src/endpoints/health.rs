@@ -33,7 +33,7 @@ async fn ready() -> impl IntoResponse {
         .await
         .unwrap_or(false)
     {
-        tracing::debug!("Shutdown marker exists, failing readiness");
+        objectstore_log::debug!("Shutdown marker exists, failing readiness");
         (StatusCode::SERVICE_UNAVAILABLE, "Shutting down")
     } else {
         (StatusCode::OK, "OK")

@@ -696,7 +696,7 @@ impl BigTableBackend {
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
         let Some((_, cells)) = response.into_iter().next() else {
-            tracing::debug!("Object not found");
+            objectstore_log::debug!("Object not found");
             return Ok(None);
         };
 
@@ -761,10 +761,7 @@ impl BigTableBackend {
                 let target = match parse_redirect_target(target, hv_id) {
                     Ok(target) => target,
                     Err(e) => {
-                        tracing::error!(
-                            error = &e as &dyn std::error::Error,
-                            "invalid redirect target in tombstone row"
-                        );
+                        objectstore_log::exception!(&e, "invalid redirect target in tombstone row");
                         return;
                     }
                 };
@@ -806,7 +803,7 @@ impl Backend for BigTableBackend {
         metadata: &Metadata,
         mut stream: ClientStream,
     ) -> Result<PutResponse> {
-        tracing::debug!("Writing to Bigtable backend");
+        objectstore_log::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
         let mut payload = ChunkedBytes::new(0);
@@ -839,7 +836,7 @@ impl Backend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        tracing::debug!("Deleting from Bigtable backend");
+        objectstore_log::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
@@ -857,7 +854,7 @@ impl HighVolumeBackend for BigTableBackend {
         metadata: &Metadata,
         payload: Bytes,
     ) -> Result<Option<Tombstone>> {
-        tracing::debug!("Conditional put to Bigtable backend");
+        objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         let false_mutations =
@@ -910,7 +907,7 @@ impl HighVolumeBackend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-        tracing::debug!("Reading from Bigtable backend");
+        objectstore_log::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
         let Some(row) = self.read_row(&path, None, "get_tiered_object").await? else {
@@ -936,7 +933,7 @@ impl HighVolumeBackend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-        tracing::debug!("Reading metadata from Bigtable backend");
+        objectstore_log::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
         // Read metadata and tombstone columns — skip the (potentially large) payload.
@@ -963,7 +960,7 @@ impl HighVolumeBackend for BigTableBackend {
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-        tracing::debug!("Conditional delete from Bigtable backend");
+        objectstore_log::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -1021,7 +1018,7 @@ impl HighVolumeBackend for BigTableBackend {
         current: Option<&ObjectId>,
         write: TieredWrite,
     ) -> Result<bool> {
-        tracing::debug!("CAS put to Bigtable backend");
+        objectstore_log::debug!("CAS put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         let now = SystemTime::now();
@@ -1124,8 +1121,7 @@ where
             Err(e) => {
                 retry_count += 1;
                 objectstore_metrics::count!("bigtable.retries", action = action);
-                let error = &e as &dyn std::error::Error;
-                tracing::warn!(retry_count, action, error, "Retrying request");
+                objectstore_log::warn_exception!(&e, retry_count, action, "Retrying request");
             }
         }
     }

@@ -3,12 +3,12 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::ServiceExt;
 use axum::extract::Request;
+use objectstore_log::Level;
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
-use tracing::Level;
 
 use crate::endpoints;
 use crate::state::ServiceState;

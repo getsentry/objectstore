@@ -110,7 +110,7 @@ async fn track_runtime_metrics(interval: Duration) {
 
     loop {
         ticker.tick().await;
-        tracing::trace!("Capturing runtime metrics");
+        objectstore_log::trace!("Capturing runtime metrics");
 
         objectstore_metrics::gauge!("runtime.num_workers" = metrics.num_workers());
         objectstore_metrics::gauge!("runtime.num_alive_tasks" = metrics.num_alive_tasks());

@@ -412,7 +412,7 @@ impl Backend for TieredStorage {
                     backend_type = backend_type,
                 );
             } else {
-                tracing::warn!(backend_type, "Missing object size");
+                objectstore_log::warn!(backend_type, "Missing object size");
             }
         }
 

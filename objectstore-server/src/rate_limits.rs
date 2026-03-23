@@ -232,7 +232,7 @@ impl RateLimiter {
         };
 
         objectstore_metrics::count!("server.request.rate_limited", reason = rejection.as_str());
-        tracing::warn!(
+        objectstore_log::warn!(
             reason = rejection.as_str(),
             "Request rejected: rate limit exceeded"
         );
