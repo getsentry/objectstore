@@ -19,6 +19,9 @@ pub mod local_fs;
 pub mod s3_compatible;
 pub mod tiered;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 /// Storage backend configuration.
 ///
 /// The `type` field in YAML or `__TYPE` in environment variables determines which variant is used.

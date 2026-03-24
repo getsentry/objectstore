@@ -247,11 +247,10 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
-    use crate::backend::common::{
-        HighVolumeBackend, TieredGet, TieredMetadata, TieredWrite, Tombstone,
-    };
+    use crate::backend::common::{HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
+    use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
@@ -426,37 +425,23 @@ mod tests {
         assert!(after.is_none());
     }
 
-    /// A backend that panics on `get_object` to verify panic isolation.
     #[derive(Debug)]
-    struct PanickingBackend;
+    struct PanicOnGet;
 
     #[async_trait::async_trait]
-    impl crate::backend::common::Backend for PanickingBackend {
-        fn name(&self) -> &'static str {
-            "panicking"
-        }
-
-        async fn put_object(
+    impl Hooks for PanicOnGet {
+        async fn get_object(
             &self,
+            _inner: &InMemoryBackend,
             _id: &ObjectId,
-            _metadata: &Metadata,
-            _stream: ClientStream,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn get_object(&self, _id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
+        ) -> Result<GetResponse> {
             panic!("intentional panic in get_object");
-        }
-
-        async fn delete_object(&self, _id: &ObjectId) -> Result<()> {
-            Ok(())
         }
     }
 
     #[tokio::test]
     async fn panic_in_backend_returns_task_failed() {
-        let service = StorageService::new(Box::new(PanickingBackend));
+        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)));
 
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id).await;
@@ -470,95 +455,50 @@ mod tests {
     /// In-memory backend with optional synchronization for `put_object`.
     ///
     /// When `pause` is enabled, each `put_object` call notifies `paused` and
-    /// then waits on `resume` before proceeding. After the write completes,
-    /// `on_put` is always notified regardless of the `pause` setting.
-    #[derive(Debug, Clone)]
-    struct GatedBackend {
-        inner: InMemoryBackend,
+    #[derive(Clone, Debug, Default)]
+    struct GateOnPut {
         pause: bool,
         paused: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
         on_put: Arc<tokio::sync::Notify>,
     }
 
-    impl GatedBackend {
-        fn new(name: &'static str) -> Self {
+    impl GateOnPut {
+        fn with_pause() -> Self {
             Self {
-                inner: InMemoryBackend::new(name),
-                pause: false,
-                paused: Arc::new(tokio::sync::Notify::new()),
-                resume: Arc::new(tokio::sync::Notify::new()),
-                on_put: Arc::new(tokio::sync::Notify::new()),
+                pause: true,
+                ..Default::default()
             }
-        }
-
-        fn with_pause(mut self) -> Self {
-            self.pause = true;
-            self
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::backend::common::Backend for GatedBackend {
-        fn name(&self) -> &'static str {
-            self.inner.name()
-        }
-
+    impl Hooks for GateOnPut {
         async fn put_object(
             &self,
+            inner: &InMemoryBackend,
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
-        ) -> Result<()> {
+        ) -> Result<PutResponse> {
             if self.pause {
                 self.paused.notify_one();
                 self.resume.notified().await;
             }
-            self.inner.put_object(id, metadata, stream).await?;
+            inner.put_object(id, metadata, stream).await?;
             self.on_put.notify_one();
             Ok(())
         }
 
-        async fn get_object(&self, id: &ObjectId) -> Result<Option<(Metadata, PayloadStream)>> {
-            self.inner.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
-            self.inner.delete_object(id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl HighVolumeBackend for GatedBackend {
-        async fn put_non_tombstone(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: bytes::Bytes,
-        ) -> Result<Option<Tombstone>> {
-            self.inner.put_non_tombstone(id, metadata, payload).await
-        }
-
-        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-            self.inner.get_tiered_object(id).await
-        }
-
-        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-            self.inner.get_tiered_metadata(id).await
-        }
-
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.inner.delete_non_tombstone(id).await
-        }
-
         async fn compare_and_write(
             &self,
+            inner: &InMemoryBackend,
             id: &ObjectId,
             current: Option<&ObjectId>,
             write: TieredWrite,
         ) -> Result<bool> {
             let notify = matches!(write, TieredWrite::Tombstone(_) | TieredWrite::Object(_, _));
-            let result = self.inner.compare_and_write(id, current, write).await?;
+            let result = inner.compare_and_write(id, current, write).await?;
             if notify {
                 self.on_put.notify_one();
             }
@@ -568,8 +508,8 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_drop_does_not_prevent_completion() {
-        let hv = Box::new(GatedBackend::new("gated-hv"));
-        let lt = Box::new(GatedBackend::new("gated-lt").with_pause());
+        let hv = Box::new(TestBackend::new(GateOnPut::default()));
+        let lt = Box::new(TestBackend::new(GateOnPut::with_pause()));
         let service = StorageService::new(Box::new(TieredStorage::new(hv.clone(), lt.clone())));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
@@ -582,7 +522,7 @@ mod tests {
 
         // Start insert through the public API. select! drops the future once the
         // backend signals it has paused, simulating a client disconnect mid-write.
-        let paused = Arc::clone(&lt.paused);
+        let paused = Arc::clone(&lt.hooks.paused);
         tokio::select! {
             _ = request => panic!("insert should not complete while backend is paused"),
             _ = paused.notified() => {}
@@ -591,11 +531,11 @@ mod tests {
         // The spawned task is now blocked inside put_object, and the caller
         // request (including the oneshot receiver) has been dropped. Unpause so
         // the task can finish writing.
-        lt.resume.notify_one();
+        lt.hooks.resume.notify_one();
 
         // Wait for the tombstone write to the high-volume backend, which is the
         // last step of the long-term insert path.
-        let on_put = Arc::clone(&hv.on_put);
+        let on_put = Arc::clone(&hv.hooks.on_put);
         tokio::time::timeout(Duration::from_secs(5), on_put.notified())
             .await
             .expect("timed out waiting for tombstone write");
@@ -610,8 +550,8 @@ mod tests {
 
     // --- Concurrency limit tests ---
 
-    fn make_limited_service(limit: usize) -> (StorageService, GatedBackend) {
-        let backend = GatedBackend::new("limited").with_pause();
+    fn make_limited_service(limit: usize) -> (StorageService, TestBackend<GateOnPut>) {
+        let backend = TestBackend::new(GateOnPut::with_pause());
         let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
         (service, backend)
     }
@@ -633,7 +573,7 @@ mod tests {
         });
 
         // Wait for the backend to signal it has paused (permit is held).
-        hv.paused.notified().await;
+        hv.hooks.paused.notified().await;
 
         // Second insert should be rejected immediately.
         let result = service
@@ -651,7 +591,7 @@ mod tests {
         );
 
         // Unblock the first operation.
-        hv.resume.notify_one();
+        hv.hooks.resume.notify_one();
         first.await.unwrap().unwrap();
 
         // Now that the permit is released, a new operation should succeed.
@@ -686,15 +626,16 @@ mod tests {
             .await
         });
 
-        hv.paused.notified().await;
+        hv.hooks.paused.notified().await;
         assert_eq!(service.tasks_running(), 1);
 
-        hv.resume.notify_one();
+        hv.hooks.resume.notify_one();
     }
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service = StorageService::new(Box::new(PanickingBackend)).with_concurrency_limit(1);
+        let service =
+            StorageService::new(Box::new(TestBackend::new(PanicOnGet))).with_concurrency_limit(1);
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());

@@ -729,6 +729,7 @@ mod tests {
 
     use super::*;
     use crate::backend::in_memory::InMemoryBackend;
+    use crate::backend::testing::{Hooks, TestBackend};
     use crate::error::Error;
     use crate::id::ObjectContext;
     use crate::stream;
@@ -980,30 +981,16 @@ mod tests {
         assert!(!lt.contains(&lt_id), "long-term object not cleaned up");
     }
 
-    /// A backend wrapper that delegates everything except `delete_object`, which always fails.
     #[derive(Debug)]
-    struct FailingDeleteBackend(InMemoryBackend);
+    struct FailDelete;
 
     #[async_trait::async_trait]
-    impl Backend for FailingDeleteBackend {
-        fn name(&self) -> &'static str {
-            "failing-delete"
-        }
-
-        async fn put_object(
+    impl Hooks for FailDelete {
+        async fn delete_object(
             &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            stream: ClientStream,
-        ) -> Result<PutResponse> {
-            self.0.put_object(id, metadata, stream).await
-        }
-
-        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-            self.0.get_object(id).await
-        }
-
-        async fn delete_object(&self, _id: &ObjectId) -> Result<DeleteResponse> {
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+        ) -> Result<DeleteResponse> {
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "simulated long-term delete failure",
@@ -1017,7 +1004,7 @@ mod tests {
     #[tokio::test]
     async fn delete_succeeds_when_gcs_cleanup_fails() {
         let hv = InMemoryBackend::new("hv");
-        let lt = FailingDeleteBackend(InMemoryBackend::new("lt"));
+        let lt = TestBackend::new(FailDelete);
         let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
 
         let id = make_id("fail-delete");
@@ -1046,60 +1033,14 @@ mod tests {
 
     // --- CAS conflicts ---
 
-    /// A backend wrapper that delegates everything except `compare_and_write`, which always
-    /// returns `Ok(false)` to simulate a lost CAS race.
     #[derive(Debug)]
-    struct ConflictingCasBackend(InMemoryBackend);
+    struct CasConflict;
 
     #[async_trait::async_trait]
-    impl Backend for ConflictingCasBackend {
-        fn name(&self) -> &'static str {
-            "conflicting-cas"
-        }
-
-        async fn put_object(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            stream: ClientStream,
-        ) -> Result<PutResponse> {
-            self.0.put_object(id, metadata, stream).await
-        }
-
-        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-            self.0.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-            self.0.delete_object(id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl HighVolumeBackend for ConflictingCasBackend {
-        async fn put_non_tombstone(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: bytes::Bytes,
-        ) -> Result<Option<Tombstone>> {
-            self.0.put_non_tombstone(id, metadata, payload).await
-        }
-
-        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-            self.0.get_tiered_object(id).await
-        }
-
-        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-            self.0.get_tiered_metadata(id).await
-        }
-
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.0.delete_non_tombstone(id).await
-        }
-
+    impl Hooks for CasConflict {
         async fn compare_and_write(
             &self,
+            _inner: &InMemoryBackend,
             _id: &ObjectId,
             _current: Option<&ObjectId>,
             _write: TieredWrite,
@@ -1113,7 +1054,7 @@ mod tests {
     /// concurrent write won.
     #[tokio::test]
     async fn put_large_cas_conflict_cleans_up_new_blob() {
-        let hv = ConflictingCasBackend(InMemoryBackend::new("hv"));
+        let hv = TestBackend::new(CasConflict);
         let lt = InMemoryBackend::new("lt");
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
@@ -1154,7 +1095,7 @@ mod tests {
             .unwrap();
 
         let lt = InMemoryBackend::new("lt");
-        let hv = ConflictingCasBackend(inner);
+        let hv = TestBackend::with_inner(inner, CasConflict);
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt));
 
         // Writing a small object over a tombstone should succeed even when CAS
@@ -1167,65 +1108,25 @@ mod tests {
 
     // --- Failure / inconsistency ---
 
-    /// A backend where `compare_and_write` always errors, but all other operations work normally.
+    /// Simulates compare_and_write failure. If `true`, it fails after commit.
     #[derive(Debug)]
-    struct FailingCasBackend(InMemoryBackend);
+    struct FailCas(bool);
 
     #[async_trait::async_trait]
-    impl Backend for FailingCasBackend {
-        fn name(&self) -> &'static str {
-            "failing-cas"
-        }
-
-        async fn put_object(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            stream: ClientStream,
-        ) -> Result<PutResponse> {
-            self.0.put_object(id, metadata, stream).await
-        }
-
-        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-            self.0.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-            self.0.delete_object(id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl HighVolumeBackend for FailingCasBackend {
-        async fn put_non_tombstone(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: bytes::Bytes,
-        ) -> Result<Option<Tombstone>> {
-            self.0.put_non_tombstone(id, metadata, payload).await
-        }
-
-        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-            self.0.get_tiered_object(id).await
-        }
-
-        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-            self.0.get_tiered_metadata(id).await
-        }
-
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.0.delete_non_tombstone(id).await
-        }
-
+    impl Hooks for FailCas {
         async fn compare_and_write(
             &self,
-            _id: &ObjectId,
-            _current: Option<&ObjectId>,
-            _write: TieredWrite,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            current: Option<&ObjectId>,
+            write: TieredWrite,
         ) -> Result<bool> {
+            if self.0 {
+                // simulate a network error _after_ commit went through
+                inner.compare_and_write(id, current, write).await?;
+            }
             Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
+                std::io::ErrorKind::TimedOut,
                 "simulated compare_and_write failure",
             )))
         }
@@ -1237,7 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
-        let hv = FailingCasBackend(InMemoryBackend::new("hv"));
+        let hv = TestBackend::new(FailCas(false));
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
 
         let id = make_id("orphan-test");
@@ -1362,72 +1263,6 @@ mod tests {
 
     // --- Written-phase cleanup ---
 
-    /// A backend where `compare_and_write` commits to the inner backend but then returns an
-    /// error, simulating a server-side commit whose response was lost in transit.
-    #[derive(Debug)]
-    struct CommitThenFailCasBackend(InMemoryBackend);
-
-    #[async_trait::async_trait]
-    impl Backend for CommitThenFailCasBackend {
-        fn name(&self) -> &'static str {
-            "commit-then-fail-cas"
-        }
-
-        async fn put_object(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            stream: ClientStream,
-        ) -> Result<PutResponse> {
-            self.0.put_object(id, metadata, stream).await
-        }
-
-        async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-            self.0.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-            self.0.delete_object(id).await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl HighVolumeBackend for CommitThenFailCasBackend {
-        async fn put_non_tombstone(
-            &self,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: bytes::Bytes,
-        ) -> Result<Option<Tombstone>> {
-            self.0.put_non_tombstone(id, metadata, payload).await
-        }
-
-        async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-            self.0.get_tiered_object(id).await
-        }
-
-        async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-            self.0.get_tiered_metadata(id).await
-        }
-
-        async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-            self.0.delete_non_tombstone(id).await
-        }
-
-        async fn compare_and_write(
-            &self,
-            id: &ObjectId,
-            current: Option<&ObjectId>,
-            write: TieredWrite,
-        ) -> Result<bool> {
-            self.0.compare_and_write(id, current, write).await?;
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "simulated response loss after commit",
-            )))
-        }
-    }
-
     /// When a large-object overwrite commits in HV but its response is lost, the guard drops in
     /// `Written` phase. Cleanup must read HV to determine the CAS outcome, then delete whichever
     /// LT blob is no longer referenced — here the old one, since the new tombstone committed.
@@ -1446,7 +1281,7 @@ mod tests {
 
         // Second put: Updates tombstone but fails immediately after committing
         let broken_storage = TieredStorage::new(
-            Box::new(CommitThenFailCasBackend(hv.clone())),
+            Box::new(TestBackend::with_inner(hv.clone(), FailCas(true))),
             Box::new(lt.clone()),
         );
         broken_storage
