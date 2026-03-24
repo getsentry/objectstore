@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpSocket};
@@ -11,6 +12,9 @@ use crate::web::app::App;
 /// The maximum backlog for TCP listen sockets before refusing connections.
 const TCP_LISTEN_BACKLOG: u32 = 1024;
 
+/// Timeout for waiting on outstanding background operations during shutdown.
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Runs the objectstore HTTP server.
 ///
 /// This function initializes the server, binds to the configured address, and runs until
@@ -21,6 +25,7 @@ pub async fn server(config: Config) -> Result<()> {
 
     let listener = listen(&config).context("failed to start TCP listener")?;
     let state = Services::spawn(config).await?;
+    let service = state.service.clone();
 
     let server_handle = tokio::spawn(async move {
         App::new(state)
@@ -42,6 +47,10 @@ pub async fn server(config: Config) -> Result<()> {
         .await;
 
     let server_result = server_handle.await.map_err(From::from).flatten();
+    let join_result = tokio::time::timeout(SHUTDOWN_JOIN_TIMEOUT, service.join()).await;
+    if join_result.is_err() {
+        objectstore_log::error!("Service did not drain within shutdown timeout");
+    }
     objectstore_log::info!("Shutdown complete");
     server_result
 }

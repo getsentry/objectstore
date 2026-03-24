@@ -51,9 +51,12 @@ pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 ///
 /// Each operation runs to completion even if the caller is cancelled (e.g., on
 /// client disconnect). This ensures that multi-step operations in the backend
-/// are never left partially applied. Operations are also isolated from panics in
-/// backend code — a failure in one operation does not bring down other in-flight
-/// work. See [`Error::Panic`].
+/// are never left partially applied. Post-commit cleanup (e.g. deleting
+/// unreferenced long-term blobs) runs in background tasks so callers are not
+/// blocked. Call [`join`](StorageService::join) during shutdown to wait for
+/// outstanding cleanup. Operations are also isolated from panics in backend
+/// code — a failure in one operation does not bring down other in-flight work.
+/// See [`Error::Panic`].
 ///
 /// # Concurrency Limit
 ///
@@ -220,6 +223,15 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         self.spawn("delete", async move { inner.delete_object(&id).await })
             .await
+    }
+
+    /// Waits for all outstanding background operations to complete.
+    ///
+    /// Blocks until any pending background cleanup tasks finish, up to the
+    /// backend's configured timeout. Should be called during graceful shutdown
+    /// after the HTTP server has stopped accepting new requests.
+    pub async fn join(&self) {
+        self.inner.join().await;
     }
 }
 
