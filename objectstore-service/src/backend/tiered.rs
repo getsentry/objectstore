@@ -463,6 +463,8 @@ impl TieredStorage {
         });
 
         let write = TieredWrite::Object(metadata.clone(), payload);
+        guard.advance(ChangePhase::Written);
+
         let written = self
             .high_volume
             .compare_and_write(id, Some(&target), write)
@@ -645,6 +647,7 @@ impl Backend for TieredStorage {
                 new: None,
                 old: Some(tombstone.target.clone()),
             });
+            guard.advance(ChangePhase::Written);
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
             let deleted = self
