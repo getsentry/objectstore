@@ -12,6 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub mod bigtable;
+pub mod changelog;
 pub mod common;
 pub mod gcs;
 pub mod in_memory;
@@ -60,7 +61,8 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume).await?;
             let lt = from_leaf_config(*c.long_term).await?;
-            Box::new(tiered::TieredStorage::new(hv, lt))
+            let log = Box::new(changelog::NoopChangeLog);
+            Box::new(tiered::TieredStorage::new(hv, lt, log))
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
         // is intentional here: any new leaf variant should fall through to

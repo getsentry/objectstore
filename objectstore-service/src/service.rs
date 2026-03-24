@@ -247,6 +247,7 @@ mod tests {
 
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
+    use crate::backend::changelog::NoopChangeLog;
     use crate::backend::common::{HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
@@ -345,7 +346,8 @@ mod tests {
 
         let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
         let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
-        let service = StorageService::new(Box::new(TieredStorage::new(high_volume, long_term)));
+        let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
+        let service = StorageService::new(Box::new(backend));
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
@@ -510,7 +512,8 @@ mod tests {
     async fn receiver_drop_does_not_prevent_completion() {
         let hv = Box::new(TestBackend::new(GateOnPut::default()));
         let lt = Box::new(TestBackend::new(GateOnPut::with_pause()));
-        let service = StorageService::new(Box::new(TieredStorage::new(hv.clone(), lt.clone())));
+        let backend = TieredStorage::new(hv.clone(), lt.clone(), Box::new(NoopChangeLog));
+        let service = StorageService::new(Box::new(backend));
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
