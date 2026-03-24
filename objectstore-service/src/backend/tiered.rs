@@ -415,7 +415,7 @@ impl TieredStorage {
     /// Creates a `ChangeGuard` for the given operation.
     ///
     /// This guard will clean up unreferenced objects in long-term storage when it drops based on
-    /// the last known phase of the change was in.
+    /// the last known phase the change was in.
     fn change_guard(&self, change: Change) -> ChangeGuard {
         ChangeGuard {
             state: Some(ChangeState::new(
