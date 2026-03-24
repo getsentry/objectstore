@@ -1433,36 +1433,56 @@ mod tests {
     /// LT blob is no longer referenced — here the old one, since the new tombstone committed.
     #[tokio::test]
     async fn written_cleanup_after_lost_cas_response() {
-        let hv_inner = InMemoryBackend::new("hv");
-        let lt = InMemoryBackend::new("lt");
+        let (storage, hv, lt) = make_tiered_storage();
+        let id = make_id("obj");
 
         // First put: establishes tombstone
-        let storage = TieredStorage::new(Box::new(hv_inner.clone()), Box::new(lt.clone()));
-        let id = make_id("obj");
         let payload = vec![0xAAu8; 2 * 1024 * 1024];
         storage
             .put_object(&id, &Default::default(), stream::single(payload.clone()))
             .await
             .unwrap();
-        storage.join().await;
-        let tombstone1 = hv_inner.get(&id).expect_tombstone().target;
+        let tombstone1 = hv.get(&id).expect_tombstone().target;
 
         // Second put: Updates tombstone but fails immediately after committing
-        let storage = TieredStorage::new(
-            Box::new(CommitThenFailCasBackend(hv_inner.clone())),
+        let broken_storage = TieredStorage::new(
+            Box::new(CommitThenFailCasBackend(hv.clone())),
             Box::new(lt.clone()),
         );
-        let result = storage
-            .put_object(&id, &Default::default(), stream::single(payload))
-            .await;
-        assert!(result.is_err());
-        let tombstone2 = hv_inner.get(&id).expect_tombstone().target;
+        broken_storage
+            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .await
+            .unwrap_err(); // must fail
+        let tombstone2 = hv.get(&id).expect_tombstone().target;
         assert_ne!(tombstone1, tombstone2);
 
         // The first tombstone's target should be cleaned up, but the second should remain.
-        storage.join().await;
+        broken_storage.join().await;
         lt.get(&tombstone1).expect_not_found();
         lt.get(&tombstone2).expect_object();
+
+        // Now delete the new object with the same tombstone failure
+        broken_storage.delete_object(&id).await.unwrap_err();
+        hv.get(&id).expect_not_found();
+        broken_storage.join().await;
+        lt.get(&tombstone2).expect_not_found();
+
+        // Create a fresh large object
+        let id = make_id("obj2");
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .await
+            .unwrap();
+        let tombstone3 = hv.get(&id).expect_tombstone().target;
+
+        // Overwrite it with a small object and check again for cleanup
+        broken_storage
+            .put_object(&id, &Default::default(), stream::single(&b"small"[..]))
+            .await
+            .unwrap_err(); // must fail
+        hv.get(&id).expect_object();
+        broken_storage.join().await;
+        lt.get(&tombstone3).expect_not_found();
     }
 
     // --- ChangeGuard drop safety tests ---
