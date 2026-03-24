@@ -293,7 +293,9 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::common::PutResponse;
     use crate::backend::in_memory::InMemoryBackend;
+    use crate::backend::testing::{Hooks, TestBackend};
     use crate::error::Error;
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
@@ -415,51 +417,33 @@ mod tests {
 
     // --- Service-level concurrent execution and capacity tests ---
 
-    /// A backend that pauses on `put_object` for testing concurrency.
-    ///
-    /// Signals via a channel, then waits for a shared `Notify` before completing.
-    struct GatedBackend {
-        inner: InMemoryBackend,
+    struct GateOnPut {
         paused_tx: tokio::sync::mpsc::Sender<()>,
         resume: Arc<tokio::sync::Notify>,
         in_flight: Arc<AtomicUsize>,
     }
 
-    impl std::fmt::Debug for GatedBackend {
+    impl std::fmt::Debug for GateOnPut {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("GatedBackend").finish()
+            f.debug_struct("GateOnPut").finish()
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::backend::common::Backend for GatedBackend {
-        fn name(&self) -> &'static str {
-            self.inner.name()
-        }
-
+    impl Hooks for GateOnPut {
         async fn put_object(
             &self,
+            inner: &InMemoryBackend,
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
-        ) -> Result<()> {
+        ) -> Result<PutResponse> {
             self.in_flight.fetch_add(1, Ordering::SeqCst);
             let _ = self.paused_tx.send(()).await;
             self.resume.notified().await;
-            let result = self.inner.put_object(id, metadata, stream).await;
+            let result = inner.put_object(id, metadata, stream).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             result
-        }
-
-        async fn get_object(
-            &self,
-            id: &ObjectId,
-        ) -> Result<Option<(Metadata, crate::PayloadStream)>> {
-            self.inner.get_object(id).await
-        }
-
-        async fn delete_object(&self, id: &ObjectId) -> Result<()> {
-            self.inner.delete_object(id).await
         }
     }
 
@@ -470,12 +454,11 @@ mod tests {
         let resume = Arc::new(tokio::sync::Notify::new());
         let in_flight = Arc::new(AtomicUsize::new(0));
 
-        let gated = GatedBackend {
-            inner: InMemoryBackend::new("gated-hv"),
+        let gated = TestBackend::new(GateOnPut {
             paused_tx,
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
-        };
+        });
         let service = StorageService::new(Box::new(gated)).with_concurrency_limit(100);
 
         let executor = service.stream().unwrap();
@@ -526,12 +509,11 @@ mod tests {
         let (paused_tx, mut paused_rx) = tokio::sync::mpsc::channel::<()>(2);
         let resume = Arc::new(tokio::sync::Notify::new());
 
-        let gated = GatedBackend {
-            inner: InMemoryBackend::new("gated-cap"),
+        let gated = TestBackend::new(GateOnPut {
             paused_tx,
             resume: Arc::clone(&resume),
             in_flight: Arc::new(AtomicUsize::new(0)),
-        };
+        });
         let service = StorageService::new(Box::new(gated)).with_concurrency_limit(1);
 
         // Hold the only permit via a blocking insert.
