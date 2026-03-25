@@ -139,6 +139,9 @@ impl ChangeManager {
     /// Spawn this into a background task at startup to recover from any orphaned objects after a
     /// crash. During normal operation, this should return an empty list and have no effect.
     pub async fn recover(self: Arc<Self>) -> Result<()> {
+        // Hold one token for the duration of recovery to prevent premature shutdown.
+        let _token = self.tracker.token();
+
         let entries =
             self.changelog.scan().await.inspect_err(|e| {
                 objectstore_log::error!(!!e, "Failed to run changelog recovery")
