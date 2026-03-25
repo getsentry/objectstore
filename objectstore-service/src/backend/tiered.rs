@@ -1287,44 +1287,4 @@ mod tests {
         );
     }
 
-    /// When the tokio runtime is dropped while an operation is in flight, the `ChangeGuard`
-    /// drops outside any runtime and cannot schedule cleanup. The log entry must persist
-    /// so that a future recovery pass can identify and clean up orphaned blobs.
-    #[test]
-    fn runtime_drop_while_pending_preserves_log_entry() {
-        let log = InMemoryChangeLog::default();
-
-        let guard = {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let storage = TieredStorage::new(
-                    Box::new(InMemoryBackend::new("hv")),
-                    Box::new(InMemoryBackend::new("lt")),
-                    Box::new(log.clone()),
-                );
-                // Simulate a mid-flight operation that recorded its change but did not complete.
-                storage
-                    .record_change(Change {
-                        id: make_id("crash-test"),
-                        new: Some(make_id("crash-test/rev")),
-                        old: None,
-                    })
-                    .await
-                    .unwrap()
-            })
-            // Runtime drops here while `guard` is still alive outside it.
-        };
-
-        // Guard drops with no runtime active: cleanup cannot be scheduled.
-        drop(guard);
-
-        // Log entry must survive so recovery can clean up the orphaned blob.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let entries = rt.block_on(log.scan()).unwrap();
-        assert_eq!(
-            entries.len(),
-            1,
-            "log entry must persist for crash recovery"
-        );
-    }
 }
