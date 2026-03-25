@@ -133,6 +133,32 @@ impl ChangeManager {
 
         Ok(ChangeGuard { state: Some(state) })
     }
+
+    /// Scans the changelog for outstanding entries and runs cleanup for each.
+    ///
+    /// Spawn this into a background task at startup to recover from any orphaned objects after a
+    /// crash. During normal operation, this should return an empty list and have no effect.
+    pub async fn recover(self: Arc<Self>) -> Result<()> {
+        let entries =
+            self.changelog.scan().await.inspect_err(|e| {
+                objectstore_log::error!(!!e, "Failed to run changelog recovery")
+            })?;
+
+        // NB: Intentionally clean up sequentially to reduce load on the system.
+        for (id, change) in entries {
+            let state = ChangeState {
+                id,
+                change,
+                phase: ChangePhase::Recovered,
+                backends: self.clone(),
+                _token: self.tracker.token(),
+            };
+
+            state.cleanup().await;
+        }
+
+        Ok(())
+    }
 }
 
 /// Durable write-ahead log for multi-step storage changes.
@@ -232,6 +258,8 @@ impl ChangeLog for NoopChangeLog {
 /// Phase of a multi-step storage change.
 #[derive(Debug, PartialEq)]
 pub enum ChangePhase {
+    /// The change was recovered from changelog and the phase is unknown.
+    Recovered,
     /// The change is recorded in the log and LT upload has started.
     Recorded,
     /// LT upload has succeeded and the tombstone is being updated.
@@ -269,41 +297,33 @@ impl ChangeState {
         self.phase = ChangePhase::Completed;
     }
 
-    /// Runs asynchronous cleanup to complete the operation, if necessary.
-    fn complete(self) {
-        if self.phase == ChangePhase::Completed {
-            return;
-        }
-
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return; // Error logged in Drop
+    /// Determines tombstone state and runs cleanup for unreferenced objects.
+    async fn cleanup(self) {
+        let current = match self.phase {
+            // For `Recovered`, we must first check the state of the tombstone.
+            ChangePhase::Recovered => self.read_tombstone().await,
+            ChangePhase::Recorded => self.change.old.clone(),
+            // For `Written`, the CAS outcome is unknown — read HV to determine it.
+            ChangePhase::Written => self.read_tombstone().await,
+            ChangePhase::Lost => self.change.old.clone(),
+            ChangePhase::Updated => self.change.new.clone(),
+            ChangePhase::Completed => return, // unreachable
         };
 
-        handle.spawn(async move {
-            let current = match self.phase {
-                ChangePhase::Recorded => self.change.old.clone(),
-                // For `Written`, the CAS outcome is unknown — read HV to determine it.
-                ChangePhase::Written => self.read_tombstone().await,
-                ChangePhase::Lost => self.change.old.clone(),
-                ChangePhase::Updated => self.change.new.clone(),
-                ChangePhase::Completed => return, // unreachable
-            };
+        if current != self.change.old
+            && let Some(ref old) = self.change.old
+        {
+            self.cleanup_lt(old).await;
+        }
 
-            if current != self.change.old
-                && let Some(ref old) = self.change.old
-            {
-                self.cleanup_lt(old).await;
-            }
+        if current != self.change.new
+            && let Some(ref new) = self.change.new
+        {
+            self.cleanup_lt(new).await;
+        }
 
-            if current != self.change.new
-                && let Some(ref new) = self.change.new
-            {
-                self.cleanup_lt(new).await;
-            }
-
-            self.cleanup_log().await;
-            self.mark_completed();
-        });
+        self.cleanup_log().await;
+        self.mark_completed();
     }
 
     /// Reads the tombstone target for `id` from HV, retrying with exponential backoff on error.
@@ -381,9 +401,14 @@ impl ChangeGuard {
 
 impl Drop for ChangeGuard {
     fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            state.complete();
-        };
+        if let Some(state) = self.state.take()
+            && state.phase != ChangePhase::Completed
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(state.cleanup());
+        }
+
+        // NB: Drop of `ChangeState` logs an error if cleanup is not scheduled.
     }
 }
 

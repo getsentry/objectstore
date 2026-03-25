@@ -223,6 +223,9 @@ impl TieredStorage {
         changelog: Box<dyn ChangeLog>,
     ) -> Self {
         let inner = ChangeManager::new(high_volume, long_term, changelog);
+        // Note on cancellation: Our `join` method will wait for all tasks tracked by the spawned
+        // recovery job, so we defer shutdown until recovery is complete or times out.
+        tokio::spawn(inner.clone().recover());
         Self { inner }
     }
 
