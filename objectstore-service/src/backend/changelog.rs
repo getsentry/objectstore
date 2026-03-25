@@ -127,7 +127,7 @@ impl ChangeManager {
             id,
             change,
             phase: ChangePhase::Recorded,
-            backends: self.clone(),
+            manager: self.clone(),
             _token: token,
         };
 
@@ -150,7 +150,7 @@ impl ChangeManager {
                 id,
                 change,
                 phase: ChangePhase::Recovered,
-                backends: self.clone(),
+                manager: self.clone(),
                 _token: self.tracker.token(),
             };
 
@@ -287,7 +287,7 @@ struct ChangeState {
     id: ChangeId,
     change: Change,
     phase: ChangePhase,
-    backends: Arc<ChangeManager>,
+    manager: Arc<ChangeManager>,
     _token: TaskTrackerToken,
 }
 
@@ -333,7 +333,7 @@ impl ChangeState {
         let mut delay = INITIAL_BACKOFF;
         loop {
             match self
-                .backends
+                .manager
                 .high_volume
                 .get_tiered_metadata(&self.change.id)
                 .await
@@ -352,7 +352,7 @@ impl ChangeState {
     /// Deletes `target` from `lt`, retrying with exponential backoff until success.
     async fn cleanup_lt(&self, target: &ObjectId) {
         let mut delay = INITIAL_BACKOFF;
-        while self.backends.long_term.delete_object(target).await.is_err() {
+        while self.manager.long_term.delete_object(target).await.is_err() {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
@@ -361,7 +361,7 @@ impl ChangeState {
     /// Removes this change's log entry, retrying with exponential backoff until success.
     async fn cleanup_log(&self) {
         let mut delay = INITIAL_BACKOFF;
-        while self.backends.changelog.remove(&self.id).await.is_err() {
+        while self.manager.changelog.remove(&self.id).await.is_err() {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
