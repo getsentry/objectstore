@@ -24,6 +24,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use crate::backend::common::{Backend, HighVolumeBackend, TieredMetadata};
@@ -75,6 +76,63 @@ pub struct Change {
     ///
     /// Needs cleanup on success (the CAS committed and the old blob is unreferenced).
     pub old: Option<ObjectId>,
+}
+
+/// Manager for multi-step storage changes, including backends and durable log.
+///
+/// Encapsulates the state and logic for recording changes, advancing their phases,
+/// and performing cleanup on drop. The `TieredStorage` backend holds an instance
+/// of this manager to use it for its multi-step operations.
+#[derive(Debug)]
+pub struct ChangeManager {
+    /// The backend for small objects (≤ 1 MiB).
+    pub(crate) high_volume: Box<dyn HighVolumeBackend>,
+    /// The backend for large objects (> 1 MiB).
+    pub(crate) long_term: Box<dyn Backend>,
+    /// Durable write-ahead log for multi-step changes.
+    pub(crate) changelog: Box<dyn ChangeLog>,
+    /// Tracks outstanding background cleanup operations for graceful shutdown.
+    pub(crate) tracker: TaskTracker,
+}
+
+impl ChangeManager {
+    /// Creates a new `ChangeManager` with the given backends and changelog.
+    pub fn new(
+        high_volume: Box<dyn HighVolumeBackend>,
+        long_term: Box<dyn Backend>,
+        changelog: Box<dyn ChangeLog>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            high_volume,
+            long_term,
+            changelog,
+            tracker: TaskTracker::new(),
+        })
+    }
+
+    /// Records the change to the log and returns a guard.
+    ///
+    /// Generates a unique [`ChangeId`] and writes a durable log entry before
+    /// returning. The caller may proceed with LT side effects immediately after.
+    ///
+    /// When the [`ChangeGuard`] is dropped, a background process is spawned to
+    /// clean up any unreferenced objects in LT storage.
+    pub async fn record(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
+        let token = self.tracker.token();
+
+        let id = ChangeId::new();
+        self.changelog.record(&id, &change).await?;
+
+        let state = ChangeState {
+            id,
+            change,
+            phase: ChangePhase::Recorded,
+            backends: self.clone(),
+            _token: token,
+        };
+
+        Ok(ChangeGuard { state: Some(state) })
+    }
 }
 
 /// Durable write-ahead log for multi-step storage changes.
@@ -201,38 +259,11 @@ struct ChangeState {
     id: ChangeId,
     change: Change,
     phase: ChangePhase,
-    hv: Arc<dyn HighVolumeBackend>,
-    lt: Arc<dyn Backend>,
-    log: Arc<dyn ChangeLog>,
+    backends: Arc<ChangeManager>,
     _token: TaskTrackerToken,
 }
 
 impl ChangeState {
-    /// Records the change to the log and returns the initialized state.
-    ///
-    /// Generates a unique [`ChangeId`] and writes a durable log entry before
-    /// returning. The caller may proceed with LT side effects immediately after.
-    async fn record(
-        change: Change,
-        hv: Arc<dyn HighVolumeBackend>,
-        lt: Arc<dyn Backend>,
-        log: Arc<dyn ChangeLog>,
-        token: TaskTrackerToken,
-    ) -> Result<Self> {
-        let id = ChangeId::new();
-        log.record(&id, &change).await?;
-
-        Ok(Self {
-            id,
-            change,
-            phase: ChangePhase::Recorded,
-            hv,
-            lt,
-            log,
-            _token: token,
-        })
-    }
-
     /// Marks the operation as completed, preventing any cleanup on drop.
     fn mark_completed(mut self) {
         self.phase = ChangePhase::Completed;
@@ -281,7 +312,12 @@ impl ChangeState {
     async fn read_tombstone(&self) -> Option<ObjectId> {
         let mut delay = INITIAL_BACKOFF;
         loop {
-            match self.hv.get_tiered_metadata(&self.change.id).await {
+            match self
+                .backends
+                .high_volume
+                .get_tiered_metadata(&self.change.id)
+                .await
+            {
                 Ok(TieredMetadata::Tombstone(t)) => return Some(t.target),
                 Ok(TieredMetadata::Object(_)) => return None,
                 Ok(TieredMetadata::NotFound) => return None,
@@ -296,7 +332,7 @@ impl ChangeState {
     /// Deletes `target` from `lt`, retrying with exponential backoff until success.
     async fn cleanup_lt(&self, target: &ObjectId) {
         let mut delay = INITIAL_BACKOFF;
-        while self.lt.delete_object(target).await.is_err() {
+        while self.backends.long_term.delete_object(target).await.is_err() {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
@@ -305,7 +341,7 @@ impl ChangeState {
     /// Removes this change's log entry, retrying with exponential backoff until success.
     async fn cleanup_log(&self) {
         let mut delay = INITIAL_BACKOFF;
-        while self.log.remove(&self.id).await.is_err() {
+        while self.backends.changelog.remove(&self.id).await.is_err() {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
@@ -335,19 +371,6 @@ pub struct ChangeGuard {
 }
 
 impl ChangeGuard {
-    /// Records the change to the log and returns a new guard.
-    pub(crate) async fn record(
-        change: Change,
-        hv: Arc<dyn HighVolumeBackend>,
-        lt: Arc<dyn Backend>,
-        log: Arc<dyn ChangeLog>,
-        token: TaskTrackerToken,
-    ) -> Result<Self> {
-        Ok(Self {
-            state: Some(ChangeState::record(change, hv, lt, log, token).await?),
-        })
-    }
-
     /// Advances the operation to the given phase. Zero-cost, no I/O.
     pub(crate) fn advance(&mut self, phase: ChangePhase) {
         if let Some(ref mut state) = self.state {

@@ -105,9 +105,8 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
-use tokio_util::task::task_tracker::TaskTracker;
 
-use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangePhase};
+use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
@@ -213,14 +212,7 @@ pub struct TieredStorageConfig {
 /// and concurrency limiting.
 #[derive(Debug)]
 pub struct TieredStorage {
-    /// The backend for small objects (≤ 1 MiB).
-    high_volume: Arc<dyn HighVolumeBackend>,
-    /// The backend for large objects (> 1 MiB).
-    long_term: Arc<dyn Backend>,
-    /// Durable write-ahead log for multi-step changes.
-    changelog: Arc<dyn ChangeLog>,
-    /// Tracks outstanding background cleanup operations for graceful shutdown.
-    tracker: TaskTracker,
+    inner: Arc<ChangeManager>,
 }
 
 impl TieredStorage {
@@ -230,31 +222,20 @@ impl TieredStorage {
         long_term: Box<dyn Backend>,
         changelog: Box<dyn ChangeLog>,
     ) -> Self {
-        Self {
-            high_volume: Arc::from(high_volume),
-            long_term: Arc::from(long_term),
-            changelog: Arc::from(changelog),
-            tracker: TaskTracker::new(),
-        }
+        let inner = ChangeManager::new(high_volume, long_term, changelog);
+        Self { inner }
     }
 
     /// Records the change to the log and returns a guard that cleans up on drop.
     async fn record_change(&self, change: Change) -> Result<ChangeGuard> {
-        ChangeGuard::record(
-            change,
-            Arc::clone(&self.high_volume),
-            Arc::clone(&self.long_term),
-            Arc::clone(&self.changelog),
-            self.tracker.token(),
-        )
-        .await
+        self.inner.clone().record(change).await
     }
 
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
-            BackendChoice::HighVolume => self.high_volume.name(),
-            BackendChoice::LongTerm => self.long_term.name(),
+            BackendChoice::HighVolume => self.inner.high_volume.name(),
+            BackendChoice::LongTerm => self.inner.long_term.name(),
         }
     }
 
@@ -269,6 +250,7 @@ impl TieredStorage {
         payload: Bytes,
     ) -> Result<()> {
         let tombstone_opt = self
+            .inner
             .high_volume
             .put_non_tombstone(id, metadata, payload.clone())
             .await?;
@@ -291,6 +273,7 @@ impl TieredStorage {
         guard.advance(ChangePhase::Written);
 
         let written = self
+            .inner
             .high_volume
             .compare_and_write(id, Some(&target), write)
             .await?;
@@ -312,7 +295,7 @@ impl TieredStorage {
         stream: ClientStream,
     ) -> Result<()> {
         // 1. Read current HV revision to establish the write precondition
-        let current = match self.high_volume.get_tiered_metadata(id).await? {
+        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
@@ -327,7 +310,10 @@ impl TieredStorage {
             })
             .await?;
 
-        self.long_term.put_object(&new, metadata, stream).await?;
+        self.inner
+            .long_term
+            .put_object(&new, metadata, stream)
+            .await?;
         guard.advance(ChangePhase::Written);
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
@@ -336,6 +322,7 @@ impl TieredStorage {
             expiration_policy: metadata.expiration_policy,
         };
         let written = self
+            .inner
             .high_volume
             .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
             .await?;
@@ -402,14 +389,14 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_object(id).await?;
+        let hv_result = self.inner.high_volume.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
             TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
             TieredGet::Tombstone(tombstone) => (
-                self.long_term.get_object(&tombstone.target).await?,
+                self.inner.long_term.get_object(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -441,12 +428,12 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_metadata(id).await?;
+        let hv_result = self.inner.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
-                self.long_term.get_metadata(&tombstone.target).await?,
+                self.inner.long_term.get_metadata(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -466,7 +453,7 @@ impl Backend for TieredStorage {
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
+        if let Some(tombstone) = self.inner.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
             let mut guard = self
@@ -480,6 +467,7 @@ impl Backend for TieredStorage {
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
             let deleted = self
+                .inner
                 .high_volume
                 .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
                 .await?;
@@ -499,11 +487,11 @@ impl Backend for TieredStorage {
     }
 
     async fn join(&self) {
-        self.tracker.close();
+        self.inner.tracker.close();
         tokio::join!(
-            self.high_volume.join(),
-            self.long_term.join(),
-            self.tracker.wait()
+            self.inner.high_volume.join(),
+            self.inner.long_term.join(),
+            self.inner.tracker.wait()
         );
     }
 }
@@ -1171,9 +1159,11 @@ mod tests {
     /// Dropping a guard outside any tokio runtime must not panic.
     #[test]
     fn guard_dropped_outside_runtime_does_not_panic() {
-        let hv = Arc::new(InMemoryBackend::new("hv"));
-        let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = TaskTracker::new();
+        let manager = ChangeManager::new(
+            Box::new(InMemoryBackend::new("hv")),
+            Box::new(InMemoryBackend::new("lt")),
+            Box::new(NoopChangeLog),
+        );
 
         let change = Change {
             id: make_id("object-key"),
@@ -1185,14 +1175,7 @@ mod tests {
         // so that no tokio context is active when the guard drops.
         let guard = {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(ChangeGuard::record(
-                change,
-                hv,
-                lt,
-                Arc::new(NoopChangeLog),
-                tracker.token(),
-            ))
-            .unwrap()
+            rt.block_on(manager.record(change)).unwrap()
         };
 
         drop(guard); // Must not panic.
