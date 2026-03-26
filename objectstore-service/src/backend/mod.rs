@@ -61,7 +61,7 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume).await?;
             let lt = from_leaf_config(*c.long_term).await?;
-            let log = Box::new(changelog::NoopChangeLog);
+            let log = changelog_from_config(c.changelog).await?;
             Box::new(tiered::TieredStorage::new(hv, lt, log))
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
@@ -102,5 +102,34 @@ async fn hv_from_config(
 ) -> anyhow::Result<Box<dyn common::HighVolumeBackend>> {
     Ok(match config {
         HighVolumeStorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
+    })
+}
+
+/// Configuration for the write-ahead changelog in a [`tiered::TieredStorageConfig`].
+///
+/// The changelog records in-flight mutations for crash recovery. Defaults to
+/// [`ChangeLogConfig::Noop`], which disables crash recovery.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChangeLogConfig {
+    /// Disables the changelog. In-flight mutations are not recoverable after a crash.
+    #[default]
+    Noop,
+    /// [Google Bigtable] changelog backend.
+    ///
+    /// Uses a dedicated BigTable connection to record mutations without
+    /// interfering with the critical path.
+    ///
+    /// [Google Bigtable]: https://cloud.google.com/bigtable
+    BigTable(bigtable::BigTableConfig),
+}
+
+/// Constructs a [`changelog::ChangeLog`] from the given config.
+async fn changelog_from_config(
+    config: ChangeLogConfig,
+) -> anyhow::Result<Box<dyn changelog::ChangeLog>> {
+    Ok(match config {
+        ChangeLogConfig::Noop => Box::new(changelog::NoopChangeLog),
+        ChangeLogConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
     })
 }

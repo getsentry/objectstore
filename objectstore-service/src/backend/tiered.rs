@@ -111,7 +111,7 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
-use crate::backend::{HighVolumeStorageConfig, StorageConfig};
+use crate::backend::{ChangeLogConfig, HighVolumeStorageConfig, StorageConfig};
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, SizedPeek};
@@ -159,6 +159,11 @@ pub struct TieredStorageConfig {
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
+    /// Write-ahead changelog for crash recovery of in-flight mutations.
+    ///
+    /// Defaults to [`ChangeLogConfig::Noop`], which disables crash recovery.
+    #[serde(default)]
+    pub changelog: ChangeLogConfig,
 }
 
 /// Two-tier storage backend that routes objects by size.
@@ -1280,7 +1285,7 @@ mod tests {
         assert!(lt_inner.is_empty(), "orphaned LT blob was not cleaned up");
 
         // The log entry must be gone once cleanup completes.
-        let entries = log.scan().await.unwrap();
+        let entries: Vec<_> = log.scan().await.unwrap().collect().await;
         assert!(
             entries.is_empty(),
             "changelog entry not removed after cleanup"

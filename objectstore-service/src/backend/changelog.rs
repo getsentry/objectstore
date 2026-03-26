@@ -24,6 +24,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 
@@ -35,6 +37,13 @@ use crate::id::ObjectId;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum delay for exponential backoff retries in background cleanup tasks.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Stream of changes claimed during a recovery scan.
+///
+/// Each item is a `(ChangeId, Change)` pair that has been atomically claimed
+/// from durable storage. Items are yielded lazily — the CAS claim for each
+/// entry happens as the caller polls the stream.
+pub type ChangeStream = BoxStream<'static, (ChangeId, Change)>;
 
 /// Unique identifier for a change log entry.
 ///
@@ -48,6 +57,11 @@ impl ChangeId {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7())
+    }
+
+    /// Parses a `ChangeId` from its UUID string representation.
+    pub(crate) fn from_uuid_str(s: &str) -> Option<Self> {
+        uuid::Uuid::parse_str(s).ok().map(Self)
     }
 }
 
@@ -142,13 +156,13 @@ impl ChangeManager {
         // Hold one token for the duration of recovery to prevent premature shutdown.
         let _token = self.tracker.token();
 
-        let entries =
+        let mut stream =
             self.changelog.scan().await.inspect_err(|e| {
                 objectstore_log::error!(!!e, "Failed to run changelog recovery")
             })?;
 
         // NB: Intentionally clean up sequentially to reduce load on the system.
-        for (id, change) in entries {
+        while let Some((id, change)) = stream.next().await {
             let state = ChangeState {
                 id,
                 change,
@@ -191,15 +205,12 @@ pub trait ChangeLog: fmt::Debug + Send + Sync {
     /// a nonexistent entry is not an error (idempotent).
     async fn remove(&self, id: &ChangeId) -> Result<()>;
 
-    /// Returns all outstanding changes eligible for recovery.
+    /// Scans for outstanding changes and returns them as a lazy stream.
     ///
-    /// During normal operation this returns only the calling instance's
-    /// entries. During recovery of a dead instance, the implementation
-    /// may return that instance's entries after the caller has claimed
-    /// ownership (via heartbeat CAS).
-    ///
-    /// The returned entries are unordered.
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>>;
+    /// For durable implementations this performs atomic claiming via
+    /// compare-and-swap so that concurrent instances do not double-process
+    /// the same entry. Items where the claim fails are silently skipped.
+    async fn scan(&self) -> Result<ChangeStream>;
 }
 
 /// In-memory [`ChangeLog`] for tests and deployments without durable logging.
@@ -225,13 +236,15 @@ impl ChangeLog for InMemoryChangeLog {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
+    async fn scan(&self) -> Result<ChangeStream> {
+        // TODO: Check if we should return anything here. This should probably yield empty since
+        // there are no abandoned in-memory entries ever.
         let entries = self.entries.lock().expect("lock poisoned");
-        let result = entries
+        let items: Vec<(ChangeId, Change)> = entries
             .iter()
             .map(|(id, change)| (id.clone(), change.clone()))
             .collect();
-        Ok(result)
+        Ok(futures_util::stream::iter(items).boxed())
     }
 }
 
@@ -253,8 +266,8 @@ impl ChangeLog for NoopChangeLog {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
-        Ok(Vec::new())
+    async fn scan(&self) -> Result<ChangeStream> {
+        Ok(futures_util::stream::empty().boxed())
     }
 }
 
@@ -444,7 +457,7 @@ mod tests {
 
         log.record(&id, &change).await.unwrap();
 
-        let entries = log.scan().await.unwrap();
+        let entries: Vec<_> = log.scan().await.unwrap().collect().await;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, id);
     }
@@ -462,7 +475,7 @@ mod tests {
         log.record(&id, &change).await.unwrap();
         log.remove(&id).await.unwrap();
 
-        let entries = log.scan().await.unwrap();
+        let entries: Vec<_> = log.scan().await.unwrap().collect().await;
         assert!(entries.is_empty());
     }
 
@@ -505,7 +518,8 @@ mod tests {
 
         // Log entry must survive so recovery can clean up the orphaned blob.
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let entries = rt.block_on(log.scan()).unwrap();
+        let entries: Vec<_> =
+            rt.block_on(async { log.scan().await.unwrap().collect::<Vec<_>>().await });
         assert_eq!(entries.len(), 1, "log entry must persist");
     }
 }
