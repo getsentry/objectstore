@@ -99,14 +99,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
-use tokio_util::task::task_tracker::{TaskTracker, TaskTrackerToken};
 
+use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
@@ -118,188 +118,6 @@ use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
-/// Initial delay for exponential backoff retries in background cleanup tasks.
-const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
-/// Maximum delay for exponential backoff retries in background cleanup tasks.
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-/// Phase of a multi-step storage operation.
-#[derive(Debug, PartialEq)]
-enum ChangePhase {
-    // The change is registered and LT upload has started.
-    Registered,
-    // LT upload has succeeded and the tombstone is being updated.
-    Written,
-    // The tombstone update failed due to a conflict.
-    Lost,
-    // The tombstone update succeeded.
-    Updated,
-    // Cleanup complete.
-    Completed,
-}
-
-impl ChangePhase {
-    /// Returns the phase corresponding to the outcome of a compare-and-write operation.
-    fn compare_and_write(succeeded: bool) -> Self {
-        if succeeded { Self::Updated } else { Self::Lost }
-    }
-}
-
-/// Describes the LT blobs involved in a multi-step storage operation.
-///
-/// Every mutating flow maps to: "I may have written a `new_target` LT blob and I
-/// may be replacing an `old_target` LT blob."
-#[derive(Debug)]
-struct Change {
-    /// The logical object being mutated.
-    ///
-    /// Used by [`ChangePhase::Written`] cleanup to query HV and determine the CAS outcome.
-    id: ObjectId,
-    /// The new LT blob written by this operation.
-    ///
-    /// Needs cleanup on failure (phase < [`ChangePhase::Updated`]).
-    new: Option<ObjectId>,
-    /// The old LT blob being replaced.
-    ///
-    /// Needs cleanup on success (phase >= [`ChangePhase::Updated`]).
-    old: Option<ObjectId>,
-}
-
-/// Internal state for a [`ChangeGuard`].
-///
-/// Logs an error if dropped in any phase other than `Completed`.
-#[derive(Debug)]
-struct ChangeState {
-    change: Change,
-    phase: ChangePhase,
-    hv: Arc<dyn HighVolumeBackend>,
-    lt: Arc<dyn Backend>,
-    _token: TaskTrackerToken,
-}
-
-impl ChangeState {
-    fn new(
-        change: Change,
-        hv: Arc<dyn HighVolumeBackend>,
-        lt: Arc<dyn Backend>,
-        token: TaskTrackerToken,
-    ) -> Self {
-        Self {
-            change,
-            phase: ChangePhase::Registered,
-            hv,
-            lt,
-            _token: token,
-        }
-    }
-
-    /// Marks the operation as completed, preventing any cleanup on drop.
-    fn mark_completed(mut self) {
-        self.phase = ChangePhase::Completed;
-    }
-
-    /// Run asynchronous cleanup to complete the operation, if necessary.
-    fn complete(self) {
-        if self.phase == ChangePhase::Completed {
-            return;
-        }
-
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return; // Error logged in Drop
-        };
-
-        handle.spawn(async move {
-            let current = match self.phase {
-                ChangePhase::Registered => self.change.old.clone(),
-                // For `Written`, the CAS outcome is unknown — read HV to determine it.
-                ChangePhase::Written => self.read_tombstone().await,
-                ChangePhase::Lost => self.change.old.clone(),
-                ChangePhase::Updated => self.change.new.clone(),
-                ChangePhase::Completed => return, // unreachable
-            };
-
-            if current != self.change.old
-                && let Some(ref old) = self.change.old
-            {
-                self.cleanup_lt(old).await;
-            }
-
-            if current != self.change.new
-                && let Some(ref new) = self.change.new
-            {
-                self.cleanup_lt(new).await;
-            }
-
-            self.mark_completed();
-        });
-    }
-
-    /// Reads the tombstone target for `id` from HV, retrying with exponential backoff on error.
-    ///
-    /// Returns `None` if the entry holds an inline object or is absent.
-    async fn read_tombstone(&self) -> Option<ObjectId> {
-        let mut delay = INITIAL_BACKOFF;
-        loop {
-            match self.hv.get_tiered_metadata(&self.change.id).await {
-                Ok(TieredMetadata::Tombstone(t)) => return Some(t.target),
-                Ok(TieredMetadata::Object(_)) => return None,
-                Ok(TieredMetadata::NotFound) => return None,
-                Err(_) => {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
-                }
-            }
-        }
-    }
-
-    /// Deletes `target` from `lt`, retrying with exponential backoff until success.
-    async fn cleanup_lt(&self, target: &ObjectId) {
-        let mut delay = INITIAL_BACKOFF;
-        while self.lt.delete_object(target).await.is_err() {
-            tokio::time::sleep(delay).await;
-            delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
-        }
-    }
-}
-
-impl Drop for ChangeState {
-    fn drop(&mut self) {
-        if self.phase != ChangePhase::Completed {
-            objectstore_log::error!(
-                change = ?self.change,
-                phase = ?self.phase,
-                "Operation dropped without completing cleanup"
-            );
-        }
-    }
-}
-
-/// RAII guard that tracks cleanup state for a multi-step storage operation.
-///
-/// When dropped in a non-`Completed` phase, determines the LT blob to clean up
-/// and spawns a background task to delete it. If no tokio runtime is available
-/// (e.g., during shutdown), the drop logs an error instead of panicking.
-struct ChangeGuard {
-    state: Option<ChangeState>,
-}
-
-impl ChangeGuard {
-    /// Advances the operation to the given phase. Zero-cost, no I/O.
-    fn advance(&mut self, phase: ChangePhase) {
-        if let Some(ref mut state) = self.state {
-            state.phase = phase;
-        }
-    }
-}
-
-impl Drop for ChangeGuard {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            state.complete();
-        };
-    }
-}
-
 /// Creates a new [`ObjectId`] with the same context but a unique revision key.
 ///
 /// The new key has the format `{original_key}/{uuid_v7}`, producing a distinct
@@ -394,44 +212,33 @@ pub struct TieredStorageConfig {
 /// and concurrency limiting.
 #[derive(Debug)]
 pub struct TieredStorage {
-    /// The backend for small objects (≤ 1 MiB).
-    high_volume: Arc<dyn HighVolumeBackend>,
-    /// The backend for large objects (> 1 MiB).
-    long_term: Arc<dyn Backend>,
-    /// Tracks outstanding background cleanup operations for graceful shutdown.
-    tracker: TaskTracker,
+    inner: Arc<ChangeManager>,
 }
 
 impl TieredStorage {
-    /// Creates a new `TieredStorage` with the given backends.
-    pub fn new(high_volume: Box<dyn HighVolumeBackend>, long_term: Box<dyn Backend>) -> Self {
-        Self {
-            high_volume: Arc::from(high_volume),
-            long_term: Arc::from(long_term),
-            tracker: TaskTracker::new(),
-        }
+    /// Creates a new `TieredStorage` with the given backends and change log.
+    pub fn new(
+        high_volume: Box<dyn HighVolumeBackend>,
+        long_term: Box<dyn Backend>,
+        changelog: Box<dyn ChangeLog>,
+    ) -> Self {
+        let inner = ChangeManager::new(high_volume, long_term, changelog);
+        // Note on cancellation: Our `join` method will wait for all tasks tracked by the spawned
+        // recovery job, so we defer shutdown until recovery is complete or times out.
+        tokio::spawn(inner.clone().recover());
+        Self { inner }
     }
 
-    /// Creates a `ChangeGuard` for the given operation.
-    ///
-    /// This guard will clean up unreferenced objects in long-term storage when it drops based on
-    /// the last known phase the change was in.
-    fn change_guard(&self, change: Change) -> ChangeGuard {
-        ChangeGuard {
-            state: Some(ChangeState::new(
-                change,
-                Arc::clone(&self.high_volume),
-                Arc::clone(&self.long_term),
-                self.tracker.token(),
-            )),
-        }
+    /// Records the change to the log and returns a guard that cleans up on drop.
+    async fn record_change(&self, change: Change) -> Result<ChangeGuard> {
+        self.inner.clone().record(change).await
     }
 
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
-            BackendChoice::HighVolume => self.high_volume.name(),
-            BackendChoice::LongTerm => self.long_term.name(),
+            BackendChoice::HighVolume => self.inner.high_volume.name(),
+            BackendChoice::LongTerm => self.inner.long_term.name(),
         }
     }
 
@@ -446,6 +253,7 @@ impl TieredStorage {
         payload: Bytes,
     ) -> Result<()> {
         let tombstone_opt = self
+            .inner
             .high_volume
             .put_non_tombstone(id, metadata, payload.clone())
             .await?;
@@ -456,16 +264,19 @@ impl TieredStorage {
         };
 
         // Tombstone exists — Swap it for inline data
-        let mut guard = self.change_guard(Change {
-            id: id.clone(),
-            new: None,
-            old: Some(target.clone()),
-        });
+        let mut guard = self
+            .record_change(Change {
+                id: id.clone(),
+                new: None,
+                old: Some(target.clone()),
+            })
+            .await?;
 
         let write = TieredWrite::Object(metadata.clone(), payload);
         guard.advance(ChangePhase::Written);
 
         let written = self
+            .inner
             .high_volume
             .compare_and_write(id, Some(&target), write)
             .await?;
@@ -487,20 +298,25 @@ impl TieredStorage {
         stream: ClientStream,
     ) -> Result<()> {
         // 1. Read current HV revision to establish the write precondition
-        let current = match self.high_volume.get_tiered_metadata(id).await? {
+        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
 
         // 2. Write payload to long-term at a unique revision key.
         let new = new_long_term_revision(id);
-        let mut guard = self.change_guard(Change {
-            id: id.clone(),
-            new: Some(new.clone()),
-            old: current.clone(),
-        });
+        let mut guard = self
+            .record_change(Change {
+                id: id.clone(),
+                new: Some(new.clone()),
+                old: current.clone(),
+            })
+            .await?;
 
-        self.long_term.put_object(&new, metadata, stream).await?;
+        self.inner
+            .long_term
+            .put_object(&new, metadata, stream)
+            .await?;
         guard.advance(ChangePhase::Written);
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
@@ -509,6 +325,7 @@ impl TieredStorage {
             expiration_policy: metadata.expiration_policy,
         };
         let written = self
+            .inner
             .high_volume
             .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
             .await?;
@@ -575,14 +392,14 @@ impl Backend for TieredStorage {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_object(id).await?;
+        let hv_result = self.inner.high_volume.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
             TieredGet::Object(metadata, stream) => {
                 (Some((metadata, stream)), BackendChoice::HighVolume)
             }
             TieredGet::Tombstone(tombstone) => (
-                self.long_term.get_object(&tombstone.target).await?,
+                self.inner.long_term.get_object(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -614,12 +431,12 @@ impl Backend for TieredStorage {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let start = Instant::now();
 
-        let hv_result = self.high_volume.get_tiered_metadata(id).await?;
+        let hv_result = self.inner.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
-                self.long_term.get_metadata(&tombstone.target).await?,
+                self.inner.long_term.get_metadata(&tombstone.target).await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -639,18 +456,21 @@ impl Backend for TieredStorage {
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        if let Some(tombstone) = self.high_volume.delete_non_tombstone(id).await? {
+        if let Some(tombstone) = self.inner.high_volume.delete_non_tombstone(id).await? {
             backend_choice = BackendChoice::LongTerm;
 
-            let mut guard = self.change_guard(Change {
-                id: id.clone(),
-                new: None,
-                old: Some(tombstone.target.clone()),
-            });
+            let mut guard = self
+                .record_change(Change {
+                    id: id.clone(),
+                    new: None,
+                    old: Some(tombstone.target.clone()),
+                })
+                .await?;
             guard.advance(ChangePhase::Written);
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
             let deleted = self
+                .inner
                 .high_volume
                 .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
                 .await?;
@@ -670,11 +490,11 @@ impl Backend for TieredStorage {
     }
 
     async fn join(&self) {
-        self.tracker.close();
+        self.inner.tracker.close();
         tokio::join!(
-            self.high_volume.join(),
-            self.long_term.join(),
-            self.tracker.wait()
+            self.inner.high_volume.join(),
+            self.inner.long_term.join(),
+            self.inner.tracker.wait()
         );
     }
 }
@@ -724,15 +544,16 @@ where
 mod tests {
     use std::time::Duration;
 
-    use objectstore_types::metadata::ExpirationPolicy;
+    use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::changelog::{InMemoryChangeLog, NoopChangeLog};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::error::Error;
     use crate::id::ObjectContext;
-    use crate::stream;
+    use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -745,11 +566,21 @@ mod tests {
         ObjectId::new(make_context(), key.into())
     }
 
-    fn make_tiered_storage() -> (TieredStorage, InMemoryBackend, InMemoryBackend) {
+    fn make_tiered_storage() -> (
+        TieredStorage,
+        InMemoryBackend,
+        InMemoryBackend,
+        InMemoryChangeLog,
+    ) {
         let hv = InMemoryBackend::new("in-memory-hv");
         let lt = InMemoryBackend::new("in-memory-lt");
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
-        (storage, hv, lt)
+        let changelog = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(lt.clone()),
+            Box::new(changelog.clone()),
+        );
+        (storage, hv, lt, changelog)
     }
 
     // --- new_long_term_revision tests ---
@@ -788,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_nonexistent_returns_none() {
-        let (storage, _hv, _lt) = make_tiered_storage();
+        let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
 
         assert!(storage.get_object(&id).await.unwrap().is_none());
@@ -797,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_nonexistent_succeeds() {
-        let (storage, _hv, _lt) = make_tiered_storage();
+        let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
 
         storage.delete_object(&id).await.unwrap();
@@ -807,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_small_object_stores_inline() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("small");
         let payload = b"small payload".to_vec();
 
@@ -831,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_large_object_creates_tombstone() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("large");
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
         let metadata_in = Metadata {
@@ -875,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn reinsert_small_over_large_swaps_to_inline() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("reinsert-key");
 
         // First: insert a large object → creates tombstone in hv, payload in lt at lt_id
@@ -907,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwrite_large_with_large_replaces_revision() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("overwrite-large");
 
         let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
@@ -944,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_small_object() {
-        let (storage, hv, _lt) = make_tiered_storage();
+        let (storage, hv, _lt, _) = make_tiered_storage();
         let id = make_id("delete-small");
 
         storage
@@ -960,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_large_object_cleans_up_both_backends() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("delete-both");
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
@@ -1005,7 +836,8 @@ mod tests {
     async fn delete_succeeds_when_gcs_cleanup_fails() {
         let hv = InMemoryBackend::new("hv");
         let lt = TestBackend::new(FailDelete);
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt), Box::new(log));
 
         let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
@@ -1056,7 +888,8 @@ mod tests {
     async fn put_large_cas_conflict_cleans_up_new_blob() {
         let hv = TestBackend::new(CasConflict);
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()), Box::new(log));
 
         let id = make_id("cas-conflict-large");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -1096,7 +929,8 @@ mod tests {
 
         let lt = InMemoryBackend::new("lt");
         let hv = TestBackend::with_inner(inner, CasConflict);
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(log));
 
         // Writing a small object over a tombstone should succeed even when CAS
         // conflicts — the other writer's write is accepted.
@@ -1139,7 +973,8 @@ mod tests {
     async fn no_orphan_when_tombstone_write_fails() {
         let lt = InMemoryBackend::new("lt");
         let hv = TestBackend::new(FailCas(false));
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()), Box::new(log));
 
         let id = make_id("orphan-test");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
@@ -1160,7 +995,7 @@ mod tests {
     /// cleanup), reads should gracefully return None rather than error.
     #[tokio::test]
     async fn orphan_tombstone_returns_none() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("orphan-tombstone");
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
@@ -1193,7 +1028,8 @@ mod tests {
     async fn tombstone_target_is_used_for_reads_and_deletes() {
         let hv = InMemoryBackend::new("hv");
         let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv.clone()), Box::new(lt.clone()), Box::new(log));
 
         let hv_id = make_id("hv-key");
         let lt_id = make_id("lt-key");
@@ -1227,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_chunk_large_object_chains_buffered_and_remaining() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("multi-chunk");
 
         // Deliver a 2 MiB payload across multiple chunks that individually
@@ -1268,7 +1104,7 @@ mod tests {
     /// LT blob is no longer referenced — here the old one, since the new tombstone committed.
     #[tokio::test]
     async fn written_cleanup_after_lost_cas_response() {
-        let (storage, hv, lt) = make_tiered_storage();
+        let (storage, hv, lt, log) = make_tiered_storage();
         let id = make_id("obj");
 
         // First put: establishes tombstone
@@ -1283,6 +1119,7 @@ mod tests {
         let broken_storage = TieredStorage::new(
             Box::new(TestBackend::with_inner(hv.clone(), FailCas(true))),
             Box::new(lt.clone()),
+            Box::new(log.clone()),
         );
         broken_storage
             .put_object(&id, &Default::default(), stream::single(payload.clone()))
@@ -1325,20 +1162,23 @@ mod tests {
     /// Dropping a guard outside any tokio runtime must not panic.
     #[test]
     fn guard_dropped_outside_runtime_does_not_panic() {
-        let hv = Arc::new(InMemoryBackend::new("hv"));
-        let lt = Arc::new(InMemoryBackend::new("lt"));
-        let tracker = TaskTracker::new();
+        let manager = ChangeManager::new(
+            Box::new(InMemoryBackend::new("hv")),
+            Box::new(InMemoryBackend::new("lt")),
+            Box::new(NoopChangeLog),
+        );
 
-        // Construct a guard that would schedule cleanup (new_target is Some).
-        // No tokio runtime is active in this plain #[test].
         let change = Change {
             id: make_id("object-key"),
             new: Some(make_id("cleanup-target")),
             old: None,
         };
 
-        let guard = ChangeGuard {
-            state: Some(ChangeState::new(change, hv, lt, tracker.token())),
+        // Build the guard inside a temporary runtime, then let the runtime drop
+        // so that no tokio context is active when the guard drops.
+        let guard = {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(manager.record(change)).unwrap()
         };
 
         drop(guard); // Must not panic.
@@ -1350,12 +1190,13 @@ mod tests {
     /// completes after 10 s; `join` must still be waiting at 9 s and done by 11 s.
     #[tokio::test(start_paused = true)]
     async fn join_waits_for_cleanup_to_complete() {
-        let (storage, _hv, _lt) = make_tiered_storage();
-        let mut guard = storage.change_guard(Change {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+        let change = Change {
             id: make_id("object-key"),
             new: None,
             old: None,
-        });
+        };
+        let mut guard = storage.record_change(change).await.unwrap();
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1370,5 +1211,79 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(join_future.is_finished(), "finish after guard drops");
+    }
+
+    // --- Changelog integration tests ---
+
+    /// LT backend hook that completes the write, then pauses until resumed.
+    ///
+    /// Lets tests cancel the owning future after the blob is committed but
+    /// before the HV tombstone is set.
+    #[derive(Clone, Debug)]
+    struct PauseAfterPut {
+        paused: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for PauseAfterPut {
+        async fn put_object(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            metadata: &Metadata,
+            stream: ClientStream,
+        ) -> Result<PutResponse> {
+            inner.put_object(id, metadata, stream).await?;
+            self.paused.notify_one();
+            self.resume.notified().await;
+            Ok(())
+        }
+    }
+
+    /// When a future is cancelled after the LT write but before the HV tombstone is set,
+    /// the `ChangeGuard` cleans up the orphaned LT blob and removes the log entry.
+    #[tokio::test]
+    async fn dropped_future_triggers_cleanup_and_log_entry_removed() {
+        let paused = Arc::new(tokio::sync::Notify::new());
+        let hooks = PauseAfterPut {
+            paused: Arc::clone(&paused),
+            resume: Arc::new(tokio::sync::Notify::new()),
+        };
+
+        let lt_inner = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(InMemoryBackend::new("hv")),
+            Box::new(TestBackend::with_inner(lt_inner.clone(), hooks)),
+            Box::new(log.clone()),
+        );
+
+        let id = make_id("drop-test");
+        let metadata = Metadata::default();
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
+
+        // Drive the put until the LT write commits, then cancel before the HV tombstone is set.
+        tokio::select! {
+            result = storage.put_object(&id, &metadata, stream::single(payload)) => {
+                panic!("expected put to pause before completing, got: {result:?}");
+            }
+            _ = paused.notified() => {
+                // LT blob stored; cancelling drops the guard in Recorded phase.
+            }
+        }
+
+        // ChangeGuard dropped → background cleanup task spawned; wait for it.
+        storage.join().await;
+
+        // The orphaned LT blob must have been deleted.
+        assert!(lt_inner.is_empty(), "orphaned LT blob was not cleaned up");
+
+        // The log entry must be gone once cleanup completes.
+        let entries = log.scan().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "changelog entry not removed after cleanup"
+        );
     }
 }
