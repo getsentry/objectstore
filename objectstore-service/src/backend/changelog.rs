@@ -506,6 +506,6 @@ mod tests {
         // Log entry must survive so recovery can clean up the orphaned blob.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let entries = rt.block_on(log.scan()).unwrap();
-        assert_eq!(entries.len(), 1, "log entry must persist for crash recovery");
+        assert_eq!(entries.len(), 1, "log entry must persist");
     }
 }

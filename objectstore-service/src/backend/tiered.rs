@@ -1286,5 +1286,4 @@ mod tests {
             "changelog entry not removed after cleanup"
         );
     }
-
 }
