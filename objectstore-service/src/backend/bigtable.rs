@@ -36,12 +36,12 @@ use std::time::{Duration, SystemTime};
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 
-use crate::backend::changelog::{Change, ChangeId, ChangeLog, ChangeStream};
+use crate::backend::changelog::{Change, ChangeId, ChangeLog};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
@@ -1342,16 +1342,12 @@ fn changelog_entry_from_row(
 /// skipped (already claimed by another instance, or not a valid changelog row), and
 /// `Err` if a recoverable error occurred that the caller should log.
 async fn process_scan_row(
-    result: Result<(Vec<u8>, Vec<RowCell>), bigtable_rs::bigtable::Error>,
+    row_key: Vec<u8>,
+    cells: Vec<RowCell>,
     bigtable: &BigTableConnection,
     table_path: &str,
     cutoff_micros: i64,
 ) -> Result<Option<(ChangeId, Change)>> {
-    let (row_key, cells) = result.map_err(|e| Error::Generic {
-        context: "changelog scan row error".to_owned(),
-        cause: Some(Box::new(e)),
-    })?;
-
     let Some((id, change)) = changelog_entry_from_row(row_key, cells)? else {
         return Ok(None);
     };
@@ -1383,7 +1379,7 @@ impl ChangeLog for BigTableBackend {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<ChangeStream> {
+    async fn scan(&self, max: u16) -> Result<Vec<(ChangeId, Change)>> {
         // Compute the staleness cutoff: entries with cell timestamp older than
         // this were written by operations that are no longer bumping heartbeats.
         let staleness_threshold_micros = CHANGE_THRESHOLD.as_millis() as i64 * 1000;
@@ -1392,40 +1388,36 @@ impl ChangeLog for BigTableBackend {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             filter: Some(changelog_staleness_filter(cutoff_micros)),
+            rows_limit: max.into(),
             ..Default::default()
         };
 
-        // Open a server-streaming RPC. Rows arrive lazily as the caller polls,
-        // so CAS claims are interleaved with row delivery without buffering the
-        // full result set. Mid-stream gRPC errors skip the affected row and are
-        // logged; the initial connection error is retried then propagates as Err.
-        let row_stream = retry("changelog-scan", || async {
+        let rows = retry("changelog-scan", || async {
             self.bigtable
                 .client()
-                .stream_rows_with_prefix(request.clone(), CHANGE_PREFIX.to_vec())
+                .read_rows_with_prefix(request.clone(), CHANGE_PREFIX.to_vec())
                 .await
         })
         .await?;
 
-        // Clone only the two fields needed for CAS claims.
-        let bigtable = self.bigtable.clone();
-        let table_path = self.table_path.clone();
-
-        let stream = row_stream.filter_map(move |result| {
-            let bigtable = bigtable.clone();
-            let table_path = table_path.clone();
-            async move {
-                match process_scan_row(result, &bigtable, &table_path, cutoff_micros).await {
-                    Ok(entry) => entry,
-                    Err(e) => {
-                        objectstore_log::error!(!!&e, "Failed to process changelog scan row");
-                        None
-                    }
-                }
+        let mut entries = Vec::with_capacity(rows.len());
+        for (row_key, cells) in rows {
+            match process_scan_row(
+                row_key,
+                cells,
+                &self.bigtable,
+                &self.table_path,
+                cutoff_micros,
+            )
+            .await
+            {
+                Ok(Some(entry)) => entries.push(entry),
+                Ok(None) => {}
+                Err(e) => objectstore_log::error!(!!&e, "Failed to process changelog scan row"),
             }
-        });
+        }
 
-        Ok(stream.boxed())
+        Ok(entries)
     }
 }
 
@@ -1437,6 +1429,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::changelog::ChangeId;
     use crate::id::ObjectContext;
     use crate::stream;
 
@@ -2325,13 +2318,13 @@ mod tests {
     async fn changelog_record_remove_scan() -> Result<()> {
         let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
         let backend = create_test_backend().await?;
-        let change_id = crate::backend::changelog::ChangeId::new();
+        let change_id = ChangeId::new();
         let (_, change) = make_change("cr-obj");
 
         backend.record(&change_id, &change).await?;
         backend.remove(&change_id).await?;
 
-        let entries: Vec<_> = backend.scan().await?.collect().await;
+        let entries: Vec<_> = backend.scan(100).await?;
         assert!(
             entries.iter().all(|(id, _)| id != &change_id),
             "removed entry must not appear in scan"
@@ -2344,7 +2337,7 @@ mod tests {
     #[tokio::test]
     async fn changelog_remove_nonexistent_is_ok() -> Result<()> {
         let backend = create_test_backend().await?;
-        let change_id = crate::backend::changelog::ChangeId::new();
+        let change_id = ChangeId::new();
 
         backend.remove(&change_id).await?;
 
@@ -2356,12 +2349,12 @@ mod tests {
     async fn changelog_fresh_entry_not_returned_by_scan() -> Result<()> {
         let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
         let backend = create_test_backend().await?;
-        let change_id = crate::backend::changelog::ChangeId::new();
+        let change_id = ChangeId::new();
         let (_, change) = make_change("fresh-obj");
 
         backend.record(&change_id, &change).await?;
 
-        let entries: Vec<_> = backend.scan().await?.collect().await;
+        let entries: Vec<_> = backend.scan(100).await?;
         // The freshly-written entry has a current timestamp — scan must skip it.
         assert!(
             entries.iter().all(|(id, _)| id != &change_id),
@@ -2389,8 +2382,6 @@ mod tests {
     /// then verify scan claims it.
     #[tokio::test]
     async fn changelog_stale_entry_claimed_by_scan() -> Result<()> {
-        use crate::backend::changelog::ChangeId;
-
         let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
         let backend = create_test_backend().await?;
         let change_id = ChangeId::new();
@@ -2410,7 +2401,7 @@ mod tests {
             .await?;
 
         // Scan should claim and return it.
-        let entries: Vec<_> = backend.scan().await?.collect().await;
+        let entries: Vec<_> = backend.scan(100).await?;
         assert!(
             entries.iter().any(|(id, _)| id == &change_id),
             "stale entry must be claimed by scan"
@@ -2425,8 +2416,6 @@ mod tests {
     /// A stale entry claimed by one scan instance is not claimed again by a concurrent scan.
     #[tokio::test]
     async fn changelog_stale_entry_claimed_once() -> Result<()> {
-        use crate::backend::changelog::ChangeId;
-
         let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
         let backend = create_test_backend().await?;
         let change_id = ChangeId::new();
@@ -2446,11 +2435,11 @@ mod tests {
             .await?;
 
         // First scan claims the entry (bumps timestamp to now).
-        let first: Vec<_> = backend.scan().await?.collect().await;
+        let first: Vec<_> = backend.scan(100).await?;
         let claimed_first = first.iter().any(|(id, _)| id == &change_id);
 
         // Second scan should NOT return the same entry (timestamp is now fresh).
-        let second: Vec<_> = backend.scan().await?.collect().await;
+        let second: Vec<_> = backend.scan(100).await?;
         let claimed_second = second.iter().any(|(id, _)| id == &change_id);
 
         assert!(claimed_first, "first scan must claim the entry");

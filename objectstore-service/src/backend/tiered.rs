@@ -1285,10 +1285,6 @@ mod tests {
         assert!(lt_inner.is_empty(), "orphaned LT blob was not cleaned up");
 
         // The log entry must be gone once cleanup completes.
-        let entries: Vec<_> = log.scan().await.unwrap().collect().await;
-        assert!(
-            entries.is_empty(),
-            "changelog entry not removed after cleanup"
-        );
+        assert!(log.is_empty(), "changelog entry not removed after cleanup");
     }
 }
