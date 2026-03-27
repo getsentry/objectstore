@@ -24,8 +24,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
-use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use crate::backend::common::{Backend, HighVolumeBackend, TieredMetadata};
 use crate::error::Result;
@@ -35,6 +35,12 @@ use crate::id::ObjectId;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum delay for exponential backoff retries in background cleanup tasks.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Maximum number of stale entries returned per [`ChangeLog::scan`] call.
+const SCAN_COUNT: u16 = 100;
+/// How often the heartbeat task re-records a change to extend its lifetime.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// Time after which a change is considered expired if not completed or refreshed.
+pub const EXPIRY: Duration = REFRESH_INTERVAL.saturating_mul(3);
 
 /// Unique identifier for a change log entry.
 ///
@@ -118,49 +124,76 @@ impl ChangeManager {
     /// When the [`ChangeGuard`] is dropped, a background process is spawned to
     /// clean up any unreferenced objects in LT storage.
     pub async fn record(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let token = self.tracker.token();
-
         let id = ChangeId::new();
         self.changelog.record(&id, &change).await?;
 
         let state = ChangeState {
-            id,
-            change,
+            id: id.clone(),
+            change: change.clone(),
             phase: ChangePhase::Recorded,
             manager: self.clone(),
-            _token: token,
+            heartbeat: Some(self.clone().spawn_heartbeat(id, change)),
         };
 
         Ok(ChangeGuard { state: Some(state) })
     }
 
-    /// Scans the changelog for outstanding entries and runs cleanup for each.
+    fn spawn_heartbeat(self: Arc<Self>, id: ChangeId, change: Change) -> JoinHandle<()> {
+        let token = self.tracker.token();
+
+        tokio::spawn(async move {
+            // Prevent shutdown while the change is active in this instance.
+            let _token = token;
+
+            loop {
+                tokio::time::sleep(REFRESH_INTERVAL).await;
+                if self.changelog.record(&id, &change).await.is_err() {
+                    // `record` retries internally. If it fails repeatedly, stop the heartbeat and
+                    // let recovery from a different instance handle the expired entry.
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Polls the changelog for stale entries and runs cleanup for each.
     ///
-    /// Spawn this into a background task at startup to recover from any orphaned objects after a
-    /// crash. During normal operation, this should return an empty list and have no effect.
-    pub async fn recover(self: Arc<Self>) -> Result<()> {
-        // Hold one token for the duration of recovery to prevent premature shutdown.
-        let _token = self.tracker.token();
+    /// Runs as an infinite background loop. On each iteration:
+    /// - If the scan fails, waits with exponential backoff before retrying.
+    /// - If the scan returns entries, cleans them up sequentially then loops immediately.
+    /// - If the scan is empty, waits [`REFRESH_INTERVAL`] before polling again.
+    ///
+    /// Spawn this at startup to recover from any orphaned objects after a crash.
+    pub async fn recover(self: Arc<Self>) {
+        let mut backoff = INITIAL_BACKOFF;
 
-        let entries =
-            self.changelog.scan().await.inspect_err(|e| {
-                objectstore_log::error!(!!e, "Failed to run changelog recovery")
-            })?;
-
-        // NB: Intentionally clean up sequentially to reduce load on the system.
-        for (id, change) in entries {
-            let state = ChangeState {
-                id,
-                change,
-                phase: ChangePhase::Recovered,
-                manager: self.clone(),
-                _token: self.tracker.token(),
-            };
-
-            state.cleanup().await;
+        loop {
+            match self.changelog.scan(SCAN_COUNT).await {
+                Err(e) => {
+                    objectstore_log::error!(!!&e, "Failed to run changelog recovery");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff.mul_f32(1.5)).min(MAX_BACKOFF);
+                }
+                Ok(entries) if entries.is_empty() => {
+                    backoff = INITIAL_BACKOFF;
+                    tokio::time::sleep(REFRESH_INTERVAL).await;
+                }
+                Ok(entries) => {
+                    backoff = INITIAL_BACKOFF;
+                    // NB: Intentionally sequential to reduce load on the system.
+                    for (id, change) in entries {
+                        let state = ChangeState {
+                            id: id.clone(),
+                            change: change.clone(),
+                            phase: ChangePhase::Recovered,
+                            manager: self.clone(),
+                            heartbeat: Some(self.clone().spawn_heartbeat(id, change)),
+                        };
+                        state.cleanup().await;
+                    }
+                }
+            }
         }
-
-        Ok(())
     }
 }
 
@@ -191,15 +224,12 @@ pub trait ChangeLog: fmt::Debug + Send + Sync {
     /// a nonexistent entry is not an error (idempotent).
     async fn remove(&self, id: &ChangeId) -> Result<()>;
 
-    /// Returns all outstanding changes eligible for recovery.
+    /// Returns up to `max` changes eligible for recovery.
     ///
-    /// During normal operation this returns only the calling instance's
-    /// entries. During recovery of a dead instance, the implementation
-    /// may return that instance's entries after the caller has claimed
-    /// ownership (via heartbeat CAS).
-    ///
-    /// The returned entries are unordered.
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>>;
+    /// During normal operation, this returns an empty list. After a crash, it
+    /// may discover stale entries from another instance, claim them, and
+    /// return them for cleanup.
+    async fn scan(&self, max: u16) -> Result<Vec<(ChangeId, Change)>>;
 }
 
 /// In-memory [`ChangeLog`] for tests and deployments without durable logging.
@@ -209,6 +239,18 @@ pub trait ChangeLog: fmt::Debug + Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryChangeLog {
     entries: Arc<Mutex<HashMap<ChangeId, Change>>>,
+}
+
+impl InMemoryChangeLog {
+    /// Returns `true` if the log contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().expect("lock poisoned").is_empty()
+    }
+
+    /// Returns a snapshot of all entries currently in the log.
+    pub fn entries(&self) -> HashMap<ChangeId, Change> {
+        self.entries.lock().expect("lock poisoned").clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -225,13 +267,8 @@ impl ChangeLog for InMemoryChangeLog {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
-        let entries = self.entries.lock().expect("lock poisoned");
-        let result = entries
-            .iter()
-            .map(|(id, change)| (id.clone(), change.clone()))
-            .collect();
-        Ok(result)
+    async fn scan(&self, _max: u16) -> Result<Vec<(ChangeId, Change)>> {
+        Ok(vec![])
     }
 }
 
@@ -253,8 +290,8 @@ impl ChangeLog for NoopChangeLog {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
-        Ok(Vec::new())
+    async fn scan(&self, _max: u16) -> Result<Vec<(ChangeId, Change)>> {
+        Ok(vec![])
     }
 }
 
@@ -291,7 +328,7 @@ struct ChangeState {
     change: Change,
     phase: ChangePhase,
     manager: Arc<ChangeManager>,
-    _token: TaskTrackerToken,
+    heartbeat: Option<JoinHandle<()>>,
 }
 
 impl ChangeState {
@@ -301,7 +338,7 @@ impl ChangeState {
     }
 
     /// Determines tombstone state and runs cleanup for unreferenced objects.
-    async fn cleanup(self) {
+    async fn cleanup(mut self) {
         let current = match self.phase {
             // For `Recovered`, we must first check the state of the tombstone.
             ChangePhase::Recovered => self.read_tombstone().await,
@@ -362,17 +399,32 @@ impl ChangeState {
     }
 
     /// Removes this change's log entry, retrying with exponential backoff until success.
-    async fn cleanup_log(&self) {
+    ///
+    /// Aborts the heartbeat task first so it cannot re-record after removal.
+    async fn cleanup_log(&mut self) {
+        if let Some(handle) = self.heartbeat.take() {
+            handle.abort();
+        }
+
         let mut delay = INITIAL_BACKOFF;
         while self.manager.changelog.remove(&self.id).await.is_err() {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
     }
+
+    /// Returns `true` if the change entry is still held by this instance.
+    fn is_valid(&self) -> bool {
+        self.heartbeat.as_ref().is_some_and(|h| !h.is_finished())
+    }
 }
 
 impl Drop for ChangeState {
     fn drop(&mut self) {
+        if let Some(handle) = self.heartbeat.take() {
+            handle.abort();
+        }
+
         if self.phase != ChangePhase::Completed {
             objectstore_log::error!(
                 change = ?self.change,
@@ -395,10 +447,19 @@ pub struct ChangeGuard {
 
 impl ChangeGuard {
     /// Advances the operation to the given phase. Zero-cost, no I/O.
-    pub(crate) fn advance(&mut self, phase: ChangePhase) {
+    pub fn advance(&mut self, phase: ChangePhase) {
         if let Some(ref mut state) = self.state {
             state.phase = phase;
         }
+    }
+
+    /// Returns `true` if the change entry is still held by this instance.
+    ///
+    /// This can return false if the internal heartbeats failed to refresh the entry in the log,
+    /// causing it to be claimed by another instance during recovery. Proceeding with tombstone
+    /// writes during this time can lead to inconsistencies.
+    pub fn is_valid(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.is_valid())
     }
 }
 
@@ -406,6 +467,7 @@ impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
             && state.phase != ChangePhase::Completed
+            && state.is_valid()
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             handle.spawn(state.cleanup());
@@ -444,9 +506,9 @@ mod tests {
 
         log.record(&id, &change).await.unwrap();
 
-        let entries = log.scan().await.unwrap();
+        let entries = log.entries();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, id);
+        assert!(entries.contains_key(&id));
     }
 
     #[tokio::test]
@@ -462,8 +524,7 @@ mod tests {
         log.record(&id, &change).await.unwrap();
         log.remove(&id).await.unwrap();
 
-        let entries = log.scan().await.unwrap();
-        assert!(entries.is_empty());
+        assert!(log.is_empty());
     }
 
     #[tokio::test]
@@ -504,8 +565,6 @@ mod tests {
         drop(guard);
 
         // Log entry must survive so recovery can clean up the orphaned blob.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let entries = rt.block_on(log.scan()).unwrap();
-        assert_eq!(entries.len(), 1, "log entry must persist");
+        assert_eq!(log.entries().len(), 1, "log entry must persist");
     }
 }
