@@ -161,7 +161,7 @@ impl ChangeManager {
     /// Runs as an infinite background loop. On each iteration:
     /// - If the scan fails, waits with exponential backoff before retrying.
     /// - If the scan returns entries, cleans them up sequentially then loops immediately.
-    /// - If the scan is empty, waits [`REFRESH_INTERVAL`] before polling again.
+    /// - If the scan is empty, waits one refresh interval before polling again.
     ///
     /// Spawn this at startup to recover from any orphaned objects after a crash.
     pub async fn recover(self: Arc<Self>) {
