@@ -112,7 +112,7 @@ use crate::backend::common::{
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::{ChangeLogConfig, HighVolumeStorageConfig, StorageConfig};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, SizedPeek};
 
@@ -323,6 +323,15 @@ impl TieredStorage {
             .put_object(&new, metadata, stream)
             .await?;
         guard.advance(ChangePhase::Written);
+
+        if !guard.is_valid() {
+            // The log is no longer synchronized due to backend failures. Abort since writing now
+            // could lead to an orphan.
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "failed to keep write-ahead log synchronize",
+            )));
+        }
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let tombstone = Tombstone {

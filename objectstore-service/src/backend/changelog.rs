@@ -147,13 +147,16 @@ impl ChangeManager {
         let token = self.tracker.token();
 
         tokio::spawn(async move {
-            // TODO: Explain why the token is here now.
+            // Prevent shutdown while the change is active in this instance.
             let _token = token;
 
             loop {
                 tokio::time::sleep(REFRESH_INTERVAL).await;
-                // TODO: Ensure we cancel cleanup if we keep failing here!
-                let _ = self.changelog.record(&id, &change).await;
+                if self.changelog.record(&id, &change).await.is_err() {
+                    // `record` retries internally. If it fails repeatedly, stop the heartbeat and
+                    // let recovery from a different instance handle the expired entry.
+                    return;
+                }
             }
         })
     }
@@ -414,6 +417,11 @@ impl ChangeState {
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }
     }
+
+    /// Returns `true` if the change entry is still held by this instance.
+    fn is_valid(&self) -> bool {
+        self.heartbeat.as_ref().is_some_and(|h| !h.is_finished())
+    }
 }
 
 impl Drop for ChangeState {
@@ -444,10 +452,19 @@ pub struct ChangeGuard {
 
 impl ChangeGuard {
     /// Advances the operation to the given phase. Zero-cost, no I/O.
-    pub(crate) fn advance(&mut self, phase: ChangePhase) {
+    pub fn advance(&mut self, phase: ChangePhase) {
         if let Some(ref mut state) = self.state {
             state.phase = phase;
         }
+    }
+
+    /// Returns `true` if the change entry is still held by this instance.
+    ///
+    /// This can return false if the internal heartbeats failed to refresh the entry in the log,
+    /// causing it to be claimed by another instance during recovery. Proceeding with tombstone
+    /// writes during this time can lead to inconsistencies.
+    pub fn is_valid(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.is_valid())
     }
 }
 
@@ -455,6 +472,7 @@ impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
             && state.phase != ChangePhase::Completed
+            && state.is_valid()
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             handle.spawn(state.cleanup());
