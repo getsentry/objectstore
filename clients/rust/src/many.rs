@@ -138,7 +138,7 @@ impl BatchOperation {
                 let mut headers = operation_headers("insert", key.as_deref());
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::maybe_compress(body, metadata.compression);
+                let body = put::maybe_compress(body, metadata.compression).await?;
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -483,31 +483,45 @@ async fn send_batch(
     Ok(results)
 }
 
+fn classify_fail(key: Option<ObjectKey>, error: Error) -> Classified {
+    Classified::Failed(OperationResult::Put(
+        key.unwrap_or_else(|| "<unknown>".to_owned()),
+        Err(error),
+    ))
+}
+
 /// Classifies a single operation for batch processing.
 ///
-/// Insert operations whose file body exceeds [`MAX_BATCH_PART_SIZE`] are marked
-/// as [`Classified::Individual`]. Everything else is [`Classified::Batchable`].
+/// Insert operations whose body exceeds [`MAX_BATCH_PART_SIZE`] are marked as
+/// [`Classified::Individual`]. Everything else is [`Classified::Batchable`].
 async fn classify(op: BatchOperation) -> Classified {
     match op {
         BatchOperation::Insert {
             key,
             metadata,
-            body: PutBody::File(file),
+            body,
         } => {
-            let meta = match file.metadata().await {
-                Ok(meta) => meta,
-                Err(err) => {
-                    let key = key.unwrap_or_else(|| "<unknown>".to_owned());
-                    return Classified::Failed(OperationResult::Put(key, Err(err.into())));
-                }
+            let size = match &body {
+                PutBody::Buffer(bytes) => Some(bytes.len() as u64),
+                PutBody::File(file) => match file.metadata().await {
+                    Ok(meta) => Some(meta.len()),
+                    Err(err) => return classify_fail(key, err.into()),
+                },
+                PutBody::Path(path) => match tokio::fs::metadata(path).await {
+                    Ok(meta) => Some(meta.len()),
+                    Err(err) => return classify_fail(key, err.into()),
+                },
+                // Streams have unknown size and must not go through the batch endpoint.
+                PutBody::Stream(_) => None,
             };
 
             let op = BatchOperation::Insert {
                 key,
                 metadata,
-                body: PutBody::File(file),
+                body,
             };
-            if meta.len() <= MAX_BATCH_PART_SIZE as u64 {
+
+            if size.is_some_and(|s| s <= MAX_BATCH_PART_SIZE as u64) {
                 Classified::Batchable(op)
             } else {
                 Classified::Individual(op)
