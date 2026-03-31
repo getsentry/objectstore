@@ -436,6 +436,17 @@ impl Session {
         url
     }
 
+    /// Returns a signed token if a token or generator was provided or `None` otherwise
+    pub fn mint_token(&self) -> crate::Result<Option<String>> {
+        match &self.client.token {
+            Some(TokenProvider::Generator(generator)) => {
+                Ok(Some(generator.sign_for_scope(&self.scope)?))
+            }
+            Some(TokenProvider::Static(token)) => Ok(Some(token.clone())),
+            None => Ok(None),
+        }
+    }
+
     fn batch_url(&self) -> Url {
         let mut url = self.client.service_url.clone();
 
@@ -454,15 +465,8 @@ impl Session {
     }
 
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
-        match &self.client.token {
-            Some(TokenProvider::Generator(generator)) => {
-                let token = generator.sign_for_scope(&self.scope)?;
-                builder = builder.bearer_auth(token);
-            }
-            Some(TokenProvider::Static(token)) => {
-                builder = builder.bearer_auth(token);
-            }
-            None => {}
+        if let Some(token) = self.mint_token()? {
+            builder = builder.bearer_auth(token);
         }
         if self.client.propagate_traces {
             let trace_headers =
