@@ -228,17 +228,24 @@ class Session:
         self._scope = scope
         self._token = token
 
+    def mint_token(self) -> str | None:
+        """
+        Returns a signed token if a token or generator was provided or `None` otherwise.
+        """
+        if isinstance(self._token, TokenGenerator):
+            return self._token.sign_for_scope(self._usecase.name, self._scope)
+        elif isinstance(self._token, str):
+            return self._token
+        return None
+
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
         if self._propagate_traces:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if isinstance(self._token, TokenGenerator):
-            signed = self._token.sign_for_scope(self._usecase.name, self._scope)
-            headers["Authorization"] = f"Bearer {signed}"
-        elif isinstance(self._token, str):
-            headers["Authorization"] = f"Bearer {self._token}"
+        if token := self.mint_token():
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
