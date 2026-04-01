@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.3
+
+### New Features ✨
+
+- (client) Add put_path for lazy file descriptor opening by @jan-auer in [#415](https://github.com/getsentry/objectstore/pull/415)
+
+### Internal Changes 🔧
+
+- (client) Refactor many API into combinator pipeline by @lcian in [#391](https://github.com/getsentry/objectstore/pull/391)
+- (config) Collapse dual storage fields into a single StorageConfig by @jan-auer in [#384](https://github.com/getsentry/objectstore/pull/384)
+
 ## 0.1.2
 
 ### New Features ✨
