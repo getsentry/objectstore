@@ -628,6 +628,33 @@ async fn batch_put_files() {
 }
 
 #[tokio::test]
+async fn put_path_does_not_exhaust_file_descriptors() {
+    // Regression test: put_path must not open file descriptors at push time.
+    // On macOS the default ulimit is 256; 1000 concurrent put_file calls would fail.
+    let server = test_server().await;
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let session = client
+        .session(Usecase::new("usecase").for_project(12345, 1337))
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut many = session.many();
+    for i in 0..1000 {
+        let path = dir.path().join(i.to_string());
+        std::fs::File::create(&path).unwrap();
+        many = many.push(session.put_path(path).compression(None));
+    }
+    many.send()
+        .await
+        .error_for_failures()
+        .await
+        .unwrap_or_else(|e| panic!("upload failures: {:?}", e.collect::<Vec<_>>()));
+}
+
+#[tokio::test]
 async fn put_file_with_compression() {
     let server = test_server().await;
 

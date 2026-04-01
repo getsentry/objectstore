@@ -1,5 +1,6 @@
 use std::fmt;
-use std::io::Cursor;
+use std::io::{self, Cursor};
+use std::path::PathBuf;
 use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
@@ -27,6 +28,7 @@ pub(crate) enum PutBody {
     Buffer(Bytes),
     Stream(ClientStream),
     File(File),
+    Path(PathBuf),
 }
 
 impl fmt::Debug for PutBody {
@@ -70,14 +72,29 @@ impl Session {
         self.put_body(PutBody::Stream(stream))
     }
 
-    /// Creates or replaces an object using the contents of a file.
+    /// Creates or replaces an object using the contents of an opened file.
     ///
-    /// The file is attempted to be read when the request is sent.
-    /// It's therefore possible for the file to be moved or changed in the meantime.
-    /// If you want to avoid this possibility, use one of the other functions to supply
-    /// a payload directly instead.
+    /// The file descriptor is held open from the moment this method is called until the
+    /// upload completes. When enqueueing many files via [`Session::many`], prefer
+    /// [`put_path`](Session::put_path) instead: it defers opening the file until just before
+    /// upload, keeping file descriptor usage within the active concurrency window and avoiding
+    /// OS file descriptor limit (e.g., macOS's default `ulimit -n`) exhaustion.
     pub fn put_file(&self, file: File) -> PutBuilder {
         self.put_body(PutBody::File(file))
+    }
+
+    /// Creates or replaces an object using the contents of the file at `path`.
+    ///
+    /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
+    /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
+    /// ensures that file descriptors are opened only within the active concurrency window,
+    /// preventing the process from exhausting the OS file descriptor limit (e.g., macOS's
+    /// default `ulimit -n`).
+    ///
+    /// Prefer `put_path` over [`put_file`](Session::put_file) whenever you are lining up a
+    /// large number of files for upload.
+    pub fn put_path(&self, path: impl Into<PathBuf>) -> PutBuilder {
+        self.put_body(PutBody::Path(path.into()))
     }
 }
 
@@ -167,8 +184,11 @@ impl PutBuilder {
 }
 
 /// Compresses the body if compression is specified.
-pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) -> Body {
-    match (compression, body) {
+pub(crate) async fn maybe_compress(
+    body: PutBody,
+    compression: Option<Compression>,
+) -> io::Result<Body> {
+    Ok(match (compression, body) {
         (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
             let cursor = Cursor::new(bytes);
             let encoder = ZstdEncoder::new(cursor);
@@ -187,13 +207,24 @@ pub(crate) fn maybe_compress(body: PutBody, compression: Option<Compression>) ->
             let stream = ReaderStream::new(encoder);
             Body::wrap_stream(stream)
         }
+        (Some(Compression::Zstd), PutBody::Path(file)) => {
+            let file = File::open(file).await?;
+            let reader = BufReader::new(file);
+            let encoder = ZstdEncoder::new(reader);
+            let stream = ReaderStream::new(encoder);
+            Body::wrap_stream(stream)
+        }
         (None, PutBody::Buffer(bytes)) => bytes.into(),
         (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
         (None, PutBody::File(file)) => {
-            let stream = ReaderStream::new(file).boxed();
+            let stream = ReaderStream::new(file);
             Body::wrap_stream(stream)
-        } // _ => todo!("compression algorithms other than `zstd` are currently not supported"),
-    }
+        }
+        (None, PutBody::Path(path)) => {
+            let stream = ReaderStream::new(File::open(path).await?);
+            Body::wrap_stream(stream)
+        }
+    })
 }
 
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
@@ -211,7 +242,7 @@ impl PutBuilder {
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
 
-        let body = maybe_compress(self.body, self.metadata.compression);
+        let body = maybe_compress(self.body, self.metadata.compression).await?;
 
         builder = builder.headers(self.metadata.to_headers("")?);
 
