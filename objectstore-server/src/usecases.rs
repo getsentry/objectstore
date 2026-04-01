@@ -38,9 +38,7 @@ use thiserror::Error;
 /// Maps use case names to their configuration. Use cases not present in the map
 /// receive the default configuration (all expiration policies allowed, no caps).
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
-pub struct UseCases {
-    config: HashMap<String, UseCaseConfig>,
-}
+pub struct UseCases(pub HashMap<String, UseCaseConfig>);
 
 impl UseCases {
     /// Validates metadata against the configuration for the given use case.
@@ -48,7 +46,7 @@ impl UseCases {
     /// Returns an error if any metadata field violates the use case's policy.
     /// Use cases not present in the configuration are always valid.
     pub fn validate(&self, usecase: &str, metadata: &Metadata) -> Result<(), UseCaseError> {
-        if let Some(config) = self.config.get(usecase) {
+        if let Some(config) = self.0.get(usecase) {
             config.validate(usecase, metadata)?
         }
         Ok(())
@@ -201,7 +199,7 @@ mod tests {
     fn usecases_from(config: UseCaseConfig) -> UseCases {
         let mut map = HashMap::new();
         map.insert("test".to_owned(), config);
-        UseCases { config: map }
+        UseCases(map)
     }
 
     // --- unconfigured use case ---
