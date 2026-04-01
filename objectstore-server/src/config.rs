@@ -50,6 +50,7 @@ pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
+use crate::usecases::UseCases;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
@@ -451,6 +452,14 @@ pub struct Config {
     /// Definitions for rate limits to enforce on incoming requests.
     pub rate_limits: RateLimits,
 
+    /// Per-use-case configuration.
+    ///
+    /// Controls properties of individual use cases such as which expiration
+    /// policies are permitted and their maximum durations. Use cases not
+    /// present in the map receive default configuration (all policies allowed,
+    /// no duration caps).
+    pub usecases: UseCases,
+
     /// Configuration for the [`StorageService`](objectstore_service::StorageService).
     pub service: Service,
 
@@ -558,6 +567,7 @@ impl Default for Config {
             auth: AuthZ::default(),
             killswitches: Killswitches::default(),
             rate_limits: RateLimits::default(),
+            usecases: UseCases::default(),
             service: Service::default(),
             http: Http::default(),
         }

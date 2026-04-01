@@ -14,4 +14,5 @@ pub mod multipart;
 pub mod observability;
 pub mod rate_limits;
 pub mod state;
+pub mod usecases;
 pub mod web;

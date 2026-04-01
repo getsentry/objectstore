@@ -12,7 +12,7 @@ use objectstore_types::metadata::Metadata;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::ApiResult;
+use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -38,12 +38,19 @@ pub struct InsertObjectResponse {
 
 async fn objects_post(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
     metadata.time_created = Some(SystemTime::now());
+
+    state
+        .config
+        .usecases
+        .validate(&context.usecase, &metadata)
+        .map_err(|e| ApiError::Client(e.to_string()))?;
 
     let response_id = service.insert_object(context, None, metadata, body).await?;
     let response = Json(InsertObjectResponse {
@@ -80,6 +87,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
 async fn object_put(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
@@ -88,6 +96,13 @@ async fn object_put(
     metadata.time_created = Some(SystemTime::now());
 
     let ObjectId { context, key } = id;
+
+    state
+        .config
+        .usecases
+        .validate(&context.usecase, &metadata)
+        .map_err(|e| ApiError::Client(e.to_string()))?;
+
     let response_id = service
         .insert_object(context, Some(key), metadata, body)
         .await?;
