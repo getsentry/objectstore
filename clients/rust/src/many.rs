@@ -527,7 +527,6 @@ async fn classify(op: BatchOperation) -> Classified {
                 Classified::Individual(op)
             }
         }
-        // TODO: similar handling for other `PutBody` variants
         other => Classified::Batchable(other),
     }
 }
