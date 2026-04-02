@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 import urllib3
 import zstandard
-from objectstore_client import Client, Usecase
+from objectstore_client import Client, Delete, Get, ManyResponse, Put, Usecase
 from objectstore_client.auth import Permission, TokenGenerator
-from objectstore_client.client import RequestError
+from objectstore_client.client import GetResponse, RequestError
 from objectstore_client.metadata import TimeToLive
 from objectstore_client.scope import Scope
 
@@ -342,3 +342,89 @@ def test_connect_timeout() -> None:
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         session.put(b"test data", compression="zstd")
+
+
+def test_many_full_cycle(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=42, project=2001)
+
+    # Put and get in the same batch
+    results = list(
+        session.many(
+            [
+                Put(b"many-data", key="many-k1", compression="none"),
+                Get("many-k1"),
+            ],
+            concurrency=1,
+        )
+    )
+    assert len(results) == 2
+    put_result = results[0]
+    get_result = results[1]
+
+    assert isinstance(put_result, ManyResponse)
+    assert put_result.key == "many-k1"
+    assert put_result.response is None
+
+    assert isinstance(get_result, ManyResponse)
+    assert get_result.key == "many-k1"
+    assert isinstance(get_result.response, GetResponse)
+    assert get_result.response.payload.read() == b"many-data"
+
+    # Delete in a subsequent batch
+    delete_results = list(session.many([Delete("many-k1")], concurrency=1))
+    assert delete_results[0].response is None
+
+    # Get after delete should return None (not found)
+    not_found_results = list(session.many([Get("many-k1")], concurrency=1))
+    assert not_found_results[0].response is None
+
+
+def test_many_get_not_found(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=42, project=2002)
+
+    results = list(session.many([Get("nonexistent-key")], concurrency=1))
+    assert len(results) == 1
+    assert results[0].response is None
+
+
+def test_many_mixed_sizes(server_url: str) -> None:
+    """Small puts go through batch, large puts go through the individual endpoint."""
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=2003)
+
+    small_data = b"small"
+    large_data = b"x" * (1024 * 1024 + 1)  # just over 1 MB
+
+    results = list(
+        session.many(
+            [
+                Put(small_data, key="mixed-small"),
+                Put(large_data, key="mixed-large"),
+            ],
+            concurrency=1,
+        )
+    )
+    assert len(results) == 2
+    assert results[0].key == "mixed-small"
+    assert results[1].key == "mixed-large"
+
+    # Verify contents
+    get_results = list(
+        session.many(
+            [Get("mixed-small"), Get("mixed-large")],
+            concurrency=1,
+        )
+    )
+    assert isinstance(get_results[0].response, GetResponse)
+    assert isinstance(get_results[1].response, GetResponse)
+    assert get_results[0].response.payload.read() == small_data
+    assert get_results[1].response.payload.read() == large_data
