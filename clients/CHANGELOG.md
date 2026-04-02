@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+### New Features ✨
+
+- (client) Add 100 MB per-batch body size limit by @jan-auer in [#417](https://github.com/getsentry/objectstore/pull/417)
+
 ## 0.1.3
 
 ### New Features ✨
