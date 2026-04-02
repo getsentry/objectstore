@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+### New Features ✨
+
+- (client) Add mint_token() method to Session API by @matt-codecov in [#416](https://github.com/getsentry/objectstore/pull/416)
+
 ## 0.1.4
 
 ### New Features ✨
