@@ -522,10 +522,9 @@ async fn classify(op: BatchOperation) -> Classified {
                 body,
             };
 
-            if size.is_some_and(|s| s <= MAX_BATCH_PART_SIZE as u64) {
-                Classified::Batchable(op, size.unwrap_or(0))
-            } else {
-                Classified::Individual(op)
+            match size {
+                Some(s) if s <= MAX_BATCH_PART_SIZE as u64 => Classified::Batchable(op, s),
+                _ => Classified::Individual(op),
             }
         }
         other => Classified::Batchable(other, 0),
