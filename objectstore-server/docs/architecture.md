@@ -109,6 +109,7 @@ Key configuration sections:
 - `http` — HTTP layer parameters (concurrency limit)
 - `service` — storage service parameters (backend concurrency limit)
 - `killswitches` — traffic blocking rules
+- `usecases` — per-use-case properties (expiration policy constraints)
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
 
@@ -272,3 +273,14 @@ matched, cause requests to be rejected with HTTP 403:
 A killswitch with no conditions matches all traffic. Multiple killswitches are
 evaluated with OR semantics — any match triggers rejection. Killswitches are
 checked during request extraction, before the handler runs.
+
+## Use Cases
+
+The `usecases` config block configures per-use-case properties. Use cases
+not present in the map are unconstrained. Currently this covers expiration
+policy constraints: which policies are permitted and their maximum durations.
+Writes that violate the constraints are rejected with HTTP 400. Validation
+applies to all insert paths: single-object `POST` and `PUT` endpoints and
+batch `INSERT` operations.
+
+See [`usecases`] for the full configuration schema and YAML examples.

@@ -93,8 +93,24 @@ async fn batch(
         move |op| service.check_permission(op.permission(), &context)
     });
 
-    // Step 4: stamp inserts with time_created and record bandwidth
-    let stamped = authorized.map({
+    // Step 4: use case policy validation
+    let policy_checked = validate(authorized, {
+        let state = Arc::clone(&state);
+        let usecase = context.usecase.clone();
+        move |op| {
+            if let Operation::Insert(ins) = op {
+                state
+                    .config
+                    .usecases
+                    .validate(&usecase, &ins.metadata)
+                    .map_err(|e| ApiError::Client(e.to_string()))?;
+            }
+            Ok(())
+        }
+    });
+
+    // Step 5: stamp inserts with time_created and record bandwidth
+    let stamped = policy_checked.map({
         let state = Arc::clone(&state);
         let context = context.clone();
         move |(idx, mut item)| {
@@ -106,7 +122,7 @@ async fn batch(
         }
     });
 
-    // Step 5: execute concurrently, then convert each result to a multipart Part
+    // Step 6: execute concurrently, then convert each result to a multipart Part
     let state_ref = Arc::clone(&state);
     let context_ref = context.clone();
     let responses = batch.execute(context, stamped).then(move |(idx, result)| {

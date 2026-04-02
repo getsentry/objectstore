@@ -3,13 +3,17 @@
 //! These tests assert safety-related behavior of the objectstore-server, such as enforcing
 //! maximum object sizes, rate limiting, and killswitches.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config, Http, Service};
 use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
+};
+use objectstore_server::usecases::{
+    DurationPolicyConfig, ExpirationConfig, ManualPolicyConfig, UseCaseConfig, UseCases,
 };
 use objectstore_test::server::TestServer;
 
@@ -535,6 +539,186 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
         response.status(),
         reqwest::StatusCode::TOO_MANY_REQUESTS,
         "expected 429 when service has no available permits"
+    );
+
+    Ok(())
+}
+
+// --- Use case policy tests ---
+
+#[tokio::test]
+async fn test_usecase_expiration_policy() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        usecases: UseCases(HashMap::from([
+            (
+                "attachments".to_owned(),
+                UseCaseConfig {
+                    expiration: ExpirationConfig {
+                        manual: ManualPolicyConfig { allowed: false },
+                        ttl: DurationPolicyConfig {
+                            allowed: true,
+                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                        },
+                        tti: DurationPolicyConfig {
+                            allowed: false,
+                            max: None,
+                        },
+                    },
+                },
+            ),
+            (
+                "debug-files".to_owned(),
+                UseCaseConfig {
+                    expiration: ExpirationConfig {
+                        manual: ManualPolicyConfig { allowed: false },
+                        ttl: DurationPolicyConfig {
+                            allowed: false,
+                            max: None,
+                        },
+                        tti: DurationPolicyConfig {
+                            allowed: true,
+                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                        },
+                    },
+                },
+            ),
+            (
+                "avatars".to_owned(),
+                UseCaseConfig {
+                    expiration: ExpirationConfig {
+                        manual: ManualPolicyConfig { allowed: true },
+                        ttl: DurationPolicyConfig {
+                            allowed: false,
+                            max: None,
+                        },
+                        tti: DurationPolicyConfig {
+                            allowed: false,
+                            max: None,
+                        },
+                    },
+                },
+            ),
+        ])),
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+
+    // Matching requests — one per use case with its permitted policy.
+    let response = client
+        .put(server.url("/v1/objects/attachments/org=1/key"))
+        .header("x-sn-expiration", "ttl:30d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "attachments: ttl within cap"
+    );
+
+    let response = client
+        .put(server.url("/v1/objects/debug-files/org=1/key"))
+        .header("x-sn-expiration", "tti:30d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "debug-files: tti within cap"
+    );
+
+    let response = client
+        .put(server.url("/v1/objects/avatars/org=1/key"))
+        .header("x-sn-expiration", "manual")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "avatars: manual"
+    );
+
+    // Duration exceeded — TTL and TTI caps.
+    let response = client
+        .put(server.url("/v1/objects/attachments/org=1/key"))
+        .header("x-sn-expiration", "ttl:100d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "attachments: ttl exceeds 90d cap"
+    );
+
+    let response = client
+        .put(server.url("/v1/objects/debug-files/org=1/key"))
+        .header("x-sn-expiration", "tti:100d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "debug-files: tti exceeds 90d cap"
+    );
+
+    // Wrong policy — one disallowed policy request per use case.
+    let response = client
+        .put(server.url("/v1/objects/attachments/org=1/key"))
+        .header("x-sn-expiration", "manual")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "attachments: manual not allowed"
+    );
+
+    let response = client
+        .put(server.url("/v1/objects/debug-files/org=1/key"))
+        .header("x-sn-expiration", "ttl:30d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "debug-files: ttl not allowed"
+    );
+
+    let response = client
+        .put(server.url("/v1/objects/avatars/org=1/key"))
+        .header("x-sn-expiration", "tti:30d")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "avatars: tti not allowed"
+    );
+
+    // Unconfigured use case — any policy is accepted.
+    let response = client
+        .put(server.url("/v1/objects/uploads/org=1/key"))
+        .header("x-sn-expiration", "manual")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "uploads: unconfigured use case accepts manual"
     );
 
     Ok(())
