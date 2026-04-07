@@ -30,6 +30,7 @@ mimalloc = { workspace = true }
 num_cpus = "1.17.0"
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
+objectstore-options = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }

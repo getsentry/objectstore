@@ -21,6 +21,9 @@ The platform is split into the following core components:
   including metadata, scopes, expiration, and permissions.
 - `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
   across service components.
+- `objectstore-options`: Runtime options backed by
+  [`sentry-options`](https://crates.io/crates/sentry-options), providing
+  dynamic configuration to service components.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
 

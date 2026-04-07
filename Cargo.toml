@@ -24,6 +24,7 @@ lto = "thin"
 objectstore-client = { path = "clients/rust" }
 objectstore-log = { path = "objectstore-log" }
 objectstore-metrics = { path = "objectstore-metrics" }
+objectstore-options = { path = "objectstore-options" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
@@ -54,4 +55,7 @@ tokio-util = { version = "0.7.15", features = ["rt"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 uuid = { version = "1.17.0", features = ["v4"] }
-sentry-options = "1.0.1"
+
+[patch.crates-io]
+sentry-options = { path = "../../../../sentry-options/clients/rust" }
+sentry-options-validation = { path = "../../../../sentry-options/sentry-options-validation" }
