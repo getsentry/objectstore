@@ -20,8 +20,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        // Check the custom header first, then fall back to the standard
-        // Authorization header for backwards compatibility.
         let encoded_token = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
