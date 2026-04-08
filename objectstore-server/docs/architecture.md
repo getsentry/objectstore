@@ -40,8 +40,10 @@ A request flows through several layers before reaching the storage service:
    recovery, Sentry transaction tracing, distributed tracing.
 2. **Extractors**: path parameters are parsed into an
    [`ObjectId`](objectstore_service::id::ObjectId) or
-   [`ObjectContext`](objectstore_service::id::ObjectContext). The `Authorization`
-   header is validated and decoded into an [`AuthContext`](auth::AuthContext).
+   [`ObjectContext`](objectstore_service::id::ObjectContext). The auth token is
+   read from the `X-Objectstore-Auth` header (preferred) or the standard
+   `Authorization` header (fallback), then validated and decoded into an
+   [`AuthContext`](auth::AuthContext).
    The optional `x-downstream-service` header is extracted for killswitch
    matching.
 3. **Admission control**: [killswitches](killswitches) and

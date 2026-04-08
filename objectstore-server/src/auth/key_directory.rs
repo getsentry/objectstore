@@ -26,9 +26,9 @@ pub struct PublicKeyConfig {
 
     /// The maximum set of permissions that this key's signer is authorized to grant.
     ///
-    /// If a request's `Authorization` header grants full permission but it was signed by
-    /// a key that is only allowed to grant read permission, then the request only has
-    /// read permission.
+    /// If a request's auth token grants full permission but it was signed by a key that
+    /// is only allowed to grant read permission, then the request only has read
+    /// permission.
     pub max_permissions: HashSet<Permission>,
 }
 
@@ -47,11 +47,12 @@ impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
     }
 }
 
-/// Directory of keys that may be used to verify a request's `Authorization` header.
+/// Directory of keys that may be used to verify a request's auth token.
 ///
-/// This directory contains a map that is keyed on a key's ID. When verifying a JWT
-/// from the `Authorization` header, the `kid` field should be read from the JWT
-/// header and used to index into this directory to select the appropriate key.
+/// The auth token is read from the `X-Objectstore-Auth` header (preferred) or the
+/// standard `Authorization` header (fallback). This directory contains a map keyed
+/// on a key's ID. When verifying a JWT, the `kid` field should be read from the
+/// JWT header and used to index into this directory to select the appropriate key.
 #[derive(Debug)]
 pub struct PublicKeyDirectory {
     /// Mapping from key ID to key configuration.

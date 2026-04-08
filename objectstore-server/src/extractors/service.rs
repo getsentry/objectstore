@@ -7,6 +7,12 @@ use crate::state::ServiceState;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
+/// Custom header for Objectstore authentication. Checked before the standard
+/// `Authorization` header so that proxy setups (e.g. Django) can use
+/// `Authorization` for their own auth while forwarding an Objectstore token in
+/// this header.
+const OBJECTSTORE_AUTH_HEADER: &str = "x-objectstore-auth";
+
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;
 
@@ -14,9 +20,12 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
+        // Check the custom header first, then fall back to the standard
+        // Authorization header for backwards compatibility.
         let encoded_token = parts
             .headers
-            .get(header::AUTHORIZATION)
+            .get(OBJECTSTORE_AUTH_HEADER)
+            .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 

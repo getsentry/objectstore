@@ -466,7 +466,7 @@ impl Session {
 
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
         if let Some(token) = self.mint_token()? {
-            builder = builder.bearer_auth(token);
+            builder = builder.header("x-objectstore-auth", format!("Bearer {token}"));
         }
         if self.client.propagate_traces {
             let trace_headers =
