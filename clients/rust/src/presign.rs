@@ -62,7 +62,7 @@ pub fn presign_url(
     let expires_at = SystemTime::now() + expires_in;
     let expires_ts = expires_at
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
+        .map_err(crate::PresignError::InvalidExpiry)?
         .as_secs();
 
     // Add X-Os-Expires and X-Os-KeyId query params

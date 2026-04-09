@@ -61,6 +61,9 @@ pub enum PresignError {
     /// Failed to parse the Ed25519 private key.
     #[error("failed to parse Ed25519 private key: {0}")]
     InvalidKey(#[from] ed25519_dalek::pkcs8::Error),
+    /// The expiry time could not be represented as a UNIX timestamp.
+    #[error("invalid expiry: {0}")]
+    InvalidExpiry(#[from] std::time::SystemTimeError),
 }
 
 /// A convenience alias that defaults our [`Error`] type.
