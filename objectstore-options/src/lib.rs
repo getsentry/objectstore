@@ -3,35 +3,18 @@
 //! [`sentry-options`]: https://crates.io/crates/sentry-options
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use arc_swap::ArcSwap;
+use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "objectstore";
 const SCHEMA: &str = include_str!("../../sentry-options/schemas/objectstore/schema.json");
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-static OPTIONS: OnceLock<RwLock<Options>> = OnceLock::new();
-
-#[cfg(test)]
-pub use sentry_options::{Value, testing::OverrideGuard};
-
-#[cfg(test)]
-thread_local! {
-    static TEST_INNER: sentry_options::Options =
-        sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])
-            .expect("objectstore schema should be valid");
-}
-
-/// TODO: Doc comment.
-#[cfg(not(test))]
-pub type Ref = std::sync::RwLockReadGuard<'static, Options>;
-
-/// TODO: Doc comment.
-#[cfg(test)]
-pub type Ref = Options;
+/// Global instance of the options, initialized by [`init`] and accessed via [`Options::get`].
+static OPTIONS: OnceLock<ArcSwap<Options>> = OnceLock::new();
 
 /// Errors returned by this crate.
 #[derive(Debug, thiserror::Error)]
@@ -42,23 +25,39 @@ pub enum Error {
     Deserialize(#[from] serde_json::Error),
 }
 
-/// TODO: Doc comment. Also refer to `init`.
+/// Runtime options for Objectstore, loaded from sentry-options.
+///
+/// Obtain a snapshot of the current options via [`Options::get`]. Before calling `get`,
+/// the global instance must be initialized with [`init`].
+#[derive(Debug)]
 pub struct Options {
     killswitches: Vec<Killswitch>,
 }
 
 impl Options {
-    /// TODO: Doc comment
-    #[cfg(not(test))]
-    pub fn get() -> Ref {
-        let options = OPTIONS.get().expect("options not initialized");
-        options.read().unwrap_or_else(|p| p.into_inner())
+    /// Returns a snapshot of the current options.
+    ///
+    /// The returned [`Arc`] holds the most recently loaded values. Callers may hold it across
+    /// await points without blocking updates — a new snapshot is swapped in atomically by the
+    /// background refresh task without invalidating existing references.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`init`] has not been called.
+    #[cfg(not(feature = "testing"))]
+    pub fn get() -> Arc<Options> {
+        OPTIONS.get().expect("options not initialized").load_full()
     }
 
-    /// TODO: Doc comment
-    #[cfg(test)]
-    pub fn get() -> Ref {
-        TEST_INNER.with(|inner| Self::deserialize(inner).expect("failed to deserialize options"))
+    /// Returns a snapshot of the current options, deserializing fresh from schema defaults.
+    ///
+    /// In test builds this bypasses the global instance and reads directly from the schema, so
+    /// [`init`] does not need to be called. Use [`override_options`] to test non-default values.
+    #[cfg(feature = "testing")]
+    pub fn get() -> Arc<Options> {
+        let inner = sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])
+            .expect("options schema should be valid");
+        Arc::new(Self::deserialize(&inner).expect("failed to deserialize options"))
     }
 
     fn deserialize(options: &sentry_options::Options) -> Result<Self, Error> {
@@ -67,10 +66,37 @@ impl Options {
         })
     }
 
-    /// TODO: Doc comment
+    /// Returns the list of active killswitches.
     pub fn killswitches(&self) -> &[Killswitch] {
         &self.killswitches
     }
+}
+
+/// A killswitch that may disable access to certain object contexts.
+///
+/// Note that at least one of the fields should be set, or else the killswitch will match all
+/// contexts and discard all requests.
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct Killswitch {
+    /// Optional usecase to match.
+    ///
+    /// If `None`, matches any usecase.
+    #[serde(default)]
+    pub usecase: Option<String>,
+
+    /// Scopes to match.
+    ///
+    /// If empty, matches any scopes. Additional scopes in the context are ignored, so a killswitch
+    /// matches if all of the specified scopes are present in the request with matching values.
+    #[serde(default)]
+    pub scopes: BTreeMap<String, String>,
+
+    /// Optional service glob pattern to match.
+    ///
+    /// If `None`, matches any service (or absence of service header).
+    /// If specified, the request must have a matching `x-downstream-service` header.
+    #[serde(default)]
+    pub service: Option<String>,
 }
 
 /// Initializes the global options instance and spawns a background refresh task.
@@ -86,26 +112,19 @@ impl Options {
 /// Idempotent: if already initialized, returns `Ok(())` without re-loading.
 ///
 /// Must be called from within a Tokio runtime.
-pub fn init(base_dir: Option<&Path>) -> Result<(), Error> {
-    if OPTIONS.get().is_some() {
-        return Ok(());
+pub fn init() -> Result<(), Error> {
+    if OPTIONS.get().is_none() {
+        // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the application
+        // will not silently run with defaults or fail later when options are accessed.
+        let inner = sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])?;
+        let _ = OPTIONS.set(ArcSwap::from_pointee(Options::deserialize(&inner)?));
+        tokio::spawn(refresh(inner));
     }
-
-    let schemas = &[(NAMESPACE, SCHEMA)];
-    let inner = match base_dir {
-        Some(dir) => sentry_options::Options::from_directory_and_schemas(dir, schemas)?,
-        None => sentry_options::Options::from_schemas(schemas)?,
-    };
-
-    // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the application
-    // will not silently run with defaults or fail later when options get accessed.
-    let _ = OPTIONS.set(RwLock::new(Options::deserialize(&inner)?));
-    tokio::spawn(refresh(inner));
 
     Ok(())
 }
 
-/// TODO: Doc comment
+/// Periodically reloads options from disk and atomically swaps in the new snapshot.
 async fn refresh(inner: sentry_options::Options) {
     let Some(snapshot) = OPTIONS.get() else {
         return;
@@ -118,7 +137,7 @@ async fn refresh(inner: sentry_options::Options) {
         interval.tick().await;
 
         match Options::deserialize(&inner) {
-            Ok(new_snapshot) => *snapshot.write().unwrap_or_else(|p| p.into_inner()) = new_snapshot,
+            Ok(new_snapshot) => snapshot.store(Arc::new(new_snapshot)),
             Err(ref err) => {
                 objectstore_log::error!(!!err, "Failed to refresh objectstore options")
             }
@@ -131,28 +150,16 @@ async fn refresh(inner: sentry_options::Options) {
 /// This function is only available in test builds and allows temporarily overriding
 /// specific options. The overrides are applied for the duration of the returned
 /// `OverrideGuard`.
-#[cfg(test)]
-pub fn override_options(overrides: &[(&str, sentry_options::Value)]) -> OverrideGuard {
+#[cfg(feature = "testing")]
+pub fn override_options(
+    overrides: &[(&str, serde_json::Value)],
+) -> sentry_options::testing::OverrideGuard {
     let overrides = overrides
         .iter()
         .map(|(key, value)| (NAMESPACE, *key, value.clone()))
         .collect::<Vec<_>>();
 
     sentry_options::testing::override_options(&overrides).unwrap()
-}
-
-/// A killswitch loaded from sentry-options.
-///
-/// This is the plain data representation used for deserialization. See
-/// [`objectstore_server::killswitches::Killswitch`] for the full type with matching logic.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct Killswitch {
-    #[serde(default)]
-    pub usecase: Option<String>,
-    #[serde(default)]
-    pub scopes: BTreeMap<String, String>,
-    #[serde(default)]
-    pub service: Option<String>,
 }
 
 #[cfg(test)]

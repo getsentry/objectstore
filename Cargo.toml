@@ -32,6 +32,7 @@ objectstore-types = { path = "objectstore-types", version = "0.1.5" }
 percent-encoding = "2.3"
 stresstest = { path = "stresstest" }
 
+arc-swap = "1.7.1"
 anyhow = "1.0.69"
 async-trait = "0.1.88"
 bytes = "1.11.1"
@@ -57,5 +58,5 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 uuid = { version = "1.17.0", features = ["v4"] }
 
 [patch.crates-io]
-sentry-options = { path = "../../../../sentry-options/clients/rust" }
-sentry-options-validation = { path = "../../../../sentry-options/sentry-options-validation" }
+sentry-options = { git = "https://github.com/getsentry/sentry-options", branch = "feat/additional-properties-map-schema" }
+sentry-options-validation = { git = "https://github.com/getsentry/sentry-options", branch = "feat/additional-properties-map-schema" }

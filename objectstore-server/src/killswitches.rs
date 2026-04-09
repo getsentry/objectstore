@@ -7,23 +7,58 @@
 //! Killswitches are part of [`crate::config::Config`] and take effect on the next request after
 //! a configuration reload — no server restart is required.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::num::NonZeroUsize;
 
 use globset::{Glob, GlobMatcher};
+use lru::LruCache;
+use objectstore_options::Options;
 use objectstore_service::id::ObjectContext;
-use serde::{Deserialize, Serialize};
+use thread_local::ThreadLocal;
+
+pub use objectstore_options::Killswitch;
 
 /// A list of killswitches that may disable access to certain object contexts.
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct Killswitches(pub Vec<Killswitch>);
+///
+/// This serializes and deserializes directly from a list of killswitches.
+#[derive(Debug, Default)]
+pub struct Killswitches {
+    /// The actual list of killswitches.
+    switches: Vec<Killswitch>,
+
+    /// Glob cache for fast matching of killswitches.
+    cache: ThreadLocal<RefCell<LruCache<String, Option<GlobMatcher>>>>,
+}
 
 impl Killswitches {
+    /// Creates a new `Killswitches` instance with the given killswitches.
+    pub fn new(killswitches: Vec<Killswitch>) -> Self {
+        Self {
+            switches: killswitches,
+            cache: ThreadLocal::new(),
+        }
+    }
+
     /// Returns `true` if any of the contained killswitches matches the given context.
     ///
     /// On match, emits a `server.request.killswitched` metric counter and a `warn!` log.
     pub fn matches(&self, context: &ObjectContext, service: Option<&str>) -> bool {
-        let Some(killswitch) = self.find(context, service) else {
+        let options = Options::get();
+
+        let mut cache = self
+            .cache
+            .get_or(|| RefCell::new(LruCache::new(NonZeroUsize::MIN)))
+            .borrow_mut();
+
+        let total_count = self.switches.len() + options.killswitches().len();
+        cache.resize(total_count.try_into().unwrap_or(NonZeroUsize::MIN));
+
+        let Some(killswitch) = self
+            .switches
+            .iter()
+            .chain(options.killswitches())
+            .find(|s| matches(s, context, service, &mut cache))
+        else {
             return false;
         };
 
@@ -32,102 +67,81 @@ impl Killswitches {
         true
     }
 
-    /// Returns the first killswitch that matches the given context, or `None` if none match.
-    pub fn find<'a>(
-        &'a self,
-        context: &ObjectContext,
-        service: Option<&str>,
-    ) -> Option<&'a Killswitch> {
-        self.0.iter().find(|s| s.matches(context, service))
+    /// Returns a slice of the contained killswitches.
+    pub fn as_slice(&self) -> &[Killswitch] {
+        &self.switches
     }
 }
 
-/// A killswitch that may disable access to certain object contexts.
-///
-/// Note that at least one of the fields should be set, or else the killswitch will match all
-/// contexts and discard all requests.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Killswitch {
-    /// Optional usecase to match.
-    ///
-    /// If `None`, matches any usecase.
-    #[serde(default)]
-    pub usecase: Option<String>,
-
-    /// Scopes to match.
-    ///
-    /// If empty, matches any scopes. Additional scopes in the context are ignored, so a killswitch
-    /// matches if all of the specified scopes are present in the request with matching values.
-    #[serde(default)]
-    pub scopes: BTreeMap<String, String>,
-
-    /// Optional service glob pattern to match.
-    ///
-    /// If `None`, matches any service (or absence of service header).
-    /// If specified, the request must have a matching `x-downstream-service` header.
-    #[serde(default)]
-    pub service: Option<String>,
-
-    /// Compiled glob matcher for the service pattern.
-    ///
-    /// This is lazily compiled on first use to avoid unwrap() calls and gracefully handle
-    /// invalid patterns by treating them as non-matches.
-    #[serde(skip)]
-    #[serde(default)]
-    pub service_matcher: OnceLock<Option<GlobMatcher>>,
-}
-
-impl PartialEq for Killswitch {
-    fn eq(&self, other: &Self) -> bool {
-        self.usecase == other.usecase
-            && self.scopes == other.scopes
-            && self.service == other.service
-        // Skip service_matcher in comparison since it's derived from service
+impl serde::Serialize for Killswitches {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.switches.serialize(serializer)
     }
 }
 
-impl Killswitch {
-    /// Returns `true` if this killswitch matches the given context and service.
-    pub fn matches(&self, context: &ObjectContext, service: Option<&str>) -> bool {
-        if let Some(ref switch_usecase) = self.usecase
-            && switch_usecase != &context.usecase
-        {
+impl<'de> serde::Deserialize<'de> for Killswitches {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::new(Vec::deserialize(deserializer)?))
+    }
+}
+
+/// Returns `true` if this killswitch matches the given context and service.
+fn matches(
+    switch: &Killswitch,
+    context: &ObjectContext,
+    service: Option<&str>,
+    cache: &mut LruCache<String, Option<GlobMatcher>>,
+) -> bool {
+    if let Some(ref switch_usecase) = switch.usecase
+        && switch_usecase != &context.usecase
+    {
+        return false;
+    }
+
+    for (scope_name, scope_value) in &switch.scopes {
+        match context.scopes.get_value(scope_name) {
+            Some(value) if value == scope_value => (),
+            _ => return false,
+        }
+    }
+
+    // Check service pattern if specified
+    if let Some(ref pattern) = switch.service {
+        // If pattern is specified but no service header present, don't match
+        let Some(service_value) = service else {
             return false;
+        };
+
+        let lookup = cache.get_or_insert_ref(pattern, || {
+            Glob::new(pattern).ok().map(|g| g.compile_matcher())
+        });
+
+        match lookup {
+            Some(m) if m.is_match(service_value) => (),
+            _ => return false,
         }
-
-        for (scope_name, scope_value) in &self.scopes {
-            match context.scopes.get_value(scope_name) {
-                Some(value) if value == scope_value => (),
-                _ => return false,
-            }
-        }
-
-        // Check service pattern if specified
-        if let Some(ref pattern) = self.service {
-            // If pattern is specified but no service header present, don't match
-            let Some(service_value) = service else {
-                return false;
-            };
-
-            let matcher = self
-                .service_matcher
-                .get_or_init(|| Glob::new(pattern).ok().map(|g| g.compile_matcher()));
-
-            match matcher {
-                Some(m) if m.is_match(service_value) => (),
-                _ => return false,
-            }
-        }
-
-        true
     }
+
+    true
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+
+    fn cache() -> LruCache<String, Option<GlobMatcher>> {
+        LruCache::new(NonZeroUsize::MIN)
+    }
 
     #[test]
     fn test_matches_empty() {
@@ -135,7 +149,6 @@ mod tests {
             usecase: None,
             scopes: BTreeMap::new(),
             service: None,
-            service_matcher: OnceLock::new(),
         };
 
         let context = ObjectContext {
@@ -143,7 +156,7 @@ mod tests {
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 
-        assert!(switch.matches(&context, None));
+        assert!(matches(&switch, &context, None, &mut cache()));
     }
 
     #[test]
@@ -152,21 +165,25 @@ mod tests {
             usecase: Some("test".to_string()),
             scopes: BTreeMap::new(),
             service: None,
-            service_matcher: OnceLock::new(),
         };
 
         let context = ObjectContext {
             usecase: "test".to_string(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
-        assert!(switch.matches(&context, Some("anyservice")));
+        assert!(matches(&switch, &context, Some("anyservice"), &mut cache()));
 
         // usecase differs
         let context = ObjectContext {
             usecase: "other".to_string(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
-        assert!(!switch.matches(&context, Some("anyservice")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("anyservice"),
+            &mut cache()
+        ));
     }
 
     #[test]
@@ -178,7 +195,6 @@ mod tests {
                 ("project".to_string(), "456".to_string()),
             ]),
             service: None,
-            service_matcher: OnceLock::new(),
         };
 
         // match, ignoring extra scope
@@ -190,7 +206,7 @@ mod tests {
                 Scope::create("extra", "789").unwrap(),
             ]),
         };
-        assert!(switch.matches(&context, Some("anyservice")));
+        assert!(matches(&switch, &context, Some("anyservice"), &mut cache()));
 
         // project differs
         let context = ObjectContext {
@@ -200,14 +216,24 @@ mod tests {
                 Scope::create("project", "999").unwrap(),
             ]),
         };
-        assert!(!switch.matches(&context, Some("anyservice")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("anyservice"),
+            &mut cache()
+        ));
 
         // missing project
         let context = ObjectContext {
             usecase: "any".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
-        assert!(!switch.matches(&context, Some("anyservice")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("anyservice"),
+            &mut cache()
+        ));
     }
 
     #[test]
@@ -216,7 +242,6 @@ mod tests {
             usecase: Some("test".to_string()),
             scopes: BTreeMap::from([("org".to_string(), "123".to_string())]),
             service: Some("myservice-*".to_string()),
-            service_matcher: OnceLock::new(),
         };
 
         // match with all filters
@@ -224,35 +249,55 @@ mod tests {
             usecase: "test".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
-        assert!(switch.matches(&context, Some("myservice-prod")));
+        assert!(matches(
+            &switch,
+            &context,
+            Some("myservice-prod"),
+            &mut cache()
+        ));
 
         // usecase differs
         let context = ObjectContext {
             usecase: "other".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
-        assert!(!switch.matches(&context, Some("myservice-prod")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("myservice-prod"),
+            &mut cache()
+        ));
 
         // scope differs
         let context = ObjectContext {
             usecase: "test".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "999").unwrap()]),
         };
-        assert!(!switch.matches(&context, Some("myservice-prod")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("myservice-prod"),
+            &mut cache()
+        ));
 
         // service differs
         let context = ObjectContext {
             usecase: "test".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
-        assert!(!switch.matches(&context, Some("otherservice")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("otherservice"),
+            &mut cache()
+        ));
 
         // missing service header
         let context = ObjectContext {
             usecase: "test".to_string(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
-        assert!(!switch.matches(&context, None));
+        assert!(!matches(&switch, &context, None, &mut cache()));
     }
 
     #[test]
@@ -261,7 +306,6 @@ mod tests {
             usecase: None,
             scopes: BTreeMap::new(),
             service: Some("myservice".to_string()),
-            service_matcher: OnceLock::new(),
         };
 
         let context = ObjectContext {
@@ -269,9 +313,14 @@ mod tests {
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 
-        assert!(switch.matches(&context, Some("myservice")));
-        assert!(!switch.matches(&context, Some("otherservice")));
-        assert!(!switch.matches(&context, None));
+        assert!(matches(&switch, &context, Some("myservice"), &mut cache()));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("otherservice"),
+            &mut cache()
+        ));
+        assert!(!matches(&switch, &context, None, &mut cache()));
     }
 
     #[test]
@@ -280,7 +329,6 @@ mod tests {
             usecase: None,
             scopes: BTreeMap::new(),
             service: Some("myservice-*".to_string()),
-            service_matcher: OnceLock::new(),
         };
 
         let context = ObjectContext {
@@ -289,16 +337,41 @@ mod tests {
         };
 
         // Matches with glob pattern
-        assert!(switch.matches(&context, Some("myservice-prod")));
-        assert!(switch.matches(&context, Some("myservice-dev")));
-        assert!(switch.matches(&context, Some("myservice-staging")));
+        assert!(matches(
+            &switch,
+            &context,
+            Some("myservice-prod"),
+            &mut cache()
+        ));
+        assert!(matches(
+            &switch,
+            &context,
+            Some("myservice-dev"),
+            &mut cache()
+        ));
+        assert!(matches(
+            &switch,
+            &context,
+            Some("myservice-staging"),
+            &mut cache()
+        ));
 
         // Doesn't match different service
-        assert!(!switch.matches(&context, Some("otherservice")));
-        assert!(!switch.matches(&context, Some("otherservice-prod")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("otherservice"),
+            &mut cache()
+        ));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("otherservice-prod"),
+            &mut cache()
+        ));
 
         // Doesn't match prefix without separator
-        assert!(!switch.matches(&context, Some("myservice")));
+        assert!(!matches(&switch, &context, Some("myservice"), &mut cache()));
     }
 
     #[test]
@@ -307,7 +380,6 @@ mod tests {
             usecase: None,
             scopes: BTreeMap::new(),
             service: Some("[invalid".to_string()), // Invalid glob pattern
-            service_matcher: OnceLock::new(),
         };
 
         let context = ObjectContext {
@@ -316,7 +388,12 @@ mod tests {
         };
 
         // Invalid pattern should not match anything
-        assert!(!switch.matches(&context, Some("anyservice")));
-        assert!(!switch.matches(&context, Some("[invalid")));
+        assert!(!matches(
+            &switch,
+            &context,
+            Some("anyservice"),
+            &mut cache()
+        ));
+        assert!(!matches(&switch, &context, Some("[invalid"), &mut cache()));
     }
 }
