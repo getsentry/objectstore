@@ -21,15 +21,9 @@ pub enum Error {
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
-    /// Error when the HTTP method is not supported for pre-signed URLs.
-    #[error("unsupported method for pre-signed URL: {method}. Only GET and HEAD are supported")]
-    UnsupportedPresignMethod {
-        /// The unsupported method that was provided.
-        method: String,
-    },
-    /// Error when parsing the Ed25519 private key for pre-signed URL signing.
-    #[error("failed to parse Ed25519 private key: {0}")]
-    PresignKey(#[from] ed25519_dalek::pkcs8::Error),
+    /// Error when generating a pre-signed URL.
+    #[error(transparent)]
+    Presign(#[from] PresignError),
     /// Error when URL manipulation fails.
     #[error("{message}")]
     InvalidUrl {
@@ -53,6 +47,20 @@ pub enum Error {
         /// The error message.
         message: String,
     },
+}
+
+/// Errors that can occur when generating a pre-signed URL.
+#[derive(Debug, thiserror::Error)]
+pub enum PresignError {
+    /// The HTTP method is not supported for pre-signed URLs.
+    #[error("unsupported method: {method}. Only GET and HEAD are supported")]
+    UnsupportedMethod {
+        /// The unsupported method that was provided.
+        method: String,
+    },
+    /// Failed to parse the Ed25519 private key.
+    #[error("failed to parse Ed25519 private key: {0}")]
+    InvalidKey(#[from] ed25519_dalek::pkcs8::Error),
 }
 
 /// A convenience alias that defaults our [`Error`] type.

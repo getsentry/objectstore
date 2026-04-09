@@ -49,12 +49,14 @@ pub fn presign_url(
 ) -> crate::Result<PresignedUrl> {
     let method_upper = method.to_ascii_uppercase();
     if method_upper != "GET" && method_upper != "HEAD" {
-        return Err(crate::Error::UnsupportedPresignMethod {
+        return Err(crate::PresignError::UnsupportedMethod {
             method: method.to_owned(),
-        });
+        }
+        .into());
     }
 
-    let signing_key = SigningKey::from_pkcs8_pem(&secret_key.secret_key)?;
+    let signing_key = SigningKey::from_pkcs8_pem(&secret_key.secret_key)
+        .map_err(crate::PresignError::InvalidKey)?;
 
     let expires_in = expires_in.unwrap_or(DEFAULT_PRESIGNED_EXPIRY);
     let expires_at = SystemTime::now() + expires_in;
