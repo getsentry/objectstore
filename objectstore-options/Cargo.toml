@@ -10,12 +10,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-arc-swap = { workspace = true }
-sentry-options = { workspace = true }
+objectstore-typed-options = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-objectstore-log = { workspace = true }
 
 [features]
 testing = []
