@@ -11,7 +11,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// `Authorization` header so that proxy setups (e.g. Django) can use
 /// `Authorization` for their own auth while forwarding an Objectstore token in
 /// this header.
-const OBJECTSTORE_AUTH_HEADER: &str = "x-objectstore-auth";
+const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
 
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;

@@ -49,7 +49,7 @@ impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
 
 /// Directory of keys that may be used to verify a request's auth token.
 ///
-/// The auth token is read from the `X-Objectstore-Auth` header (preferred) or the
+/// The auth token is read from the `X-Os-Auth` header (preferred) or the
 /// standard `Authorization` header (fallback). This directory contains a map keyed
 /// on a key's ID. When verifying a JWT, the `kid` field should be read from the
 /// JWT header and used to index into this directory to select the appropriate key.

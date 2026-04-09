@@ -245,7 +245,7 @@ class Session:
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
         if token := self.mint_token():
-            headers["x-objectstore-auth"] = f"Bearer {token}"
+            headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:

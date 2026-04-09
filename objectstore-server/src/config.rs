@@ -343,7 +343,7 @@ pub struct AuthZ {
 
     /// Keys that may be used to verify a request's auth token.
     ///
-    /// The auth token is read from the `X-Objectstore-Auth` header (preferred)
+    /// The auth token is read from the `X-Os-Auth` header (preferred)
     /// or the standard `Authorization` header (fallback). This field is a
     /// container keyed on a key's ID. When verifying a JWT, the `kid` field
     /// should be read from the JWT header and used to index into this map to
@@ -445,7 +445,7 @@ pub struct Config {
     /// Content-based authorization configuration.
     ///
     /// Controls the verification and enforcement of content-based access control based on the
-    /// JWT in a request's `X-Objectstore-Auth` or `Authorization` header.
+    /// JWT in a request's `X-Os-Auth` or `Authorization` header.
     pub auth: AuthZ,
 
     /// A list of matchers for requests to discard without processing.
