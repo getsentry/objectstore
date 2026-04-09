@@ -100,7 +100,7 @@ authentication for `GET` and `HEAD` requests.
 
 **URL format:**
 
-```
+```text
 /v1/objects/{usecase}/{scopes}/{key}?X-Os-Expires={unix_ts}&X-Os-KeyId={kid}&X-Os-Signature={base64url_sig}
 ```
 

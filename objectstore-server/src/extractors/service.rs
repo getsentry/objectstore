@@ -41,9 +41,8 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 )));
             }
 
-            let auth_result =
-                verify_presigned(&presigned_params, &parts.uri, &state.key_directory)
-                    .inspect_err(|err| err.log(None, None, enforce));
+            let auth_result = verify_presigned(&presigned_params, &parts.uri, &state.key_directory)
+                .inspect_err(|err| err.log(None, None, enforce));
 
             let auth_context = match enforce {
                 true => Some(auth_result?),
