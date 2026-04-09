@@ -1,6 +1,6 @@
-//! Derive macro for [`objectstore_typed_options::SentryOptions`].
+//! Derive macro for `SentryOptions`.
 //!
-//! See the [`objectstore-typed-options`] crate for full documentation and usage examples.
+//! See the `objectstore-typed-options` crate for full documentation and usage examples.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -16,13 +16,15 @@ use syn::{DeriveInput, Fields, LitStr, parse_macro_input};
 ///
 /// # Generated code
 ///
-/// For each struct field, `deserialize` calls `Deserialize::deserialize(options.get(NAMESPACE, "<field>")?)`.
+/// For each struct field, `deserialize` calls `Deserialize::deserialize(options.get(NAMESPACE,
+/// "<field>")?)`.
 ///
 /// Additionally generates:
 /// - `SentryOptions` trait impl with `NAMESPACE`, `SCHEMA`, and `deserialize`
 /// - Inherent `get() -> Arc<Self>`, `init() -> Result<(), Error>`, and (under `testing` feature)
 ///   `override_with()`
-/// - A module-scoped `OnceLock<ArcSwap<T>>` static for the singleton instance
+/// - A `OnceLock<ArcSwap<T>>` static for the singleton instance, wrapped in `const _: () = { … }`
+///   to avoid symbol conflicts when multiple structs derive `SentryOptions` in the same module
 #[proc_macro_derive(SentryOptions, attributes(sentry_options))]
 pub fn derive_sentry_options(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -109,6 +111,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .collect();
 
     Ok(quote! {
+        const _: () = {
         static __OPTIONS: ::std::sync::OnceLock<
             ::objectstore_typed_options::arc_swap::ArcSwap<#name>
         > = ::std::sync::OnceLock::new();
@@ -224,5 +227,6 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     .expect("failed to override options")
             }
         }
+        }; // end const _: () = { ... }
     })
 }
