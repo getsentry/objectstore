@@ -21,9 +21,15 @@ pub enum Error {
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
-    /// Error when creating or verifying pre-signed URLs.
-    #[error("presign error: {0}")]
-    Presign(String),
+    /// Error when the HTTP method is not supported for pre-signed URLs.
+    #[error("unsupported method for pre-signed URL: {method}. Only GET and HEAD are supported")]
+    UnsupportedPresignMethod {
+        /// The unsupported method that was provided.
+        method: String,
+    },
+    /// Error when parsing the Ed25519 private key for pre-signed URL signing.
+    #[error("failed to parse Ed25519 private key: {0}")]
+    PresignKey(#[from] ed25519_dalek::pkcs8::Error),
     /// Error when URL manipulation fails.
     #[error("{message}")]
     InvalidUrl {

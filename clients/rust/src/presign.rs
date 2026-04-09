@@ -49,19 +49,18 @@ pub fn presign_url(
 ) -> crate::Result<PresignedUrl> {
     let method_upper = method.to_ascii_uppercase();
     if method_upper != "GET" && method_upper != "HEAD" {
-        return Err(crate::Error::Presign(format!(
-            "unsupported method for pre-signed URL: {method}. Only GET and HEAD are supported"
-        )));
+        return Err(crate::Error::UnsupportedPresignMethod {
+            method: method.to_owned(),
+        });
     }
 
-    let signing_key = SigningKey::from_pkcs8_pem(&secret_key.secret_key)
-        .map_err(|e| crate::Error::Presign(format!("failed to parse Ed25519 private key: {e}")))?;
+    let signing_key = SigningKey::from_pkcs8_pem(&secret_key.secret_key)?;
 
     let expires_in = expires_in.unwrap_or(DEFAULT_PRESIGNED_EXPIRY);
     let expires_at = SystemTime::now() + expires_in;
     let expires_ts = expires_at
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| crate::Error::Presign(format!("invalid expiry time: {e}")))?
+        .expect("system clock before UNIX epoch")
         .as_secs();
 
     // Add X-Os-Expires and X-Os-KeyId query params
