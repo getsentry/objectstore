@@ -113,11 +113,14 @@ pub struct Killswitch {
 /// Must be called from within a Tokio runtime.
 pub fn init() -> Result<(), Error> {
     if OPTIONS.get().is_none() {
-        // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the application
-        // will not silently run with defaults or fail later when options are accessed.
+        // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the
+        // application will not silently run with defaults or fail later when options are accessed.
         let inner = sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])?;
-        let _ = OPTIONS.set(ArcSwap::from_pointee(Options::deserialize(&inner)?));
-        tokio::spawn(refresh(inner));
+        let initial = Options::deserialize(&inner)?;
+
+        if OPTIONS.set(ArcSwap::from_pointee(initial)).is_ok() {
+            tokio::spawn(refresh(inner));
+        }
     }
 
     Ok(())

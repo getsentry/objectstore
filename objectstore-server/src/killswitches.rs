@@ -111,7 +111,6 @@ fn matches(
         }
     }
 
-    // Check service pattern if specified
     if let Some(ref pattern) = switch.service {
         // If pattern is specified but no service header present, don't match
         let Some(service_value) = service else {
