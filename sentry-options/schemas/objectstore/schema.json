@@ -8,16 +8,23 @@
       "description": "Runtime killswitches for disabling access to specific object contexts. Each entry matches requests by usecase, scope values, and optionally a downstream service glob pattern. When any killswitch matches, the request is rejected without forwarding to the storage backend.",
       "items": {
         "type": "object",
-        "properties":
-{
-  "scopes": {
-    "type": "object",
-    "additionalProperties": {
-      "type": "string"
-    },
-    "optional": true
-  }
-}
+        "properties": {
+          "usecase": {
+            "type": "string",
+            "optional": true
+          },
+          "service": {
+            "type": "string",
+            "optional": true
+          },
+          "scopes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "optional": true
+          }
+        }
       }
     }
   }
