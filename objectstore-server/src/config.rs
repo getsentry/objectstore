@@ -311,8 +311,8 @@ impl Default for Sentry {
 // Logging configuration is defined in `objectstore_log::LoggingConfig`.
 // Metrics configuration is defined in `objectstore_metrics::MetricsConfig`.
 
-/// A key that may be used to verify a request's `Authorization` header and its
-/// associated permissions. May contain multiple key versions to facilitate rotation.
+/// A key that may be used to verify a request's auth token and its associated
+/// permissions. May contain multiple key versions to facilitate rotation.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZVerificationKey {
     /// Files that contain versions of this key's key material which may be used to verify
@@ -325,8 +325,8 @@ pub struct AuthZVerificationKey {
 
     /// The maximum set of permissions that this key's signer is authorized to grant.
     ///
-    /// If a request's `Authorization` header grants full permission but it was signed by
-    /// a key that is only allowed to grant read permission, then the request only has
+    /// If a request's auth token grants full permission but it was signed by a key
+    /// that is only allowed to grant read permission, then the request only has
     /// read permission.
     #[serde(default)]
     pub max_permissions: HashSet<Permission>,
@@ -341,11 +341,13 @@ pub struct AuthZ {
     /// in `403 Unauthorized` responses.
     pub enforce: bool,
 
-    /// Keys that may be used to verify a request's `Authorization` header.
+    /// Keys that may be used to verify a request's auth token.
     ///
-    /// This field is a container that is keyed on a key's ID. When verifying a JWT
-    /// from the `Authorization` header, the `kid` field should be read from the JWT
-    /// header and used to index into this map to select the appropriate key.
+    /// The auth token is read from the `X-Os-Auth` header (preferred)
+    /// or the standard `Authorization` header (fallback). This field is a
+    /// container keyed on a key's ID. When verifying a JWT, the `kid` field
+    /// should be read from the JWT header and used to index into this map to
+    /// select the appropriate key.
     #[serde(default)]
     pub keys: BTreeMap<String, AuthZVerificationKey>,
 }
@@ -443,7 +445,7 @@ pub struct Config {
     /// Content-based authorization configuration.
     ///
     /// Controls the verification and enforcement of content-based access control based on the
-    /// JWT in a request's `Authorization` header.
+    /// JWT in a request's `X-Os-Auth` or `Authorization` header.
     pub auth: AuthZ,
 
     /// A list of matchers for requests to discard without processing.
