@@ -4,6 +4,7 @@
 mod context;
 mod error;
 mod key_directory;
+pub(crate) mod presigned;
 mod service;
 mod util;
 

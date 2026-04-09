@@ -2494,7 +2494,9 @@ name = "objectstore-client"
 version = "0.1.6"
 dependencies = [
  "async-compression",
+ "base64",
  "bytes",
+ "ed25519-dalek",
  "futures-util",
  "infer",
  "jsonwebtoken",
@@ -2544,7 +2546,9 @@ dependencies = [
  "argh",
  "async-stream",
  "axum",
+ "base64",
  "bytes",
+ "ed25519-dalek",
  "elegant-departure",
  "figment",
  "futures",

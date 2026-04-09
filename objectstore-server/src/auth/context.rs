@@ -167,6 +167,7 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::auth::PublicKeyConfig;
+    use ed25519_dalek::pkcs8::DecodePublicKey;
     use jsonwebtoken::DecodingKey;
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
@@ -191,6 +192,9 @@ mod tests {
     fn test_key_config(max_permissions: HashSet<Permission>) -> PublicKeyDirectory {
         let public_key = PublicKeyConfig {
             key_versions: vec![DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap()],
+            verifying_keys: vec![
+                ed25519_dalek::VerifyingKey::from_public_key_pem(&TEST_EDDSA_PUBKEY).unwrap(),
+            ],
             max_permissions,
         };
         PublicKeyDirectory {

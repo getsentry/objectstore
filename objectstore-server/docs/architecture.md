@@ -92,6 +92,47 @@ the token's scopes and permissions cover the requested
 [`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
 Scope values in the token can use wildcards to grant broad access.
 
+### Pre-Signed URLs
+
+Pre-signed URLs provide time-limited, read-only access to specific objects
+without requiring an auth header. They are an alternative to JWT-based
+authentication for `GET` and `HEAD` requests.
+
+**URL format:**
+
+```
+/v1/objects/{usecase}/{scopes}/{key}?X-Os-Expires={unix_ts}&X-Os-KeyId={kid}&X-Os-Signature={base64url_sig}
+```
+
+- `X-Os-Expires` — Unix timestamp (seconds) when the URL expires
+- `X-Os-KeyId` — key ID mapping to a key in the `PublicKeyDirectory`
+- `X-Os-Signature` — base64url-encoded Ed25519 signature (no padding)
+
+**Canonical form** — the signed content is:
+
+```text
+GET\n{percent_decoded_path}\n{sorted_decoded_query_params}
+```
+
+- Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
+- The path is percent-decoded to handle proxy re-encoding.
+- Query params (excluding `X-Os-Signature`) are percent-decoded, sorted
+  alphabetically by key, and joined as `key=value` pairs with `&`.
+
+**Verification flow:**
+
+1. If no JWT is found in request headers, the extractor checks for pre-signed
+   URL query parameters.
+2. The request method must be `GET` or `HEAD`.
+3. Expiry is checked against the current time.
+4. The key's `max_permissions` must include `ObjectRead`.
+5. The canonical request string is reconstructed and verified against the
+   Ed25519 signature using the public key(s) for the given `kid`.
+6. An `AuthContext` is created with `ObjectRead` permission, with usecase and
+   scopes parsed from the URL path.
+
+Header-based JWT auth always takes precedence over pre-signed URL parameters.
+
 ## Configuration
 
 Configuration uses [figment](https://docs.rs/figment) for layered merging with

@@ -9,6 +9,7 @@ mod error;
 mod get;
 mod key;
 mod many;
+mod presign;
 mod put;
 pub mod utils;
 
@@ -21,4 +22,5 @@ pub use error::*;
 pub use get::*;
 pub use key::*;
 pub use many::*;
+pub use presign::*;
 pub use put::*;

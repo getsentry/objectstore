@@ -1,7 +1,8 @@
 use axum::extract::FromRequestParts;
-use axum::http::{header, request::Parts};
+use axum::http::{Method, header, request::Parts};
 
-use crate::auth::{AuthAwareService, AuthContext};
+use crate::auth::presigned::{extract_presigned_params, verify_presigned};
+use crate::auth::{AuthAwareService, AuthContext, AuthError};
 use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
 
@@ -20,6 +21,9 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
+        let enforce = state.config.auth.enforce;
+
+        // 1. Try header-based JWT auth (preferred)
         let encoded_token = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
@@ -27,14 +31,36 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let enforce = state.config.auth.enforce;
-        // Attempt to decode / verify the JWT, logging failure
+        // 2. If no header token, try pre-signed URL params
+        if encoded_token.is_none()
+            && let Some(presigned_params) = extract_presigned_params(&parts.uri)
+        {
+            if parts.method != Method::GET && parts.method != Method::HEAD {
+                return Err(ApiError::Auth(AuthError::BadRequest(
+                    "Pre-signed URLs are only valid for GET and HEAD requests",
+                )));
+            }
+
+            let auth_result =
+                verify_presigned(&presigned_params, &parts.uri, &state.key_directory)
+                    .inspect_err(|err| err.log(None, None, enforce));
+
+            let auth_context = match enforce {
+                true => Some(auth_result?),
+                false => auth_result.ok(),
+            };
+
+            return AuthAwareService::new(
+                state.service.clone(),
+                auth_context,
+                state.config.auth.enforce,
+            );
+        }
+
+        // 3. Fall through to JWT verification
         let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
             .inspect_err(|err| err.log(None, None, enforce));
 
-        // If auth enforcement is enabled, `from_encoded_jwt()` must have succeeded.
-        // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
-        // still proceed with `None` if it failed.
         let auth_context = match enforce {
             true => Some(auth_result?),
             false => auth_result.ok(),

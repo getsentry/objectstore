@@ -21,6 +21,9 @@ pub enum Error {
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
+    /// Error when creating or verifying pre-signed URLs.
+    #[error("presign error: {0}")]
+    Presign(String),
     /// Error when URL manipulation fails.
     #[error("{message}")]
     InvalidUrl {
