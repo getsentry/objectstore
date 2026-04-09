@@ -2704,13 +2704,8 @@ dependencies = [
 name = "objectstore-options"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
- "objectstore-log",
- "sentry-options",
+ "objectstore-typed-options",
  "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -2801,6 +2796,29 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "objectstore-typed-options"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "objectstore-log",
+ "objectstore-typed-options-derive",
+ "sentry-options",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "objectstore-typed-options-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
