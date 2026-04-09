@@ -1,0 +1,24 @@
+[package]
+name = "objectstore-options"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Runtime options for Objectstore, backed by sentry-options"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+arc-swap = { workspace = true }
+sentry-options = "1.0.5"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+objectstore-log = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[features]
+testing = []
+
+[dev-dependencies]

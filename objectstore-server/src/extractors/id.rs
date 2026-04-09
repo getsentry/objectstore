@@ -373,11 +373,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: Default::default(),
             }]),
             ..Config::default()
         };
@@ -402,11 +401,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_context_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: Default::default(),
             }]),
             ..Config::default()
         };
@@ -433,11 +431,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched_with_service() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: None,
                 scopes: BTreeMap::new(),
                 service: Some("test-*".into()),
-                service_matcher: Default::default(),
             }]),
             ..Config::default()
         };

@@ -66,11 +66,10 @@ async fn test_web_concurrency_limit() -> Result<()> {
 #[tokio::test]
 async fn test_killswitches() -> Result<()> {
     let server = TestServer::with_config(Config {
-        killswitches: Killswitches(vec![Killswitch {
+        killswitches: Killswitches::new(vec![Killswitch {
             usecase: Some("blocked".to_string()),
             scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
             service: Some("test-*".to_string()),
-            service_matcher: Default::default(),
         }]),
         auth: AuthZ {
             enforce: false,
