@@ -101,8 +101,7 @@ pub struct Killswitch {
 
 /// Initializes the global options instance and spawns a background refresh task.
 ///
-/// If `base_dir` is provided, values are loaded from `{base_dir}/values/`. Otherwise, the
-/// standard fallback chain is used:
+/// The standard fallback chain is used:
 ///
 /// 1. `SENTRY_OPTIONS_DIR` environment variable
 /// 2. `/etc/sentry-options` (if it exists)
