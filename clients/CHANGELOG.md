@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6
+
+### New Features ✨
+
+- (server) Add X-Os-Auth as alternative auth header by @lcian in [#422](https://github.com/getsentry/objectstore/pull/422)
+
+### Internal Changes 🔧
+
+- (python) Pin uv_build version with upper bound by @jan-auer in [#420](https://github.com/getsentry/objectstore/pull/420)
+
 ## 0.1.5
 
 ### New Features ✨
