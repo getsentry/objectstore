@@ -119,16 +119,12 @@ Uses a "decode then re-encode" canonicalization approach:
 - Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
 - The path is percent-decoded, then re-encoded with a strict canonical set
   (only `A-Z a-z 0-9 - _ . ~` left unencoded, `/` preserved, uppercase hex).
-  The encoding function uses the same unreserved character set as AWS
-  Signature V4's `UriEncode`.
 - Query params (excluding `X-Os-Signature`) are percent-decoded, re-encoded
   with the same canonical set, sorted alphabetically by encoded key, and
   joined as `key=value` pairs with `&`.
 
-The decode-then-re-encode step is not part of AWS SigV4 (which assumes
-consistent encoding between client and server), but normalizes to a single
-deterministic representation regardless of how intermediaries may have
-re-encoded the URL.
+The decode-then-re-encode step is normalizes the URL to a single deterministic
+representation, regardless of how intermediaries may have re-encoded it.
 
 **Verification flow:**
 
