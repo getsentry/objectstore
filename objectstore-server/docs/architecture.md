@@ -123,7 +123,7 @@ Uses a "decode then re-encode" canonicalization approach:
   with the same canonical set, sorted alphabetically by encoded key, and
   joined as `key=value` pairs with `&`.
 
-The decode-then-re-encode step is normalizes the URL to a single deterministic
+The decode-then-re-encode step normalizes the URL to a single deterministic
 representation, regardless of how intermediaries may have re-encoded it.
 
 **Verification flow:**

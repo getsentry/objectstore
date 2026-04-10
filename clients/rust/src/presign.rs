@@ -47,7 +47,7 @@ const CANONICAL_PATH_ENCODE_SET: &AsciiSet = &CANONICAL_ENCODE_SET.remove(b'/');
 pub fn presign_url(
     secret_key: &SecretKey,
     method: &str,
-    mut url: Url,
+    url: &Url,
     expires_in: Option<Duration>,
 ) -> crate::Result<Url> {
     let method_upper = method.to_ascii_uppercase();
@@ -67,6 +67,8 @@ pub fn presign_url(
         .duration_since(UNIX_EPOCH)
         .map_err(crate::PresignError::InvalidExpiry)?
         .as_secs();
+
+    let mut url = url.clone();
 
     // Add X-Os-Expires and X-Os-KeyId query params
     url.query_pairs_mut()
@@ -169,7 +171,7 @@ mod tests {
         let result = presign_url(
             &test_secret_key(),
             "GET",
-            url,
+            &url,
             Some(Duration::from_secs(300)),
         )
         .unwrap();
@@ -182,20 +184,19 @@ mod tests {
 
     #[test]
     fn test_presign_url_head_produces_same_signature() {
-        let url1 = Url::parse("http://localhost:8888/v1/objects/test/org=1/key").unwrap();
-        let url2 = url1.clone();
+        let url = Url::parse("http://localhost:8888/v1/objects/test/org=1/key").unwrap();
 
         let result1 = presign_url(
             &test_secret_key(),
             "GET",
-            url1,
+            &url,
             Some(Duration::from_secs(300)),
         )
         .unwrap();
         let result2 = presign_url(
             &test_secret_key(),
             "HEAD",
-            url2,
+            &url,
             Some(Duration::from_secs(300)),
         )
         .unwrap();
@@ -210,7 +211,7 @@ mod tests {
     #[test]
     fn test_presign_url_invalid_method() {
         let url = Url::parse("http://localhost:8888/v1/objects/test/org=1/key").unwrap();
-        let result = presign_url(&test_secret_key(), "PUT", url, None);
+        let result = presign_url(&test_secret_key(), "PUT", &url, None);
         assert!(result.is_err());
     }
 

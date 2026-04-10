@@ -43,7 +43,9 @@ pub fn extract_presigned_params(uri: &http::Uri) -> Option<PreSignedParams> {
     let mut signature: Option<Vec<u8>> = None;
 
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         let k = percent_decode(k);
         let v = percent_decode(v);
         match k.as_str() {
