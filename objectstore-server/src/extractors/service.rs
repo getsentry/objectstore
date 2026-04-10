@@ -42,7 +42,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             ),
             // Fall back to header-based JWT auth
             (None, Some(jwt)) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
-            // No auth provided
             (None, None) => Err(AuthError::BadRequest("No authorization provided")),
         };
 
