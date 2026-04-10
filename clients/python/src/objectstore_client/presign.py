@@ -97,11 +97,11 @@ def _canonical_presigned_request(path: str, query: str) -> str:
         GET\\n{canonical_path}\\n{canonical_query}
 
     - Method is always ``GET`` (HEAD maps to GET).
-    - Path is decoded then re-encoded (preserving ``/``).
+    - Path is decoded then re-encoded.
     - Query params are decoded then re-encoded, sorted by encoded key,
       excluding ``X-Os-Signature``.
     """
-    canonical_path = _canonical_encode_path(unquote(path))
+    canonical_path = _canonical_encode(unquote(path))
 
     params = []
     for pair in query.split("&"):
@@ -123,8 +123,3 @@ def _canonical_presigned_request(path: str, query: str) -> str:
 def _canonical_encode(value: str) -> str:
     """Canonically encode a string: only ``A-Z a-z 0-9 - _ . ~`` left unencoded."""
     return quote(value, safe=_UNRESERVED_SAFE)
-
-
-def _canonical_encode_path(path: str) -> str:
-    """Canonically encode a URL path, preserving ``/`` as a separator."""
-    return quote(path, safe="/" + _UNRESERVED_SAFE)

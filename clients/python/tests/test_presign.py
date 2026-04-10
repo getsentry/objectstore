@@ -28,7 +28,7 @@ class TestCanonicalForm:
         )
         assert canonical == (
             "GET\n"
-            "/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key\n"
+            "%2Fv1%2Fobjects%2Fattachments%2Forg%3D123%3Bproject%3D456%2Fmy-key\n"
             "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
         )
 

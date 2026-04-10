@@ -117,11 +117,11 @@ GET\n{canonical_path}\n{canonical_query}
 Uses a "decode then re-encode" canonicalization approach:
 
 - Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
-- The path is percent-decoded, then re-encoded with a strict canonical set
-  (only `A-Z a-z 0-9 - _ . ~` left unencoded, `/` preserved, uppercase hex).
-- Query params (excluding `X-Os-Signature`) are percent-decoded, re-encoded
-  with the same canonical set, sorted alphabetically by encoded key, and
-  joined as `key=value` pairs with `&`.
+- Both the path and query params are percent-decoded, then re-encoded with a
+  strict canonical set (only `A-Z a-z 0-9 - _ . ~` left unencoded, uppercase
+  hex).
+- Query params exclude `X-Os-Signature`, are sorted alphabetically by encoded
+  key, and joined as `key=value` pairs with `&`.
 
 The decode-then-re-encode step normalizes the URL to a single deterministic
 representation, regardless of how intermediaries may have re-encoded it.

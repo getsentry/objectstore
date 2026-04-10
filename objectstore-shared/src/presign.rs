@@ -1,18 +1,10 @@
-//! Canonical form computation for pre-signed URLs.
-//!
-//! This module contains the shared signing/verification primitives used by both
-//! the Objectstore server and client. Keeping them in one place ensures that the
-//! canonical form is always computed identically on both sides.
+//! Constants and functions for canonical form computation for pre-signed URLs.
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 
-/// Query parameter name for the expiry timestamp.
-pub const PARAM_EXPIRES: &str = "X-Os-Expires";
-
-/// Query parameter name for the key ID.
+/// Query parameters used for pre-signed URLs.
 pub const PARAM_KEY_ID: &str = "X-Os-KeyId";
-
-/// Query parameter name for the signature.
+pub const PARAM_EXPIRES: &str = "X-Os-Expires";
 pub const PARAM_SIGNATURE: &str = "X-Os-Signature";
 
 /// Canonical encoding set: encode everything except RFC 3986 unreserved characters
@@ -22,9 +14,6 @@ const CANONICAL_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'.')
     .remove(b'~');
-
-/// Same as [`CANONICAL_ENCODE_SET`] but also preserves `/` for path encoding.
-const CANONICAL_PATH_ENCODE_SET: &AsciiSet = &CANONICAL_ENCODE_SET.remove(b'/');
 
 /// Build the canonical request string for pre-signed URL signing/verification.
 ///
@@ -41,11 +30,11 @@ const CANONICAL_PATH_ENCODE_SET: &AsciiSet = &CANONICAL_ENCODE_SET.remove(b'/');
 /// ```
 ///
 /// - Method is always `GET` (HEAD maps to GET).
-/// - Path is decoded then re-encoded (preserving `/`).
+/// - Path is decoded then re-encoded.
 /// - Query params are decoded then re-encoded, sorted by encoded key,
 ///   excluding `X-Os-Signature`.
 pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
-    let canonical_path = canonical_encode_path(&percent_decode(path));
+    let canonical_path = canonical_encode(&percent_decode(path));
 
     let mut params: Vec<(String, String)> = query
         .unwrap_or("")
@@ -86,11 +75,6 @@ pub fn canonical_encode(input: &str) -> String {
     percent_encode(input.as_bytes(), CANONICAL_ENCODE_SET).to_string()
 }
 
-/// Canonically encode a URL path, preserving `/` as a path separator.
-pub fn canonical_encode_path(input: &str) -> String {
-    percent_encode(input.as_bytes(), CANONICAL_PATH_ENCODE_SET).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,7 +87,7 @@ mod tests {
         );
         assert_eq!(
             canonical,
-            "GET\n/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key\nX-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
+            "GET\n%2Fv1%2Fobjects%2Fattachments%2Forg%3D123%3Bproject%3D456%2Fmy-key\nX-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
         );
     }
 
