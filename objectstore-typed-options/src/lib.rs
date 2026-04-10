@@ -86,6 +86,9 @@
 //! println!("max_retries = {}", Options::get().max_retries());
 //! ```
 
+#[cfg(feature = "testing")]
+pub mod schema;
+
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
