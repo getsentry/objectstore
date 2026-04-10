@@ -107,6 +107,8 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     for pair in query.split("&"):
         if not pair:
             continue
+        if "=" not in pair:
+            continue
         k, _, v = pair.partition("=")
         k = unquote(k)
         if k == PARAM_SIGNATURE:
