@@ -128,17 +128,17 @@ representation, regardless of how intermediaries may have re-encoded it.
 
 **Verification flow:**
 
-1. If no JWT is found in request headers, the extractor checks for pre-signed
-   URL query parameters.
-2. The request method must be `GET` or `HEAD`.
-3. Expiry is checked against the current time.
-4. The key's `max_permissions` must include `ObjectRead`.
-5. The canonical request string is reconstructed and verified against the
-   Ed25519 signature using the public key(s) for the given `kid`.
-6. An `AuthContext` is created with `ObjectRead` permission, with usecase and
-   scopes parsed from the URL path.
-
 Pre-signed URL parameters take precedence over header-based JWT auth.
+The extractor checks for pre-signed URL query parameters first, then
+falls back to JWT headers.
+
+1. The request method must be `GET` or `HEAD`.
+2. Expiry is checked against the current time.
+3. The key's `max_permissions` must include `ObjectRead`.
+4. The canonical request string is reconstructed and verified against the
+   Ed25519 signature using the public key(s) for the given `kid`.
+5. An `AuthContext` is created with `ObjectRead` permission, with usecase and
+   scopes parsed from the URL path.
 
 ## Configuration
 
