@@ -114,17 +114,17 @@ authentication for `GET` and `HEAD` requests.
 GET\n{canonical_path}\n{canonical_query}
 ```
 
-Uses a "decode then re-encode" canonicalization approach:
-
 - Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
-- Both the path and query params are percent-decoded, then re-encoded with a
-  strict canonical set (only `A-Z a-z 0-9 - _ . ~` left unencoded, uppercase
-  hex).
-- Query params exclude `X-Os-Signature`, are sorted alphabetically by encoded
-  key, and joined as `key=value` pairs with `&`.
+- The path uses the encoded request path as received over HTTP.
+- Percent-encoded octets are normalized only by uppercasing their hex digits.
+- Query params exclude `X-Os-Signature`, keep their encoded key/value bytes,
+  are sorted alphabetically by encoded key, and joined as `key=value` pairs
+  with `&`.
 
-The decode-then-re-encode step normalizes the URL to a single deterministic
-representation, regardless of how intermediaries may have re-encoded it.
+This keeps distinct object keys such as `/a/b` and `/a%2Fb` distinct in the
+canonical form. Intermediaries must not rewrite the request target's encoding.
+Verification uses Axum's `OriginalUri` so nested routing does not strip the
+`/v1/` prefix from the signed path.
 
 **Verification flow:**
 
