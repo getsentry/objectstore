@@ -121,11 +121,6 @@ GET\n{canonical_path}\n{canonical_query}
   are sorted alphabetically by encoded key, and joined as `key=value` pairs
   with `&`.
 
-This keeps distinct object keys such as `/a/b` and `/a%2Fb` distinct in the
-canonical form. Intermediaries must not rewrite the request target's encoding.
-Verification uses Axum's `OriginalUri` so nested routing does not strip the
-`/v1/` prefix from the signed path.
-
 **Verification flow:**
 
 Pre-signed URL parameters take precedence over header-based JWT auth.
