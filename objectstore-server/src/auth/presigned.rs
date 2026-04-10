@@ -311,7 +311,7 @@ mod tests {
         let path = "/v1/objects/attachments/org=123;project=456/my-key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let ctx = AuthContext::from_presigned_url(&params, &uri, &dir).unwrap();
+        let ctx = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir).unwrap();
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.permissions.contains(&Permission::ObjectRead));
         assert_eq!(ctx.permissions.len(), 1);
@@ -331,7 +331,7 @@ mod tests {
         let path = "/v1/objects/attachments/org=123/my-key";
         let (uri, params) = sign_url(path, past_expires());
 
-        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir);
         assert!(matches!(result, Err(AuthError::BadRequest(_))));
     }
 
@@ -349,7 +349,8 @@ mod tests {
         .parse()
         .unwrap();
 
-        let result = AuthContext::from_presigned_url(&params, &tampered_uri, &dir);
+        let result =
+            AuthContext::from_presigned_url(&params, &http::Method::GET, &tampered_uri, &dir);
         assert!(matches!(result, Err(AuthError::VerificationFailure)));
     }
 
@@ -370,7 +371,7 @@ mod tests {
             .unwrap();
         let params = extract_presigned_params(&uri).unwrap();
 
-        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir);
         assert!(matches!(result, Err(AuthError::InternalError(_))));
     }
 
@@ -388,7 +389,7 @@ mod tests {
         let path = "/v1/objects/attachments/org=123/key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir);
         assert!(matches!(result, Err(AuthError::NotPermitted)));
     }
 
@@ -398,9 +399,24 @@ mod tests {
         let path = "/v1/objects/attachments/_/my-key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let ctx = AuthContext::from_presigned_url(&params, &uri, &dir).unwrap();
+        let ctx = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir).unwrap();
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.scopes.is_empty());
+    }
+
+    #[test]
+    fn test_from_presigned_url_rejects_non_read_methods() {
+        let dir = test_key_directory();
+        let path = "/v1/objects/attachments/org=123/key";
+        let (uri, params) = sign_url(path, future_expires());
+
+        for method in [http::Method::PUT, http::Method::POST, http::Method::DELETE] {
+            let result = AuthContext::from_presigned_url(&params, &method, &uri, &dir);
+            assert!(
+                matches!(result, Err(AuthError::BadRequest(_))),
+                "expected rejection for {method}"
+            );
+        }
     }
 
     #[test]

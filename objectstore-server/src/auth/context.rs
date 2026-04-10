@@ -143,9 +143,17 @@ impl AuthContext {
     /// The resulting context is always scoped to `ObjectRead` only.
     pub fn from_presigned_url(
         params: &PreSignedParams,
+        method: &http::Method,
         uri: &http::Uri,
         key_directory: &PublicKeyDirectory,
     ) -> Result<AuthContext, AuthError> {
+        // Pre-signed URLs are only valid for read operations
+        if method != http::Method::GET && method != http::Method::HEAD {
+            return Err(AuthError::BadRequest(
+                "Pre-signed URLs are only valid for GET and HEAD requests",
+            ));
+        }
+
         // Check expiry
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

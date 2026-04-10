@@ -1,5 +1,5 @@
 use axum::extract::FromRequestParts;
-use axum::http::{Method, header, request::Parts};
+use axum::http::{header, request::Parts};
 
 use crate::auth::presigned::extract_presigned_params;
 use crate::auth::{AuthAwareService, AuthContext, AuthError};
@@ -33,17 +33,15 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         let presigned_params = extract_presigned_params(&parts.uri);
 
         let auth_result = match (encoded_jwt, presigned_params) {
-            // Header-based JWT auth takes precedence
+            // JWT auth takes precedence
             (Some(jwt), _) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
             // Fall back to pre-signed URL params
-            (None, Some(ref params)) => {
-                if parts.method != Method::GET && parts.method != Method::HEAD {
-                    return Err(ApiError::Auth(AuthError::BadRequest(
-                        "Pre-signed URLs are only valid for GET and HEAD requests",
-                    )));
-                }
-                AuthContext::from_presigned_url(params, &parts.uri, &state.key_directory)
-            }
+            (None, Some(ref params)) => AuthContext::from_presigned_url(
+                params,
+                &parts.method,
+                &parts.uri,
+                &state.key_directory,
+            ),
             // No auth provided
             (None, None) => Err(AuthError::BadRequest("No authorization provided")),
         };
