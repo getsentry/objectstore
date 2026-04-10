@@ -104,9 +104,14 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     canonical_path = _canonical_encode_path(unquote(path))
 
     params = []
-    for k, v in parse_qsl(query, keep_blank_values=True):
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        k, _, v = pair.partition("=")
+        k = unquote(k)
         if k == PARAM_SIGNATURE:
             continue
+        v = unquote(v)
         params.append((_canonical_encode(k), _canonical_encode(v)))
 
     params.sort(key=lambda x: x[0])
