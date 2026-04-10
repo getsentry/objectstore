@@ -16,7 +16,7 @@ PARAM_SIGNATURE = "X-Os-Signature"
 DEFAULT_PRESIGNED_EXPIRY = 300  # 5 minutes
 
 # RFC 3986 unreserved characters (minus letters and digits which are always safe).
-# This matches the Rust ``CANONICAL_ENCODE_SET`` and AWS Signature V4's ``UriEncode``.
+# Same character set as AWS Signature V4's ``UriEncode``.
 _UNRESERVED_SAFE = "-_.~"
 
 
@@ -87,7 +87,7 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     """
     Build the canonical request string for pre-signed URL signing/verification.
 
-    Uses an S3-style "decode then re-encode" approach: percent-decode the raw
+    Uses a "decode then re-encode" approach: percent-decode the raw
     values, then re-encode with a strict canonical set (only ``A-Z a-z 0-9 - _ . ~``
     left unencoded, uppercase hex). This normalizes to a single deterministic
     representation regardless of how the original URL was encoded.

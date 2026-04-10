@@ -7,7 +7,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use crate::auth::util::StringOrWildcard;
 
 /// Canonical encoding set: encode everything except RFC 3986 unreserved characters
-/// (`A-Z a-z 0-9 - _ . ~`). Matches AWS Signature V4's `UriEncode`.
+/// (`A-Z a-z 0-9 - _ . ~`). Same character set as AWS Signature V4's `UriEncode`.
 const CANONICAL_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'_')
@@ -63,7 +63,7 @@ pub fn extract_presigned_params(uri: &http::Uri) -> Option<PreSignedParams> {
 
 /// Build the canonical request string for pre-signed URL verification.
 ///
-/// Uses an S3-style "decode then re-encode" approach for maximum resilience:
+/// Uses a "decode then re-encode" approach for maximum resilience:
 /// 1. Percent-decode the raw path/query values
 /// 2. Re-encode using a strict canonical set (only `A-Z a-z 0-9 - _ . ~` unencoded)
 ///
