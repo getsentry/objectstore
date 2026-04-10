@@ -33,6 +33,7 @@ num_cpus = "1.17.0"
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
 objectstore-service = { workspace = true }
+objectstore-shared = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

@@ -19,6 +19,7 @@ futures-util = { workspace = true }
 infer = { version = "0.19.0", default-features = false }
 jsonwebtoken = { workspace = true }
 multer = "3.1.0"
+objectstore-shared = { workspace = true }
 objectstore-types = { workspace = true }
 percent-encoding = { workspace = true }
 reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart"] }

@@ -26,6 +26,7 @@ objectstore-log = { path = "objectstore-log" }
 objectstore-metrics = { path = "objectstore-metrics" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }
+objectstore-shared = { path = "objectstore-shared", version = "0.1.0" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-types = { path = "objectstore-types", version = "0.1.6" }
 percent-encoding = "2.3"

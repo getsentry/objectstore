@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
-use crate::auth::presigned::{
-    PreSignedParams, canonical_presigned_request, parse_path_context, percent_decode,
-};
+use objectstore_shared::presign::{canonical_presigned_request, percent_decode};
+
+use crate::auth::presigned::{PreSignedParams, parse_path_context};
 use crate::auth::util::StringOrWildcard;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

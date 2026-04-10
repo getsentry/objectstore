@@ -2501,6 +2501,7 @@ dependencies = [
  "infer",
  "jsonwebtoken",
  "multer",
+ "objectstore-shared",
  "objectstore-test",
  "objectstore-types",
  "percent-encoding",
@@ -2564,6 +2565,7 @@ dependencies = [
  "objectstore-log",
  "objectstore-metrics",
  "objectstore-service",
+ "objectstore-shared",
  "objectstore-test",
  "objectstore-types",
  "papaya",
@@ -2613,6 +2615,13 @@ dependencies = [
  "tracing",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "objectstore-shared"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
 ]
 
 [[package]]
