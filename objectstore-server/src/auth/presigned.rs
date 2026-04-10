@@ -1,14 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Verifier};
-use objectstore_types::auth::Permission;
 
-use crate::auth::context::AuthContext;
-use crate::auth::error::AuthError;
-use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
 /// Query parameter names for pre-signed URLs.
@@ -17,6 +11,7 @@ const PARAM_KEY_ID: &str = "X-Os-KeyId";
 const PARAM_SIGNATURE: &str = "X-Os-Signature";
 
 /// Pre-signed URL parameters extracted from the query string.
+#[derive(Debug)]
 pub struct PreSignedParams {
     pub expires: u64,
     pub key_id: String,
@@ -64,7 +59,7 @@ pub fn extract_presigned_params(uri: &http::Uri) -> Option<PreSignedParams> {
 /// - Method is always `GET` (HEAD maps to GET).
 /// - Path is percent-decoded.
 /// - Query params are percent-decoded, sorted by key, excluding `X-Os-Signature`.
-pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
+pub(crate) fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
     let decoded_path = percent_decode(path);
 
     let mut params: Vec<(String, String)> = query
@@ -93,70 +88,13 @@ pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
     format!("GET\n{decoded_path}\n{query_str}")
 }
 
-/// Verify a pre-signed URL and return an `AuthContext` on success.
-///
-/// This checks expiry, verifies the Ed25519 signature against the canonical request,
-/// and constructs an `AuthContext` with `ObjectRead` permission derived from the URL path.
-pub fn verify_presigned(
-    params: &PreSignedParams,
-    uri: &http::Uri,
-    key_directory: &PublicKeyDirectory,
-) -> Result<AuthContext, AuthError> {
-    // Check expiry
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if params.expires <= now {
-        return Err(AuthError::BadRequest("Pre-signed URL has expired"));
-    }
-
-    // Look up key config
-    let key_config = key_directory.keys.get(&params.key_id).ok_or_else(|| {
-        AuthError::InternalError(format!("Key `{}` not configured", params.key_id))
-    })?;
-
-    // Check key has read permission
-    if !key_config.max_permissions.contains(&Permission::ObjectRead) {
-        return Err(AuthError::NotPermitted);
-    }
-
-    // Build canonical request
-    let canonical = canonical_presigned_request(uri.path(), uri.query());
-
-    // Parse signature bytes
-    let signature = Signature::from_slice(&params.signature)
-        .map_err(|_| AuthError::BadRequest("Invalid signature format"))?;
-
-    // Verify against each key version
-    let verified = key_config
-        .verifying_keys
-        .iter()
-        .any(|vk| vk.verify(canonical.as_bytes(), &signature).is_ok());
-
-    if !verified {
-        return Err(AuthError::VerificationFailure);
-    }
-
-    // Parse usecase and scopes from the path
-    let decoded_path = percent_decode(uri.path());
-    let (usecase, scopes) = parse_path_context(&decoded_path).ok_or(AuthError::BadRequest(
-        "Cannot parse path for pre-signed URL",
-    ))?;
-
-    Ok(AuthContext {
-        usecase,
-        scopes,
-        permissions: HashSet::from([Permission::ObjectRead]),
-    })
-}
-
 /// Extract usecase and scopes from a decoded URL path.
 ///
 /// Expected format: `/v1/objects/{usecase}/{scopes}/{key...}` or with a prefix.
 /// Scopes are semicolon-separated `key=value` pairs (e.g., `org=123;project=456`).
-fn parse_path_context(decoded_path: &str) -> Option<(String, BTreeMap<String, StringOrWildcard>)> {
+pub(crate) fn parse_path_context(
+    decoded_path: &str,
+) -> Option<(String, BTreeMap<String, StringOrWildcard>)> {
     // Find the `/v1/objects/` segment and take what follows
     let rest = decoded_path
         .find("/v1/objects/")
@@ -188,7 +126,7 @@ fn parse_path_context(decoded_path: &str) -> Option<(String, BTreeMap<String, St
 }
 
 /// Percent-decode a string, interpreting the result as UTF-8.
-fn percent_decode(input: &str) -> String {
+pub(crate) fn percent_decode(input: &str) -> String {
     percent_encoding::percent_decode_str(input)
         .decode_utf8_lossy()
         .into_owned()
@@ -196,12 +134,18 @@ fn percent_decode(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use jsonwebtoken::DecodingKey;
+    use objectstore_types::auth::Permission;
 
+    use crate::auth::context::AuthContext;
+    use crate::auth::error::AuthError;
     use crate::auth::key_directory::{PublicKeyConfig, PublicKeyDirectory};
     use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY, TEST_EDDSA_PUBKEY};
 
@@ -271,7 +215,6 @@ mod tests {
             "/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key",
             Some("X-Os-Expires=1712668800&X-Os-KeyId=relay-prod"),
         );
-        // Percent-decoded path should match the non-encoded version
         assert_eq!(
             canonical,
             "GET\n/v1/objects/attachments/org=123;project=456/my-key\nX-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
@@ -314,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_presigned_valid_get() {
+    fn test_from_presigned_url_valid() {
         let dir = test_key_directory();
         let path = "/v1/objects/attachments/org=123;project=456/my-key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let ctx = verify_presigned(&params, &uri, &dir).unwrap();
+        let ctx = AuthContext::from_presigned_url(&params, &uri, &dir).unwrap();
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.permissions.contains(&Permission::ObjectRead));
         assert_eq!(ctx.permissions.len(), 1);
@@ -334,22 +277,21 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_presigned_expired() {
+    fn test_from_presigned_url_expired() {
         let dir = test_key_directory();
         let path = "/v1/objects/attachments/org=123/my-key";
         let (uri, params) = sign_url(path, past_expires());
 
-        let result = verify_presigned(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
         assert!(matches!(result, Err(AuthError::BadRequest(_))));
     }
 
     #[test]
-    fn test_verify_presigned_tampered_path() {
+    fn test_from_presigned_url_tampered_path() {
         let dir = test_key_directory();
         let path = "/v1/objects/attachments/org=123/my-key";
         let (_, params) = sign_url(path, future_expires());
 
-        // Use a different path for verification
         let tampered_uri: http::Uri = format!(
             "/v1/objects/attachments/org=999/my-key?{PARAM_EXPIRES}={}&{PARAM_KEY_ID}={TEST_EDDSA_KID}&{PARAM_SIGNATURE}={}",
             params.expires,
@@ -358,12 +300,12 @@ mod tests {
         .parse()
         .unwrap();
 
-        let result = verify_presigned(&params, &tampered_uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &tampered_uri, &dir);
         assert!(matches!(result, Err(AuthError::VerificationFailure)));
     }
 
     #[test]
-    fn test_verify_presigned_unknown_key_id() {
+    fn test_from_presigned_url_unknown_key_id() {
         let dir = test_key_directory();
         let signing_key = SigningKey::from_pkcs8_pem(&TEST_EDDSA_PRIVKEY).unwrap();
 
@@ -379,12 +321,12 @@ mod tests {
             .unwrap();
         let params = extract_presigned_params(&uri).unwrap();
 
-        let result = verify_presigned(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
         assert!(matches!(result, Err(AuthError::InternalError(_))));
     }
 
     #[test]
-    fn test_verify_presigned_key_without_read_permission() {
+    fn test_from_presigned_url_key_without_read_permission() {
         let public_key = PublicKeyConfig {
             key_versions: vec![DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap()],
             verifying_keys: vec![VerifyingKey::from_public_key_pem(&TEST_EDDSA_PUBKEY).unwrap()],
@@ -397,17 +339,17 @@ mod tests {
         let path = "/v1/objects/attachments/org=123/key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let result = verify_presigned(&params, &uri, &dir);
+        let result = AuthContext::from_presigned_url(&params, &uri, &dir);
         assert!(matches!(result, Err(AuthError::NotPermitted)));
     }
 
     #[test]
-    fn test_verify_presigned_empty_scopes() {
+    fn test_from_presigned_url_empty_scopes() {
         let dir = test_key_directory();
         let path = "/v1/objects/attachments/_/my-key";
         let (uri, params) = sign_url(path, future_expires());
 
-        let ctx = verify_presigned(&params, &uri, &dir).unwrap();
+        let ctx = AuthContext::from_presigned_url(&params, &uri, &dir).unwrap();
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.scopes.is_empty());
     }

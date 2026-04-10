@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::{Signature, Verifier};
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
@@ -7,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
+use crate::auth::presigned::{
+    PreSignedParams, canonical_presigned_request, parse_path_context, percent_decode,
+};
 use crate::auth::util::StringOrWildcard;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -131,6 +136,66 @@ impl AuthContext {
             usecase,
             scopes: scope,
             permissions,
+        })
+    }
+
+    /// Construct an `AuthContext` from pre-signed URL parameters.
+    ///
+    /// Verifies that the URL has not expired, that the signing key exists and permits
+    /// `ObjectRead`, and that the Ed25519 signature matches the canonical request.
+    /// The resulting context is always scoped to `ObjectRead` only.
+    pub fn from_presigned_url(
+        params: &PreSignedParams,
+        uri: &http::Uri,
+        key_directory: &PublicKeyDirectory,
+    ) -> Result<AuthContext, AuthError> {
+        // Check expiry
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if params.expires <= now {
+            return Err(AuthError::BadRequest("Pre-signed URL has expired"));
+        }
+
+        // Look up key config
+        let key_config = key_directory.keys.get(&params.key_id).ok_or_else(|| {
+            AuthError::InternalError(format!("Key `{}` not configured", params.key_id))
+        })?;
+
+        // Check key has read permission
+        if !key_config.max_permissions.contains(&Permission::ObjectRead) {
+            return Err(AuthError::NotPermitted);
+        }
+
+        // Build canonical request
+        let canonical = canonical_presigned_request(uri.path(), uri.query());
+
+        // Parse signature bytes
+        let signature = Signature::from_slice(&params.signature)
+            .map_err(|_| AuthError::BadRequest("Invalid signature format"))?;
+
+        // Verify against each key version
+        let verified = key_config
+            .verifying_keys
+            .iter()
+            .any(|vk| vk.verify(canonical.as_bytes(), &signature).is_ok());
+
+        if !verified {
+            return Err(AuthError::VerificationFailure);
+        }
+
+        // Parse usecase and scopes from the path
+        let decoded_path = percent_decode(uri.path());
+        let (usecase, scopes) = parse_path_context(&decoded_path).ok_or(AuthError::BadRequest(
+            "Cannot parse path for pre-signed URL",
+        ))?;
+
+        Ok(AuthContext {
+            usecase,
+            scopes,
+            permissions: HashSet::from([Permission::ObjectRead]),
         })
     }
 

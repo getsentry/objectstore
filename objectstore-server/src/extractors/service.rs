@@ -1,7 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::{Method, header, request::Parts};
 
-use crate::auth::presigned::{extract_presigned_params, verify_presigned};
+use crate::auth::presigned::extract_presigned_params;
 use crate::auth::{AuthAwareService, AuthContext, AuthError};
 use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
@@ -32,7 +32,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(strip_bearer);
 
         // 2. If no header token, try pre-signed URL params
-        if encoded_token.is_none()
+        let auth_result = if encoded_token.is_none()
             && let Some(presigned_params) = extract_presigned_params(&parts.uri)
         {
             if parts.method != Method::GET && parts.method != Method::HEAD {
@@ -40,25 +40,15 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                     "Pre-signed URLs are only valid for GET and HEAD requests",
                 )));
             }
+            AuthContext::from_presigned_url(&presigned_params, &parts.uri, &state.key_directory)
+        } else {
+            // 3. Fall through to JWT verification
+            AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
+        };
 
-            let auth_result = verify_presigned(&presigned_params, &parts.uri, &state.key_directory)
-                .inspect_err(|err| err.log(None, None, enforce));
-
-            let auth_context = match enforce {
-                true => Some(auth_result?),
-                false => auth_result.ok(),
-            };
-
-            return AuthAwareService::new(
-                state.service.clone(),
-                auth_context,
-                state.config.auth.enforce,
-            );
+        if let Err(err) = &auth_result {
+            err.log(None, None, enforce);
         }
-
-        // 3. Fall through to JWT verification
-        let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
-            .inspect_err(|err| err.log(None, None, enforce));
 
         let auth_context = match enforce {
             true => Some(auth_result?),
