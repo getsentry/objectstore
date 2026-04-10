@@ -23,33 +23,38 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
     ) -> Result<Self, Self::Rejection> {
         let enforce = state.config.auth.enforce;
 
-        let encoded_token = parts
+        let encoded_jwt = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
             .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let auth_result = match (encoded_token, extract_presigned_params(&parts.uri)) {
+        let presigned_params = extract_presigned_params(&parts.uri);
+
+        let auth_result = match (encoded_jwt, presigned_params) {
             // Header-based JWT auth takes precedence
-            (Some(_), _) => AuthContext::from_encoded_jwt(encoded_token, &state.key_directory),
+            (Some(jwt), _) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
             // Fall back to pre-signed URL params
-            (None, Some(ref presigned_params)) => {
+            (None, Some(ref params)) => {
                 if parts.method != Method::GET && parts.method != Method::HEAD {
                     return Err(ApiError::Auth(AuthError::BadRequest(
                         "Pre-signed URLs are only valid for GET and HEAD requests",
                     )));
                 }
-                AuthContext::from_presigned_url(presigned_params, &parts.uri, &state.key_directory)
+                AuthContext::from_presigned_url(params, &parts.uri, &state.key_directory)
             }
             // No auth provided
-            (None, None) => AuthContext::from_encoded_jwt(None, &state.key_directory),
+            (None, None) => Err(AuthError::BadRequest("No authorization provided")),
         };
 
         if let Err(err) = &auth_result {
             err.log(None, None, enforce);
         }
 
+        // If auth enforcement is enabled, `auth_context` must be `Ok(context)`.
+        // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
+        // still proceed with `None` if it failed.
         let auth_context = match enforce {
             true => Some(auth_result?),
             false => auth_result.ok(),

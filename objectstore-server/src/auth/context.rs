@@ -72,12 +72,9 @@ impl AuthContext {
     /// header field and attempt verification. It will also ensure that the timestamp from the
     /// `exp` claim field has not passed.
     pub fn from_encoded_jwt(
-        encoded_token: Option<&str>,
+        encoded_token: &str,
         key_directory: &PublicKeyDirectory,
     ) -> Result<AuthContext, AuthError> {
-        let encoded_token =
-            encoded_token.ok_or(AuthError::BadRequest("No authorization token provided"))?;
-
         let jwt_header = decode_header(encoded_token)?;
         let key_id = jwt_header
             .kid
@@ -316,8 +313,7 @@ mod tests {
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config)?;
 
         // Ensure the key is correctly verified and deserialized
         let expected = sample_auth_context("123", "456", max_permission());
@@ -335,8 +331,7 @@ mod tests {
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
         let test_config = test_key_config(ro_permission.clone());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config)?;
 
         // Ensure the key is correctly verified and that the permissions are restricted
         let expected = sample_auth_context("123", "456", ro_permission);
@@ -352,7 +347,7 @@ mod tests {
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context = AuthContext::from_encoded_jwt(Some(encoded_token), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token, &test_config);
 
         // Ensure the token failed verification
         assert!(matches!(auth_context, Err(AuthError::ValidationFailure(_))));
@@ -371,8 +366,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config);
 
         // Ensure the token failed verification
         assert!(matches!(auth_context, Err(AuthError::VerificationFailure)));
@@ -391,8 +385,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config);
 
         // Ensure the token failed verification
         let Err(AuthError::ValidationFailure(error)) = auth_context else {
