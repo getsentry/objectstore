@@ -17,9 +17,6 @@ pub const PARAM_SIGNATURE: &str = "X-Os-Signature";
 /// - Percent-encoded octets are normalized to uppercase hex digits.
 /// - Query params use the encoded key/value pairs from the URI, excluding
 ///   `X-Os-Signature`, sorted by encoded key.
-///
-/// This keeps the original encoded path intact, so distinct keys such as
-/// `/a/b` and `/a%2Fb` remain distinct in the canonical form.
 pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
     let canonical_path = normalize_percent_encoding(path);
 
