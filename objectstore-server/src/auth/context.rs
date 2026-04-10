@@ -27,7 +27,7 @@ struct JwtClaims {
 fn jwt_validation_params(jwt_header: &Header) -> Validation {
     let mut validation = Validation::new(jwt_header.alg);
     validation.set_audience(&["objectstore"]);
-    validation.set_issuer(&["sentry", "relay"]);
+    validation.set_issuer(&["sentry", "relay", "launchpad"]);
     validation.set_required_spec_claims(&["exp"]);
     validation
 }
@@ -61,7 +61,7 @@ impl AuthContext {
     /// - the `exp` claim indicating when the token expires
     ///
     /// The `aud` claim is not required, but if set it must be `"objectstore"`. The `iss` claim
-    /// is not required, but if set it must be `"relay"` or `"sentry"`.
+    /// is not required, but if set it must be `"relay"`, `"sentry"`, or `"launchpad"`.
     ///
     /// To verify the token, objectstore will look up a list of possible keys based on the `kid`
     /// header field and attempt verification. It will also ensure that the timestamp from the
