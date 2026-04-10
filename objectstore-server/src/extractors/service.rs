@@ -23,7 +23,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
     ) -> Result<Self, Self::Rejection> {
         let enforce = state.config.auth.enforce;
 
-        // 1. Try header-based JWT auth (preferred)
         let encoded_token = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
@@ -31,19 +30,20 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        // 2. If no header token, try pre-signed URL params
-        let auth_result = if encoded_token.is_none()
-            && let Some(presigned_params) = extract_presigned_params(&parts.uri)
-        {
-            if parts.method != Method::GET && parts.method != Method::HEAD {
-                return Err(ApiError::Auth(AuthError::BadRequest(
-                    "Pre-signed URLs are only valid for GET and HEAD requests",
-                )));
+        let auth_result = match (encoded_token, extract_presigned_params(&parts.uri)) {
+            // Header-based JWT auth takes precedence
+            (Some(_), _) => AuthContext::from_encoded_jwt(encoded_token, &state.key_directory),
+            // Fall back to pre-signed URL params
+            (None, Some(ref presigned_params)) => {
+                if parts.method != Method::GET && parts.method != Method::HEAD {
+                    return Err(ApiError::Auth(AuthError::BadRequest(
+                        "Pre-signed URLs are only valid for GET and HEAD requests",
+                    )));
+                }
+                AuthContext::from_presigned_url(presigned_params, &parts.uri, &state.key_directory)
             }
-            AuthContext::from_presigned_url(&presigned_params, &parts.uri, &state.key_directory)
-        } else {
-            // 3. Fall through to JWT verification
-            AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
+            // No auth provided
+            (None, None) => AuthContext::from_encoded_jwt(None, &state.key_directory),
         };
 
         if let Err(err) = &auth_result {
