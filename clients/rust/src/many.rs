@@ -33,10 +33,10 @@ const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 /// Operations that are guaranteed to exceed `MAX_BATCH_PART_SIZE` are executed using requests to
 /// the individual object endpoint, rather than the batch endpoint.
 /// This determines the maximum number of such requests that can be executed concurrently.
-const MAX_INDIVIDUAL_CONCURRENCY: usize = 1;
+const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
 
 /// Maximum number of requests to the batch endpoint that can be executed concurrently.
-const MAX_BATCH_CONCURRENCY: usize = 1;
+const MAX_BATCH_CONCURRENCY: usize = 3;
 
 /// Maximum total body size (pre-compression) to include in a single batch request.
 const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
