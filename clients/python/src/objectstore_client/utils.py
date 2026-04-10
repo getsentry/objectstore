@@ -6,6 +6,8 @@ from typing import IO, Any
 import filetype  # type: ignore[import-untyped]
 from zstandard import ZstdCompressionReader
 
+from objectstore_client.presign import presign_url as presign_url  # re-export
+
 
 def parse_accept_encoding(header: str) -> list[str]:
     """Parse an Accept-Encoding header value for use in objectstore GET requests.
