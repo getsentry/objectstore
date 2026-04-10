@@ -1,24 +1,31 @@
 {
-  "version": "1.0",
-  "type": "object",
   "properties": {
     "killswitches": {
-      "type": "array",
       "default": [],
-      "description": "Runtime killswitches for disabling access to specific object contexts. Each entry matches requests by usecase, scope values, and optionally a downstream service glob pattern. When any killswitch matches, the request is rejected without forwarding to the storage backend.",
+      "description": "Active killswitches that may disable access to specific object contexts.",
       "items": {
-        "type": "object",
-        "properties":
-{
-  "scopes": {
-    "type": "object",
-    "additionalProperties": {
-      "type": "string"
-    },
-    "optional": true
-  }
-}
-      }
+        "properties": {
+          "scopes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "optional": true,
+            "type": "object"
+          },
+          "service": {
+            "optional": true,
+            "type": "string"
+          },
+          "usecase": {
+            "optional": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
     }
-  }
+  },
+  "type": "object",
+  "version": "1.0"
 }
