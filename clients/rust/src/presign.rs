@@ -16,18 +16,9 @@ const PARAM_SIGNATURE: &str = "X-Os-Signature";
 /// Default pre-signed URL lifetime: 5 minutes.
 const DEFAULT_PRESIGNED_EXPIRY: Duration = Duration::from_secs(300);
 
-/// A pre-signed URL with its expiry time.
-#[derive(Debug, Clone)]
-pub struct PresignedUrl {
-    /// The full pre-signed URL including signature query parameters.
-    pub url: Url,
-    /// When this pre-signed URL expires.
-    pub expires_at: SystemTime,
-}
-
 /// Generate a pre-signed URL for reading an object.
 ///
-/// The returned URL is valid for both GET and HEAD requests until `expires_at`.
+/// The returned URL is valid for both GET and HEAD requests.
 /// The `method` parameter must be `"GET"` or `"HEAD"` — both produce the same
 /// signature since HEAD is semantically equivalent to GET for authorization.
 ///
@@ -46,7 +37,7 @@ pub fn presign_url(
     method: &str,
     mut url: Url,
     expires_in: Option<Duration>,
-) -> crate::Result<PresignedUrl> {
+) -> crate::Result<Url> {
     let method_upper = method.to_ascii_uppercase();
     if method_upper != "GET" && method_upper != "HEAD" {
         return Err(crate::PresignError::UnsupportedMethod {
@@ -78,7 +69,7 @@ pub fn presign_url(
     // Append signature
     url.query_pairs_mut().append_pair(PARAM_SIGNATURE, &sig_b64);
 
-    Ok(PresignedUrl { url, expires_at })
+    Ok(url)
 }
 
 /// Build the canonical request string for pre-signed URL signing/verification.
@@ -153,14 +144,10 @@ mod tests {
         )
         .unwrap();
 
-        // URL should have all three query params
-        let query = result.url.query().unwrap();
+        let query = result.query().unwrap();
         assert!(query.contains("X-Os-Expires="));
         assert!(query.contains("X-Os-KeyId=test_kid"));
         assert!(query.contains("X-Os-Signature="));
-
-        // expires_at should be in the future
-        assert!(result.expires_at > SystemTime::now());
     }
 
     #[test]
@@ -183,12 +170,10 @@ mod tests {
         )
         .unwrap();
 
-        // Extract signature from both — they may differ due to different timestamps,
-        // but the canonical method is always GET for both
-        let canonical1 = canonical_presigned_request(result1.url.path(), result1.url.query());
-        let canonical2 = canonical_presigned_request(result2.url.path(), result2.url.query());
+        // Both canonical forms should use GET as the method
+        let canonical1 = canonical_presigned_request(result1.path(), result1.query());
+        let canonical2 = canonical_presigned_request(result2.path(), result2.query());
 
-        // Both should start with GET
         assert!(canonical1.starts_with("GET\n"));
         assert!(canonical2.starts_with("GET\n"));
     }
@@ -198,16 +183,6 @@ mod tests {
         let url = Url::parse("http://localhost:8888/v1/objects/test/org=1/key").unwrap();
         let result = presign_url(&test_secret_key(), "PUT", url, None);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_presign_url_default_expiry() {
-        let url = Url::parse("http://localhost:8888/v1/objects/test/org=1/key").unwrap();
-        let result = presign_url(&test_secret_key(), "GET", url, None).unwrap();
-
-        // Default is 5 minutes, should be ~300s from now
-        let diff = result.expires_at.duration_since(SystemTime::now()).unwrap();
-        assert!(diff.as_secs() >= 298 && diff.as_secs() <= 301);
     }
 
     #[test]

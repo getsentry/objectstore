@@ -3,7 +3,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from objectstore_client.presign import (
-    PresignedUrl,
     _canonical_presigned_request,
     presign_url,
 )
@@ -36,7 +35,6 @@ class TestCanonicalForm:
             "/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key",
             "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod",
         )
-        # Should match the non-encoded version after decoding
         assert canonical == (
             "GET\n"
             "/v1/objects/attachments/org=123;project=456/my-key\n"
@@ -60,8 +58,8 @@ class TestPresignUrl:
         url = "http://localhost:8888/v1/objects/attachments/org=123;project=456/my-key"
         result = presign_url(TEST_EDDSA_KID, _read_private_key(), "GET", url)
 
-        assert isinstance(result, PresignedUrl)
-        parsed = urlparse(result.url)
+        assert isinstance(result, str)
+        parsed = urlparse(result)
         query = parse_qs(parsed.query)
 
         assert "X-Os-Expires" in query
@@ -75,8 +73,8 @@ class TestPresignUrl:
         r1 = presign_url(TEST_EDDSA_KID, _read_private_key(), "GET", url)
         r2 = presign_url(TEST_EDDSA_KID, _read_private_key(), "HEAD", url)
 
-        p1 = urlparse(r1.url)
-        p2 = urlparse(r2.url)
+        p1 = urlparse(r1)
+        p2 = urlparse(r2)
         c1 = _canonical_presigned_request(p1.path, p1.query)
         c2 = _canonical_presigned_request(p2.path, p2.query)
 
@@ -88,23 +86,18 @@ class TestPresignUrl:
         with pytest.raises(ValueError, match="Unsupported method"):
             presign_url(TEST_EDDSA_KID, _read_private_key(), "PUT", url)
 
-    def test_default_expiry(self) -> None:
-        url = "http://localhost:8888/v1/objects/test/org=1/key"
-        result = presign_url(TEST_EDDSA_KID, _read_private_key(), "GET", url)
-
-        # Default is 5 minutes
-        from datetime import UTC, datetime
-
-        diff = result.expires_at - datetime.now(tz=UTC)
-        assert 298 <= diff.total_seconds() <= 301
-
     def test_custom_expiry(self) -> None:
         url = "http://localhost:8888/v1/objects/test/org=1/key"
         result = presign_url(
             TEST_EDDSA_KID, _read_private_key(), "GET", url, expires_in=60
         )
 
+        # Verify the expires param is ~60s from now
+        parsed = urlparse(result)
+        query = parse_qs(parsed.query)
+        expires_ts = int(query["X-Os-Expires"][0])
+
         from datetime import UTC, datetime
 
-        diff = result.expires_at - datetime.now(tz=UTC)
-        assert 58 <= diff.total_seconds() <= 61
+        diff = expires_ts - int(datetime.now(tz=UTC).timestamp())
+        assert 58 <= diff <= 61

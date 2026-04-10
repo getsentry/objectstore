@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime, timedelta
-from typing import NamedTuple
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -17,26 +16,17 @@ PARAM_SIGNATURE = "X-Os-Signature"
 DEFAULT_PRESIGNED_EXPIRY = 300  # 5 minutes
 
 
-class PresignedUrl(NamedTuple):
-    """A pre-signed URL with its expiry time."""
-
-    url: str
-    """The full pre-signed URL including signature query parameters."""
-    expires_at: datetime
-    """When this pre-signed URL expires."""
-
-
 def presign_url(
     kid: str,
     secret_key: str,
     method: str,
     url: str,
     expires_in: int = DEFAULT_PRESIGNED_EXPIRY,
-) -> PresignedUrl:
+) -> str:
     """
     Generate a pre-signed URL for reading an object.
 
-    The returned URL is valid for both GET and HEAD requests until ``expires_at``.
+    The returned URL is valid for both GET and HEAD requests.
 
     Args:
         kid: The key ID that the Objectstore server uses to look up the public key.
@@ -48,7 +38,7 @@ def presign_url(
             Defaults to 300 (5 minutes).
 
     Returns:
-        A :class:`PresignedUrl` containing the signed URL and expiry time.
+        The pre-signed URL string including signature query parameters.
 
     Raises:
         ValueError: If the method is not GET or HEAD.
@@ -86,9 +76,7 @@ def presign_url(
 
     # Append signature
     existing_params.append((PARAM_SIGNATURE, sig_b64))
-    final_url = urlunparse(parsed._replace(query=urlencode(existing_params)))
-
-    return PresignedUrl(url=final_url, expires_at=expires_at)
+    return urlunparse(parsed._replace(query=urlencode(existing_params)))
 
 
 def _canonical_presigned_request(path: str, query: str) -> str:

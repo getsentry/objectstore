@@ -14,7 +14,7 @@ from objectstore_client.metadata import (
     TimeToLive,
 )
 from objectstore_client.metrics import MetricsBackend, NoOpMetricsBackend
-from objectstore_client.presign import PresignedUrl, presign_url
+from objectstore_client.presign import presign_url
 from objectstore_client.utils import parse_accept_encoding
 
 __all__ = [
@@ -27,7 +27,6 @@ __all__ = [
     "ExpirationPolicy",
     "Metadata",
     "Permission",
-    "PresignedUrl",
     "TimeToIdle",
     "TimeToLive",
     "TokenProvider",
