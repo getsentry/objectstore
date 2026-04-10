@@ -111,13 +111,21 @@ authentication for `GET` and `HEAD` requests.
 **Canonical form** — the signed content is:
 
 ```text
-GET\n{percent_decoded_path}\n{sorted_decoded_query_params}
+GET\n{canonical_path}\n{canonical_query}
 ```
 
+Uses an S3-style "decode then re-encode" approach (matching AWS Signature V4):
+
 - Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
-- The path is percent-decoded to handle proxy re-encoding.
-- Query params (excluding `X-Os-Signature`) are percent-decoded, sorted
-  alphabetically by key, and joined as `key=value` pairs with `&`.
+- The path is percent-decoded, then re-encoded with a strict canonical set
+  (only `A-Z a-z 0-9 - _ . ~` left unencoded, `/` preserved, uppercase hex).
+- Query params (excluding `X-Os-Signature`) are percent-decoded, re-encoded
+  with the same canonical set, sorted alphabetically by encoded key, and
+  joined as `key=value` pairs with `&`.
+
+This normalizes to a single deterministic representation regardless of how the
+URL was encoded by the client or any intermediary (handles proxy re-encoding,
+mixed-case hex digits, etc.).
 
 **Verification flow:**
 
