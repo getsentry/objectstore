@@ -89,6 +89,9 @@
 //! println!("max_retries = {}", Options::get().max_retries());
 //! ```
 
+#[cfg(feature = "testing")]
+pub mod schema;
+
 // Re-exported for use by generated code from `#[derive(SentryOptions)]`. Not public API.
 #[doc(hidden)]
 pub use {arc_swap, sentry_options, serde, serde_json};

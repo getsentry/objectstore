@@ -17,3 +17,5 @@ serde = { workspace = true, features = ["derive"] }
 testing = []
 
 [dev-dependencies]
+objectstore-typed-options = { workspace = true, features = ["derive", "testing"] }
+schemars = "1.2.1"
