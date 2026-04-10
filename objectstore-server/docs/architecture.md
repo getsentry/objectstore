@@ -142,7 +142,7 @@ re-encoded the URL.
 6. An `AuthContext` is created with `ObjectRead` permission, with usecase and
    scopes parsed from the URL path.
 
-Header-based JWT auth always takes precedence over pre-signed URL parameters.
+Pre-signed URL parameters take precedence over header-based JWT auth.
 
 ## Configuration
 

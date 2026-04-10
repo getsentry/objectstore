@@ -32,16 +32,16 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 
         let presigned_params = extract_presigned_params(&parts.uri);
 
-        let auth_result = match (encoded_jwt, presigned_params) {
-            // JWT auth takes precedence
-            (Some(jwt), _) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
-            // Fall back to pre-signed URL params
-            (None, Some(ref params)) => AuthContext::from_presigned_url(
+        let auth_result = match (presigned_params, encoded_jwt) {
+            // Pre-signed URL params take precedence
+            (Some(ref params), _) => AuthContext::from_presigned_url(
                 params,
                 &parts.method,
                 &parts.uri,
                 &state.key_directory,
             ),
+            // Fall back to header-based JWT auth
+            (None, Some(jwt)) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
             // No auth provided
             (None, None) => Err(AuthError::BadRequest("No authorization provided")),
         };
