@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -14,6 +14,10 @@ PARAM_KEY_ID = "X-Os-KeyId"
 PARAM_SIGNATURE = "X-Os-Signature"
 
 DEFAULT_PRESIGNED_EXPIRY = 300  # 5 minutes
+
+# RFC 3986 unreserved characters (minus letters and digits which are always safe).
+# This matches the Rust ``CANONICAL_ENCODE_SET`` and AWS Signature V4's ``UriEncode``.
+_UNRESERVED_SAFE = "-_.~"
 
 
 def presign_url(
@@ -83,22 +87,39 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     """
     Build the canonical request string for pre-signed URL signing/verification.
 
+    Uses an S3-style "decode then re-encode" approach: percent-decode the raw
+    values, then re-encode with a strict canonical set (only ``A-Z a-z 0-9 - _ . ~``
+    left unencoded, uppercase hex). This normalizes to a single deterministic
+    representation regardless of how the original URL was encoded.
+
     The canonical form is::
 
-        GET\\n{percent_decoded_path}\\n{sorted_decoded_query_params}
+        GET\\n{canonical_path}\\n{canonical_query}
 
     - Method is always ``GET`` (HEAD maps to GET).
-    - Path is percent-decoded.
-    - Query params are percent-decoded, sorted by key, excluding ``X-Os-Signature``.
+    - Path is decoded then re-encoded (preserving ``/``).
+    - Query params are decoded then re-encoded, sorted by encoded key,
+      excluding ``X-Os-Signature``.
     """
-    decoded_path = unquote(path)
+    canonical_path = _canonical_encode_path(unquote(path))
 
-    params = [
-        (k, v)
-        for k, v in parse_qsl(query, keep_blank_values=True)
-        if k != PARAM_SIGNATURE
-    ]
+    params = []
+    for k, v in parse_qsl(query, keep_blank_values=True):
+        if k == PARAM_SIGNATURE:
+            continue
+        params.append((_canonical_encode(k), _canonical_encode(v)))
+
     params.sort(key=lambda x: x[0])
 
     query_str = "&".join(f"{k}={v}" for k, v in params)
-    return f"GET\n{decoded_path}\n{query_str}"
+    return f"GET\n{canonical_path}\n{query_str}"
+
+
+def _canonical_encode(value: str) -> str:
+    """Canonically encode a string: only ``A-Z a-z 0-9 - _ . ~`` left unencoded."""
+    return quote(value, safe=_UNRESERVED_SAFE)
+
+
+def _canonical_encode_path(path: str) -> str:
+    """Canonically encode a URL path, preserving ``/`` as a separator."""
+    return quote(path, safe="/" + _UNRESERVED_SAFE)

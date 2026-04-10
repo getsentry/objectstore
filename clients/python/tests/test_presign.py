@@ -20,26 +20,41 @@ def _read_private_key() -> str:
 
 class TestCanonicalForm:
     def test_basic(self) -> None:
+        # = and ; in path are canonically encoded; query keys/values are
+        # individually encoded (= and & are structural delimiters)
         canonical = _canonical_presigned_request(
             "/v1/objects/attachments/org=123;project=456/my-key",
             "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod&X-Os-Signature=abc123",
         )
         assert canonical == (
             "GET\n"
-            "/v1/objects/attachments/org=123;project=456/my-key\n"
+            "/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key\n"
             "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
         )
 
     def test_percent_encoded_path(self) -> None:
-        canonical = _canonical_presigned_request(
+        # Pre-encoded and unencoded paths produce identical canonical forms
+        canonical_unencoded = _canonical_presigned_request(
+            "/v1/objects/attachments/org=123;project=456/my-key",
+            "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod",
+        )
+        canonical_encoded = _canonical_presigned_request(
             "/v1/objects/attachments/org%3D123%3Bproject%3D456/my-key",
             "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod",
         )
-        assert canonical == (
-            "GET\n"
-            "/v1/objects/attachments/org=123;project=456/my-key\n"
-            "X-Os-Expires=1712668800&X-Os-KeyId=relay-prod"
+        assert canonical_unencoded == canonical_encoded
+
+    def test_lowercase_hex(self) -> None:
+        # Lowercase and uppercase hex digits produce the same canonical form
+        canonical_upper = _canonical_presigned_request(
+            "/v1/objects/test/org%3D1/key",
+            "X-Os-Expires=1000&X-Os-KeyId=test",
         )
+        canonical_lower = _canonical_presigned_request(
+            "/v1/objects/test/org%3d1/key",
+            "X-Os-Expires=1000&X-Os-KeyId=test",
+        )
+        assert canonical_upper == canonical_lower
 
     def test_reordered_query_params(self) -> None:
         c1 = _canonical_presigned_request(
