@@ -13,7 +13,7 @@ use objectstore_shared::presign::canonical_presigned_request;
 
 use crate::auth::presigned::PreSignedParams;
 use crate::auth::util::StringOrWildcard;
-use crate::extractors::id::object_id_from_uri_path;
+use crate::extractors::id::parse_object_id_from_path;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
@@ -208,7 +208,7 @@ impl AuthContext {
 
         // Parse the exact object ID from the path so this remains an object-bound grant rather
         // than a widened scope-bound grant.
-        let object_id = object_id_from_uri_path(uri.path()).ok_or(AuthError::BadRequest(
+        let object_id = parse_object_id_from_path(uri.path()).ok_or(AuthError::BadRequest(
             "Cannot parse path for pre-signed URL",
         ))?;
         let usecase = object_id.context.usecase.clone();

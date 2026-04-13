@@ -5,6 +5,7 @@ use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_shared::presign::percent_decode;
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
@@ -50,8 +51,13 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let Path(params) = Path::<ObjectParams>::from_request_parts(parts, state).await?;
-        let id = ObjectId::from_parts(params.usecase, params.scopes, params.key);
+        let id = match parse_object_id_from_path(parts.uri.path()) {
+            Some(id) => id,
+            None => {
+                let Path(params) = Path::<ObjectParams>::from_request_parts(parts, state).await?;
+                ObjectId::from_parts(params.usecase, params.scopes, params.key)
+            }
+        };
 
         populate_sentry_context(id.context());
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
@@ -87,25 +93,44 @@ struct ObjectParams {
     key: String,
 }
 
+/// Parses an [`ObjectContext`] from an HTTP request path matching the object endpoint shape.
+///
+/// This accepts paths with arbitrary prefixes as long as they contain an `/objects/` segment,
+/// such as `/v1/objects/{usecase}/{scopes}` or `/v1/objects/{usecase}/{scopes}/{key}`.
+pub(crate) fn parse_object_context_from_path(path: &str) -> Option<ObjectContext> {
+    let (usecase, scopes, _key) = parse_object_path_parts(path)?;
+    Some(ObjectContext { usecase, scopes })
+}
+
 /// Parses an [`ObjectId`] from an HTTP request path matching the object endpoint shape.
 ///
 /// This accepts paths with arbitrary prefixes as long as they contain an `/objects/` segment,
 /// such as `/v1/objects/{usecase}/{scopes}/{key}`.
-pub(crate) fn object_id_from_uri_path(path: &str) -> Option<ObjectId> {
+pub(crate) fn parse_object_id_from_path(path: &str) -> Option<ObjectId> {
+    let (usecase, scopes, key) = parse_object_path_parts(path)?;
+    let key = key?;
+    if key.is_empty() {
+        return None;
+    }
+
+    Some(ObjectId::from_parts(usecase, scopes, key))
+}
+
+fn parse_object_path_parts(path: &str) -> Option<(String, Scopes, Option<String>)> {
     let rest = path
         .find("/objects/")
         .map(|i| &path[i + "/objects/".len()..])?;
 
     let mut parts = rest.splitn(3, '/');
-    let usecase = parts.next()?.to_string();
-    let scopes = parse_scopes_str(parts.next()?).ok()?;
-    let key = parts.next()?.to_string();
+    let usecase = percent_decode(parts.next()?);
+    let scopes = parse_scopes_str(&percent_decode(parts.next()?)).ok()?;
+    let key = parts.next().map(percent_decode);
 
-    if usecase.is_empty() || key.is_empty() {
+    if usecase.is_empty() {
         return None;
     }
 
-    Some(ObjectId::from_parts(usecase, scopes, key))
+    Some((usecase, scopes, key))
 }
 
 /// Deserializes a `Scopes` instance from a string representation.
@@ -144,10 +169,15 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let Path(params) = Path::<ContextParams>::from_request_parts(parts, state).await?;
-        let context = ObjectContext {
-            usecase: params.usecase,
-            scopes: params.scopes,
+        let context = match parse_object_context_from_path(parts.uri.path()) {
+            Some(context) => context,
+            None => {
+                let Path(params) = Path::<ContextParams>::from_request_parts(parts, state).await?;
+                ObjectContext {
+                    usecase: params.usecase,
+                    scopes: params.scopes,
+                }
+            }
         };
 
         populate_sentry_context(&context);
@@ -242,8 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_id_from_uri_path_with_prefix() {
-        let id = object_id_from_uri_path("/api/prefix/v1/objects/myusecase/org=1;project=2/a/b")
+    fn parse_object_id_from_path_with_prefix() {
+        let id = parse_object_id_from_path("/api/prefix/v1/objects/myusecase/org=1;project=2/a/b")
             .unwrap();
 
         assert_eq!(id.usecase(), "myusecase");
@@ -253,8 +283,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_id_from_uri_path_rejects_missing_key() {
-        assert!(object_id_from_uri_path("/v1/objects/myusecase/org=1/").is_none());
+    fn parse_object_id_from_path_rejects_missing_key() {
+        assert!(parse_object_id_from_path("/v1/objects/myusecase/org=1/").is_none());
+    }
+
+    #[test]
+    fn parse_object_context_from_path_accepts_collection_path() {
+        let context =
+            parse_object_context_from_path("/api/prefix/v1/objects/myusecase/org=1;project=2/")
+                .unwrap();
+
+        assert_eq!(context.usecase, "myusecase");
+        assert_eq!(context.scopes.get_value("org"), Some("1"));
+        assert_eq!(context.scopes.get_value("project"), Some("2"));
+    }
+
+    #[test]
+    fn parse_object_id_from_path_decodes_percent_encoded_key() {
+        let id = parse_object_id_from_path("/v1/objects/myusecase/_/folder%2Ffile.txt").unwrap();
+
+        assert_eq!(id.key(), "folder/file.txt");
     }
 
     // --- Extractor integration tests ---
