@@ -222,10 +222,9 @@ impl AuthContext {
                 if name != scope.name() {
                     return false;
                 }
-                if let StringOrWildcard::String(s) = value
-                    && s != scope.value()
-                {
-                    return false;
+                match value {
+                    StringOrWildcard::String(s) if s == scope.value() => {}
+                    _ => return false,
                 }
             }
             true
