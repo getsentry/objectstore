@@ -90,7 +90,7 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     - Method is always ``GET`` (HEAD maps to GET).
     - Path uses the encoded URI path as received by the service.
     - Percent-encoded octets are normalized to uppercase hex digits.
-    - Query params use the encoded key/value pairs from the URI, excluding
+    - Query params use the encoded keys and optional values from the URI, excluding
       ``X-Os-Signature``, sorted by encoded key.
     """
     canonical_path = _normalize_percent_encoding(path)
@@ -99,17 +99,20 @@ def _canonical_presigned_request(path: str, query: str) -> str:
     for pair in query.split("&"):
         if not pair:
             continue
-        if "=" not in pair:
-            continue
-        k, _, v = pair.partition("=")
+        if "=" in pair:
+            k, _, v = pair.partition("=")
+            value = _normalize_percent_encoding(v)
+        else:
+            k = pair
+            value = None
         k = _normalize_percent_encoding(k)
         if k == PARAM_SIGNATURE:
             continue
-        params.append((k, _normalize_percent_encoding(v)))
+        params.append((k, value))
 
     params.sort(key=lambda x: (x[0], x[1]))
 
-    query_str = "&".join(f"{k}={v}" for k, v in params)
+    query_str = "&".join(k if v is None else f"{k}={v}" for k, v in params)
     return f"GET\n{canonical_path}\n{query_str}"
 
 

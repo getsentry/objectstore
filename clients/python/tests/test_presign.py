@@ -75,6 +75,13 @@ class TestCanonicalForm:
         )
         assert c1 == c2
 
+    def test_bare_query_params(self) -> None:
+        canonical = _canonical_presigned_request(
+            "/path",
+            "y&X-Os-KeyId=test&x=1&X-Os-Expires=1000&z",
+        )
+        assert canonical == ("GET\n/path\nX-Os-Expires=1000&X-Os-KeyId=test&x=1&y&z")
+
 
 class TestPresignUrl:
     def test_produces_valid_format(self) -> None:

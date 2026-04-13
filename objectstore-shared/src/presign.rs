@@ -15,22 +15,25 @@ pub const PARAM_SIGNATURE: &str = "X-Os-Signature";
 /// - Method is always `GET` (HEAD maps to GET).
 /// - Path uses the encoded URI path as received by the service.
 /// - Percent-encoded octets are normalized to uppercase hex digits.
-/// - Query params use the encoded key/value pairs from the URI, excluding
-///   `X-Os-Signature`, sorted by encoded key.
+/// - Query params use the encoded keys and optional values from the URI,
+///   excluding `X-Os-Signature`, sorted by encoded key.
 pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
     let canonical_path = normalize_percent_encoding(path);
 
-    let mut params: Vec<(String, String)> = query
+    let mut params: Vec<(String, Option<String>)> = query
         .unwrap_or("")
         .split('&')
         .filter(|s| !s.is_empty())
         .filter_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
+            let (k, v) = match pair.split_once('=') {
+                Some((k, v)) => (k, Some(normalize_percent_encoding(v))),
+                None => (pair, None),
+            };
             let canonical_key = normalize_percent_encoding(k);
             if canonical_key == PARAM_SIGNATURE {
                 return None;
             }
-            Some((canonical_key, normalize_percent_encoding(v)))
+            Some((canonical_key, v))
         })
         .collect();
 
@@ -38,7 +41,10 @@ pub fn canonical_presigned_request(path: &str, query: Option<&str>) -> String {
 
     let query_str = params
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(k, v)| match v {
+            Some(v) => format!("{k}={v}"),
+            None => k.clone(),
+        })
         .collect::<Vec<_>>()
         .join("&");
 
@@ -113,5 +119,15 @@ mod tests {
         let c1 = canonical_presigned_request("/path", Some("X-Os-KeyId=test&X-Os-Expires=1000"));
         let c2 = canonical_presigned_request("/path", Some("X-Os-Expires=1000&X-Os-KeyId=test"));
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_canonical_form_bare_query_params() {
+        let canonical =
+            canonical_presigned_request("/path", Some("y&X-Os-KeyId=test&x=1&X-Os-Expires=1000&z"));
+        assert_eq!(
+            canonical,
+            "GET\n/path\nX-Os-Expires=1000&X-Os-KeyId=test&x=1&y&z"
+        );
     }
 }
