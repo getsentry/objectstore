@@ -161,13 +161,24 @@ impl AuthContext {
             return Err(AuthError::NotPermitted);
         }
 
-        if self.scopes.len() > context.scopes.iter().count() {
+        let request_scope_count = context.scopes.iter().count();
+        if self.scopes.is_empty() {
+            return if request_scope_count == 0 {
+                Ok(())
+            } else {
+                Err(AuthError::NotPermitted)
+            };
+        }
+
+        if self.scopes.len() > request_scope_count {
             return Err(AuthError::NotPermitted);
         }
 
-        for ((authorized_name, authorized_value), request_scope) in
-            self.scopes.iter().zip(&context.scopes)
-        {
+        let mut request_scopes = context.scopes.iter();
+        for (authorized_name, authorized_value) in &self.scopes {
+            let Some(request_scope) = request_scopes.next() else {
+                return Err(AuthError::NotPermitted);
+            };
             let authorized = authorized_name == request_scope.name()
                 && match authorized_value {
                     StringOrWildcard::String(s) => s == request_scope.value(),
@@ -447,6 +458,38 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assert_authorized_empty_auth_scope_fails_for_scoped_request() -> Result<(), AuthError> {
+        let auth_context = AuthContext {
+            usecase: "attachments".into(),
+            scopes: vec![],
+            permissions: max_permission(),
+        };
+        let object = sample_object_context("123", "456");
+
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assert_authorized_empty_auth_scope_allows_empty_request() -> Result<(), AuthError> {
+        let auth_context = AuthContext {
+            usecase: "attachments".into(),
+            scopes: vec![],
+            permissions: max_permission(),
+        };
+        let object = ObjectContext {
+            usecase: "attachments".into(),
+            scopes: Scopes::empty(),
+        };
+
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
