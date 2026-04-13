@@ -437,6 +437,27 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     }
 
     #[test]
+    fn test_assert_authorized_empty_auth_scope_allows_any_scope() -> Result<(), AuthError> {
+        let auth_context = AuthContext {
+            usecase: "attachments".into(),
+            permissions: max_permission(),
+            scopes: vec![],
+        };
+        let object = ObjectContext {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([
+                Scope::create("org", "123").unwrap(),
+                Scope::create("project", "456").unwrap(),
+                Scope::create("hello", "world").unwrap(),
+            ]),
+        };
+
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_assert_authorized_scope_order_mismatch_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "*", max_permission());
         let object = ObjectContext {
