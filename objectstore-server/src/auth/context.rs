@@ -259,11 +259,8 @@ mod tests {
             usecase: "attachments".into(),
             permissions,
             scopes: vec![
-                ("org".into(), serde_json::from_value(json!(org)).unwrap()),
-                (
-                    "project".into(),
-                    serde_json::from_value(json!(proj)).unwrap(),
-                ),
+                ("org".into(), org.to_owned().into()),
+                ("project".into(), proj.to_owned().into()),
             ],
         }
     }
