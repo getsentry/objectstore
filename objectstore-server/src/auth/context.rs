@@ -9,18 +9,6 @@ use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
-/// Whether scope matching requires an exact set or allows a subset.
-enum ScopeMatch {
-    /// Request scopes must be a subset of auth scopes.
-    ///
-    /// Used for scope-bound auth where a broader token can access narrower objects.
-    Subset,
-    /// Request scopes must exactly equal auth scopes.
-    ///
-    /// Used for object-bound auth where the token is pinned to one specific object.
-    Exact,
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
@@ -174,39 +162,8 @@ impl AuthContext {
             return Err(AuthError::NotPermitted);
         }
 
-        self.assert_scope_authorized(perm, context)
-    }
-
-    /// Ensures that an object-scoped operation requiring `perm` is authorized.
-    ///
-    /// For scope-bound auth this falls back to the same usecase and scope matching as context
-    /// checks. For object-bound auth it authorizes only the exact matching object key within the
-    /// mirrored usecase and scopes.
-    pub fn assert_object_authorized(
-        &self,
-        perm: Permission,
-        id: &ObjectId,
-    ) -> Result<(), AuthError> {
-        if let Some(bound_key) = &self.object_key {
-            if self.permissions.contains(&perm)
-                && self.scope_matches_context(id.context(), ScopeMatch::Exact)
-                && bound_key == id.key()
-            {
-                return Ok(());
-            }
-            return Err(AuthError::NotPermitted);
-        }
-
-        self.assert_scope_authorized(perm, id.context())
-    }
-
-    fn assert_scope_authorized(
-        &self,
-        perm: Permission,
-        context: &ObjectContext,
-    ) -> Result<(), AuthError> {
         if !self.permissions.contains(&perm)
-            || !self.scope_matches_context(context, ScopeMatch::Subset)
+            || !self.scope_matches_context(context, /* strict */ false)
         {
             return Err(AuthError::NotPermitted);
         }
@@ -214,12 +171,41 @@ impl AuthContext {
         Ok(())
     }
 
-    fn scope_matches_context(&self, context: &ObjectContext, mode: ScopeMatch) -> bool {
+    /// Ensures that an object-scoped operation requiring `perm` is authorized.
+    ///
+    /// For a scope-bound [`AuthContext`], this falls back to [`Self::assert_context_authorized`].
+    /// For an object-bound [`AuthContext`], a strict match between the authorized and requested
+    /// usecase, scopes and object key is required.
+    pub fn assert_object_authorized(
+        &self,
+        perm: Permission,
+        id: &ObjectId,
+    ) -> Result<(), AuthError> {
+        if let Some(bound_key) = &self.object_key {
+            if self.permissions.contains(&perm)
+                && self.scope_matches_context(id.context(), /* strict */ true)
+                && bound_key == id.key()
+            {
+                return Ok(());
+            }
+            return Err(AuthError::NotPermitted);
+        }
+
+        self.assert_context_authorized(perm, id.context())
+    }
+
+    /// Returns whether this `AuthContext`'s usecase and scope match the ones contained in the
+    /// given `context`.
+    /// The `strict` flag governs how the comparison is performed:
+    /// - `false`: usecase and scope in this `AuthContext` need to be a superset of the ones in
+    /// `context`.
+    /// - `true`: usecase and scope in `AuthContext` and `ObjectContext` need to match exactly.
+    fn scope_matches_context(&self, context: &ObjectContext, strict: bool) -> bool {
         if self.usecase != context.usecase {
             return false;
         }
 
-        if matches!(mode, ScopeMatch::Exact) && self.scopes.len() != context.scopes.iter().count() {
+        if strict && self.scopes.len() != context.scopes.iter().count() {
             return false;
         }
 
