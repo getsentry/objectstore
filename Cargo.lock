@@ -2494,11 +2494,14 @@ name = "objectstore-client"
 version = "0.1.6"
 dependencies = [
  "async-compression",
+ "base64",
  "bytes",
+ "ed25519-dalek",
  "futures-util",
  "infer",
  "jsonwebtoken",
  "multer",
+ "objectstore-shared",
  "objectstore-test",
  "objectstore-types",
  "percent-encoding",
@@ -2544,7 +2547,9 @@ dependencies = [
  "argh",
  "async-stream",
  "axum",
+ "base64",
  "bytes",
+ "ed25519-dalek",
  "elegant-departure",
  "figment",
  "futures",
@@ -2560,6 +2565,7 @@ dependencies = [
  "objectstore-log",
  "objectstore-metrics",
  "objectstore-service",
+ "objectstore-shared",
  "objectstore-test",
  "objectstore-types",
  "papaya",
@@ -2609,6 +2615,13 @@ dependencies = [
  "tracing",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "objectstore-shared"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
 ]
 
 [[package]]

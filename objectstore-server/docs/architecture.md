@@ -95,6 +95,52 @@ operations are checked against an
 [`ObjectId`](objectstore_service::id::ObjectId). Scope values in the token can
 use wildcards to grant broad access.
 
+### Pre-Signed URLs
+
+Pre-signed URLs provide time-limited, read-only access to specific objects
+without requiring an auth header. They are an alternative to JWT-based
+authentication for `GET` and `HEAD` requests.
+
+**URL format:**
+
+```text
+/v1/objects/{usecase}/{scopes}/{key}?X-Os-Expires={unix_ts}&X-Os-KeyId={kid}&X-Os-Signature={base64url_sig}
+```
+
+- `X-Os-Expires` — Unix timestamp (seconds) when the URL expires
+- `X-Os-KeyId` — key ID mapping to a key in the `PublicKeyDirectory`
+- `X-Os-Signature` — base64url-encoded Ed25519 signature (no padding)
+
+**Canonical form** — the signed content is:
+
+```text
+GET\n{canonical_path}\n{canonical_query}
+```
+
+- Method is always `GET` (HEAD maps to GET, allowing a single URL for both).
+- The path uses the encoded request path as received over HTTP.
+- Percent-encoded octets are normalized only by uppercasing their hex digits.
+- Query params exclude `X-Os-Signature`, keep their encoded key/value bytes,
+  are sorted alphabetically by encoded key, and joined as `key=value` pairs
+  with `&`.
+
+**Verification flow:**
+
+Pre-signed URL parameters take precedence over header-based JWT auth.
+The extractor checks for pre-signed URL query parameters first, then
+falls back to JWT headers.
+
+1. The request method must be `GET` or `HEAD`.
+2. Expiry is checked against the current time.
+3. The key's `max_permissions` must include `ObjectRead`.
+4. The canonical request string is reconstructed and verified against the
+   Ed25519 signature using the public key(s) for the given `kid`.
+5. An object-bound `AuthContext` is created with `ObjectRead` permission and
+   the exact [`ObjectId`](objectstore_service::id::ObjectId) parsed from the
+   URL path.
+6. Context-level authorization checks reject object-bound auth contexts, so a
+   pre-signed URL can authorize only the exact object it was signed for.
+
 ## Configuration
 
 Configuration uses [figment](https://docs.rs/figment) for layered merging with

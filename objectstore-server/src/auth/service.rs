@@ -79,8 +79,8 @@ impl AuthAwareService {
 
     /// Checks whether the request is authorized for the given permission on the given context.
     ///
-    /// Object-bound auth contexts are rejected here because they must not be widened into
-    /// context-level authorization.
+    /// Object-bound auth contexts, such as pre-signed URLs, are rejected here because they must
+    /// not be widened into context-level authorization.
     pub fn check_context_permission(
         &self,
         perm: Permission,

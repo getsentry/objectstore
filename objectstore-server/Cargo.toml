@@ -16,7 +16,9 @@ argh = "0.1.13"
 async-stream = "0.3.6"
 axum = { version = "0.8.4", features = ["multipart"] }
 percent-encoding = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
+ed25519-dalek = { workspace = true }
 elegant-departure = { version = "0.3.2", features = ["tokio"] }
 figment = { version = "0.10.19", features = ["env", "test", "yaml"] }
 futures = { workspace = true }
@@ -31,6 +33,7 @@ num_cpus = "1.17.0"
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
 objectstore-service = { workspace = true }
+objectstore-shared = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

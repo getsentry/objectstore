@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::{Signature, Verifier};
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::{ObjectContext, ObjectId, ObjectKey};
 use objectstore_types::auth::Permission;
@@ -7,7 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
+use objectstore_shared::presign::canonical_presigned_request;
+
+use crate::auth::presigned::PreSignedParams;
 use crate::auth::util::StringOrWildcard;
+use crate::extractors::id::parse_object_id_from_path;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
@@ -86,12 +92,9 @@ impl AuthContext {
     /// header field and attempt verification. It will also ensure that the timestamp from the
     /// `exp` claim field has not passed.
     pub fn from_encoded_jwt(
-        encoded_token: Option<&str>,
+        encoded_token: &str,
         key_directory: &PublicKeyDirectory,
     ) -> Result<AuthContext, AuthError> {
-        let encoded_token =
-            encoded_token.ok_or(AuthError::BadRequest("No authorization token provided"))?;
-
         let jwt_header = decode_header(encoded_token)?;
         let key_id = jwt_header
             .kid
@@ -153,6 +156,90 @@ impl AuthContext {
             scopes_vec,
             permissions,
             object_key: None,
+        })
+    }
+
+    /// Construct an `AuthContext` from pre-signed URL parameters.
+    ///
+    /// Verifies that the URL has not expired, that the signing key exists and permits
+    /// `ObjectRead`, and that the Ed25519 signature matches the canonical request.
+    /// The resulting context is always scoped to `ObjectRead` only.
+    pub fn from_presigned_url(
+        params: &PreSignedParams,
+        method: &http::Method,
+        uri: &http::Uri,
+        key_directory: &PublicKeyDirectory,
+    ) -> Result<AuthContext, AuthError> {
+        // Pre-signed URLs are only valid for read operations
+        if method != http::Method::GET && method != http::Method::HEAD {
+            return Err(AuthError::BadRequest(
+                "Pre-signed URLs are only valid for GET and HEAD requests",
+            ));
+        }
+
+        // Check expiry
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if params.expires <= now {
+            return Err(AuthError::BadRequest("Pre-signed URL has expired"));
+        }
+
+        // Look up key config
+        let key_config = key_directory.keys.get(&params.key_id).ok_or_else(|| {
+            AuthError::InternalError(format!("Key `{}` not configured", params.key_id))
+        })?;
+
+        // Check key has read permission
+        if !key_config.max_permissions.contains(&Permission::ObjectRead) {
+            return Err(AuthError::NotPermitted);
+        }
+
+        // Build canonical request
+        let canonical = canonical_presigned_request(uri.path(), uri.query());
+
+        // Parse signature bytes
+        let signature = Signature::from_slice(&params.signature)
+            .map_err(|_| AuthError::BadRequest("Invalid signature format"))?;
+
+        // Verify against each key version
+        let verified = key_config
+            .verifying_keys
+            .iter()
+            .any(|vk| vk.verify(canonical.as_bytes(), &signature).is_ok());
+
+        if !verified {
+            return Err(AuthError::VerificationFailure);
+        }
+
+        // Parse the exact object ID from the path so this remains an object-bound grant rather
+        // than a widened scope-bound grant.
+        let object_id = parse_object_id_from_path(uri.path()).ok_or(AuthError::BadRequest(
+            "Cannot parse path for pre-signed URL",
+        ))?;
+        let object_key = object_id.key;
+        let usecase = object_id.context.usecase.clone();
+        let scopes_vec: Vec<(String, StringOrWildcard)> = object_id
+            .context
+            .scopes
+            .iter()
+            .map(|scope: &objectstore_types::scope::Scope| {
+                (
+                    scope.name().to_string(),
+                    StringOrWildcard::String(scope.value().to_string()),
+                )
+            })
+            .collect();
+        let scopes = scopes_vec.iter().cloned().collect();
+
+        Ok(AuthContext {
+            usecase,
+            scopes,
+            scopes_vec,
+            permissions: HashSet::from([Permission::ObjectRead]),
+            object_key: Some(object_key),
         })
     }
 
@@ -249,6 +336,7 @@ impl AuthContext {
 mod tests {
     use super::*;
     use crate::auth::PublicKeyConfig;
+    use ed25519_dalek::pkcs8::DecodePublicKey;
     use jsonwebtoken::DecodingKey;
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
@@ -273,6 +361,9 @@ mod tests {
     fn test_key_config(max_permissions: HashSet<Permission>) -> PublicKeyDirectory {
         let public_key = PublicKeyConfig {
             key_versions: vec![DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap()],
+            verifying_keys: vec![
+                ed25519_dalek::VerifyingKey::from_public_key_pem(&TEST_EDDSA_PUBKEY).unwrap(),
+            ],
             max_permissions,
         };
         PublicKeyDirectory {
@@ -337,8 +428,7 @@ mod tests {
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config)?;
 
         // Ensure the key is correctly verified and deserialized
         let expected = sample_auth_context("123", "456", max_permission());
@@ -356,8 +446,7 @@ mod tests {
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
         let test_config = test_key_config(ro_permission.clone());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config)?;
 
         // Ensure the key is correctly verified and that the permissions are restricted
         let expected = sample_auth_context("123", "456", ro_permission);
@@ -373,7 +462,7 @@ mod tests {
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context = AuthContext::from_encoded_jwt(Some(encoded_token), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token, &test_config);
 
         // Ensure the token failed verification
         assert!(matches!(auth_context, Err(AuthError::ValidationFailure(_))));
@@ -392,8 +481,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config);
 
         // Ensure the token failed verification
         assert!(matches!(auth_context, Err(AuthError::VerificationFailure)));
@@ -412,8 +500,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
-        let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config);
+        let auth_context = AuthContext::from_encoded_jwt(encoded_token.as_str(), &test_config);
 
         // Ensure the token failed verification
         let Err(AuthError::ValidationFailure(error)) = auth_context else {

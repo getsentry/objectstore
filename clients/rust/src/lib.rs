@@ -9,6 +9,7 @@ mod error;
 mod get;
 mod key;
 mod many;
+mod presign;
 mod put;
 pub mod utils;
 

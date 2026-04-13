@@ -1,7 +1,8 @@
-use axum::extract::FromRequestParts;
-use axum::http::{header, request::Parts};
+use axum::extract::{FromRequestParts, OriginalUri};
+use axum::http::{Uri, header, request::Parts};
 
-use crate::auth::{AuthAwareService, AuthContext};
+use crate::auth::presigned::extract_presigned_params;
+use crate::auth::{AuthAwareService, AuthContext, AuthError};
 use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
 
@@ -20,19 +21,36 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let encoded_token = parts
+        let enforce = state.config.auth.enforce;
+        let request_uri = request_uri_for_auth(parts);
+
+        let encoded_jwt = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
             .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let enforce = state.config.auth.enforce;
-        // Attempt to decode / verify the JWT, logging failure
-        let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
-            .inspect_err(|err| err.log(None, None, enforce));
+        let presigned_params = extract_presigned_params(&request_uri);
 
-        // If auth enforcement is enabled, `from_encoded_jwt()` must have succeeded.
+        let auth_result = match (presigned_params, encoded_jwt) {
+            // Pre-signed URL params take precedence
+            (Some(ref params), _) => AuthContext::from_presigned_url(
+                params,
+                &parts.method,
+                &request_uri,
+                &state.key_directory,
+            ),
+            // Fall back to header-based JWT auth
+            (None, Some(jwt)) => AuthContext::from_encoded_jwt(jwt, &state.key_directory),
+            (None, None) => Err(AuthError::BadRequest("No authorization provided")),
+        };
+
+        if let Err(err) = &auth_result {
+            err.log(None, None, enforce);
+        }
+
+        // If auth enforcement is enabled, `auth_context` must be `Ok(context)`.
         // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
         // still proceed with `None` if it failed.
         let auth_context = match enforce {
@@ -48,6 +66,14 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
     }
 }
 
+fn request_uri_for_auth(parts: &Parts) -> Uri {
+    parts
+        .extensions
+        .get::<OriginalUri>()
+        .map(|original| original.0.clone())
+        .unwrap_or_else(|| parts.uri.clone())
+}
+
 fn strip_bearer(header_value: &str) -> Option<&str> {
     let (prefix, tail) = header_value.split_at_checked(BEARER_PREFIX.len())?;
     if prefix.eq_ignore_ascii_case(BEARER_PREFIX) {
@@ -60,6 +86,7 @@ fn strip_bearer(header_value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Request;
 
     #[test]
     fn test_strip_bearer() {
@@ -74,5 +101,36 @@ mod tests {
 
         // No character boundary at end of expected prefix
         assert_eq!(strip_bearer("Bearer⚠️tokenvalue"), None);
+    }
+
+    #[test]
+    fn request_uri_uses_original_uri_extension() {
+        let request = Request::builder()
+            .uri("/objects/test/_/key?X-Os-Expires=1")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        parts.extensions.insert(OriginalUri(
+            "/v1/objects/test/_/key?X-Os-Expires=1".parse().unwrap(),
+        ));
+
+        assert_eq!(
+            request_uri_for_auth(&parts),
+            Uri::from_static("/v1/objects/test/_/key?X-Os-Expires=1"),
+        );
+    }
+
+    #[test]
+    fn request_uri_falls_back_to_parts_uri() {
+        let request = Request::builder()
+            .uri("/v1/objects/test/_/key?X-Os-Expires=1")
+            .body(())
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        assert_eq!(
+            request_uri_for_auth(&parts),
+            Uri::from_static("/v1/objects/test/_/key?X-Os-Expires=1"),
+        );
     }
 }

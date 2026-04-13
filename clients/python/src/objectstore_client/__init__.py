@@ -14,7 +14,7 @@ from objectstore_client.metadata import (
     TimeToLive,
 )
 from objectstore_client.metrics import MetricsBackend, NoOpMetricsBackend
-from objectstore_client.utils import parse_accept_encoding
+from objectstore_client.utils import parse_accept_encoding, presign_url
 
 __all__ = [
     "Client",
@@ -33,4 +33,5 @@ __all__ = [
     "MetricsBackend",
     "NoOpMetricsBackend",
     "parse_accept_encoding",
+    "presign_url",
 ]
