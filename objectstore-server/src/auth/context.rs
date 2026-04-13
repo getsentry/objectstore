@@ -159,7 +159,7 @@ impl AuthContext {
     /// Ensures that a context-scoped operation requiring `perm` is authorized.
     ///
     /// Context checks are valid only for scope-bound auth. If this [`AuthContext`] is object-bound
-    /// via [`Self::object_key`], this always returns `Err(AuthError::NotPermitted)` because an
+    /// via `object_key`, this always returns `Err(AuthError::NotPermitted)` because an
     /// exact-object grant must not be widened into a context-wide grant.
     pub fn assert_context_authorized(
         &self,
