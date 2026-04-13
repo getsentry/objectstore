@@ -47,13 +47,19 @@ pub struct AuthContext {
     /// See also: [`ObjectContext::usecase`].
     pub usecase: String,
 
-    /// The scope elements that this request may act on.
+    /// The scope elements that this request may act on, indexed by name for subset lookups.
     ///
     /// For scope-bound auth these are the authorized scopes. For object-bound auth these are the
     /// bound object's scopes, but they do not imply context-level authorization.
     ///
     /// See also: [`ObjectContext::scopes`].
-    pub scopes: BTreeMap<String, StringOrWildcard>,
+    pub scopes_map: BTreeMap<String, StringOrWildcard>,
+
+    /// The same scope elements in an ordered representation used for strict positional matching.
+    ///
+    /// For scope-bound auth (JWTs) the order is not meaningful. For object-bound auth (presigned
+    /// URLs) the order must mirror the object's storage path so that strict matching is correct.
+    pub scopes_vec: Vec<(String, StringOrWildcard)>,
 
     /// The permissions that this request has been granted.
     pub permissions: HashSet<Permission>,
@@ -140,9 +146,11 @@ impl AuthContext {
             .cloned()
             .collect();
 
+        let scopes_vec = scope.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         Ok(AuthContext {
             usecase,
-            scopes: scope,
+            scopes_map: scope,
+            scopes_vec,
             permissions,
             object_key: None,
         })
@@ -205,22 +213,37 @@ impl AuthContext {
             return false;
         }
 
-        if strict && self.scopes.len() != context.scopes.iter().count() {
-            return false;
-        }
-
-        for scope in &context.scopes {
-            let authorized = match self.scopes.get(scope.name()) {
-                Some(StringOrWildcard::String(s)) => s == scope.value(),
-                Some(StringOrWildcard::Wildcard) => true,
-                None => false,
-            };
-            if !authorized {
+        if strict {
+            // Positional comparison: same length and each element must match in order.
+            let context_scopes: Vec<_> = context.scopes.iter().collect();
+            if self.scopes_vec.len() != context_scopes.len() {
                 return false;
             }
+            for ((name, value), scope) in self.scopes_vec.iter().zip(&context_scopes) {
+                if name != scope.name() {
+                    return false;
+                }
+                if let StringOrWildcard::String(s) = value
+                    && s != scope.value()
+                {
+                    return false;
+                }
+            }
+            true
+        } else {
+            // Subset check: every scope in context must be present in auth.
+            for scope in &context.scopes {
+                let authorized = match self.scopes_map.get(scope.name()) {
+                    Some(StringOrWildcard::String(s)) => s == scope.value(),
+                    Some(StringOrWildcard::Wildcard) => true,
+                    None => false,
+                };
+                if !authorized {
+                    return false;
+                }
+            }
+            true
         }
-
-        true
     }
 }
 
@@ -292,11 +315,21 @@ mod tests {
         .unwrap()
     }
 
+    fn make_scopes_map(org: &str, proj: &str) -> BTreeMap<String, StringOrWildcard> {
+        serde_json::from_value(json!({"org": org, "project": proj})).unwrap()
+    }
+
     fn sample_auth_context(org: &str, proj: &str, permissions: HashSet<Permission>) -> AuthContext {
+        let scopes_map = make_scopes_map(org, proj);
+        let scopes_vec = scopes_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         AuthContext {
             usecase: "attachments".into(),
             permissions,
-            scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
+            scopes_map,
+            scopes_vec,
             object_key: None,
         }
     }
@@ -504,7 +537,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
         let auth_context = AuthContext {
             usecase: object_id.usecase().to_string(),
-            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            scopes_map: make_scopes_map("123", "456"),
+            scopes_vec: make_scopes_map("123", "456").into_iter().collect(),
             permissions: HashSet::from([Permission::ObjectRead]),
             object_key: Some(object_id.key),
         };
@@ -523,7 +557,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
         let auth_context = AuthContext {
             usecase: object_id.usecase().to_string(),
-            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            scopes_map: make_scopes_map("123", "456"),
+            scopes_vec: make_scopes_map("123", "456").into_iter().collect(),
             permissions: HashSet::from([Permission::ObjectRead]),
             object_key: Some(object_id.key.clone()),
         };
@@ -551,7 +586,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let other_id = ObjectId::new(sample_object_context("123", "456"), "other-key".into());
         let auth_context = AuthContext {
             usecase: object_id.usecase().to_string(),
-            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            scopes_map: make_scopes_map("123", "456"),
+            scopes_vec: make_scopes_map("123", "456").into_iter().collect(),
             permissions: HashSet::from([Permission::ObjectRead]),
             object_key: Some(object_id.key),
         };
@@ -568,7 +604,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let other_id = ObjectId::new(sample_object_context("123", "999"), "my-key".into());
         let auth_context = AuthContext {
             usecase: object_id.usecase().to_string(),
-            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            scopes_map: make_scopes_map("123", "456"),
+            scopes_vec: make_scopes_map("123", "456").into_iter().collect(),
             permissions: HashSet::from([Permission::ObjectRead]),
             object_key: Some(object_id.key),
         };
@@ -591,7 +628,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         );
         let auth_context = AuthContext {
             usecase: object_id.usecase().to_string(),
-            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            scopes_map: make_scopes_map("123", "456"),
+            scopes_vec: make_scopes_map("123", "456").into_iter().collect(),
             permissions: HashSet::from([Permission::ObjectRead]),
             object_key: Some(object_id.key),
         };
