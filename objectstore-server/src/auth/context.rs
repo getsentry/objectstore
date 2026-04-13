@@ -198,7 +198,7 @@ impl AuthContext {
     /// given `context`.
     /// The `strict` flag governs how the comparison is performed:
     /// - `false`: usecase and scope in this `AuthContext` need to be a superset of the ones in
-    /// `context`.
+    ///   `context`.
     /// - `true`: usecase and scope in `AuthContext` and `ObjectContext` need to match exactly.
     fn scope_matches_context(&self, context: &ObjectContext, strict: bool) -> bool {
         if self.usecase != context.usecase {
