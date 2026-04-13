@@ -456,8 +456,11 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         Ok(())
     }
 
+    // Not allowed:
+    //   auth_context: org.123 / proj.*
+    //         object: proj.456 / org.123
     #[test]
-    fn test_assert_authorized_scope_order_mismatch_fails() -> Result<(), AuthError> {
+    fn test_assert_authorized_scope_wrong_order_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "*", max_permission());
         let object = ObjectContext {
             usecase: "attachments".into(),
