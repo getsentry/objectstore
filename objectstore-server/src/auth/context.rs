@@ -164,7 +164,7 @@ impl AuthContext {
         // All authorized scopes need to match a prefix of the requested scopes. Order matters.
         let mut request_scopes = context.scopes.iter();
         for (authorized_name, authorized_value) in &self.scopes {
-            // Always reject when the requested scope is less specific than the authorized scope.
+            // Always reject when the requested scope is less specific (shorter) than the authorized scope.
             let Some(request_scope) = request_scopes.next() else {
                 return Err(AuthError::NotPermitted);
             };
