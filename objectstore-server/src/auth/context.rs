@@ -530,6 +530,18 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     }
 
     #[test]
+    fn test_assert_object_authorized_scope_bound_allows_any_key_in_context() -> Result<(), AuthError>
+    {
+        let auth_context =
+            sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
+        let object_id = ObjectId::new(sample_object_context("123", "456"), "any-key".into());
+
+        auth_context.assert_object_authorized(Permission::ObjectRead, &object_id)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_assert_object_authorized_object_bound_mismatch_fails() -> Result<(), AuthError> {
         let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
         let other_id = ObjectId::new(sample_object_context("123", "456"), "other-key".into());
