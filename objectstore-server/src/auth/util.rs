@@ -10,12 +10,6 @@ pub enum StringOrWildcard {
     String(String),
 }
 
-impl From<String> for StringOrWildcard {
-    fn from(value: String) -> Self {
-        Self::String(value)
-    }
-}
-
 impl<'de> Deserialize<'de> for StringOrWildcard {
     fn deserialize<D>(deserializer: D) -> Result<StringOrWildcard, D::Error>
     where
