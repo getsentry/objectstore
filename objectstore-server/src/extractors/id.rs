@@ -102,9 +102,9 @@ where
 
     let scopes = s
         .split(';')
-        .map(|scope| {
-            let (key, value) = scope
-                .split_once('=')
+        .map(|s| {
+            let (key, value) = s
+                .split_once("=")
                 .ok_or_else(|| de::Error::custom("scope must be 'key=value'"))?;
 
             Scope::create(key, value).map_err(de::Error::custom)
