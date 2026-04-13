@@ -161,21 +161,10 @@ impl AuthContext {
             return Err(AuthError::NotPermitted);
         }
 
-        let request_scope_count = context.scopes.iter().count();
-        if self.scopes.is_empty() {
-            return if request_scope_count == 0 {
-                Ok(())
-            } else {
-                Err(AuthError::NotPermitted)
-            };
-        }
-
-        if self.scopes.len() > request_scope_count {
-            return Err(AuthError::NotPermitted);
-        }
-
+        // All authorized scopes need to match a prefix of the requested scopes. Order matters.
         let mut request_scopes = context.scopes.iter();
         for (authorized_name, authorized_value) in &self.scopes {
+            // Always reject when the requested scope is less specific than the authorized scope.
             let Some(request_scope) = request_scopes.next() else {
                 return Err(AuthError::NotPermitted);
             };
@@ -188,6 +177,8 @@ impl AuthContext {
                 return Err(AuthError::NotPermitted);
             }
         }
+        // `request_scopes` could contain more values which we didn't consume, which means that the
+        // request is for a subscope of what this `AuthContext` authorizes, which is fine.
 
         Ok(())
     }
