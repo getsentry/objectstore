@@ -45,7 +45,7 @@ pub struct AuthContext {
     /// bound object's usecase.
     ///
     /// See also: [`ObjectContext::usecase`].
-    pub usecase: String,
+    usecase: String,
 
     /// The scope elements that this request may act on, indexed by name for subset lookups.
     ///
@@ -62,14 +62,14 @@ pub struct AuthContext {
     scopes_vec: Vec<(String, StringOrWildcard)>,
 
     /// The permissions that this request has been granted.
-    pub permissions: HashSet<Permission>,
+    permissions: HashSet<Permission>,
 
     /// The exact object key this request is bound to, if any.
     ///
     /// When present, this context authorizes only operations on the exact matching object
     /// identified by this key together with the usecase and scopes above. Context-level checks
     /// must reject such a request even when the usecase and scopes would otherwise match.
-    pub object_key: Option<ObjectKey>,
+    object_key: Option<ObjectKey>,
 }
 
 impl AuthContext {
@@ -214,7 +214,6 @@ impl AuthContext {
         }
 
         if strict {
-            // Positional comparison: same length and each element must match in order.
             let context_scopes: Vec<_> = context.scopes.iter().collect();
             if self.scopes_vec.len() != context_scopes.len() {
                 return false;
@@ -231,7 +230,6 @@ impl AuthContext {
             }
             true
         } else {
-            // Subset check: every scope in context must be present in auth.
             for scope in &context.scopes {
                 let authorized = match self.scopes.get(scope.name()) {
                     Some(StringOrWildcard::String(s)) => s == scope.value(),
