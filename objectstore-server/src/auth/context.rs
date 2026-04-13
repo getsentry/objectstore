@@ -9,6 +9,18 @@ use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
+/// Whether scope matching requires an exact set or allows a subset.
+enum ScopeMatch {
+    /// Request scopes must be a subset of auth scopes.
+    ///
+    /// Used for scope-bound auth where a broader token can access narrower objects.
+    Subset,
+    /// Request scopes must exactly equal auth scopes.
+    ///
+    /// Used for object-bound auth where the token is pinned to one specific object.
+    Exact,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
@@ -177,7 +189,7 @@ impl AuthContext {
     ) -> Result<(), AuthError> {
         if let Some(bound_key) = &self.object_key {
             if self.permissions.contains(&perm)
-                && self.scope_matches_context(id.context())
+                && self.scope_matches_context(id.context(), ScopeMatch::Exact)
                 && bound_key == id.key()
             {
                 return Ok(());
@@ -193,15 +205,21 @@ impl AuthContext {
         perm: Permission,
         context: &ObjectContext,
     ) -> Result<(), AuthError> {
-        if !self.permissions.contains(&perm) || !self.scope_matches_context(context) {
+        if !self.permissions.contains(&perm)
+            || !self.scope_matches_context(context, ScopeMatch::Subset)
+        {
             return Err(AuthError::NotPermitted);
         }
 
         Ok(())
     }
 
-    fn scope_matches_context(&self, context: &ObjectContext) -> bool {
+    fn scope_matches_context(&self, context: &ObjectContext, mode: ScopeMatch) -> bool {
         if self.usecase != context.usecase {
+            return false;
+        }
+
+        if matches!(mode, ScopeMatch::Exact) && self.scopes.len() != context.scopes.iter().count() {
             return false;
         }
 
