@@ -41,7 +41,7 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
 pub struct AuthContext {
     /// The objectstore usecase that this request may act on.
     ///
-    /// For scope-bound auth this is the authorized usecase. For object-bound auth this mirrors the
+    /// For scope-bound auth this is the authorized usecase. For object-bound auth this is the
     /// bound object's usecase.
     ///
     /// See also: [`ObjectContext::usecase`].
@@ -49,8 +49,8 @@ pub struct AuthContext {
 
     /// The scope elements that this request may act on.
     ///
-    /// For scope-bound auth these are the authorized scopes. For object-bound auth this mirrors
-    /// the bound object's scopes but does not imply context-level authorization.
+    /// For scope-bound auth these are the authorized scopes. For object-bound auth these are the
+    /// bound object's scopes, but they do not imply context-level authorization.
     ///
     /// See also: [`ObjectContext::scopes`].
     pub scopes: BTreeMap<String, StringOrWildcard>,
@@ -60,9 +60,9 @@ pub struct AuthContext {
 
     /// The exact object key this request is bound to, if any.
     ///
-    /// When present, this context authorizes only operations on the exact matching object within
-    /// the mirrored usecase and scopes above. Context-level checks must reject such a request even
-    /// when the mirrored usecase and scopes would otherwise match.
+    /// When present, this context authorizes only operations on the exact matching object
+    /// identified by this key together with the usecase and scopes above. Context-level checks
+    /// must reject such a request even when the usecase and scopes would otherwise match.
     pub object_key: Option<ObjectKey>,
 }
 
