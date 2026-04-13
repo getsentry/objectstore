@@ -259,8 +259,14 @@ mod tests {
             usecase: "attachments".into(),
             permissions,
             scopes: vec![
-                ("org".into(), org.to_owned().into()),
-                ("project".into(), proj.to_owned().into()),
+                (
+                    "org".into(),
+                    StringOrWildcard::deserialize(json!(org)).unwrap(),
+                ),
+                (
+                    "project".into(),
+                    StringOrWildcard::deserialize(json!(proj)).unwrap(),
+                ),
             ],
         }
     }
