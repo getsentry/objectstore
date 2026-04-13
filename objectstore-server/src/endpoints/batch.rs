@@ -90,7 +90,13 @@ async fn batch(
     // Step 3: auth check
     let authorized = validate(rate_limited, {
         let context = context.clone();
-        move |op| service.check_permission(op.permission(), &context)
+        move |op| match op.key() {
+            Some(key) => {
+                let id = objectstore_service::id::ObjectId::new(context.clone(), key.clone());
+                service.check_object_permission(op.permission(), &id)
+            }
+            None => service.check_context_permission(op.permission(), &context),
+        }
     });
 
     // Step 4: use case policy validation

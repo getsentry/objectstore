@@ -62,12 +62,14 @@ impl AuthAwareService {
         }
     }
 
-    fn assert_authorized(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
-        let auth_result = match &self.context {
-            Some(auth) => auth.assert_authorized(perm, context),
-            None => Ok(()),
-        }
-        .inspect_err(|err| err.log(Some(perm), Some(context.usecase.as_str()), self.enforce));
+    fn check_auth_result(
+        &self,
+        auth_result: Result<(), AuthError>,
+        perm: Permission,
+        usecase: &str,
+    ) -> ApiResult<()> {
+        let auth_result =
+            auth_result.inspect_err(|err| err.log(Some(perm), Some(usecase), self.enforce));
 
         match self.enforce {
             true => Ok(auth_result?),
@@ -77,11 +79,32 @@ impl AuthAwareService {
 
     /// Checks whether the request is authorized for the given permission on the given context.
     ///
-    /// Returns `Ok(())` if authorized, or otherwise an error indicating the reason.
-    /// Equivalent to the internal `assert_authorized` check but exposed for callers
-    /// that validate operations individually before delegating to a lower-level service.
-    pub fn check_permission(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
-        self.assert_authorized(perm, context)
+    /// Object-bound auth contexts are rejected here because they must not be widened into
+    /// context-level authorization.
+    pub fn check_context_permission(
+        &self,
+        perm: Permission,
+        context: &ObjectContext,
+    ) -> ApiResult<()> {
+        let auth_result = match &self.context {
+            Some(auth) => auth.assert_context_authorized(perm, context),
+            None => Ok(()),
+        };
+
+        self.check_auth_result(auth_result, perm, &context.usecase)
+    }
+
+    /// Checks whether the request is authorized for the given permission on the given object.
+    ///
+    /// Object-bound auth contexts authorize only exact object matches here. Scope-bound auth
+    /// contexts fall back to their usecase/scope grant.
+    pub fn check_object_permission(&self, perm: Permission, id: &ObjectId) -> ApiResult<()> {
+        let auth_result = match &self.context {
+            Some(auth) => auth.assert_object_authorized(perm, id),
+            None => Ok(()),
+        };
+
+        self.check_auth_result(auth_result, perm, id.usecase())
     }
 
     /// Auth-aware wrapper around [`StorageService::insert_object`].
@@ -92,7 +115,14 @@ impl AuthAwareService {
         metadata: Metadata,
         stream: ClientStream,
     ) -> ApiResult<InsertResponse> {
-        self.assert_authorized(Permission::ObjectWrite, &context)?;
+        match &key {
+            Some(key) => {
+                let id = ObjectId::new(context.clone(), key.clone());
+                self.check_object_permission(Permission::ObjectWrite, &id)?;
+            }
+            None => self.check_context_permission(Permission::ObjectWrite, &context)?,
+        }
+
         Ok(self
             .service
             .insert_object(context, key, metadata, stream)
@@ -101,19 +131,19 @@ impl AuthAwareService {
 
     /// Auth-aware wrapper around [`StorageService::get_metadata`].
     pub async fn get_metadata(&self, id: ObjectId) -> ApiResult<MetadataResponse> {
-        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        self.check_object_permission(Permission::ObjectRead, &id)?;
         Ok(self.service.get_metadata(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
     pub async fn get_object(&self, id: ObjectId) -> ApiResult<GetResponse> {
-        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        self.check_object_permission(Permission::ObjectRead, &id)?;
         Ok(self.service.get_object(id).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
     pub async fn delete_object(&self, id: ObjectId) -> ApiResult<DeleteResponse> {
-        self.assert_authorized(Permission::ObjectDelete, id.context())?;
+        self.check_object_permission(Permission::ObjectDelete, &id)?;
         Ok(self.service.delete_object(id).await?)
     }
 }

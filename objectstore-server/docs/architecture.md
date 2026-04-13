@@ -88,9 +88,12 @@ limiting what any token signed by that key can do.
 ### Authorization Check
 
 On every operation, [`AuthAwareService`](auth::AuthAwareService) verifies that
-the token's scopes and permissions cover the requested
-[`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
-Scope values in the token can use wildcards to grant broad access.
+the token's scopes and permissions cover the requested target and operation
+type. Context-scoped operations are checked against an
+[`ObjectContext`](objectstore_service::id::ObjectContext); object-scoped
+operations are checked against an
+[`ObjectId`](objectstore_service::id::ObjectId). Scope values in the token can
+use wildcards to grant broad access.
 
 ## Configuration
 
