@@ -208,6 +208,7 @@ impl AuthContext {
     /// - `false`: usecase and scope in this `AuthContext` need to be a superset of the ones in
     ///   `context`.
     /// - `true`: usecase and scope in `AuthContext` and `ObjectContext` need to match exactly.
+    ///    Wildcard matches are disabled.
     fn scope_matches_context(&self, context: &ObjectContext, strict: bool) -> bool {
         if self.usecase != context.usecase {
             return false;
