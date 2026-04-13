@@ -578,4 +578,28 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         Ok(())
     }
+
+    #[test]
+    fn test_assert_object_authorized_object_bound_fewer_scopes_fails() -> Result<(), AuthError> {
+        let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
+        let fewer_scopes_id = ObjectId::new(
+            ObjectContext {
+                usecase: "attachments".into(),
+                scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
+            },
+            "my-key".into(),
+        );
+        let auth_context = AuthContext {
+            usecase: object_id.usecase().to_string(),
+            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            permissions: HashSet::from([Permission::ObjectRead]),
+            object_key: Some(object_id.key),
+        };
+
+        let result =
+            auth_context.assert_object_authorized(Permission::ObjectRead, &fewer_scopes_id);
+        assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
 }
