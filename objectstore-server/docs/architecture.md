@@ -72,8 +72,9 @@ Tokens must include:
 - **Header**: `kid` (key ID) and `alg: EdDSA`
 - **Claims**: `aud: "objectstore"`, `iss: "sentry"` or `"relay"`, `exp`
   (expiration timestamp)
-- **Resource claims** (`res`): the usecase and scope values the token grants
-  access to (e.g., `{"os:usecase": "attachments", "org": "123"}`)
+- **Resource claims** (`res`): the usecase and an ordered `scopes` array the
+  token grants access to (e.g., `{"os:usecase": "attachments", "scopes":
+  [{"name": "org", "value": "123"}]}`)
 - **Permissions**: array of granted operations (`object.read`, `object.write`,
   `object.delete`)
 
@@ -90,7 +91,10 @@ limiting what any token signed by that key can do.
 On every operation, [`AuthAwareService`](auth::AuthAwareService) verifies that
 the token's scopes and permissions cover the requested
 [`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
-Scope values in the token can use wildcards to grant broad access.
+Scope values in the token can use wildcards to grant broad access. Scope
+matching is order-sensitive and prefix-based: a token for `org=1, project=*`
+matches `org=1, project=10` and `org=1, project=10, shard=blue`, but not
+`project=10, org=1`.
 
 ## Configuration
 

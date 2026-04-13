@@ -55,7 +55,10 @@ class TokenGenerator:
         claims = {
             "res": {
                 "os:usecase": usecase,
-                **{k: str(v) for k, v in scope.dict().items()},
+                "scopes": [
+                    {"name": key, "value": str(value)}
+                    for key, value in scope.dict().items()
+                ],
             },
             "permissions": self.permissions,
             "exp": datetime.now(tz=UTC) + timedelta(seconds=self.expiry_seconds),
