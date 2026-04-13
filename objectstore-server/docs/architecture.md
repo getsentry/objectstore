@@ -88,9 +88,12 @@ limiting what any token signed by that key can do.
 ### Authorization Check
 
 On every operation, [`AuthAwareService`](auth::AuthAwareService) verifies that
-the token's scopes and permissions cover the requested
-[`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
-Scope values in the token can use wildcards to grant broad access.
+the token's scopes and permissions cover the requested target and operation
+type. Context-scoped operations are checked against an
+[`ObjectContext`](objectstore_service::id::ObjectContext); object-scoped
+operations are checked against an
+[`ObjectId`](objectstore_service::id::ObjectId). Scope values in the token can
+use wildcards to grant broad access.
 
 ### Pre-Signed URLs
 
@@ -132,8 +135,11 @@ falls back to JWT headers.
 3. The key's `max_permissions` must include `ObjectRead`.
 4. The canonical request string is reconstructed and verified against the
    Ed25519 signature using the public key(s) for the given `kid`.
-5. An `AuthContext` is created with `ObjectRead` permission, with usecase and
-   scopes parsed from the URL path.
+5. An object-bound `AuthContext` is created with `ObjectRead` permission and
+   the exact [`ObjectId`](objectstore_service::id::ObjectId) parsed from the
+   URL path.
+6. Context-level authorization checks reject object-bound auth contexts, so a
+   pre-signed URL can authorize only the exact object it was signed for.
 
 ## Configuration
 

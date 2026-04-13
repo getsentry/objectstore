@@ -1,10 +1,6 @@
-use std::collections::BTreeMap;
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use objectstore_shared::presign::{PARAM_EXPIRES, PARAM_KEY_ID, PARAM_SIGNATURE, percent_decode};
-
-use crate::auth::util::StringOrWildcard;
 
 /// Pre-signed URL parameters extracted from the query string.
 #[derive(Debug)]
@@ -47,45 +43,9 @@ pub fn extract_presigned_params(uri: &http::Uri) -> Option<PreSignedParams> {
     })
 }
 
-/// Extract usecase and scopes from a decoded URL path.
-///
-/// Expected format: `/v1/objects/{usecase}/{scopes}/{key...}` or with a prefix.
-/// Scopes are semicolon-separated `key=value` pairs (e.g., `org=123;project=456`).
-pub(crate) fn parse_path_context(
-    decoded_path: &str,
-) -> Option<(String, BTreeMap<String, StringOrWildcard>)> {
-    // Find the `/v1/objects/` segment and take what follows
-    let rest = decoded_path
-        .find("/v1/objects/")
-        .map(|i| &decoded_path[i + "/v1/objects/".len()..])?;
-
-    let mut parts = rest.splitn(3, '/');
-    let usecase = parts.next()?.to_string();
-    let scopes_str = parts.next()?;
-    // parts.next() would be the key, which we don't need
-
-    if usecase.is_empty() {
-        return None;
-    }
-
-    let scopes = if scopes_str == "_" || scopes_str.is_empty() {
-        BTreeMap::new()
-    } else {
-        scopes_str
-            .split(';')
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let (k, v) = s.split_once('=')?;
-                Some((k.to_string(), StringOrWildcard::String(v.to_string())))
-            })
-            .collect::<Option<BTreeMap<_, _>>>()?
-    };
-
-    Some((usecase, scopes))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -182,13 +142,14 @@ mod tests {
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.permissions.contains(&Permission::ObjectRead));
         assert_eq!(ctx.permissions.len(), 1);
+        assert_eq!(ctx.object_id.as_ref().map(|id| id.key()), Some("my-key"));
         assert_eq!(
             ctx.scopes.get("org"),
-            Some(&StringOrWildcard::String("123".into()))
+            Some(&crate::auth::util::StringOrWildcard::String("123".into()))
         );
         assert_eq!(
             ctx.scopes.get("project"),
-            Some(&StringOrWildcard::String("456".into()))
+            Some(&crate::auth::util::StringOrWildcard::String("456".into()))
         );
     }
 
@@ -269,6 +230,7 @@ mod tests {
         let ctx = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir).unwrap();
         assert_eq!(ctx.usecase, "attachments");
         assert!(ctx.scopes.is_empty());
+        assert_eq!(ctx.object_id.as_ref().map(|id| id.key()), Some("my-key"));
     }
 
     #[test]
@@ -284,38 +246,5 @@ mod tests {
                 "expected rejection for {method}"
             );
         }
-    }
-
-    #[test]
-    fn test_parse_path_context_standard() {
-        let (usecase, scopes) =
-            parse_path_context("/v1/objects/attachments/org=123;project=456/my-key").unwrap();
-        assert_eq!(usecase, "attachments");
-        assert_eq!(
-            scopes.get("org"),
-            Some(&StringOrWildcard::String("123".into()))
-        );
-        assert_eq!(
-            scopes.get("project"),
-            Some(&StringOrWildcard::String("456".into()))
-        );
-    }
-
-    #[test]
-    fn test_parse_path_context_with_prefix() {
-        let (usecase, scopes) =
-            parse_path_context("/api/prefix/v1/objects/attachments/org=1/key").unwrap();
-        assert_eq!(usecase, "attachments");
-        assert_eq!(
-            scopes.get("org"),
-            Some(&StringOrWildcard::String("1".into()))
-        );
-    }
-
-    #[test]
-    fn test_parse_path_context_empty_scopes() {
-        let (usecase, scopes) = parse_path_context("/v1/objects/attachments/_/key").unwrap();
-        assert_eq!(usecase, "attachments");
-        assert!(scopes.is_empty());
     }
 }

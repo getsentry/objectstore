@@ -3,16 +3,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, Verifier};
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
-use objectstore_service::id::ObjectContext;
+use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::auth::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
-use objectstore_shared::presign::{canonical_presigned_request, percent_decode};
+use objectstore_shared::presign::canonical_presigned_request;
 
-use crate::auth::presigned::{PreSignedParams, parse_path_context};
+use crate::auth::presigned::PreSignedParams;
 use crate::auth::util::StringOrWildcard;
+use crate::extractors::id::object_id_from_uri_path;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
@@ -39,23 +40,36 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
 
 /// `AuthContext` encapsulates the verified content of things like authorization tokens.
 ///
-/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
-/// perform certain operations on a given resource.
+/// [`AuthContext::assert_context_authorized`] and [`AuthContext::assert_object_authorized`] can be
+/// used to check whether a request is authorized to perform certain operations on a given target.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub struct AuthContext {
     /// The objectstore usecase that this request may act on.
+    ///
+    /// For scope-bound auth this is the authorized usecase. For object-bound auth this mirrors the
+    /// bound object's usecase.
     ///
     /// See also: [`ObjectContext::usecase`].
     pub usecase: String,
 
     /// The scope elements that this request may act on.
     ///
+    /// For scope-bound auth these are the authorized scopes. For object-bound auth this mirrors
+    /// the bound object's scopes but does not imply context-level authorization.
+    ///
     /// See also: [`ObjectContext::scopes`].
     pub scopes: BTreeMap<String, StringOrWildcard>,
 
     /// The permissions that this request has been granted.
     pub permissions: HashSet<Permission>,
+
+    /// The exact object this request is bound to, if any.
+    ///
+    /// When present, this context authorizes only operations on the exact matching object ID.
+    /// Context-level checks must reject such a request even when the mirrored usecase and scopes
+    /// would otherwise match.
+    pub object_id: Option<ObjectId>,
 }
 
 impl AuthContext {
@@ -133,6 +147,7 @@ impl AuthContext {
             usecase,
             scopes: scope,
             permissions,
+            object_id: None,
         })
     }
 
@@ -191,25 +206,69 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        // Parse usecase and scopes from the path
-        let decoded_path = percent_decode(uri.path());
-        let (usecase, scopes) = parse_path_context(&decoded_path).ok_or(AuthError::BadRequest(
+        // Parse the exact object ID from the path so this remains an object-bound grant rather
+        // than a widened scope-bound grant.
+        let object_id = object_id_from_uri_path(uri.path()).ok_or(AuthError::BadRequest(
             "Cannot parse path for pre-signed URL",
         ))?;
+        let usecase = object_id.context.usecase.clone();
+        let scopes = object_id
+            .context
+            .scopes
+            .iter()
+            .map(|scope| {
+                (
+                    scope.name().to_string(),
+                    StringOrWildcard::String(scope.value().to_string()),
+                )
+            })
+            .collect();
 
         Ok(AuthContext {
             usecase,
             scopes,
             permissions: HashSet::from([Permission::ObjectRead]),
+            object_id: Some(object_id),
         })
     }
 
-    /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
-    /// `Err(AuthError::NotPermitted)` is returned.
+    /// Ensures that a context-scoped operation requiring `perm` is authorized.
     ///
-    /// The passed-in `perm` is checked against this `AuthContext`'s `permissions`. If it is not
-    /// present, then the operation is not authorized.
-    pub fn assert_authorized(
+    /// Context checks are valid only for scope-bound auth. If this [`AuthContext`] is object-bound
+    /// via [`Self::object_id`], this always returns `Err(AuthError::NotPermitted)` because an
+    /// exact-object grant must not be widened into a context-wide grant.
+    pub fn assert_context_authorized(
+        &self,
+        perm: Permission,
+        context: &ObjectContext,
+    ) -> Result<(), AuthError> {
+        if self.object_id.is_some() {
+            return Err(AuthError::NotPermitted);
+        }
+
+        self.assert_scope_authorized(perm, context)
+    }
+
+    /// Ensures that an object-scoped operation requiring `perm` is authorized.
+    ///
+    /// For scope-bound auth this falls back to the same usecase and scope matching as context
+    /// checks. For object-bound auth it authorizes only the exact matching [`ObjectId`].
+    pub fn assert_object_authorized(
+        &self,
+        perm: Permission,
+        id: &ObjectId,
+    ) -> Result<(), AuthError> {
+        if let Some(bound_id) = &self.object_id {
+            if self.permissions.contains(&perm) && bound_id == id {
+                return Ok(());
+            }
+            return Err(AuthError::NotPermitted);
+        }
+
+        self.assert_scope_authorized(perm, id.context())
+    }
+
+    fn assert_scope_authorized(
         &self,
         perm: Permission,
         context: &ObjectContext,
@@ -310,6 +369,7 @@ mod tests {
             usecase: "attachments".into(),
             permissions,
             scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
+            object_id: None,
         }
     }
 
@@ -421,11 +481,11 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     //   auth_context: org.123 / proj.123
     //         object: org.123 / proj.123
     #[test]
-    fn test_assert_authorized_exact_scope_allowed() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_exact_scope_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_context_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -434,11 +494,11 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     //   auth_context: org.123 / proj.*
     //         object: org.123 / proj.123
     #[test]
-    fn test_assert_authorized_wildcard_project_allowed() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_wildcard_project_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "*", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_context_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -447,14 +507,14 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     //   auth_context: org.123 / proj.456
     //         object: org.123
     #[test]
-    fn test_assert_authorized_org_only_path_allowed() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_org_only_path_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = ObjectContext {
             usecase: "attachments".into(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_context_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -466,41 +526,93 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     //   auth_context: org.123 / proj.456
     //         object: org.999 / proj.456
     #[test]
-    fn test_assert_authorized_scope_mismatch_fails() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_scope_mismatch_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "999");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result = auth_context.assert_context_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("999", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result = auth_context.assert_context_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
     }
 
     #[test]
-    fn test_assert_authorized_wrong_usecase_fails() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_wrong_usecase_fails() -> Result<(), AuthError> {
         let mut auth_context = sample_auth_context("123", "456", max_permission());
         auth_context.usecase = "debug-files".into();
         let object = sample_object_context("123", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result = auth_context.assert_context_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
     }
 
     #[test]
-    fn test_assert_authorized_auth_context_missing_permission_fails() -> Result<(), AuthError> {
+    fn test_assert_context_authorized_auth_context_missing_permission_fails()
+    -> Result<(), AuthError> {
         let auth_context =
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
         let object = sample_object_context("123", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
+        let result = auth_context.assert_context_authorized(Permission::ObjectWrite, &object);
+        assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assert_context_authorized_rejects_object_bound_auth() -> Result<(), AuthError> {
+        let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
+        let auth_context = AuthContext {
+            usecase: object_id.usecase().to_string(),
+            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            permissions: HashSet::from([Permission::ObjectRead]),
+            object_id: Some(object_id),
+        };
+
+        let result = auth_context.assert_context_authorized(
+            Permission::ObjectRead,
+            &sample_object_context("123", "456"),
+        );
+        assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assert_object_authorized_exact_object_bound_match() -> Result<(), AuthError> {
+        let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
+        let auth_context = AuthContext {
+            usecase: object_id.usecase().to_string(),
+            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            permissions: HashSet::from([Permission::ObjectRead]),
+            object_id: Some(object_id.clone()),
+        };
+
+        auth_context.assert_object_authorized(Permission::ObjectRead, &object_id)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_assert_object_authorized_object_bound_mismatch_fails() -> Result<(), AuthError> {
+        let object_id = ObjectId::new(sample_object_context("123", "456"), "my-key".into());
+        let other_id = ObjectId::new(sample_object_context("123", "456"), "other-key".into());
+        let auth_context = AuthContext {
+            usecase: object_id.usecase().to_string(),
+            scopes: serde_json::from_value(json!({"org": "123", "project": "456"})).unwrap(),
+            permissions: HashSet::from([Permission::ObjectRead]),
+            object_id: Some(object_id),
+        };
+
+        let result = auth_context.assert_object_authorized(Permission::ObjectRead, &other_id);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())

@@ -87,6 +87,27 @@ struct ObjectParams {
     key: String,
 }
 
+/// Parses an [`ObjectId`] from an HTTP request path matching the object endpoint shape.
+///
+/// This accepts paths with arbitrary prefixes as long as they contain an `/objects/` segment,
+/// such as `/v1/objects/{usecase}/{scopes}/{key}`.
+pub(crate) fn object_id_from_uri_path(path: &str) -> Option<ObjectId> {
+    let rest = path
+        .find("/objects/")
+        .map(|i| &path[i + "/objects/".len()..])?;
+
+    let mut parts = rest.splitn(3, '/');
+    let usecase = parts.next()?.to_string();
+    let scopes = parse_scopes_str(parts.next()?).ok()?;
+    let key = parts.next()?.to_string();
+
+    if usecase.is_empty() || key.is_empty() {
+        return None;
+    }
+
+    Some(ObjectId::from_parts(usecase, scopes, key))
+}
+
 /// Deserializes a `Scopes` instance from a string representation.
 ///
 /// The string representation is a semicolon-separated list of `key=value` pairs, following the
@@ -96,22 +117,24 @@ where
     D: de::Deserializer<'de>,
 {
     let s = Cow::<str>::deserialize(deserializer)?;
-    if s == EMPTY_SCOPES {
+    parse_scopes_str(&s).map_err(de::Error::custom)
+}
+
+fn parse_scopes_str(scopes_str: &str) -> Result<Scopes, String> {
+    if scopes_str == EMPTY_SCOPES {
         return Ok(Scopes::empty());
     }
 
-    let scopes = s
+    scopes_str
         .split(';')
-        .map(|s| {
-            let (key, value) = s
-                .split_once("=")
-                .ok_or_else(|| de::Error::custom("scope must be 'key=value'"))?;
+        .map(|scope| {
+            let (key, value) = scope
+                .split_once('=')
+                .ok_or_else(|| "scope must be 'key=value'".to_string())?;
 
-            Scope::create(key, value).map_err(de::Error::custom)
+            Scope::create(key, value).map_err(|err| err.to_string())
         })
-        .collect::<Result<_, _>>()?;
-
-    Ok(scopes)
+        .collect()
 }
 
 impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
@@ -216,6 +239,22 @@ mod tests {
     fn parse_empty_key_or_value() {
         assert!(deser_scopes("=value").is_err());
         assert!(deser_scopes("key=").is_err());
+    }
+
+    #[test]
+    fn parse_object_id_from_uri_path_with_prefix() {
+        let id = object_id_from_uri_path("/api/prefix/v1/objects/myusecase/org=1;project=2/a/b")
+            .unwrap();
+
+        assert_eq!(id.usecase(), "myusecase");
+        assert_eq!(id.scopes().get_value("org"), Some("1"));
+        assert_eq!(id.scopes().get_value("project"), Some("2"));
+        assert_eq!(id.key(), "a/b");
+    }
+
+    #[test]
+    fn parse_object_id_from_uri_path_rejects_missing_key() {
+        assert!(object_id_from_uri_path("/v1/objects/myusecase/org=1/").is_none());
     }
 
     // --- Extractor integration tests ---

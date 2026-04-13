@@ -3,7 +3,7 @@
 pub mod batch;
 pub mod body;
 pub mod downstream_service;
-mod id;
+pub(crate) mod id;
 mod service;
 
 /// An extractor for a remote type.
