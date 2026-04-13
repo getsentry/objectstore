@@ -333,6 +333,25 @@ impl AuthContext {
 }
 
 #[cfg(test)]
+impl AuthContext {
+    pub(crate) fn usecase(&self) -> &str {
+        &self.usecase
+    }
+
+    pub(crate) fn scopes(&self) -> &BTreeMap<String, StringOrWildcard> {
+        &self.scopes
+    }
+
+    pub(crate) fn permissions(&self) -> &HashSet<Permission> {
+        &self.permissions
+    }
+
+    pub(crate) fn object_key(&self) -> Option<&str> {
+        self.object_key.as_deref()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::PublicKeyConfig;

@@ -139,16 +139,16 @@ mod tests {
         let (uri, params) = sign_url(path, future_expires());
 
         let ctx = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir).unwrap();
-        assert_eq!(ctx.usecase, "attachments");
-        assert!(ctx.permissions.contains(&Permission::ObjectRead));
-        assert_eq!(ctx.permissions.len(), 1);
-        assert_eq!(ctx.object_key.as_deref(), Some("my-key"));
+        assert_eq!(ctx.usecase(), "attachments");
+        assert!(ctx.permissions().contains(&Permission::ObjectRead));
+        assert_eq!(ctx.permissions().len(), 1);
+        assert_eq!(ctx.object_key(), Some("my-key"));
         assert_eq!(
-            ctx.scopes.get("org"),
+            ctx.scopes().get("org"),
             Some(&crate::auth::util::StringOrWildcard::String("123".into()))
         );
         assert_eq!(
-            ctx.scopes.get("project"),
+            ctx.scopes().get("project"),
             Some(&crate::auth::util::StringOrWildcard::String("456".into()))
         );
     }
@@ -228,9 +228,9 @@ mod tests {
         let (uri, params) = sign_url(path, future_expires());
 
         let ctx = AuthContext::from_presigned_url(&params, &http::Method::GET, &uri, &dir).unwrap();
-        assert_eq!(ctx.usecase, "attachments");
-        assert!(ctx.scopes.is_empty());
-        assert_eq!(ctx.object_key.as_deref(), Some("my-key"));
+        assert_eq!(ctx.usecase(), "attachments");
+        assert!(ctx.scopes().is_empty());
+        assert_eq!(ctx.object_key(), Some("my-key"));
     }
 
     #[test]
