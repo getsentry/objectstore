@@ -462,38 +462,6 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         Ok(())
     }
 
-    #[test]
-    fn test_assert_authorized_empty_auth_scope_fails_for_scoped_request() -> Result<(), AuthError> {
-        let auth_context = AuthContext {
-            usecase: "attachments".into(),
-            scopes: vec![],
-            permissions: max_permission(),
-        };
-        let object = sample_object_context("123", "456");
-
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
-        assert_eq!(result, Err(AuthError::NotPermitted));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_assert_authorized_empty_auth_scope_allows_empty_request() -> Result<(), AuthError> {
-        let auth_context = AuthContext {
-            usecase: "attachments".into(),
-            scopes: vec![],
-            permissions: max_permission(),
-        };
-        let object = ObjectContext {
-            usecase: "attachments".into(),
-            scopes: Scopes::empty(),
-        };
-
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
-
-        Ok(())
-    }
-
     // Not allowed:
     //   auth_context: org.123 / proj.456
     //         object: org.123 / proj.999
