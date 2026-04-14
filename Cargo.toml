@@ -41,7 +41,7 @@ humantime = "2.2.0"
 humantime-serde = "1.1.1"
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 mimalloc = { version = "0.1.48", features = ["v3", "override"] }
-rand = "0.9.1"
+rand = "0.9.3"
 regex = "1.12.3"
 reqwest = { version = "0.12.22" }
 sentry = { version = "0.45.0" }
