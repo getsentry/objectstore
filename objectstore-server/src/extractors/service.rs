@@ -13,6 +13,11 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// this header.
 const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
 
+/// Query parameter name for Objectstore authentication. Used as a fallback when
+/// headers cannot be set (e.g. browser-initiated requests). The value should be
+/// the raw JWT without a `Bearer` prefix.
+const OBJECTSTORE_AUTH_QUERY_PARAM: &str = "X-Os-Auth";
+
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;
 
@@ -20,12 +25,20 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
+        // Precedence: X-Os-Auth header > X-Os-Auth query param > Authorization header.
         let encoded_token = parts
             .headers
             .get(OBJECTSTORE_AUTH_HEADER)
-            .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
-            .and_then(strip_bearer);
+            .and_then(strip_bearer)
+            .or_else(|| extract_query_param(parts.uri.query(), OBJECTSTORE_AUTH_QUERY_PARAM))
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(strip_bearer)
+            });
 
         let enforce = state.config.auth.enforce;
         // Attempt to decode / verify the JWT, logging failure
@@ -57,6 +70,20 @@ fn strip_bearer(header_value: &str) -> Option<&str> {
     }
 }
 
+/// Extracts the value of a query parameter by name from a raw query string.
+///
+/// Returns `None` if the query string is absent, the parameter is not present,
+/// or the parameter has no value.
+fn extract_query_param<'a>(query: Option<&'a str>, param: &str) -> Option<&'a str> {
+    query?
+        .split('&')
+        .find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == param).then_some(value)
+        })
+        .filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +101,28 @@ mod tests {
 
         // No character boundary at end of expected prefix
         assert_eq!(strip_bearer("Bearer⚠️tokenvalue"), None);
+    }
+
+    #[test]
+    fn test_extract_query_param() {
+        assert_eq!(extract_query_param(None, "X-Os-Auth"), None);
+        assert_eq!(extract_query_param(Some(""), "X-Os-Auth"), None);
+        assert_eq!(extract_query_param(Some("other=val"), "X-Os-Auth"), None);
+        assert_eq!(
+            extract_query_param(Some("X-Os-Auth=mytoken"), "X-Os-Auth"),
+            Some("mytoken")
+        );
+        assert_eq!(
+            extract_query_param(Some("foo=bar&X-Os-Auth=mytoken"), "X-Os-Auth"),
+            Some("mytoken")
+        );
+        assert_eq!(
+            extract_query_param(Some("X-Os-Auth=mytoken&foo=bar"), "X-Os-Auth"),
+            Some("mytoken")
+        );
+        // Empty value
+        assert_eq!(extract_query_param(Some("X-Os-Auth="), "X-Os-Auth"), None);
+        // No `=` sign
+        assert_eq!(extract_query_param(Some("X-Os-Auth"), "X-Os-Auth"), None);
     }
 }
