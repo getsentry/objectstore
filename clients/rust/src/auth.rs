@@ -129,10 +129,17 @@ impl TokenGenerator {
         self
     }
 
+    /// Returns the permissions configured on this generator.
+    pub(crate) fn configured_permissions(&self) -> &HashSet<Permission> {
+        &self.permissions
+    }
+
     /// Sign a token for the given [`Scope`](crate::Scope), returning the JWT string.
     ///
     /// Use this to produce a static token that can be handed to an external service
     /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
+    ///
+    /// The token is signed using the generator's configured permissions and expiry.
     ///
     /// # Errors
     ///
@@ -148,14 +155,27 @@ impl TokenGenerator {
             // `InvalidScope`, unless we add a new variant and forget to update this code path.
             _ => return Err(scope::InvalidScopeError::Unreachable.into()),
         };
-        self.sign_for_scope(scope)
+        self.sign_for_scope(scope, None, None)
     }
 
-    /// Sign a new token for the passed-in scope using the configured expiry and permissions.
-    pub(crate) fn sign_for_scope(&self, scope: &ScopeInner) -> crate::Result<String> {
+    /// Sign a new token for the passed-in scope.
+    ///
+    /// Optional overrides for `permissions` and `expiry_seconds` can be provided.
+    /// When `None`, the generator's configured defaults are used.
+    pub(crate) fn sign_for_scope(
+        &self,
+        scope: &ScopeInner,
+        permissions: Option<&[Permission]>,
+        expiry_seconds: Option<u64>,
+    ) -> crate::Result<String> {
+        let permissions = match permissions {
+            Some(p) => p.iter().copied().collect(),
+            None => self.permissions.clone(),
+        };
+        let expiry_seconds = expiry_seconds.unwrap_or(self.expiry_seconds);
         let claims = JwtClaims {
-            exp: get_current_timestamp() + self.expiry_seconds,
-            permissions: self.permissions.clone(),
+            exp: get_current_timestamp() + expiry_seconds,
+            permissions,
             res: JwtRes {
                 usecase: scope.usecase().name().into(),
                 scopes: scope

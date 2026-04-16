@@ -42,23 +42,49 @@ class TokenGenerator:
         self.expiry_seconds = expiry_seconds
         self.permissions = permissions if permissions is not None else Permission.max()
 
-    def sign_for_scope(self, usecase: str, scope: Scope) -> str:
+    def sign_for_scope(
+        self,
+        usecase: str,
+        scope: Scope,
+        permissions: list[Permission] | None = None,
+        expiry_seconds: int | None = None,
+    ) -> str:
         """
         Sign a JWT for the passed-in usecase and scope using the configured key
         information, expiry, and permissions.
 
-        The JWT is signed using EdDSA, so `self.secret_key` must be an EdDSA private
-        key. `self.kid` is used by the Objectstore server to load the corresponding
-        public key from its configuration.
+        When ``permissions`` is ``None``, the generator's default permissions are
+        used.  When provided, they override the defaults for this token only.
+
+        When ``expiry_seconds`` is ``None``, the generator's default expiry is
+        used.
+
+        Raises ``ValueError`` if any requested permission is not granted to
+        this generator.
+
+        The JWT is signed using EdDSA, so ``self.secret_key`` must be an EdDSA
+        private key. ``self.kid`` is used by the Objectstore server to load the
+        corresponding public key from its configuration.
         """
+        if permissions is not None:
+            escalated = set(permissions) - set(self.permissions)
+            if escalated:
+                raise ValueError(
+                    "requested permissions not granted to this "
+                    f"token generator: {sorted(escalated)}"
+                )
+
         headers = {"kid": self.kid}
+        expiry = expiry_seconds if expiry_seconds is not None else self.expiry_seconds
         claims = {
             "res": {
                 "os:usecase": usecase,
                 **{k: str(v) for k, v in scope.dict().items()},
             },
-            "permissions": self.permissions,
-            "exp": datetime.now(tz=UTC) + timedelta(seconds=self.expiry_seconds),
+            "permissions": (
+                permissions if permissions is not None else self.permissions
+            ),
+            "exp": datetime.now(tz=UTC) + timedelta(seconds=expiry),
         }
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)

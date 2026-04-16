@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use objectstore_types::auth::Permission;
+
 /// Errors that can happen within the objectstore-client
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,6 +23,12 @@ pub enum Error {
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
+    /// Error when trying to mint a token without a [`TokenGenerator`](crate::TokenGenerator).
+    #[error("no token generator configured on this session")]
+    NoTokenGenerator,
+    /// Error when minting a token with permissions not granted to the generator.
+    #[error("requested permissions not granted to this token generator: {0:?}")]
+    PermissionEscalation(Vec<Permission>),
     /// Error when URL manipulation fails.
     #[error("{message}")]
     InvalidUrl {
