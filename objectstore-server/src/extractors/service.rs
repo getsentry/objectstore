@@ -72,9 +72,7 @@ fn strip_bearer(header_value: &str) -> Option<&str> {
 
 fn extract_query_param_value<'a>(query: Option<&'a str>, param: &str) -> Option<&'a str> {
     query?.split('&').find_map(|pair| {
-        let Some((key, value)) = pair.split_once('=') else {
-            return None;
-        };
+        let (key, value) = pair.split_once('=')?;
         (key == param && !value.is_empty()).then_some(value)
     })
 }
