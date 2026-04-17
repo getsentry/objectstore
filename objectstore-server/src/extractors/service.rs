@@ -31,7 +31,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             .get(OBJECTSTORE_AUTH_HEADER)
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer)
-            .or_else(|| extract_query_param(parts.uri.query(), OBJECTSTORE_AUTH_QUERY_PARAM))
+            .or_else(|| extract_query_param_value(parts.uri.query(), OBJECTSTORE_AUTH_QUERY_PARAM))
             .or_else(|| {
                 parts
                     .headers
@@ -70,18 +70,13 @@ fn strip_bearer(header_value: &str) -> Option<&str> {
     }
 }
 
-/// Extracts the value of a query parameter by name from a raw query string.
-///
-/// Returns `None` if the query string is absent, the parameter is not present,
-/// or the parameter has no value.
-fn extract_query_param<'a>(query: Option<&'a str>, param: &str) -> Option<&'a str> {
-    query?
-        .split('&')
-        .find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == param).then_some(value)
-        })
-        .filter(|v| !v.is_empty())
+fn extract_query_param_value<'a>(query: Option<&'a str>, param: &str) -> Option<&'a str> {
+    query?.split('&').find_map(|pair| {
+        let Some((key, value)) = pair.split_once('=') else {
+            return None;
+        };
+        (key == param && !value.is_empty()).then_some(value)
+    })
 }
 
 #[cfg(test)]
@@ -104,25 +99,36 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_query_param() {
-        assert_eq!(extract_query_param(None, "X-Os-Auth"), None);
-        assert_eq!(extract_query_param(Some(""), "X-Os-Auth"), None);
-        assert_eq!(extract_query_param(Some("other=val"), "X-Os-Auth"), None);
+    fn test_extract_query_param_value() {
+        assert_eq!(extract_query_param_value(None, "X-Os-Auth"), None);
+        assert_eq!(extract_query_param_value(Some(""), "X-Os-Auth"), None);
         assert_eq!(
-            extract_query_param(Some("X-Os-Auth=mytoken"), "X-Os-Auth"),
+            extract_query_param_value(Some("other=val"), "X-Os-Auth"),
+            None
+        );
+
+        assert_eq!(
+            extract_query_param_value(Some("X-Os-Auth=mytoken"), "X-Os-Auth"),
             Some("mytoken")
         );
         assert_eq!(
-            extract_query_param(Some("foo=bar&X-Os-Auth=mytoken"), "X-Os-Auth"),
+            extract_query_param_value(Some("foo=bar&X-Os-Auth=mytoken"), "X-Os-Auth"),
             Some("mytoken")
         );
         assert_eq!(
-            extract_query_param(Some("X-Os-Auth=mytoken&foo=bar"), "X-Os-Auth"),
+            extract_query_param_value(Some("X-Os-Auth=mytoken&foo=bar"), "X-Os-Auth"),
             Some("mytoken")
         );
+
         // Empty value
-        assert_eq!(extract_query_param(Some("X-Os-Auth="), "X-Os-Auth"), None);
+        assert_eq!(
+            extract_query_param_value(Some("X-Os-Auth="), "X-Os-Auth"),
+            None
+        );
         // No `=` sign
-        assert_eq!(extract_query_param(Some("X-Os-Auth"), "X-Os-Auth"), None);
+        assert_eq!(
+            extract_query_param_value(Some("X-Os-Auth"), "X-Os-Auth"),
+            None
+        );
     }
 }
