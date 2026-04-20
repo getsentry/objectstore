@@ -73,7 +73,7 @@ local deploy_canary(region) =
     [];
 
 local soak_time(region) =
-  if region == 's4s' then
+  if region == 's4s2' then
     [
       {
         'soak-time': {
