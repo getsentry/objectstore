@@ -131,7 +131,7 @@ async fn track_runtime_metrics(interval: Duration) {
             "runtime.num_io_driver_fds" = registered_fds - deregistered_fds
         );
 
-        // TODO(lcian): Temporary metrics
+        // TODO(lcian): Remove these or refactor in a better place
         let mut _elapsed_msecs = 0usize;
         let mut _user_msecs = 0usize;
         let mut _system_msecs = 0usize;
