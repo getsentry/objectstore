@@ -130,33 +130,5 @@ async fn track_runtime_metrics(interval: Duration) {
         objectstore_metrics::gauge!(
             "runtime.num_io_driver_fds" = registered_fds - deregistered_fds
         );
-
-        // TODO(lcian): Remove these or refactor in a better place
-        let mut _elapsed_msecs = 0usize;
-        let mut _user_msecs = 0usize;
-        let mut _system_msecs = 0usize;
-        let mut current_rss = 0usize;
-        let mut peak_rss = 0usize;
-        let mut current_commit = 0usize;
-        let mut peak_commit = 0usize;
-        let mut page_faults = 0usize;
-        // SAFETY: `mi_process_info` only writes to the eight out-parameters.
-        unsafe {
-            libmimalloc_sys::mi_process_info(
-                &mut _elapsed_msecs,
-                &mut _user_msecs,
-                &mut _system_msecs,
-                &mut current_rss,
-                &mut peak_rss,
-                &mut current_commit,
-                &mut peak_commit,
-                &mut page_faults,
-            );
-        }
-        objectstore_metrics::gauge!("allocator.rss_bytes" = current_rss);
-        objectstore_metrics::gauge!("allocator.rss_peak_bytes" = peak_rss);
-        objectstore_metrics::gauge!("allocator.commit_bytes" = current_commit);
-        objectstore_metrics::gauge!("allocator.commit_peak_bytes" = peak_commit);
-        objectstore_metrics::gauge!("allocator.page_faults" = page_faults);
     }
 }
