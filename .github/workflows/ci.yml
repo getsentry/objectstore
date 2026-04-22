@@ -94,6 +94,15 @@ jobs:
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
             gcr.io/cloud-devrel-public-resources/storage-testbench:latest
 
+      - name: Start MinIO
+        run: |
+          docker run -d \
+            --name minio \
+            -p 8089:9000 \
+            --entrypoint /run-minio.sh \
+            -v $PWD/devservices/run-minio.sh:/run-minio.sh \
+            minio/minio
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update

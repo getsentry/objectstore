@@ -9,10 +9,12 @@ x-sentry-service-config:
       description: Google Cloud BigTable emulator
     gcs:
       description: Google Cloud Storage emulator
+    minio:
+      description: MinIO server
   modes:
     default: []
     containerized: [objectstore]
-    full: [bigtable, gcs]
+    full: [bigtable, gcs, minio]
 
 x-programs:
   devserver:
@@ -70,6 +72,23 @@ services:
       retries: 5
     ports:
       - 127.0.0.1:8087:9000
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
+  minio:
+    image: minio/minio
+    entrypoint: /run-minio.sh
+    healthcheck:
+      test: mc ready local
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    ports:
+      - 127.0.0.1:8089:9000
+    volumes:
+      - ./run-minio.sh:/run-minio.sh
     networks:
       - devservices
     labels:
