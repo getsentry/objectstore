@@ -183,6 +183,7 @@ the required images and configuration, such as port mapping.
 column families.
  - For **Google Cloud Storage** (GCS), a test bucket is already configured in
   the dev container.
+ - For **MinIO** (S3-compatible), a public test bucket is created on startup.
 
 The emulators example config is pre-configured with a tiered configuration using
 both backends. To use it:
