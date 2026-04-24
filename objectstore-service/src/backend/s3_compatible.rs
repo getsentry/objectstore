@@ -106,16 +106,22 @@ pub struct S3CompatibleConfig {
     /// When set, the backend writes the resolved expiration time to this
     /// header on PUT, and on reads with a [`TimeToIdle`] policy it bumps the
     /// timestamp (via copy-in-place with a metadata-directive REPLACE) when
-    /// the recorded expiry is older than `now + tti - 1 day`.
+    /// the recorded expiry is older than `now + tti - TTI_DEBOUNCE`.
     ///
-    /// Defaults to `x-goog-custom-time` — the header the [GCS XML API]
-    /// interprets in conjunction with a `daysSinceCustomTime` lifecycle
-    /// rule. AWS S3 has no equivalent mechanism and will ignore the header.
-    /// Set to `None` on those deployments to disable the feature entirely.
+    /// Defaults to `x-amz-meta-x-os-custom-time`, which results in the
+    /// timestamp being stored as plain user metadata on any S3-compatible
+    /// backend. That preserves the TTI bump flow on deployments with no
+    /// native lifecycle mechanism (AWS S3 proper, MinIO) — the expiry is
+    /// persisted and observable, just not acted on by the storage layer.
+    ///
+    /// Override with `x-goog-custom-time` when pointing at the [GCS XML API]
+    /// with a `daysSinceCustomTime` lifecycle configured on the bucket, so
+    /// GCS itself garbage-collects expired objects. Set to `None` to skip
+    /// writing the header entirely.
     ///
     /// # Default
     ///
-    /// `Some("x-goog-custom-time")`
+    /// `Some("x-amz-meta-x-os-custom-time")`
     ///
     /// # Environment Variables
     ///
@@ -140,7 +146,7 @@ fn default_metadata_prefix() -> String {
 }
 
 fn default_custom_time_header() -> Option<String> {
-    Some("x-goog-custom-time".to_owned())
+    Some("x-amz-meta-x-os-custom-time".to_owned())
 }
 
 /// Time to debounce bumping an object with configured TTI.
