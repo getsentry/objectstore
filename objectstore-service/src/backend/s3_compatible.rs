@@ -1,9 +1,10 @@
 //! Backend that can be used with any S3-compatible object store (Amazon S3, MinIO, R2, etc.).
 
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::header::{self, HeaderMap};
 use s3::Bucket;
 use s3::command::Command;
@@ -99,6 +100,31 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__METADATA_PREFIX=x-goog-meta-`
     #[serde(default = "default_metadata_prefix")]
     pub metadata_prefix: String,
+
+    /// Header used to store the object's expiration timestamp.
+    ///
+    /// When set, the backend writes the resolved expiration time to this
+    /// header on PUT, and on reads with a [`TimeToIdle`] policy it bumps the
+    /// timestamp (via copy-in-place with a metadata-directive REPLACE) when
+    /// the recorded expiry is older than `now + tti - 1 day`.
+    ///
+    /// Defaults to `x-goog-custom-time` — the header the [GCS XML API]
+    /// interprets in conjunction with a `daysSinceCustomTime` lifecycle
+    /// rule. AWS S3 has no equivalent mechanism and will ignore the header.
+    /// Set to `None` on those deployments to disable the feature entirely.
+    ///
+    /// # Default
+    ///
+    /// `Some("x-goog-custom-time")`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
+    ///
+    /// [`TimeToIdle`]: objectstore_types::metadata::ExpirationPolicy::TimeToIdle
+    /// [GCS XML API]: https://docs.cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime
+    #[serde(default = "default_custom_time_header")]
+    pub custom_time_header: Option<String>,
 }
 
 fn default_region() -> String {
@@ -112,6 +138,13 @@ fn default_use_path_style() -> bool {
 fn default_metadata_prefix() -> String {
     "x-amz-meta-".to_owned()
 }
+
+fn default_custom_time_header() -> Option<String> {
+    Some("x-goog-custom-time".to_owned())
+}
+
+/// Time to debounce bumping an object with configured TTI.
+const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
 /// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {
@@ -147,6 +180,7 @@ pub struct S3CompatibleBackend<T> {
     endpoint: String,
     token_provider: Option<T>,
     metadata_prefix: String,
+    custom_time_header: Option<String>,
 }
 
 impl<T> S3CompatibleBackend<T> {
@@ -174,12 +208,119 @@ impl<T> S3CompatibleBackend<T> {
             bucket,
             endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
+            custom_time_header: config.custom_time_header,
             token_provider: None,
         })
     }
 
     fn object_path(&self, id: &ObjectId) -> String {
         format!("/{}", id.as_storage_path())
+    }
+
+    /// Protocol-level header prefix corresponding to [`metadata_prefix`].
+    ///
+    /// Strips the trailing `meta-` suffix: `x-amz-meta-` → `x-amz-`,
+    /// `x-goog-meta-` → `x-goog-`. Used to build request-level headers like
+    /// `{prefix}copy-source` and `{prefix}metadata-directive`.
+    ///
+    /// [`metadata_prefix`]: S3CompatibleConfig::metadata_prefix
+    fn protocol_prefix(&self) -> &str {
+        self.metadata_prefix
+            .strip_suffix("meta-")
+            .unwrap_or(&self.metadata_prefix)
+    }
+
+    /// If `metadata` has a [`TimeToIdle`] policy and a
+    /// [`custom_time_header`] is configured, bumps the recorded expiry via a
+    /// metadata-only copy-in-place when it would otherwise fall outside the
+    /// 1-day debounce window.
+    ///
+    /// [`TimeToIdle`]: objectstore_types::metadata::ExpirationPolicy::TimeToIdle
+    /// [`custom_time_header`]: S3CompatibleConfig::custom_time_header
+    async fn bump_tti_if_needed(
+        &self,
+        path: &str,
+        headers: &HeaderMap,
+        metadata: &Metadata,
+    ) -> Result<()> {
+        let Some(custom_time_header) = &self.custom_time_header else {
+            return Ok(());
+        };
+        let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy else {
+            return Ok(());
+        };
+
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
+        let expire_at = headers
+            .get(custom_time_header.as_str())
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| humantime::parse_rfc3339(s).ok())
+            .unwrap_or(access_time);
+
+        if expire_at < access_time + tti - TTI_DEBOUNCE {
+            // TODO: Schedule into background persistently so this doesn't get lost on restarts.
+            self.update_metadata(path, metadata).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Rewrites the object's metadata in place via a copy-with-REPLACE
+    /// request. Used to bump the custom-time header for TTI objects.
+    async fn update_metadata(&self, path: &str, metadata: &Metadata) -> Result<()> {
+        let protocol_prefix = self.protocol_prefix();
+        let copy_source_header = format!("{protocol_prefix}copy-source");
+        let metadata_directive_header = format!("{protocol_prefix}metadata-directive");
+        let copy_source = format!("/{}{}", self.bucket.name(), path);
+
+        let mut request = self
+            .bucket
+            .put_object_builder(path, &[])
+            .with_content_type(metadata.content_type.as_ref())
+            .with_header(&copy_source_header, copy_source)
+            .map_err(|e| map_s3_error(e, "S3: failed to set copy-source header"))?
+            .with_header(&metadata_directive_header, "REPLACE")
+            .map_err(|e| map_s3_error(e, "S3: failed to set metadata-directive header"))?;
+
+        if let Some(compression) = metadata.compression {
+            request = request
+                .with_content_encoding(compression.as_str())
+                .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
+        }
+
+        let headers = metadata
+            .to_headers(&self.metadata_prefix)
+            .map_err(Error::Metadata)?;
+        for (name, value) in &headers {
+            if name == header::CONTENT_TYPE || name == header::CONTENT_ENCODING {
+                continue;
+            }
+            let value_str = value.to_str().map_err(|e| Error::Generic {
+                context: format!("S3: non-ascii metadata header value for {name}"),
+                cause: Some(Box::new(e)),
+            })?;
+            request = request
+                .with_header(name.as_str(), value_str)
+                .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
+        }
+
+        if let Some(custom_time_header) = &self.custom_time_header
+            && let Some(expires_in) = metadata.expiration_policy.expires_in()
+        {
+            let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+            request = request
+                .with_header(custom_time_header, expires_at.to_string())
+                .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
+        }
+
+        request
+            .execute()
+            .await
+            .map_err(|e| map_s3_error(e, "S3: failed to update object metadata"))?;
+
+        Ok(())
     }
 
     /// Issues a HEAD request and returns the raw response headers.
@@ -291,6 +432,21 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
         }
 
+        if let Some(custom_time_header) = &self.custom_time_header
+            && let Some(expires_in) = metadata.expiration_policy.expires_in()
+        {
+            let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+            let name = reqwest::header::HeaderName::try_from(custom_time_header).map_err(|e| {
+                Error::Generic {
+                    context: format!("S3: invalid custom time header name: {custom_time_header:?}"),
+                    cause: Some(Box::new(e)),
+                }
+            })?;
+            request = request
+                .with_header(name, expires_at.to_string())
+                .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
+        }
+
         let mut reader = StreamReader::new(stream.map_err(io::Error::other));
 
         request
@@ -316,6 +472,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
+        self.bump_tti_if_needed(&path, &headers, &metadata).await?;
 
         let response = match self.bucket.get_object_stream(&path).await {
             Ok(response) => response,
@@ -339,10 +496,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         let Some(headers) = self.raw_head(&path).await? else {
             return Ok(None);
         };
-        Ok(Some(metadata_from_headers(
-            &headers,
-            &self.metadata_prefix,
-        )?))
+        let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
+        self.bump_tti_if_needed(&path, &headers, &metadata).await?;
+        Ok(Some(metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -387,6 +543,7 @@ mod tests {
             region: default_region(),
             use_path_style: default_use_path_style(),
             metadata_prefix: default_metadata_prefix(),
+            custom_time_header: default_custom_time_header(),
         })
         .unwrap()
     }
