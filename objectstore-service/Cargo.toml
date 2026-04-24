@@ -29,6 +29,7 @@ reqwest = { workspace = true, features = [
     "multipart",
     "json",
 ] }
+rust-s3 = { version = "0.37.1", default-features = false, features = ["tokio-native-tls", "fail-on-err"] }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

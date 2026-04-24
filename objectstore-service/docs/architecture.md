@@ -149,6 +149,11 @@ capabilities. For example, BigTable has built-in TTL via garbage collection
 policies, and GCS supports object lifecycle management. The service does not
 perform active garbage collection.
 
+Backends without native lifecycle support — currently the
+[filesystem](backend::local_fs) and [S3-compatible](backend::s3_compatible)
+backends — accept and persist expiration policies on objects but require an
+external cleanup job to actually remove expired data.
+
 # Backpressure
 
 The service applies backpressure to protect backends from overload. Rather than
