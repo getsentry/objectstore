@@ -110,27 +110,17 @@ pub struct S3CompatibleConfig {
     ///
     /// Defaults to `x-amz-meta-x-os-custom-time`, which results in the
     /// timestamp being stored as plain user metadata on any S3-compatible
-    /// backend. That preserves the TTI bump flow on deployments with no
-    /// native lifecycle mechanism (AWS S3 proper, MinIO) — the expiry is
-    /// persisted and observable, just not acted on by the storage layer.
-    ///
-    /// Override with `x-goog-custom-time` when pointing at the [GCS XML API]
-    /// with a `daysSinceCustomTime` lifecycle configured on the bucket, so
-    /// GCS itself garbage-collects expired objects. Set to `None` to skip
-    /// writing the header entirely.
+    /// backend.
     ///
     /// # Default
     ///
-    /// `Some("x-amz-meta-x-os-custom-time")`
+    /// `"x-amz-meta-x-os-custom-time"`
     ///
     /// # Environment Variables
     ///
     /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
-    ///
-    /// [`TimeToIdle`]: objectstore_types::metadata::ExpirationPolicy::TimeToIdle
-    /// [GCS XML API]: https://docs.cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime
     #[serde(default = "default_custom_time_header")]
-    pub custom_time_header: Option<String>,
+    pub custom_time_header: String,
 }
 
 fn default_region() -> String {
@@ -145,8 +135,8 @@ fn default_metadata_prefix() -> String {
     "x-amz-meta-".to_owned()
 }
 
-fn default_custom_time_header() -> Option<String> {
-    Some("x-amz-meta-x-os-custom-time".to_owned())
+fn default_custom_time_header() -> String {
+    "x-amz-meta-x-os-custom-time".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
