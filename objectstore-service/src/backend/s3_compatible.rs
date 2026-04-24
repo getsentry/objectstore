@@ -108,13 +108,13 @@ pub struct S3CompatibleConfig {
     /// timestamp (via copy-in-place with a metadata-directive REPLACE) when
     /// the recorded expiry is older than `now + tti - TTI_DEBOUNCE`.
     ///
-    /// Defaults to `x-amz-meta-x-os-custom-time`, which results in the
+    /// Defaults to `x-amz-meta-expiry`, which results in the
     /// timestamp being stored as plain user metadata on any S3-compatible
     /// backend.
     ///
     /// # Default
     ///
-    /// `"x-amz-meta-x-os-custom-time"`
+    /// `"x-amz-meta-expiry"`
     ///
     /// # Environment Variables
     ///
@@ -136,7 +136,7 @@ fn default_metadata_prefix() -> String {
 }
 
 fn default_custom_time_header() -> String {
-    "x-amz-meta-x-os-custom-time".to_owned()
+    "x-amz-meta-expiry".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -176,7 +176,7 @@ pub struct S3CompatibleBackend<T> {
     endpoint: String,
     token_provider: Option<T>,
     metadata_prefix: String,
-    custom_time_header: Option<String>,
+    custom_time_header: String,
 }
 
 impl<T> S3CompatibleBackend<T> {
@@ -239,9 +239,6 @@ impl<T> S3CompatibleBackend<T> {
         headers: &HeaderMap,
         metadata: &Metadata,
     ) -> Result<()> {
-        let Some(custom_time_header) = &self.custom_time_header else {
-            return Ok(());
-        };
         let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy else {
             return Ok(());
         };
@@ -250,7 +247,7 @@ impl<T> S3CompatibleBackend<T> {
         let access_time = SystemTime::now();
 
         let expire_at = headers
-            .get(custom_time_header.as_str())
+            .get(self.custom_time_header.as_str())
             .and_then(|v| v.to_str().ok())
             .and_then(|s| humantime::parse_rfc3339(s).ok())
             .unwrap_or(access_time);
@@ -302,12 +299,10 @@ impl<T> S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
         }
 
-        if let Some(custom_time_header) = &self.custom_time_header
-            && let Some(expires_in) = metadata.expiration_policy.expires_in()
-        {
+        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
             let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
             request = request
-                .with_header(custom_time_header, expires_at.to_string())
+                .with_header(self.custom_time_header.as_str(), expires_at.to_string())
                 .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
         }
 
@@ -428,16 +423,18 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
         }
 
-        if let Some(custom_time_header) = &self.custom_time_header
-            && let Some(expires_in) = metadata.expiration_policy.expires_in()
-        {
+        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
             let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
-            let name = reqwest::header::HeaderName::try_from(custom_time_header).map_err(|e| {
-                Error::Generic {
-                    context: format!("S3: invalid custom time header name: {custom_time_header:?}"),
-                    cause: Some(Box::new(e)),
-                }
-            })?;
+            let name =
+                reqwest::header::HeaderName::try_from(&self.custom_time_header).map_err(|e| {
+                    Error::Generic {
+                        context: format!(
+                            "S3: invalid custom time header name: {:?}",
+                            self.custom_time_header
+                        ),
+                        cause: Some(Box::new(e)),
+                    }
+                })?;
             request = request
                 .with_header(name, expires_at.to_string())
                 .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
