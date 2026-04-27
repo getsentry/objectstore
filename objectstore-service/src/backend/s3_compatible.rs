@@ -829,7 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
-        let backend = create_test_backend().await?;
+        let backend = create_test_backend();
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
