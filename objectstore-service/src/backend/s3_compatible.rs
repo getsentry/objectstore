@@ -41,6 +41,7 @@ use crate::stream::{self, ClientStream};
 ///   region: us-east-1
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
+///   protocol_prefix: x-amz-
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -105,9 +106,6 @@ pub struct S3CompatibleConfig {
 
     /// Protocol-level header prefix used for non-metadata request headers
     /// like `{prefix}copy-source` and `{prefix}metadata-directive`.
-    ///
-    /// Override alongside [`metadata_prefix`](Self::metadata_prefix) when
-    /// targeting GCS's XML API (`x-goog-`).
     ///
     /// # Default
     ///
@@ -272,7 +270,7 @@ impl<T> S3CompatibleBackend<T> {
     }
 
     /// Rewrites the object's metadata in place via a copy-with-REPLACE
-    /// request. Used to bump the custom-time header for TTI objects.
+    /// request. Used to bump the expiration time header for TTI objects.
     async fn update_metadata(&self, path: &str, metadata: &Metadata) -> Result<()> {
         let copy_source_header = format!("{}copy-source", self.protocol_prefix);
         let metadata_directive_header = format!("{}metadata-directive", self.protocol_prefix);
@@ -320,10 +318,8 @@ impl<T> S3CompatibleBackend<T> {
     /// Issues a HEAD request and returns the raw response headers.
     ///
     /// `Bucket::head_object` is not sufficient because it only surfaces
-    /// `x-amz-meta-*` keys — it drops any other metadata prefix (e.g.
-    /// `x-goog-meta-*`). We build a `ReqwestRequest` directly so we can
-    /// inspect the full `HeaderMap`.
-    async fn raw_head(&self, path: &str) -> Result<Option<HeaderMap>> {
+    /// `x-amz-meta-*` keys, which could be different from `self.metadata_prefix`.
+    async fn head_object(&self, path: &str) -> Result<Option<HeaderMap>> {
         let request = ReqwestRequest::new(&self.bucket, path, Command::HeadObject)
             .await
             .map_err(|e| map_s3_error(e, "S3: failed to build head request"))?;
@@ -437,7 +433,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Reading from s3_compatible backend");
         let path = self.object_path(id);
 
-        let Some(headers) = self.raw_head(&path).await? else {
+        let Some(headers) = self.head_object(&path).await? else {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
@@ -462,7 +458,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
         let path = self.object_path(id);
 
-        let Some(headers) = self.raw_head(&path).await? else {
+        let Some(headers) = self.head_object(&path).await? else {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
