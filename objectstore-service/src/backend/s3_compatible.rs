@@ -347,6 +347,9 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
         f.debug_struct("S3CompatibleBackend")
             .field("bucket", &self.bucket)
             .field("endpoint", &self.endpoint)
+            .field("metadata_prefix", &self.metadata_prefix)
+            .field("protocol_prefix", &self.protocol_prefix)
+            .field("custom_time_header", &self.custom_time_header)
             .finish_non_exhaustive()
     }
 }
