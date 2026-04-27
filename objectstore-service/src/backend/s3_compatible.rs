@@ -270,13 +270,18 @@ impl<T> S3CompatibleBackend<T> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
-        let expire_at = headers
+        let current_expiry = headers
             .get(self.custom_time_header.as_str())
             .and_then(|v| v.to_str().ok())
             .and_then(|s| humantime::parse_rfc3339(s).ok())
             .unwrap_or(access_time);
+        let new_expiry = access_time + tti;
 
-        if expire_at < access_time + tti - TTI_DEBOUNCE {
+        let bump_amount = new_expiry
+            .duration_since(current_expiry)
+            .unwrap_or_default();
+
+        if bump_amount > TTI_DEBOUNCE {
             // TODO: Schedule into background persistently so this doesn't get lost on restarts.
             self.update_metadata(path, metadata).await?;
         }
