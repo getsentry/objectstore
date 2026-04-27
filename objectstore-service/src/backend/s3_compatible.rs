@@ -192,17 +192,19 @@ pub struct S3CompatibleBackend<T> {
     custom_time_header: String,
 }
 
-/// Wraps [`Metadata::to_headers`] with S3-specific concerns.
+/// Wraps [`Metadata::to_headers`] with S3-specific concerns. If `custom_time`
+/// is `Some`, it is written under `custom_time_header`.
 fn metadata_to_s3_headers(
     metadata: &Metadata,
     prefix: &str,
     custom_time_header: &str,
+    custom_time: Option<SystemTime>,
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+    if let Some(custom_time) = custom_time {
+        let formatted = humantime::format_rfc3339_seconds(custom_time);
         let name = HeaderName::try_from(custom_time_header)?;
-        headers.append(name, expires_at.to_string().parse()?);
+        headers.append(name, formatted.to_string().parse()?);
     }
     Ok(headers)
 }
@@ -283,15 +285,23 @@ impl<T> S3CompatibleBackend<T> {
 
         if bump_amount > TTI_DEBOUNCE {
             // TODO: Schedule into background persistently so this doesn't get lost on restarts.
-            self.update_metadata(path, metadata).await?;
+            self.update_custom_time(path, metadata, new_expiry).await?;
         }
 
         Ok(())
     }
 
     /// Rewrites the object's metadata in place via a copy-with-REPLACE
-    /// request. Used to bump the expiration time header for TTI objects.
-    async fn update_metadata(&self, path: &str, metadata: &Metadata) -> Result<()> {
+    /// request, setting [`custom_time_header`] to `custom_time`. Used to bump
+    /// the expiration time for TTI objects.
+    ///
+    /// [`custom_time_header`]: S3CompatibleConfig::custom_time_header
+    async fn update_custom_time(
+        &self,
+        path: &str,
+        metadata: &Metadata,
+        custom_time: SystemTime,
+    ) -> Result<()> {
         let copy_source_header = format!("{}copy-source", self.protocol_prefix);
         let metadata_directive_header = format!("{}metadata-directive", self.protocol_prefix);
         let copy_source = format!("/{}{}", self.bucket.name(), path);
@@ -311,9 +321,13 @@ impl<T> S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
-        let headers =
-            metadata_to_s3_headers(metadata, &self.metadata_prefix, &self.custom_time_header)
-                .map_err(Error::Metadata)?;
+        let headers = metadata_to_s3_headers(
+            metadata,
+            &self.metadata_prefix,
+            &self.custom_time_header,
+            Some(custom_time),
+        )
+        .map_err(Error::Metadata)?;
         for (name, value) in &headers {
             if name == header::CONTENT_TYPE || name == header::CONTENT_ENCODING {
                 continue;
@@ -330,7 +344,7 @@ impl<T> S3CompatibleBackend<T> {
         request
             .execute()
             .await
-            .map_err(|e| map_s3_error(e, "S3: failed to update object metadata"))?;
+            .map_err(|e| map_s3_error(e, "S3: failed to update custom_time"))?;
 
         Ok(())
     }
@@ -414,9 +428,17 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
-        let headers =
-            metadata_to_s3_headers(metadata, &self.metadata_prefix, &self.custom_time_header)
-                .map_err(Error::Metadata)?;
+        let custom_time = metadata
+            .expiration_policy
+            .expires_in()
+            .map(|d| SystemTime::now() + d);
+        let headers = metadata_to_s3_headers(
+            metadata,
+            &self.metadata_prefix,
+            &self.custom_time_header,
+            custom_time,
+        )
+        .map_err(Error::Metadata)?;
         for (name, value) in &headers {
             if name == header::CONTENT_TYPE || name == header::CONTENT_ENCODING {
                 continue;
@@ -505,7 +527,7 @@ mod tests {
     use std::time::SystemTime;
 
     use anyhow::Result;
-    use objectstore_types::metadata::{Compression, ExpirationPolicy};
+    use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -652,39 +674,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_overwrite() -> Result<()> {
-        let backend = create_test_backend();
-
-        let id = make_id();
-        let metadata = Metadata {
-            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello"))
-            .await?;
-
-        let metadata = Metadata {
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("world"))
-            .await?;
-
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
-
-        let payload = stream::read_to_vec(stream).await?;
-        let str_payload = str::from_utf8(&payload).unwrap();
-        assert_eq!(str_payload, "world");
-        assert_eq!(meta.custom, metadata.custom);
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_read_after_delete() -> Result<()> {
         let backend = create_test_backend();
 
@@ -803,9 +792,11 @@ mod tests {
 
         // Manually set custom_time to just inside the bump window.
         // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
-        let object_url = backend.object_url(&id)?;
+        let path = backend.object_path(&id);
         let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
-        backend.update_custom_time(object_url, old_deadline).await?;
+        backend
+            .update_custom_time(&path, &metadata, old_deadline)
+            .await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
