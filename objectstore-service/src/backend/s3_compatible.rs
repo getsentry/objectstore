@@ -42,7 +42,6 @@ use crate::stream::{self, ClientStream};
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
 ///   protocol_prefix: x-amz-
-///   custom_time_header: x-amz-meta-expiry
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -118,17 +117,22 @@ pub struct S3CompatibleConfig {
     #[serde(default = "default_protocol_prefix")]
     pub protocol_prefix: String,
 
-    /// Header carrying the object's resolved expiration timestamp.
+    /// Optional extra header that mirrors the object's resolved expiration
+    /// timestamp, on top of the canonical `x-sn-time-expires`.
+    ///
+    /// Used to interoperate with S3-compatible backends that recognize a
+    /// dedicated header for object lifecycle (such as GCS, which uses
+    /// `x-goog-custom-time`). Leave unset for plain S3.
     ///
     /// # Default
     ///
-    /// `"x-amz-meta-expiry"`
+    /// `None`
     ///
     /// # Environment Variables
     ///
     /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
-    #[serde(default = "default_custom_time_header")]
-    pub custom_time_header: String,
+    #[serde(default)]
+    pub custom_time_header: Option<String>,
 }
 
 fn default_region() -> String {
@@ -145,10 +149,6 @@ fn default_metadata_prefix() -> String {
 
 fn default_protocol_prefix() -> String {
     "x-amz-".to_owned()
-}
-
-fn default_custom_time_header() -> String {
-    "x-amz-meta-expiry".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -189,21 +189,20 @@ pub struct S3CompatibleBackend<T> {
     token_provider: Option<T>,
     metadata_prefix: String,
     protocol_prefix: String,
-    custom_time_header: String,
+    custom_time_header: Option<String>,
 }
 
-/// Wraps [`Metadata::to_headers`] with S3-specific concerns. If `custom_time`
-/// is `Some`, it is written under `custom_time_header`.
+/// Wraps [`Metadata::to_headers`], additionally echoing `time_expires` under
+/// `custom_time_header` when both are set.
 fn metadata_to_s3_headers(
     metadata: &Metadata,
     prefix: &str,
-    custom_time_header: &str,
-    custom_time: Option<SystemTime>,
+    custom_time_header: Option<&str>,
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
-    if let Some(custom_time) = custom_time {
-        let formatted = humantime::format_rfc3339_seconds(custom_time);
-        let name = HeaderName::try_from(custom_time_header)?;
+    if let (Some(name), Some(time)) = (custom_time_header, metadata.time_expires) {
+        let formatted = humantime::format_rfc3339_seconds(time);
+        let name = HeaderName::try_from(name)?;
         headers.append(name, formatted.to_string().parse()?);
     }
     Ok(headers)
@@ -252,19 +251,12 @@ impl<T> S3CompatibleBackend<T> {
         format!("/{}", id.as_storage_path())
     }
 
-    /// If `metadata` has a [`TimeToIdle`] policy and a
-    /// [`custom_time_header`] is configured, bumps the recorded expiry via a
-    /// metadata-only copy-in-place when it would otherwise fall outside the
-    /// 1-day debounce window.
+    /// If `metadata` has a [`TimeToIdle`] policy, bumps the recorded expiry
+    /// via a metadata-only copy-in-place when it would otherwise fall outside
+    /// the 1-day debounce window.
     ///
     /// [`TimeToIdle`]: objectstore_types::metadata::ExpirationPolicy::TimeToIdle
-    /// [`custom_time_header`]: S3CompatibleConfig::custom_time_header
-    async fn bump_tti_if_needed(
-        &self,
-        path: &str,
-        headers: &HeaderMap,
-        metadata: &Metadata,
-    ) -> Result<()> {
+    async fn bump_tti_if_needed(&self, path: &str, metadata: &Metadata) -> Result<()> {
         let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy else {
             return Ok(());
         };
@@ -272,11 +264,7 @@ impl<T> S3CompatibleBackend<T> {
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
-        let current_expiry = headers
-            .get(self.custom_time_header.as_str())
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| humantime::parse_rfc3339(s).ok())
-            .unwrap_or(access_time);
+        let current_expiry = metadata.time_expires.unwrap_or(access_time);
         let new_expiry = access_time + tti;
 
         let bump_amount = new_expiry
@@ -292,8 +280,9 @@ impl<T> S3CompatibleBackend<T> {
     }
 
     /// Rewrites the object's metadata in place via a copy-with-REPLACE
-    /// request, setting [`custom_time_header`] to `custom_time`. Used to bump
-    /// the expiration time for TTI objects.
+    /// request, setting `time_expires` (and the configured
+    /// [`custom_time_header`], if any) to `custom_time`. Used to bump the
+    /// expiration time for TTI objects.
     ///
     /// [`custom_time_header`]: S3CompatibleConfig::custom_time_header
     async fn update_custom_time(
@@ -321,11 +310,12 @@ impl<T> S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
+        let mut metadata = metadata.clone();
+        metadata.time_expires = Some(custom_time);
         let headers = metadata_to_s3_headers(
-            metadata,
+            &metadata,
             &self.metadata_prefix,
-            &self.custom_time_header,
-            Some(custom_time),
+            self.custom_time_header.as_deref(),
         )
         .map_err(Error::Metadata)?;
         for (name, value) in &headers {
@@ -428,15 +418,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
-        let custom_time = metadata
-            .expiration_policy
-            .expires_in()
-            .map(|d| SystemTime::now() + d);
+        let mut metadata = metadata.clone();
+        if let Some(d) = metadata.expiration_policy.expires_in() {
+            metadata.time_expires = Some(SystemTime::now() + d);
+        }
         let headers = metadata_to_s3_headers(
-            metadata,
+            &metadata,
             &self.metadata_prefix,
-            &self.custom_time_header,
-            custom_time,
+            self.custom_time_header.as_deref(),
         )
         .map_err(Error::Metadata)?;
         for (name, value) in &headers {
@@ -476,7 +465,17 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
-        self.bump_tti_if_needed(&path, &headers, &metadata).await?;
+
+        // Filter already expired objects but leave them to garbage collection.
+        let access_time = SystemTime::now();
+        if metadata.expiration_policy.is_timeout()
+            && metadata.time_expires.is_some_and(|ts| ts < access_time)
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        self.bump_tti_if_needed(&path, &metadata).await?;
 
         let response = match self.bucket.get_object_stream(&path).await {
             Ok(response) => response,
@@ -501,7 +500,17 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
-        self.bump_tti_if_needed(&path, &headers, &metadata).await?;
+
+        // Filter already expired objects but leave them to garbage collection.
+        let access_time = SystemTime::now();
+        if metadata.expiration_policy.is_timeout()
+            && metadata.time_expires.is_some_and(|ts| ts < access_time)
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        self.bump_tti_if_needed(&path, &metadata).await?;
         Ok(Some(metadata))
     }
 
@@ -548,7 +557,7 @@ mod tests {
             use_path_style: default_use_path_style(),
             metadata_prefix: default_metadata_prefix(),
             protocol_prefix: default_protocol_prefix(),
-            custom_time_header: default_custom_time_header(),
+            custom_time_header: None,
         })
         .unwrap()
     }
