@@ -390,7 +390,7 @@ fn is_not_found(error: &S3Error) -> bool {
 #[async_trait::async_trait]
 impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     fn name(&self) -> &'static str {
-        "s3-compatible"
+        "s3_compatible"
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
