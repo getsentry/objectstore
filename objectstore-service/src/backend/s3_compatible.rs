@@ -414,11 +414,6 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
-        // All non-standard fields are emitted with the configured metadata
-        // prefix (e.g. `x-amz-meta-` or `x-goog-meta-`) via `with_header`.
-        // `with_metadata` is not used here because it hardcodes the S3
-        // prefix. Standard headers (Content-Type, Content-Encoding) are
-        // handled above.
         let headers =
             metadata_to_s3_headers(metadata, &self.metadata_prefix, &self.custom_time_header)
                 .map_err(Error::Metadata)?;
@@ -431,12 +426,11 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 cause: Some(Box::new(e)),
             })?;
             request = request
-                .with_header(name.clone(), value_str)
+                .with_header(name, value_str)
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
         }
 
         let mut reader = StreamReader::new(stream.map_err(io::Error::other));
-
         request
             .execute_stream(&mut reader)
             .await
@@ -572,6 +566,7 @@ mod tests {
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.origin, metadata.origin);
         assert_eq!(meta.custom, metadata.custom);
+        assert!(metadata.time_created.is_some());
 
         Ok(())
     }
@@ -631,6 +626,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_streaming_upload() -> Result<()> {
+        let backend = create_test_backend();
+
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        // rust-s3 dispatches to multipart uploads when the stream exceeds the
+        // 8 MiB chunk size. Use 20 MiB to ensure multiple parts are uploaded.
+        let chunk = bytes::Bytes::from(vec![0xab; 1024 * 1024]); // 1 MiB
+        let stream =
+            futures_util::stream::iter(std::iter::repeat_with(move || Ok(chunk.clone())).take(20))
+                .boxed();
+
+        backend.put_object(&id, &metadata, stream).await?;
+
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+
+        assert_eq!(payload.len(), 20 * 1024 * 1024);
+        assert!(payload.iter().all(|&b| b == 0xab));
+        assert_eq!(meta.size, Some(20 * 1024 * 1024));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() -> Result<()> {
+        let backend = create_test_backend();
+
+        let id = make_id();
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello"))
+            .await?;
+
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("world"))
+            .await?;
+
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+
+        let payload = stream::read_to_vec(stream).await?;
+        let str_payload = str::from_utf8(&payload).unwrap();
+        assert_eq!(str_payload, "world");
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_read_after_delete() -> Result<()> {
         let backend = create_test_backend();
 
@@ -642,6 +696,52 @@ mod tests {
             .await?;
 
         backend.delete_object(&id).await?;
+
+        let result = backend.get_object(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ttl_immediate() -> Result<()> {
+        // NB: We create a TTL that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend();
+
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        let result = backend.get_object(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_immediate() -> Result<()> {
+        // NB: We create a TTI that immediately expires in this tests. This might be optimized away
+        // in a future implementation, so we will have to update this test accordingly.
+
+        let backend = create_test_backend();
+
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
 
         let result = backend.get_object(&id).await?;
         assert!(result.is_none());
@@ -685,7 +785,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_metadata_bumps_tti() -> Result<()> {
+        let backend = create_test_backend();
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        // Manually set custom_time to just inside the bump window.
+        // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
+        let object_url = backend.object_url(&id)?;
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        backend.update_custom_time(object_url, old_deadline).await?;
+
+        // First get_metadata sees the old timestamp and triggers a TTI bump.
+        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+
+        // Second get_metadata sees the bumped timestamp.
+        let post_meta = backend.get_metadata(&id).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
+        );
+
+        // Verify the payload is still intact after the bump.
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+        assert_eq!(&payload, b"hello, world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        // A freshly written object has time_expires ≈ now + 2d, which is well outside
+        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
+        let first = backend.get_metadata(&id).await?.unwrap();
+        let first_expiry = first.time_expires.unwrap();
+
+        let second = backend.get_metadata(&id).await?.unwrap();
+        let second_expiry = second.time_expires.unwrap();
+
+        assert_eq!(
+            first_expiry, second_expiry,
+            "Fresh TTI object should not have its expiry bumped"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_compressed_payload_roundtrip() -> Result<()> {
+        use objectstore_types::metadata::Compression;
+
         let backend = create_test_backend();
 
         let plaintext = b"hello, world (but compressed with zstd)";
@@ -710,32 +888,6 @@ mod tests {
             payload, compressed,
             "Payload should be returned still compressed, not auto-decompressed"
         );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_streaming_multipart_upload() -> Result<()> {
-        // rust-s3 dispatches to multipart uploads when the stream exceeds the
-        // 8 MiB chunk size. Use 20 MiB to ensure multiple parts are uploaded.
-        let backend = create_test_backend();
-
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let chunk = bytes::Bytes::from(vec![0xab; 1024 * 1024]); // 1 MiB
-        let stream =
-            futures_util::stream::iter(std::iter::repeat_with(move || Ok(chunk.clone())).take(20))
-                .boxed();
-
-        backend.put_object(&id, &metadata, stream).await?;
-
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-
-        assert_eq!(payload.len(), 20 * 1024 * 1024);
-        assert!(payload.iter().all(|&b| b == 0xab));
-        assert_eq!(meta.size, Some(20 * 1024 * 1024));
 
         Ok(())
     }
