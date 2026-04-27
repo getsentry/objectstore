@@ -102,6 +102,22 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__METADATA_PREFIX=x-goog-meta-`
     #[serde(default = "default_metadata_prefix")]
     pub metadata_prefix: String,
+
+    /// Protocol-level header prefix used for non-metadata request headers
+    /// like `{prefix}copy-source` and `{prefix}metadata-directive`.
+    ///
+    /// Override alongside [`metadata_prefix`](Self::metadata_prefix) when
+    /// targeting GCS's XML API (`x-goog-`).
+    ///
+    /// # Default
+    ///
+    /// `"x-amz-"`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__PROTOCOL_PREFIX=x-goog-`
+    #[serde(default = "default_protocol_prefix")]
+    pub protocol_prefix: String,
 }
 
 fn default_region() -> String {
@@ -114,6 +130,10 @@ fn default_use_path_style() -> bool {
 
 fn default_metadata_prefix() -> String {
     "x-amz-meta-".to_owned()
+}
+
+fn default_protocol_prefix() -> String {
+    "x-amz-".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -153,6 +173,7 @@ pub struct S3CompatibleBackend<T> {
     endpoint: String,
     token_provider: Option<T>,
     metadata_prefix: String,
+    protocol_prefix: String,
     custom_time_header: String,
 }
 
@@ -206,6 +227,7 @@ impl<T> S3CompatibleBackend<T> {
             bucket,
             endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
+            protocol_prefix: config.protocol_prefix,
             custom_time_header,
             token_provider: None,
         })
@@ -213,19 +235,6 @@ impl<T> S3CompatibleBackend<T> {
 
     fn object_path(&self, id: &ObjectId) -> String {
         format!("/{}", id.as_storage_path())
-    }
-
-    /// Protocol-level header prefix corresponding to [`metadata_prefix`].
-    ///
-    /// Strips the trailing `meta-` suffix: `x-amz-meta-` → `x-amz-`,
-    /// `x-goog-meta-` → `x-goog-`. Used to build request-level headers like
-    /// `{prefix}copy-source` and `{prefix}metadata-directive`.
-    ///
-    /// [`metadata_prefix`]: S3CompatibleConfig::metadata_prefix
-    fn protocol_prefix(&self) -> &str {
-        self.metadata_prefix
-            .strip_suffix("meta-")
-            .unwrap_or(&self.metadata_prefix)
     }
 
     /// If `metadata` has a [`TimeToIdle`] policy and a
@@ -265,9 +274,8 @@ impl<T> S3CompatibleBackend<T> {
     /// Rewrites the object's metadata in place via a copy-with-REPLACE
     /// request. Used to bump the custom-time header for TTI objects.
     async fn update_metadata(&self, path: &str, metadata: &Metadata) -> Result<()> {
-        let protocol_prefix = self.protocol_prefix();
-        let copy_source_header = format!("{protocol_prefix}copy-source");
-        let metadata_directive_header = format!("{protocol_prefix}metadata-directive");
+        let copy_source_header = format!("{}copy-source", self.protocol_prefix);
+        let metadata_directive_header = format!("{}metadata-directive", self.protocol_prefix);
         let copy_source = format!("/{}{}", self.bucket.name(), path);
 
         let mut request = self
@@ -504,6 +512,7 @@ mod tests {
             region: default_region(),
             use_path_style: default_use_path_style(),
             metadata_prefix: default_metadata_prefix(),
+            protocol_prefix: default_protocol_prefix(),
         })
         .unwrap()
     }
