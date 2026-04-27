@@ -339,6 +339,29 @@ impl<T> S3CompatibleBackend<T> {
         Ok(())
     }
 
+    /// HEADs an object, filters expired entries, and bumps TTI.
+    ///
+    /// Returns `None` if the object is absent or past its expiry.
+    async fn fetch_live_metadata(&self, path: &str) -> Result<Option<Metadata>> {
+        let Some(headers) = self.head_object(path).await? else {
+            return Ok(None);
+        };
+        let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
+
+        // Filter already expired objects but leave them to garbage collection.
+        if metadata.expiration_policy.is_timeout()
+            && metadata
+                .time_expires
+                .is_some_and(|ts| ts < SystemTime::now())
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        self.bump_tti_if_needed(path, &metadata).await?;
+        Ok(Some(metadata))
+    }
+
     /// Issues a HEAD request and returns the raw response headers.
     ///
     /// `Bucket::head_object` is not sufficient because it only surfaces
@@ -461,21 +484,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Reading from s3_compatible backend");
         let path = self.object_path(id);
 
-        let Some(headers) = self.head_object(&path).await? else {
+        let Some(metadata) = self.fetch_live_metadata(&path).await? else {
             return Ok(None);
         };
-        let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
-
-        // Filter already expired objects but leave them to garbage collection.
-        let access_time = SystemTime::now();
-        if metadata.expiration_policy.is_timeout()
-            && metadata.time_expires.is_some_and(|ts| ts < access_time)
-        {
-            objectstore_log::debug!("Object found but past expiry");
-            return Ok(None);
-        }
-
-        self.bump_tti_if_needed(&path, &metadata).await?;
 
         let response = match self.bucket.get_object_stream(&path).await {
             Ok(response) => response,
@@ -495,23 +506,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
         let path = self.object_path(id);
-
-        let Some(headers) = self.head_object(&path).await? else {
-            return Ok(None);
-        };
-        let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
-
-        // Filter already expired objects but leave them to garbage collection.
-        let access_time = SystemTime::now();
-        if metadata.expiration_policy.is_timeout()
-            && metadata.time_expires.is_some_and(|ts| ts < access_time)
-        {
-            objectstore_log::debug!("Object found but past expiry");
-            return Ok(None);
-        }
-
-        self.bump_tti_if_needed(&path, &metadata).await?;
-        Ok(Some(metadata))
+        self.fetch_live_metadata(&path).await
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
