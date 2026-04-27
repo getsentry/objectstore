@@ -13,6 +13,7 @@ use s3::error::S3Error;
 use s3::region::Region;
 use s3::request::Request as _;
 use s3::request::tokio_backend::ReqwestRequest;
+use serde::{Deserialize, Serialize};
 use tokio_util::io::StreamReader;
 
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
@@ -39,8 +40,10 @@ use crate::stream::{self, ClientStream};
 ///   bucket: my-bucket
 ///   region: us-east-1
 ///   use_path_style: false
+///   metadata_prefix: x-amz-meta-
+///   custom_time_header: x-amz-meta-expiry
 /// ```
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
     /// S3 endpoint URL.
     ///
