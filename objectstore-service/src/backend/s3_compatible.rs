@@ -5,7 +5,7 @@ use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
-use reqwest::header::{self, HeaderMap};
+use reqwest::header::{self, HeaderMap, HeaderName};
 use s3::Bucket;
 use s3::command::Command;
 use s3::creds::Credentials;
@@ -286,9 +286,9 @@ impl<T> S3CompatibleBackend<T> {
                 .map_err(|e| map_s3_error(e, "S3: failed to set content-encoding"))?;
         }
 
-        let headers = metadata
-            .to_headers(&self.metadata_prefix)
-            .map_err(Error::Metadata)?;
+        let headers =
+            metadata_to_s3_headers(metadata, &self.metadata_prefix, &self.custom_time_header)
+                .map_err(Error::Metadata)?;
         for (name, value) in &headers {
             if name == header::CONTENT_TYPE || name == header::CONTENT_ENCODING {
                 continue;
@@ -300,13 +300,6 @@ impl<T> S3CompatibleBackend<T> {
             request = request
                 .with_header(name.as_str(), value_str)
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
-        }
-
-        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-            let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
-            request = request
-                .with_header(self.custom_time_header.as_str(), expires_at.to_string())
-                .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
         }
 
         request
@@ -373,6 +366,23 @@ fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> 
     Ok(metadata)
 }
 
+/// Wraps [`Metadata::to_headers`] with S3-specific concerns: appends the
+/// `custom_time_header` carrying the resolved expiration timestamp when the
+/// object has a TTL or TTI policy.
+fn metadata_to_s3_headers(
+    metadata: &Metadata,
+    prefix: &str,
+    custom_time_header: &str,
+) -> Result<HeaderMap, objectstore_types::metadata::Error> {
+    let mut headers = metadata.to_headers(prefix)?;
+    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
+        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+        let name = HeaderName::try_from(custom_time_header)?;
+        headers.append(name, expires_at.to_string().parse()?);
+    }
+    Ok(headers)
+}
+
 /// Returns `true` if `error` is an HTTP 404 from rust-s3.
 fn is_not_found(error: &S3Error) -> bool {
     matches!(error, S3Error::HttpFailWithBody(404, _))
@@ -410,9 +420,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         // `with_metadata` is not used here because it hardcodes the S3
         // prefix. Standard headers (Content-Type, Content-Encoding) are
         // handled above.
-        let headers = metadata
-            .to_headers(&self.metadata_prefix)
-            .map_err(Error::Metadata)?;
+        let headers =
+            metadata_to_s3_headers(metadata, &self.metadata_prefix, &self.custom_time_header)
+                .map_err(Error::Metadata)?;
         for (name, value) in &headers {
             if name == header::CONTENT_TYPE || name == header::CONTENT_ENCODING {
                 continue;
@@ -424,23 +434,6 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             request = request
                 .with_header(name.clone(), value_str)
                 .map_err(|e| map_s3_error(e, "S3: failed to set object metadata"))?;
-        }
-
-        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-            let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
-            let name =
-                reqwest::header::HeaderName::try_from(&self.custom_time_header).map_err(|e| {
-                    Error::Generic {
-                        context: format!(
-                            "S3: invalid custom time header name: {:?}",
-                            self.custom_time_header
-                        ),
-                        cause: Some(Box::new(e)),
-                    }
-                })?;
-            request = request
-                .with_header(name, expires_at.to_string())
-                .map_err(|e| map_s3_error(e, "S3: failed to set custom time header"))?;
         }
 
         let mut reader = StreamReader::new(stream.map_err(io::Error::other));
