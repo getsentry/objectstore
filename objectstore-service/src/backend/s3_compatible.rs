@@ -41,7 +41,6 @@ use crate::stream::{self, ClientStream};
 ///   region: us-east-1
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
-///   custom_time_header: x-amz-meta-expiry
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -103,27 +102,6 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__METADATA_PREFIX=x-goog-meta-`
     #[serde(default = "default_metadata_prefix")]
     pub metadata_prefix: String,
-
-    /// Header used to store the object's expiration timestamp.
-    ///
-    /// When set, the backend writes the resolved expiration time to this
-    /// header on PUT, and on reads with a [`TimeToIdle`] policy it bumps the
-    /// timestamp (via copy-in-place with a metadata-directive REPLACE) when
-    /// the recorded expiry is older than `now + tti - TTI_DEBOUNCE`.
-    ///
-    /// Defaults to `x-amz-meta-expiry`, which results in the
-    /// timestamp being stored as plain user metadata on any S3-compatible
-    /// backend.
-    ///
-    /// # Default
-    ///
-    /// `"x-amz-meta-expiry"`
-    ///
-    /// # Environment Variables
-    ///
-    /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
-    #[serde(default = "default_custom_time_header")]
-    pub custom_time_header: String,
 }
 
 fn default_region() -> String {
@@ -136,10 +114,6 @@ fn default_use_path_style() -> bool {
 
 fn default_metadata_prefix() -> String {
     "x-amz-meta-".to_owned()
-}
-
-fn default_custom_time_header() -> String {
-    "x-amz-meta-expiry".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -182,6 +156,29 @@ pub struct S3CompatibleBackend<T> {
     custom_time_header: String,
 }
 
+/// Wraps [`Metadata::to_headers`] with S3-specific concerns.
+fn metadata_to_s3_headers(
+    metadata: &Metadata,
+    prefix: &str,
+    custom_time_header: &str,
+) -> Result<HeaderMap, objectstore_types::metadata::Error> {
+    let mut headers = metadata.to_headers(prefix)?;
+    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
+        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+        let name = HeaderName::try_from(custom_time_header)?;
+        headers.append(name, expires_at.to_string().parse()?);
+    }
+    Ok(headers)
+}
+
+fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> {
+    let mut metadata = Metadata::from_headers(headers, prefix)?;
+    metadata.size = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<usize>().ok());
+    Ok(metadata)
+}
+
 impl<T> S3CompatibleBackend<T> {
     /// Creates a new S3-compatible backend bound to the given config and token provider.
     pub fn new(config: S3CompatibleConfig, token_provider: T) -> anyhow::Result<Self> {
@@ -203,11 +200,13 @@ impl<T> S3CompatibleBackend<T> {
             bucket.set_path_style();
         }
 
+        let custom_time_header = format!("{}expiry", config.metadata_prefix);
+
         Ok(Self {
             bucket,
             endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
-            custom_time_header: config.custom_time_header,
+            custom_time_header,
             token_provider: None,
         })
     }
@@ -354,33 +353,6 @@ fn map_s3_error(error: S3Error, context: &str) -> Error {
         context: context.to_owned(),
         cause: Some(Box::new(error)),
     }
-}
-
-/// Parses a response [`HeaderMap`] into our [`Metadata`], delegating the
-/// prefix-stripping logic to [`Metadata::from_headers`].
-fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> {
-    let mut metadata = Metadata::from_headers(headers, prefix)?;
-    metadata.size = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<usize>().ok());
-    Ok(metadata)
-}
-
-/// Wraps [`Metadata::to_headers`] with S3-specific concerns: appends the
-/// `custom_time_header` carrying the resolved expiration timestamp when the
-/// object has a TTL or TTI policy.
-fn metadata_to_s3_headers(
-    metadata: &Metadata,
-    prefix: &str,
-    custom_time_header: &str,
-) -> Result<HeaderMap, objectstore_types::metadata::Error> {
-    let mut headers = metadata.to_headers(prefix)?;
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
-        let name = HeaderName::try_from(custom_time_header)?;
-        headers.append(name, expires_at.to_string().parse()?);
-    }
-    Ok(headers)
 }
 
 /// Returns `true` if `error` is an HTTP 404 from rust-s3.
@@ -532,7 +504,6 @@ mod tests {
             region: default_region(),
             use_path_style: default_use_path_style(),
             metadata_prefix: default_metadata_prefix(),
-            custom_time_header: default_custom_time_header(),
         })
         .unwrap()
     }
