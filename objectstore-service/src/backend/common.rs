@@ -8,6 +8,10 @@ use bytes::Bytes;
 
 use crate::error::Result;
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -58,6 +62,52 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// (such as [`TieredStorage`](super::tiered::TieredStorage)) should override this
     /// to wait for those tasks to complete.
     async fn join(&self) {}
+}
+
+/// Trait for backends that support our S3-style multipart upload protocol.
+#[async_trait::async_trait]
+pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
+    /// Initiates a new multipart upload at `id` with the given metadata.
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse>;
+
+    /// Uploads a single part of the upload identified by `(id, upload_id)`.
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse>;
+
+    /// Lists the parts uploaded so far for `(id, upload_id)`.
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse>;
+
+    /// Aborts the upload identified by `(id, upload_id)`.
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse>;
+
+    /// Finalizes the upload identified by `(id, upload_id)` with the given
+    /// ordered list of parts.
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse>;
 }
 
 /// Trait for backends that support tombstone-conditional operations.
