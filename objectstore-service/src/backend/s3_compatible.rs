@@ -42,6 +42,7 @@ use crate::stream::{self, ClientStream};
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
 ///   protocol_prefix: x-amz-
+///   custom_time_header: x-amz-meta-expiry
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -116,6 +117,18 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__PROTOCOL_PREFIX=x-goog-`
     #[serde(default = "default_protocol_prefix")]
     pub protocol_prefix: String,
+
+    /// Header carrying the object's resolved expiration timestamp.
+    ///
+    /// # Default
+    ///
+    /// `"x-amz-meta-expiry"`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
+    #[serde(default = "default_custom_time_header")]
+    pub custom_time_header: String,
 }
 
 fn default_region() -> String {
@@ -132,6 +145,10 @@ fn default_metadata_prefix() -> String {
 
 fn default_protocol_prefix() -> String {
     "x-amz-".to_owned()
+}
+
+fn default_custom_time_header() -> String {
+    "x-amz-meta-expiry".to_owned()
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -201,12 +218,12 @@ fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> 
 impl<T> S3CompatibleBackend<T> {
     /// Creates a new S3-compatible backend bound to the given config and token provider.
     pub fn new(config: S3CompatibleConfig, token_provider: T) -> anyhow::Result<Self> {
-        let mut this = Self::build(config)?;
+        let mut this = Self::from_config(config)?;
         this.token_provider = Some(token_provider);
         Ok(this)
     }
 
-    fn build(config: S3CompatibleConfig) -> anyhow::Result<Self> {
+    fn from_config(config: S3CompatibleConfig) -> anyhow::Result<Self> {
         let credentials = Credentials::default().or_else(|_| Credentials::anonymous())?;
 
         let region = Region::Custom {
@@ -219,14 +236,12 @@ impl<T> S3CompatibleBackend<T> {
             bucket.set_path_style();
         }
 
-        let custom_time_header = format!("{}expiry", config.metadata_prefix);
-
         Ok(Self {
             bucket,
             endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
             protocol_prefix: config.protocol_prefix,
-            custom_time_header,
+            custom_time_header: config.custom_time_header,
             token_provider: None,
         })
     }
@@ -338,7 +353,7 @@ impl<T> S3CompatibleBackend<T> {
 impl S3CompatibleBackend<NoToken> {
     /// Creates a new S3-compatible backend that sends unauthenticated requests.
     pub fn without_token(config: S3CompatibleConfig) -> anyhow::Result<Self> {
-        Self::build(config)
+        Self::from_config(config)
     }
 }
 
@@ -512,6 +527,7 @@ mod tests {
             use_path_style: default_use_path_style(),
             metadata_prefix: default_metadata_prefix(),
             protocol_prefix: default_protocol_prefix(),
+            custom_time_header: default_custom_time_header(),
         })
         .unwrap()
     }
