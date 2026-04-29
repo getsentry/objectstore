@@ -119,6 +119,64 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --all-features
 
+  codecov:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Start Bigtable Emulator
+        run: |
+          docker run -d \
+            --name bigtable-emulator \
+            -p 8086:8086 \
+            -e BIGTABLE_EMULATOR_HOST=localhost:8086 \
+            -v $PWD/devservices/run-bigtable.sh:/run-bigtable.sh \
+            google/cloud-sdk \
+            /run-bigtable.sh
+
+      - name: Start GCS Emulator
+        run: |
+          docker run -d \
+            --name gcs-emulator \
+            -p 8087:9000 \
+            -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
+            gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+
+      - name: Start MinIO
+        run: |
+          docker run -d \
+            --name minio \
+            -p 8089:9000 \
+            --entrypoint /run-minio.sh \
+            -v $PWD/devservices/run-minio.sh:/run-minio.sh \
+            minio/minio
+
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup component add llvm-tools-preview
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: ${{ github.job }}
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info --locked
+
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   test-python:
     name: Test Python
     runs-on: ubuntu-latest
