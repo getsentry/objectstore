@@ -119,8 +119,8 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --all-features
 
-  codecov:
-    name: Code Coverage
+  coverage:
+    name: Test Coverage
     runs-on: ubuntu-latest
 
     steps:
