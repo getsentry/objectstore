@@ -103,14 +103,11 @@ jobs:
 
       - &assemble
         name: Push to GitHub Container Registry
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-          GITHUB_REF: ${{ github.ref }}
         run: |
           for PLATFORM in amd64 arm64; do
             docker load --input /tmp/objectstore-$PLATFORM.tar
-            docker tag $PLATFORM $REGISTRY:"$GITHUB_SHA"-$PLATFORM
-            docker push $REGISTRY:"$GITHUB_SHA"-$PLATFORM
+            docker tag $PLATFORM "$REGISTRY:$GITHUB_SHA-$PLATFORM"
+            docker push "$REGISTRY:$GITHUB_SHA-$PLATFORM"
           done
 
           # Push nightly on main branch - releases are tagged by craft.
@@ -120,10 +117,10 @@ jobs:
           fi
 
           for TAG in $TAGS; do
-            docker manifest create $REGISTRY:$TAG \
-              --amend $REGISTRY:"$GITHUB_SHA"-amd64 \
-              --amend $REGISTRY:"$GITHUB_SHA"-arm64
-            docker manifest push $REGISTRY:$TAG
+            docker manifest create "$REGISTRY:$TAG" \
+              --amend "$REGISTRY:$GITHUB_SHA-amd64" \
+              --amend "$REGISTRY:$GITHUB_SHA-arm64"
+            docker manifest push "$REGISTRY:$TAG"
           done
 
   assemble-gcr:
@@ -193,8 +190,6 @@ jobs:
           path: /tmp
 
       - name: Extract and upload artifacts
-        env:
-          GITHUB_SHA: ${{ github.sha }}
         run: |
           docker load --input /tmp/objectstore-amd64.tar
           docker run --rm amd64 version > /tmp/release-name
