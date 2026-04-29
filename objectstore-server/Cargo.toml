@@ -39,7 +39,7 @@ sentry = { workspace = true, features = [
     "tracing",
     "logs",
 ] }
-secrecy = { version = "0.10.3", features = ["serde"] }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

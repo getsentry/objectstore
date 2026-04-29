@@ -1,7 +1,7 @@
 //! Backend that can be used with any S3-compatible object store (Amazon S3, MinIO, R2, etc.).
 
+use std::io;
 use std::time::{Duration, SystemTime};
-use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
@@ -13,23 +13,23 @@ use s3::error::S3Error;
 use s3::region::Region;
 use s3::request::Request as _;
 use s3::request::tokio_backend::ReqwestRequest;
+use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::StreamReader;
 
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::secret::ConfigSecret;
 use crate::stream::{self, ClientStream};
 
 /// Configuration for [`S3CompatibleBackend`].
 ///
-/// Supports [Amazon S3] and other S3-compatible services such as MinIO. AWS
-/// credentials are resolved via the standard [SDK chain] (env vars, profile,
-/// STS web identity, ECS container, EC2 IMDS); if no credentials can be
-/// resolved, the backend falls back to anonymous (unauthenticated) requests.
+/// Supports [Amazon S3] and other S3-compatible services such as MinIO.
+/// Authentication uses static SigV4 credentials ([`access_key_id`](Self::access_key_id)
+/// and [`secret_access_key`](Self::secret_access_key)).
 ///
 /// [Amazon S3]: https://aws.amazon.com/s3/
-/// [SDK chain]: https://docs.rs/aws-creds/0.39.1/aws_creds/credentials/struct.Credentials.html
 ///
 /// # Example
 ///
@@ -42,6 +42,8 @@ use crate::stream::{self, ClientStream};
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
 ///   protocol_prefix: x-amz-
+///   access_key_id: AKIAIOSFODNN7EXAMPLE
+///   secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -133,6 +135,20 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
     #[serde(default)]
     pub custom_time_header: Option<String>,
+
+    /// AWS access key ID (or equivalent for S3-compatible services).
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__ACCESS_KEY_ID=…`
+    pub access_key_id: String,
+
+    /// AWS secret access key (or equivalent for S3-compatible services).
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__SECRET_ACCESS_KEY=…`
+    pub secret_access_key: SecretBox<ConfigSecret>,
 }
 
 fn default_region() -> String {
@@ -154,39 +170,10 @@ fn default_protocol_prefix() -> String {
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
-/// An authentication token that can be passed as a bearer credential.
-pub trait Token: Send + Sync {
-    /// Returns the token string.
-    fn as_str(&self) -> &str;
-}
-
-/// Provides authentication tokens for S3-compatible requests.
-pub trait TokenProvider: Send + Sync + 'static {
-    /// Returns a fresh token, fetching or refreshing it as needed.
-    fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
-}
-
-/// Placeholder [`TokenProvider`] for unauthenticated backends.
+/// S3-compatible storage backend.
 #[derive(Debug)]
-pub struct NoToken;
-
-impl TokenProvider for NoToken {
-    #[allow(refining_impl_trait)]
-    async fn get_token(&self) -> anyhow::Result<NoToken> {
-        unimplemented!()
-    }
-}
-impl Token for NoToken {
-    fn as_str(&self) -> &str {
-        unimplemented!()
-    }
-}
-
-/// S3-compatible storage backend with pluggable authentication.
-pub struct S3CompatibleBackend<T> {
+pub struct S3CompatibleBackend {
     bucket: Box<Bucket>,
-    endpoint: String,
-    token_provider: Option<T>,
     metadata_prefix: String,
     protocol_prefix: String,
     custom_time_header: Option<String>,
@@ -216,16 +203,29 @@ fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> 
     Ok(metadata)
 }
 
-impl<T> S3CompatibleBackend<T> {
-    /// Creates a new S3-compatible backend bound to the given config and token provider.
-    pub fn new(config: S3CompatibleConfig, token_provider: T) -> anyhow::Result<Self> {
-        let mut this = Self::from_config(config)?;
-        this.token_provider = Some(token_provider);
-        Ok(this)
+/// Maps an [`S3Error`] to our [`Error`] type with the given context.
+fn map_s3_error(error: S3Error, context: &str) -> Error {
+    Error::Generic {
+        context: context.to_owned(),
+        cause: Some(Box::new(error)),
     }
+}
 
-    fn from_config(config: S3CompatibleConfig) -> anyhow::Result<Self> {
-        let credentials = Credentials::default().or_else(|_| Credentials::anonymous())?;
+/// Returns `true` if `error` is an HTTP 404 from rust-s3.
+fn is_not_found(error: &S3Error) -> bool {
+    matches!(error, S3Error::HttpFailWithBody(404, _))
+}
+
+impl S3CompatibleBackend {
+    /// Creates a new S3-compatible backend bound to the given config.
+    pub fn new(config: S3CompatibleConfig) -> anyhow::Result<Self> {
+        let credentials = Credentials::new(
+            Some(&config.access_key_id),
+            Some(config.secret_access_key.expose_secret().as_str()),
+            None,
+            None,
+            None,
+        )?;
 
         let region = Region::Custom {
             region: config.region,
@@ -239,11 +239,9 @@ impl<T> S3CompatibleBackend<T> {
 
         Ok(Self {
             bucket,
-            endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
             protocol_prefix: config.protocol_prefix,
             custom_time_header: config.custom_time_header,
-            token_provider: None,
         })
     }
 
@@ -382,40 +380,8 @@ impl<T> S3CompatibleBackend<T> {
     }
 }
 
-impl S3CompatibleBackend<NoToken> {
-    /// Creates a new S3-compatible backend that sends unauthenticated requests.
-    pub fn without_token(config: S3CompatibleConfig) -> anyhow::Result<Self> {
-        Self::from_config(config)
-    }
-}
-
-impl<T> fmt::Debug for S3CompatibleBackend<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3CompatibleBackend")
-            .field("bucket", &self.bucket)
-            .field("endpoint", &self.endpoint)
-            .field("metadata_prefix", &self.metadata_prefix)
-            .field("protocol_prefix", &self.protocol_prefix)
-            .field("custom_time_header", &self.custom_time_header)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Maps an [`S3Error`] to our [`Error`] type with the given context.
-fn map_s3_error(error: S3Error, context: &str) -> Error {
-    Error::Generic {
-        context: context.to_owned(),
-        cause: Some(Box::new(error)),
-    }
-}
-
-/// Returns `true` if `error` is an HTTP 404 from rust-s3.
-fn is_not_found(error: &S3Error) -> bool {
-    matches!(error, S3Error::HttpFailWithBody(404, _))
-}
-
 #[async_trait::async_trait]
-impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
+impl Backend for S3CompatibleBackend {
     fn name(&self) -> &'static str {
         "s3_compatible"
     }
@@ -544,8 +510,8 @@ mod tests {
     //
     // Refer to the readme for how to set up MinIO via devservices.
 
-    fn create_test_backend() -> S3CompatibleBackend<NoToken> {
-        S3CompatibleBackend::without_token(S3CompatibleConfig {
+    fn create_test_backend() -> S3CompatibleBackend {
+        S3CompatibleBackend::new(S3CompatibleConfig {
             endpoint: "http://localhost:8089".into(),
             bucket: "test-bucket".into(),
             region: default_region(),
@@ -553,6 +519,8 @@ mod tests {
             metadata_prefix: default_metadata_prefix(),
             protocol_prefix: default_protocol_prefix(),
             custom_time_header: None,
+            access_key_id: "minioadmin".into(),
+            secret_access_key: SecretBox::new(Box::new(ConfigSecret::from("minioadmin"))),
         })
         .unwrap()
     }
