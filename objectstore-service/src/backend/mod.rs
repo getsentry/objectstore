@@ -74,9 +74,7 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
 async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
-        StorageConfig::S3Compatible(c) => {
-            Box::new(s3_compatible::S3CompatibleBackend::without_token(c)?)
-        }
+        StorageConfig::S3Compatible(c) => Box::new(s3_compatible::S3CompatibleBackend::new(c)?),
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),

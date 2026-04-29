@@ -1,9 +1,11 @@
 //! Backend that can be used with any S3-compatible object store (Amazon S3, MinIO, R2, etc.).
 
+use std::io;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
+use gcp_auth::TokenProvider as _;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::header::{self, HeaderMap, HeaderName};
 use s3::Bucket;
@@ -13,12 +15,15 @@ use s3::error::S3Error;
 use s3::region::Region;
 use s3::request::Request as _;
 use s3::request::tokio_backend::ReqwestRequest;
+use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::StreamReader;
 
 use crate::backend::common::{Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse};
 use crate::error::{Error, Result};
+use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
+use crate::secret::ConfigSecret;
 use crate::stream::{self, ClientStream};
 
 /// Configuration for [`S3CompatibleBackend`].
@@ -133,6 +138,19 @@ pub struct S3CompatibleConfig {
     /// - `OS__STORAGE__CUSTOM_TIME_HEADER=x-goog-custom-time`
     #[serde(default)]
     pub custom_time_header: Option<String>,
+
+    /// Optional static credentials for S3 SigV4 authentication.
+    ///
+    /// When set, the backend uses these credentials for signing requests
+    /// instead of the default credential chain. When unset, falls back to
+    /// anonymous (unauthenticated) requests.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__AUTH__ACCESS_KEY_ID=…`
+    /// - `OS__STORAGE__AUTH__SECRET_ACCESS_KEY=…`
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 }
 
 fn default_region() -> String {
@@ -151,45 +169,26 @@ fn default_protocol_prefix() -> String {
     "x-amz-".to_owned()
 }
 
+/// Static AWS-style credentials for S3 SigV4 authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// AWS access key ID (or equivalent for S3-compatible services).
+    pub access_key_id: String,
+    /// AWS secret access key (or equivalent for S3-compatible services).
+    pub secret_access_key: SecretBox<ConfigSecret>,
+}
+
 /// Time to debounce bumping an object with configured TTI.
 const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
 
-/// An authentication token that can be passed as a bearer credential.
-pub trait Token: Send + Sync {
-    /// Returns the token string.
-    fn as_str(&self) -> &str;
-}
-
-/// Provides authentication tokens for S3-compatible requests.
-pub trait TokenProvider: Send + Sync + 'static {
-    /// Returns a fresh token, fetching or refreshing it as needed.
-    fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
-}
-
-/// Placeholder [`TokenProvider`] for unauthenticated backends.
+/// S3-compatible storage backend.
 #[derive(Debug)]
-pub struct NoToken;
-
-impl TokenProvider for NoToken {
-    #[allow(refining_impl_trait)]
-    async fn get_token(&self) -> anyhow::Result<NoToken> {
-        unimplemented!()
-    }
-}
-impl Token for NoToken {
-    fn as_str(&self) -> &str {
-        unimplemented!()
-    }
-}
-
-/// S3-compatible storage backend with pluggable authentication.
-pub struct S3CompatibleBackend<T> {
+pub struct S3CompatibleBackend {
     bucket: Box<Bucket>,
-    endpoint: String,
-    token_provider: Option<T>,
     metadata_prefix: String,
     protocol_prefix: String,
     custom_time_header: Option<String>,
+    bearer_auth_provider: Option<Arc<PrefetchingTokenProvider>>,
 }
 
 /// Wraps [`Metadata::to_headers`], additionally echoing `time_expires` under
@@ -216,16 +215,48 @@ fn metadata_from_headers(headers: &HeaderMap, prefix: &str) -> Result<Metadata> 
     Ok(metadata)
 }
 
-impl<T> S3CompatibleBackend<T> {
-    /// Creates a new S3-compatible backend bound to the given config and token provider.
-    pub fn new(config: S3CompatibleConfig, token_provider: T) -> anyhow::Result<Self> {
-        let mut this = Self::from_config(config)?;
-        this.token_provider = Some(token_provider);
-        Ok(this)
+/// Maps an [`S3Error`] to our [`Error`] type with the given context.
+fn map_s3_error(error: S3Error, context: &str) -> Error {
+    Error::Generic {
+        context: context.to_owned(),
+        cause: Some(Box::new(error)),
+    }
+}
+
+/// Returns `true` if `error` is an HTTP 404 from rust-s3.
+fn is_not_found(error: &S3Error) -> bool {
+    matches!(error, S3Error::HttpFailWithBody(404, _))
+}
+
+impl S3CompatibleBackend {
+    /// Creates a new S3-compatible backend bound to the given config.
+    pub fn new(config: S3CompatibleConfig) -> anyhow::Result<Self> {
+        Self::from_config(config)
+    }
+
+    /// Creates a new S3-compatible backend bound to the given config and bearer auth provider.
+    pub fn new_with_bearer_auth(
+        config: S3CompatibleConfig,
+        bearer_auth_provider: Arc<PrefetchingTokenProvider>,
+    ) -> anyhow::Result<Self> {
+        let mut slf = Self::from_config(config)?;
+        slf.bearer_auth_provider = Some(bearer_auth_provider);
+        Ok(slf)
     }
 
     fn from_config(config: S3CompatibleConfig) -> anyhow::Result<Self> {
-        let credentials = Credentials::default().or_else(|_| Credentials::anonymous())?;
+        let credentials = config
+            .auth
+            .map(|auth| {
+                Credentials::new(
+                    Some(&auth.access_key_id),
+                    Some(auth.secret_access_key.expose_secret().as_str()),
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .unwrap_or_else(Credentials::anonymous)?;
 
         let region = Region::Custom {
             region: config.region,
@@ -239,12 +270,37 @@ impl<T> S3CompatibleBackend<T> {
 
         Ok(Self {
             bucket,
-            endpoint: config.endpoint,
             metadata_prefix: config.metadata_prefix,
             protocol_prefix: config.protocol_prefix,
             custom_time_header: config.custom_time_header,
-            token_provider: None,
+            bearer_auth_provider: None,
         })
+    }
+
+    /// Returns a bucket with a fresh `Authorization: Bearer` header when a
+    /// bearer auth provider is configured.
+    async fn authed_bucket(&self) -> Result<Box<Bucket>> {
+        let Some(provider) = &self.bearer_auth_provider else {
+            return Ok(self.bucket.clone());
+        };
+        let token = provider.token(&[]).await.map_err(|e| Error::Generic {
+            context: "S3: failed to get bearer token".to_owned(),
+            cause: Some(Box::new(e)),
+        })?;
+        let mut headers = self.bucket.extra_headers().clone();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token.as_str()).parse().map_err(
+                |e: header::InvalidHeaderValue| Error::Generic {
+                    context: "S3: invalid bearer token value".to_owned(),
+                    cause: Some(Box::new(e)),
+                },
+            )?,
+        );
+        self.bucket
+            .with_extra_headers(headers)
+            .map(Box::new)
+            .map_err(|e| map_s3_error(e, "S3: failed to set auth headers"))
     }
 
     fn object_path(&self, id: &ObjectId) -> String {
@@ -256,7 +312,12 @@ impl<T> S3CompatibleBackend<T> {
     /// the 1-day debounce window.
     ///
     /// [`TimeToIdle`]: objectstore_types::metadata::ExpirationPolicy::TimeToIdle
-    async fn bump_tti_if_needed(&self, path: &str, metadata: &Metadata) -> Result<()> {
+    async fn bump_tti_if_needed(
+        &self,
+        bucket: &Bucket,
+        path: &str,
+        metadata: &Metadata,
+    ) -> Result<()> {
         let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy else {
             return Ok(());
         };
@@ -273,7 +334,8 @@ impl<T> S3CompatibleBackend<T> {
 
         if bump_amount > TTI_DEBOUNCE {
             // TODO: Schedule into background persistently so this doesn't get lost on restarts.
-            self.update_custom_time(path, metadata, new_expiry).await?;
+            self.update_custom_time(bucket, path, metadata, new_expiry)
+                .await?;
         }
 
         Ok(())
@@ -287,16 +349,16 @@ impl<T> S3CompatibleBackend<T> {
     /// [`custom_time_header`]: S3CompatibleConfig::custom_time_header
     async fn update_custom_time(
         &self,
+        bucket: &Bucket,
         path: &str,
         metadata: &Metadata,
         custom_time: SystemTime,
     ) -> Result<()> {
         let copy_source_header = format!("{}copy-source", self.protocol_prefix);
         let metadata_directive_header = format!("{}metadata-directive", self.protocol_prefix);
-        let copy_source = format!("/{}{}", self.bucket.name(), path);
+        let copy_source = format!("/{}{}", bucket.name(), path);
 
-        let mut request = self
-            .bucket
+        let mut request = bucket
             .put_object_builder(path, &[])
             .with_content_type(metadata.content_type.as_ref())
             .with_header(&copy_source_header, copy_source)
@@ -342,8 +404,8 @@ impl<T> S3CompatibleBackend<T> {
     /// HEADs an object, filters expired entries, and bumps TTI.
     ///
     /// Returns `None` if the object is absent or past its expiry.
-    async fn fetch_live_metadata(&self, path: &str) -> Result<Option<Metadata>> {
-        let Some(headers) = self.head_object(path).await? else {
+    async fn fetch_live_metadata(&self, bucket: &Bucket, path: &str) -> Result<Option<Metadata>> {
+        let Some(headers) = self.head_object(bucket, path).await? else {
             return Ok(None);
         };
         let metadata = metadata_from_headers(&headers, &self.metadata_prefix)?;
@@ -358,7 +420,7 @@ impl<T> S3CompatibleBackend<T> {
             return Ok(None);
         }
 
-        self.bump_tti_if_needed(path, &metadata).await?;
+        self.bump_tti_if_needed(bucket, path, &metadata).await?;
         Ok(Some(metadata))
     }
 
@@ -366,8 +428,8 @@ impl<T> S3CompatibleBackend<T> {
     ///
     /// `Bucket::head_object` is not sufficient because it only surfaces
     /// `x-amz-meta-*` keys, which could be different from `self.metadata_prefix`.
-    async fn head_object(&self, path: &str) -> Result<Option<HeaderMap>> {
-        let request = ReqwestRequest::new(&self.bucket, path, Command::HeadObject)
+    async fn head_object(&self, bucket: &Bucket, path: &str) -> Result<Option<HeaderMap>> {
+        let request = ReqwestRequest::new(bucket, path, Command::HeadObject)
             .await
             .map_err(|e| map_s3_error(e, "S3: failed to build head request"))?;
 
@@ -382,40 +444,8 @@ impl<T> S3CompatibleBackend<T> {
     }
 }
 
-impl S3CompatibleBackend<NoToken> {
-    /// Creates a new S3-compatible backend that sends unauthenticated requests.
-    pub fn without_token(config: S3CompatibleConfig) -> anyhow::Result<Self> {
-        Self::from_config(config)
-    }
-}
-
-impl<T> fmt::Debug for S3CompatibleBackend<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3CompatibleBackend")
-            .field("bucket", &self.bucket)
-            .field("endpoint", &self.endpoint)
-            .field("metadata_prefix", &self.metadata_prefix)
-            .field("protocol_prefix", &self.protocol_prefix)
-            .field("custom_time_header", &self.custom_time_header)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Maps an [`S3Error`] to our [`Error`] type with the given context.
-fn map_s3_error(error: S3Error, context: &str) -> Error {
-    Error::Generic {
-        context: context.to_owned(),
-        cause: Some(Box::new(error)),
-    }
-}
-
-/// Returns `true` if `error` is an HTTP 404 from rust-s3.
-fn is_not_found(error: &S3Error) -> bool {
-    matches!(error, S3Error::HttpFailWithBody(404, _))
-}
-
 #[async_trait::async_trait]
-impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
+impl Backend for S3CompatibleBackend {
     fn name(&self) -> &'static str {
         "s3_compatible"
     }
@@ -428,10 +458,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         stream: ClientStream,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
+        let bucket = self.authed_bucket().await?;
         let path = self.object_path(id);
 
-        let mut request = self
-            .bucket
+        let mut request = bucket
             .put_object_stream_builder(&path)
             .with_content_type(metadata.content_type.as_ref());
 
@@ -482,13 +512,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
+        let bucket = self.authed_bucket().await?;
         let path = self.object_path(id);
 
-        let Some(metadata) = self.fetch_live_metadata(&path).await? else {
+        let Some(metadata) = self.fetch_live_metadata(&bucket, &path).await? else {
             return Ok(None);
         };
 
-        let response = match self.bucket.get_object_stream(&path).await {
+        let response = match bucket.get_object_stream(&path).await {
             Ok(response) => response,
             Err(ref e) if is_not_found(e) => {
                 // Object was deleted between HEAD and GET; treat as missing.
@@ -505,16 +536,18 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
+        let bucket = self.authed_bucket().await?;
         let path = self.object_path(id);
-        self.fetch_live_metadata(&path).await
+        self.fetch_live_metadata(&bucket, &path).await
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
+        let bucket = self.authed_bucket().await?;
         let path = self.object_path(id);
 
-        match self.bucket.delete_object(&path).await {
+        match bucket.delete_object(&path).await {
             Ok(_) => Ok(()),
             Err(ref e) if is_not_found(e) => {
                 objectstore_log::debug!("Object not found");
@@ -544,8 +577,8 @@ mod tests {
     //
     // Refer to the readme for how to set up MinIO via devservices.
 
-    fn create_test_backend() -> S3CompatibleBackend<NoToken> {
-        S3CompatibleBackend::without_token(S3CompatibleConfig {
+    fn create_test_backend() -> S3CompatibleBackend {
+        S3CompatibleBackend::new(S3CompatibleConfig {
             endpoint: "http://localhost:8089".into(),
             bucket: "test-bucket".into(),
             region: default_region(),
@@ -553,6 +586,7 @@ mod tests {
             metadata_prefix: default_metadata_prefix(),
             protocol_prefix: default_protocol_prefix(),
             custom_time_header: None,
+            auth: None,
         })
         .unwrap()
     }
@@ -799,7 +833,7 @@ mod tests {
         let path = backend.object_path(&id);
         let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
         backend
-            .update_custom_time(&path, &metadata, old_deadline)
+            .update_custom_time(&backend.bucket, &path, &metadata, old_deadline)
             .await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.

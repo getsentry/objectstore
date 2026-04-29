@@ -33,7 +33,6 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
-use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,8 +40,9 @@ use std::time::Duration;
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
+use objectstore_service::secret::ConfigSecret;
 use objectstore_types::auth::Permission;
-use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
+use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
@@ -54,46 +54,6 @@ use crate::usecases::UseCases;
 
 /// Environment variable prefix for all configuration options.
 const ENV_PREFIX: &str = "OS__";
-
-/// Newtype around `String` that may protect against accidental
-/// logging of secrets in our configuration struct. Use with
-/// [`secrecy::SecretBox`].
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct ConfigSecret(String);
-
-impl ConfigSecret {
-    /// Returns the secret value as a string slice.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl From<&str> for ConfigSecret {
-    fn from(str: &str) -> Self {
-        ConfigSecret(str.to_string())
-    }
-}
-
-impl std::ops::Deref for ConfigSecret {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ConfigSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "[redacted]")
-    }
-}
-
-impl CloneableSecret for ConfigSecret {}
-impl SerializableSecret for ConfigSecret {}
-impl Zeroize for ConfigSecret {
-    fn zeroize(&mut self) {
-        self.0.zeroize();
-    }
-}
 
 /// Runtime configuration for the Tokio async runtime.
 ///

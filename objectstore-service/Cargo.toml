@@ -30,6 +30,7 @@ reqwest = { workspace = true, features = [
     "json",
 ] }
 rust-s3 = { version = "0.37.1", default-features = false, features = ["tokio-native-tls", "fail-on-err"] }
+secrecy = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
