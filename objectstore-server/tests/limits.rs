@@ -113,6 +113,10 @@ async fn test_killswitches() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_global_rps_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(2),
@@ -159,6 +163,10 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_usecase_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(100),
@@ -213,6 +221,10 @@ async fn test_throughput_usecase_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_scope_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(100),
@@ -267,6 +279,10 @@ async fn test_throughput_scope_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_rule() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: None,
@@ -331,6 +347,10 @@ async fn test_throughput_rule() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_global_bps_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(500),
@@ -385,6 +405,10 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(100_000),
@@ -446,6 +470,10 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_scope_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(100_000),

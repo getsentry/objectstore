@@ -14,6 +14,9 @@ storage:
     endpoint: http://localhost:8087
     bucket: test-bucket
 
+auth:
+  enforce: false
+
 logging:
   level: trace
   format: auto

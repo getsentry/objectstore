@@ -62,9 +62,9 @@ A request flows through several layers before reaching the storage service:
 ## Authentication & Authorization
 
 Objectstore uses **JWT tokens with EdDSA signatures** (Ed25519) for
-authentication. Auth enforcement is optional and controlled by the
-[`auth.enforce`](config) config flag, allowing unauthenticated development
-setups.
+authentication. Auth enforcement is **enabled by default** and controlled by the
+[`auth.enforce`](config) config flag. Set `enforce: false` explicitly for
+unauthenticated development setups.
 
 ### Token Structure
 
@@ -100,8 +100,8 @@ this precedence (highest wins):
 1. **Environment variables** — prefixed with `OS__`, using `__` as a nested
    separator. Example: `OS__STORAGE__TYPE=tiered`
 2. **YAML file** — passed via the `-c` / `--config` CLI flag
-3. **Defaults** — sensible development defaults (local filesystem backend,
-   auth disabled)
+3. **Defaults** — sensible defaults (local filesystem backend,
+   auth enabled)
 
 Key configuration sections:
 - `storage` — backend type and connection parameters; use `type: tiered` for

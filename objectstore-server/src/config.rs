@@ -333,12 +333,13 @@ pub struct AuthZVerificationKey {
 }
 
 /// Configuration for content-based authorization.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZ {
     /// Whether to enforce content-based authorization or not.
     ///
-    /// If this is set to `false`, checks are still performed but failures will not result
-    /// in `403 Unauthorized` responses.
+    /// Defaults to `true`. If this is set to `false`, checks are still performed but failures
+    /// will not result in `403 Unauthorized` responses.
+    #[serde(default = "default_enforce")]
     pub enforce: bool,
 
     /// Keys that may be used to verify a request's auth token.
@@ -350,6 +351,19 @@ pub struct AuthZ {
     /// select the appropriate key.
     #[serde(default)]
     pub keys: BTreeMap<String, AuthZVerificationKey>,
+}
+
+fn default_enforce() -> bool {
+    true
+}
+
+impl Default for AuthZ {
+    fn default() -> Self {
+        Self {
+            enforce: true,
+            keys: BTreeMap::new(),
+        }
+    }
 }
 
 /// Main configuration struct for the objectstore server.
@@ -888,6 +902,44 @@ mod tests {
             assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_defaults_to_true() {
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(None).unwrap();
+            assert!(config.auth.enforce);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_defaults_to_true_when_omitted_from_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                auth:
+                    keys: {}
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert!(config.auth.enforce);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_can_be_disabled() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__AUTH__ENFORCE", "false");
+            let config = Config::load(None).unwrap();
+            assert!(!config.auth.enforce);
             Ok(())
         });
     }
