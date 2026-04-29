@@ -380,6 +380,9 @@ impl BandwidthRateLimiter {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
         let mut interval = tokio::time::interval(TICK);
+        // The first tick of a tokio interval fires immediately. Consume it so the
+        // first real iteration has a full ~50ms of elapsed time.
+        interval.tick().await;
         let mut last = Instant::now();
         let mut global_ewma: f64 = 0.0;
         // Shadow EWMAs for per-usecase/per-scope entries, keyed the same way as the maps.
