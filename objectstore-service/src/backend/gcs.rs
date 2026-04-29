@@ -10,15 +10,21 @@ use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
+    PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, ListedParts, PartInfo, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{self, ClientStream};
 
 /// Configuration for [`GcsBackend`].
@@ -286,6 +292,83 @@ impl serde::Serialize for GcsMetaKey {
     }
 }
 
+/// Response from a GCS XML API `POST ?uploads` (initiate multipart) request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InitiateMultipartUploadResult {
+    upload_id: String,
+}
+
+/// Response from a GCS XML API `GET ?uploadId=…` (list parts) request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlListPartsResult {
+    #[serde(default)]
+    is_truncated: bool,
+    next_part_number_marker: Option<u32>,
+    #[serde(default, rename = "Part")]
+    parts: Vec<XmlPart>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlPart {
+    part_number: u32,
+    #[serde(rename = "ETag")]
+    e_tag: String,
+    last_modified: String,
+    size: u64,
+}
+
+/// Error body that GCS/S3 can embed in a 200 response on complete-multipart.
+#[derive(Debug, Deserialize)]
+#[serde(rename = "Error", rename_all = "PascalCase")]
+struct GcsXmlError {
+    code: String,
+    message: String,
+}
+
+/// Builds HTTP headers that encode `metadata` for a GCS XML API
+/// initiate-multipart request, translating the same fields that
+/// [`GcsObject::from_metadata`] produces for the JSON API.
+fn metadata_to_xml_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
+    let gcs_obj = GcsObject::from_metadata(metadata);
+    let mut headers = header::HeaderMap::new();
+
+    if let Some(custom_time) = gcs_obj.custom_time {
+        let formatted = humantime::format_rfc3339_seconds(custom_time);
+        headers.insert(
+            HeaderName::from_static("x-goog-custom-time"),
+            formatted
+                .to_string()
+                .parse()
+                .map_err(|_| Error::generic("GCS: invalid custom-time header value"))?,
+        );
+    }
+
+    if let Some(encoding) = &gcs_obj.content_encoding {
+        headers.insert(
+            header::CONTENT_ENCODING,
+            encoding
+                .parse()
+                .map_err(|_| Error::generic("GCS: invalid content-encoding header value"))?,
+        );
+    }
+
+    for (key, value) in &gcs_obj.metadata {
+        let header_name = format!("x-goog-meta-{key}");
+        headers.insert(
+            HeaderName::try_from(&header_name)
+                .map_err(|_| Error::generic(format!("GCS: invalid header name: {header_name}")))?,
+            value.parse().map_err(|_| {
+                Error::generic(format!("GCS: invalid header value for {header_name}"))
+            })?,
+        );
+    }
+
+    Ok(headers)
+}
+
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
 fn is_retryable(error: &Error) -> bool {
     let Error::Reqwest { cause, .. } = error else {
@@ -374,6 +457,30 @@ impl GcsBackend {
             .append_pair("uploadType", upload_type)
             .append_pair("name", &id.as_storage_path().to_string());
 
+        Ok(url)
+    }
+
+    /// Formats a GCS XML API URL for the given object.
+    ///
+    /// Unlike [`object_url`](Self::object_url) (JSON API at
+    /// `/storage/v1/b/{bucket}/o/{name}`), this produces
+    /// `/{bucket}/{path_segments}` for the S3-compatible XML API used by
+    /// multipart uploads.
+    fn xml_object_url(&self, id: &ObjectId) -> Result<Url> {
+        let mut url = self.endpoint.clone();
+        {
+            let mut segments = url.path_segments_mut().map_err(|()| Error::Generic {
+                context: format!(
+                    "GCS: invalid endpoint URL, {} cannot be a base",
+                    self.endpoint
+                ),
+                cause: None,
+            })?;
+            segments.push(&self.bucket);
+            for part in id.as_storage_path().to_string().split('/') {
+                segments.push(part);
+            }
+        }
         Ok(url)
     }
 
@@ -618,6 +725,220 @@ impl Backend for GcsBackend {
             Ok(())
         })
         .await
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartUploadBackend for GcsBackend {
+    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        objectstore_log::debug!("Initiating multipart upload on GCS backend");
+        let mut url = self.xml_object_url(id)?;
+        url.set_query(Some("uploads"));
+
+        let mut builder = self
+            .request(Method::POST, url)
+            .await?
+            .header(header::CONTENT_TYPE, metadata.content_type.as_ref())
+            .header(header::CONTENT_LENGTH, "0");
+
+        let meta_headers = metadata_to_xml_headers(metadata)?;
+        for (name, value) in &meta_headers {
+            builder = builder.header(name, value);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::reqwest("GCS: initiate multipart upload", e))?;
+
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+
+        let result: InitiateMultipartUploadResult = quick_xml::de::from_reader(body.as_ref())
+            .map_err(|e| Error::Generic {
+                context: "GCS: failed to parse initiate multipart response".to_owned(),
+                cause: Some(Box::new(e)),
+            })?;
+
+        Ok(result.upload_id)
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id, upload_id, part_number), skip_all)]
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<&str>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        objectstore_log::debug!("Uploading part to GCS backend");
+        let mut url = self.xml_object_url(id)?;
+        url.query_pairs_mut()
+            .append_pair("partNumber", &part_number.to_string())
+            .append_pair("uploadId", upload_id);
+
+        let mut builder = self
+            .request(Method::PUT, url)
+            .await?
+            .header(header::CONTENT_LENGTH, content_length)
+            .body(Body::wrap_stream(body));
+
+        if let Some(md5) = content_md5 {
+            builder = builder.header("content-md5", md5);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::reqwest("GCS: upload part", e))?;
+
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned())
+            .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
+
+        Ok(etag)
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        objectstore_log::debug!("Listing parts on GCS backend");
+        let mut url = self.xml_object_url(id)?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("uploadId", upload_id);
+            if let Some(max) = max_parts {
+                pairs.append_pair("max-parts", &max.to_string());
+            }
+            if let Some(marker) = part_number_marker {
+                pairs.append_pair("part-number-marker", &marker.to_string());
+            }
+        }
+
+        let resp = self
+            .request(Method::GET, url)
+            .await?
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::reqwest("GCS: list parts", e))?;
+
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
+
+        let parsed: XmlListPartsResult =
+            quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
+                context: "GCS: failed to parse list parts response".to_owned(),
+                cause: Some(Box::new(e)),
+            })?;
+
+        let parts = parsed
+            .parts
+            .into_iter()
+            .map(|p| {
+                let last_modified = humantime::parse_rfc3339(&p.last_modified)
+                    .or_else(|_| humantime::parse_rfc3339_weak(&p.last_modified))
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                PartInfo {
+                    part_number: p.part_number,
+                    etag: p.e_tag,
+                    last_modified,
+                    size: p.size,
+                }
+            })
+            .collect();
+
+        Ok(ListedParts {
+            parts,
+            is_truncated: parsed.is_truncated,
+            next_part_number_marker: parsed.next_part_number_marker,
+        })
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        objectstore_log::debug!("Aborting multipart upload on GCS backend");
+        let mut url = self.xml_object_url(id)?;
+        url.query_pairs_mut().append_pair("uploadId", upload_id);
+
+        self.request(Method::DELETE, url)
+            .await?
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        objectstore_log::debug!("Completing multipart upload on GCS backend");
+        let mut url = self.xml_object_url(id)?;
+        url.query_pairs_mut().append_pair("uploadId", upload_id);
+
+        let mut xml = String::from("<CompleteMultipartUpload>");
+        for part in &parts {
+            xml.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                part.part_number, part.etag
+            ));
+        }
+        xml.push_str("</CompleteMultipartUpload>");
+
+        let resp = self
+            .request(Method::POST, url)
+            .await?
+            .header(header::CONTENT_TYPE, "application/xml")
+            .body(xml)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::reqwest("GCS: complete multipart upload", e))?;
+
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
+
+        if let Ok(err) = quick_xml::de::from_reader::<_, GcsXmlError>(body.as_ref()) {
+            return Err(Error::generic(format!(
+                "GCS: complete multipart upload failed: {} ({})",
+                err.message, err.code
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -946,4 +1267,5 @@ mod tests {
 
         Ok(())
     }
+
 }

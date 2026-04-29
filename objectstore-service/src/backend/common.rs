@@ -75,12 +75,22 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
     ) -> Result<InitiateMultipartResponse>;
 
     /// Uploads a single part of the upload identified by `(id, upload_id)`.
+    ///
+    /// `content_length` is required by the protocol — neither AWS S3 nor
+    /// MinIO accept `Transfer-Encoding: chunked` on `UploadPart`, so we
+    /// always need an upfront length. `content_md5`, when supplied, is
+    /// forwarded as the `Content-MD5` header so the storage backend can
+    /// verify the part's bytes; format follows [RFC 1864] (base64-encoded
+    /// MD5).
+    ///
+    /// [RFC 1864]: https://www.rfc-editor.org/rfc/rfc1864
     async fn upload_part(
         &self,
         id: &ObjectId,
         upload_id: &UploadId,
         part_number: PartNumber,
         content_length: u64,
+        content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse>;
 

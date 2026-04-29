@@ -2577,6 +2577,7 @@ dependencies = [
  "objectstore-log",
  "objectstore-metrics",
  "objectstore-types",
+ "quick-xml",
  "regex",
  "reqwest 0.12.28",
  "sentry",
