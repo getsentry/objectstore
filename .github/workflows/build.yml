@@ -103,23 +103,26 @@ jobs:
 
       - &assemble
         name: Push to GitHub Container Registry
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           for PLATFORM in amd64 arm64; do
             docker load --input /tmp/objectstore-$PLATFORM.tar
-            docker tag $PLATFORM $REGISTRY:${{ github.sha }}-$PLATFORM
-            docker push $REGISTRY:${{ github.sha }}-$PLATFORM
+            docker tag $PLATFORM $REGISTRY:"$GITHUB_SHA"-$PLATFORM
+            docker push $REGISTRY:"$GITHUB_SHA"-$PLATFORM
           done
 
           # Push nightly on main branch - releases are tagged by craft.
-          TAGS="${{ github.sha }}"
-          if [[ "${{ github.ref }}" != refs/heads/release/* ]]; then
+          TAGS="$GITHUB_SHA"
+          if [[ "$GITHUB_REF" != refs/heads/release/* ]]; then
             TAGS="$TAGS nightly"
           fi
 
           for TAG in $TAGS; do
             docker manifest create $REGISTRY:$TAG \
-              --amend $REGISTRY:${{ github.sha }}-amd64 \
-              --amend $REGISTRY:${{ github.sha }}-arm64
+              --amend $REGISTRY:"$GITHUB_SHA"-amd64 \
+              --amend $REGISTRY:"$GITHUB_SHA"-arm64
             docker manifest push $REGISTRY:$TAG
           done
 
@@ -190,9 +193,11 @@ jobs:
           path: /tmp
 
       - name: Extract and upload artifacts
+        env:
+          GITHUB_SHA: ${{ github.sha }}
         run: |
           docker load --input /tmp/objectstore-amd64.tar
           docker run --rm amd64 version > /tmp/release-name
 
           gsutil -m cp /tmp/release-name \
-            "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/${{ github.sha }}/"
+            "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/$GITHUB_SHA/"
