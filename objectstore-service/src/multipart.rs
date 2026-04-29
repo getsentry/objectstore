@@ -12,7 +12,7 @@ pub type ETag = String;
 /// Description of one part in the response to
 /// [`MultipartUploadBackend::list_parts`](crate::backend::common::MultipartUploadBackend::list_parts).
 #[derive(Clone, Debug)]
-pub struct PartInfo {
+pub struct Part {
     /// 1-indexed position of this part within the upload.
     pub part_number: PartNumber,
     /// Identifier returned when the part was uploaded.
@@ -39,7 +39,7 @@ pub struct CompletedPart {
 #[derive(Clone, Debug)]
 pub struct ListedParts {
     /// Parts uploaded so far, in `part_number` order.
-    pub parts: Vec<PartInfo>,
+    pub parts: Vec<Part>,
     /// Set when the listing was truncated and more parts can be fetched
     /// using [`Self::next_part_number_marker`] as the next
     /// `part_number_marker`.

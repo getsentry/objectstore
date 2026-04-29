@@ -23,7 +23,7 @@ use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, ListedParts, PartInfo, PartNumber, UploadId, UploadPartResponse,
+    ListPartsResponse, ListedParts, PartNumber, UploadId, UploadPartResponse,
 };
 use crate::stream::{self, ClientStream};
 
@@ -292,17 +292,17 @@ impl serde::Serialize for GcsMetaKey {
     }
 }
 
-/// Response from a GCS XML API `POST ?uploads` (initiate multipart) request.
+/// Response for a GCS XML API initiate multipart request.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct InitiateMultipartUploadResult {
+struct XmlInitiateMultipartUploadResponse {
     upload_id: String,
 }
 
-/// Response from a GCS XML API `GET ?uploadId=…` (list parts) request.
+/// Response for a GCS XML API list parts request.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct XmlListPartsResult {
+struct XmlListPartsResponse {
     #[serde(default)]
     is_truncated: bool,
     next_part_number_marker: Option<u32>,
@@ -316,57 +316,100 @@ struct XmlPart {
     part_number: u32,
     #[serde(rename = "ETag")]
     e_tag: String,
-    last_modified: String,
+    #[serde(with = "humantime_serde")]
+    last_modified: SystemTime,
     size: u64,
 }
 
-/// Error body that GCS/S3 can embed in a 200 response on complete-multipart.
+/// Request body for a GCS XML API complete multipart upload.
+#[derive(Debug, Serialize)]
+#[serde(rename = "CompleteMultipartUpload")]
+struct XmlCompleteMultipartUpload<'a> {
+    #[serde(rename = "Part")]
+    parts: Vec<XmlCompletePart<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlCompletePart<'a> {
+    part_number: PartNumber,
+    #[serde(rename = "ETag")]
+    e_tag: &'a str,
+}
+
+/// Error response for a complete multipart request.
 #[derive(Debug, Deserialize)]
 #[serde(rename = "Error", rename_all = "PascalCase")]
-struct GcsXmlError {
+struct XmlError {
     code: String,
     message: String,
 }
 
-/// Builds HTTP headers that encode `metadata` for a GCS XML API
-/// initiate-multipart request, translating the same fields that
-/// [`GcsObject::from_metadata`] produces for the JSON API.
-fn metadata_to_xml_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
-    let gcs_obj = GcsObject::from_metadata(metadata);
+/// Builds HTTP headers that encode `metadata` for a GCS XML API request.
+fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
-    if let Some(custom_time) = gcs_obj.custom_time {
+    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
+        let custom_time = SystemTime::now() + expires_in;
         let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
-            formatted
-                .to_string()
-                .parse()
-                .map_err(|_| Error::generic("GCS: invalid custom-time header value"))?,
-        );
-    }
-
-    if let Some(encoding) = &gcs_obj.content_encoding {
-        headers.insert(
-            header::CONTENT_ENCODING,
-            encoding
-                .parse()
-                .map_err(|_| Error::generic("GCS: invalid content-encoding header value"))?,
-        );
-    }
-
-    for (key, value) in &gcs_obj.metadata {
-        let header_name = format!("x-goog-meta-{key}");
-        headers.insert(
-            HeaderName::try_from(&header_name)
-                .map_err(|_| Error::generic(format!("GCS: invalid header name: {header_name}")))?,
-            value.parse().map_err(|_| {
-                Error::generic(format!("GCS: invalid header value for {header_name}"))
+            formatted.to_string().parse().map_err(|e| Error::Generic {
+                context: "GCS: invalid custom-time header value".into(),
+                cause: Some(Box::new(e)),
             })?,
         );
     }
 
+    if let Some(compression) = metadata.compression {
+        headers.insert(
+            header::CONTENT_ENCODING,
+            compression
+                .to_string()
+                .parse()
+                .map_err(|e| Error::Generic {
+                    context: "GCS: invalid content-encoding header value".into(),
+                    cause: Some(Box::new(e)),
+                })?,
+        );
+    }
+
+    if metadata.expiration_policy != ExpirationPolicy::default() {
+        insert_gcs_meta_header(
+            &mut headers,
+            &GcsMetaKey::Expiration,
+            &metadata.expiration_policy.to_string(),
+        )?;
+    }
+
+    if let Some(origin) = &metadata.origin {
+        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Origin, origin)?;
+    }
+
+    for (key, value) in &metadata.custom {
+        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Custom(key.clone()), value)?;
+    }
+
     Ok(headers)
+}
+
+fn insert_gcs_meta_header(
+    headers: &mut header::HeaderMap,
+    key: &GcsMetaKey,
+    value: &str,
+) -> Result<()> {
+    let header_name = format!("x-goog-meta-{key}");
+    headers.insert(
+        HeaderName::try_from(&header_name).map_err(|e| Error::Generic {
+            context: format!("GCS: invalid header name: {header_name}"),
+            cause: Some(Box::new(e)),
+        })?,
+        value.parse().map_err(|e| Error::Generic {
+            context: format!("GCS: invalid header value for {header_name}"),
+            cause: Some(Box::new(e)),
+        })?,
+    );
+    Ok(())
 }
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
@@ -746,7 +789,7 @@ impl MultipartUploadBackend for GcsBackend {
             .header(header::CONTENT_TYPE, metadata.content_type.as_ref())
             .header(header::CONTENT_LENGTH, "0");
 
-        let meta_headers = metadata_to_xml_headers(metadata)?;
+        let meta_headers = metadata_to_gcs_headers(metadata)?;
         for (name, value) in &meta_headers {
             builder = builder.header(name, value);
         }
@@ -762,7 +805,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
 
-        let result: InitiateMultipartUploadResult = quick_xml::de::from_reader(body.as_ref())
+        let result: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
             .map_err(|e| Error::Generic {
                 context: "GCS: failed to parse initiate multipart response".to_owned(),
                 cause: Some(Box::new(e)),
@@ -847,7 +890,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
 
-        let parsed: XmlListPartsResult =
+        let parsed: XmlListPartsResponse =
             quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
                 context: "GCS: failed to parse list parts response".to_owned(),
                 cause: Some(Box::new(e)),
@@ -856,16 +899,11 @@ impl MultipartUploadBackend for GcsBackend {
         let parts = parsed
             .parts
             .into_iter()
-            .map(|p| {
-                let last_modified = humantime::parse_rfc3339(&p.last_modified)
-                    .or_else(|_| humantime::parse_rfc3339_weak(&p.last_modified))
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                PartInfo {
-                    part_number: p.part_number,
-                    etag: p.e_tag,
-                    last_modified,
-                    size: p.size,
-                }
+            .map(|p| crate::multipart::Part {
+                part_number: p.part_number,
+                etag: p.e_tag,
+                last_modified: p.last_modified,
+                size: p.size,
             })
             .collect();
 
@@ -907,14 +945,19 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
-        let mut xml = String::from("<CompleteMultipartUpload>");
-        for part in &parts {
-            xml.push_str(&format!(
-                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                part.part_number, part.etag
-            ));
-        }
-        xml.push_str("</CompleteMultipartUpload>");
+        let body = XmlCompleteMultipartUpload {
+            parts: parts
+                .iter()
+                .map(|p| XmlCompletePart {
+                    part_number: p.part_number,
+                    e_tag: &p.etag,
+                })
+                .collect(),
+        };
+        let xml = quick_xml::se::to_string(&body).map_err(|e| Error::Generic {
+            context: "GCS: failed to serialize complete multipart request".into(),
+            cause: Some(Box::new(e)),
+        })?;
 
         let resp = self
             .request(Method::POST, url)
@@ -931,7 +974,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
 
-        if let Ok(err) = quick_xml::de::from_reader::<_, GcsXmlError>(body.as_ref()) {
+        if let Ok(err) = quick_xml::de::from_reader::<_, XmlError>(body.as_ref()) {
             return Err(Error::generic(format!(
                 "GCS: complete multipart upload failed: {} ({})",
                 err.message, err.code
@@ -1267,5 +1310,4 @@ mod tests {
 
         Ok(())
     }
-
 }
