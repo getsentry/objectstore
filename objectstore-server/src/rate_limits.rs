@@ -380,7 +380,7 @@ impl BandwidthRateLimiter {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
         let mut interval = tokio::time::interval(TICK);
-        let to_bps = 1.0 / TICK.as_secs_f64(); // Conversion factor from bytes to bps
+        let mut last = Instant::now();
         let mut global_ewma: f64 = 0.0;
         // Shadow EWMAs for per-usecase/per-scope entries, keyed the same way as the maps.
         let mut usecase_ewmas: std::collections::HashMap<String, f64> =
@@ -390,6 +390,10 @@ impl BandwidthRateLimiter {
 
         loop {
             interval.tick().await;
+
+            let now = Instant::now();
+            let to_bps = 1.0 / now.duration_since(last).as_secs_f64();
+            last = now;
 
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
