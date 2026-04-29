@@ -585,8 +585,8 @@ mod tests {
             jail.set_env("OS__STORAGE__TYPE", "s3compatible");
             jail.set_env("OS__STORAGE__ENDPOINT", "http://localhost:8888");
             jail.set_env("OS__STORAGE__BUCKET", "whatever");
-            jail.set_env("OS__STORAGE__AUTH__ACCESS_KEY_ID", "testkey");
-            jail.set_env("OS__STORAGE__AUTH__SECRET_ACCESS_KEY", "testsecret");
+            jail.set_env("OS__STORAGE__ACCESS_KEY_ID", "testkey");
+            jail.set_env("OS__STORAGE__SECRET_ACCESS_KEY", "testsecret");
             jail.set_env("OS__METRICS__TAGS__FOO", "bar");
             jail.set_env("OS__METRICS__TAGS__BAZ", "qux");
             jail.set_env("OS__SENTRY__DSN", "abcde");
@@ -630,9 +630,8 @@ mod tests {
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
-                auth:
-                    access_key_id: testkey
-                    secret_access_key: testsecret
+                access_key_id: testkey
+                secret_access_key: testsecret
             sentry:
                 dsn: abcde
                 environment: production
@@ -675,9 +674,8 @@ mod tests {
                 type: s3compatible
                 endpoint: http://localhost:8888
                 bucket: whatever
-                auth:
-                    access_key_id: testkey
-                    secret_access_key: testsecret
+                access_key_id: testkey
+                secret_access_key: testsecret
             "#,
             )
             .unwrap();

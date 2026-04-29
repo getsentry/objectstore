@@ -42,9 +42,8 @@ use crate::stream::{self, ClientStream};
 ///   use_path_style: false
 ///   metadata_prefix: x-amz-meta-
 ///   protocol_prefix: x-amz-
-///   auth:
-///     access_key_id: AKIAIOSFODNN7EXAMPLE
-///     secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+///   access_key_id: AKIAIOSFODNN7EXAMPLE
+///   secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3CompatibleConfig {
@@ -137,13 +136,19 @@ pub struct S3CompatibleConfig {
     #[serde(default)]
     pub custom_time_header: Option<String>,
 
-    /// Static credentials for S3 SigV4 authentication.
+    /// AWS access key ID (or equivalent for S3-compatible services).
     ///
     /// # Environment Variables
     ///
-    /// - `OS__STORAGE__AUTH__ACCESS_KEY_ID=…`
-    /// - `OS__STORAGE__AUTH__SECRET_ACCESS_KEY=…`
-    pub auth: AuthConfig,
+    /// - `OS__STORAGE__ACCESS_KEY_ID=…`
+    pub access_key_id: String,
+
+    /// AWS secret access key (or equivalent for S3-compatible services).
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__SECRET_ACCESS_KEY=…`
+    pub secret_access_key: SecretBox<ConfigSecret>,
 }
 
 fn default_region() -> String {
@@ -160,15 +165,6 @@ fn default_metadata_prefix() -> String {
 
 fn default_protocol_prefix() -> String {
     "x-amz-".to_owned()
-}
-
-/// Static AWS-style credentials for S3 SigV4 authentication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthConfig {
-    /// AWS access key ID (or equivalent for S3-compatible services).
-    pub access_key_id: String,
-    /// AWS secret access key (or equivalent for S3-compatible services).
-    pub secret_access_key: SecretBox<ConfigSecret>,
 }
 
 /// Time to debounce bumping an object with configured TTI.
@@ -224,8 +220,8 @@ impl S3CompatibleBackend {
     /// Creates a new S3-compatible backend bound to the given config.
     pub fn new(config: S3CompatibleConfig) -> anyhow::Result<Self> {
         let credentials = Credentials::new(
-            Some(&config.auth.access_key_id),
-            Some(config.auth.secret_access_key.expose_secret().as_str()),
+            Some(&config.access_key_id),
+            Some(config.secret_access_key.expose_secret().as_str()),
             None,
             None,
             None,
@@ -523,10 +519,8 @@ mod tests {
             metadata_prefix: default_metadata_prefix(),
             protocol_prefix: default_protocol_prefix(),
             custom_time_header: None,
-            auth: AuthConfig {
-                access_key_id: "minioadmin".into(),
-                secret_access_key: SecretBox::new(Box::new(ConfigSecret::from("minioadmin"))),
-            },
+            access_key_id: "minioadmin".into(),
+            secret_access_key: SecretBox::new(Box::new(ConfigSecret::from("minioadmin"))),
         })
         .unwrap()
     }
