@@ -34,10 +34,28 @@ pub struct CompletedPart {
     pub etag: ETag,
 }
 
-/// Response from
+/// Error optionally returned by
+/// [`MultipartUploadBackend::complete_multipart`](crate::backend::common::MultipartUploadBackend::complete_multipart).
+#[derive(Clone, Debug)]
+pub struct CompleteMultipartError {
+    /// Error code or identifier.
+    pub code: String,
+    /// Human-readable error description.
+    pub message: String,
+}
+
+/// Response for
+/// [`MultipartUploadBackend::initiate_multipart`](crate::backend::common::MultipartUploadBackend::initiate_multipart).
+pub type InitiateMultipartResponse = UploadId;
+
+/// Response for
+/// [`MultipartUploadBackend::upload_part`](crate::backend::common::MultipartUploadBackend::upload_part).
+pub type UploadPartResponse = ETag;
+
+/// Response for
 /// [`MultipartUploadBackend::list_parts`](crate::backend::common::MultipartUploadBackend::list_parts).
 #[derive(Clone, Debug)]
-pub struct ListedParts {
+pub struct ListPartsResponse {
     /// Parts uploaded so far, in `part_number` order.
     pub parts: Vec<Part>,
     /// Set when the listing was truncated and more parts can be fetched
@@ -49,35 +67,10 @@ pub struct ListedParts {
     pub next_part_number_marker: Option<PartNumber>,
 }
 
-/// Backend response for
-/// [`MultipartUploadBackend::initiate_multipart`](crate::backend::common::MultipartUploadBackend::initiate_multipart).
-pub type InitiateMultipartResponse = UploadId;
-/// Backend response for
-/// [`MultipartUploadBackend::upload_part`](crate::backend::common::MultipartUploadBackend::upload_part).
-pub type UploadPartResponse = ETag;
-/// Backend response for
-/// [`MultipartUploadBackend::list_parts`](crate::backend::common::MultipartUploadBackend::list_parts).
-pub type ListPartsResponse = ListedParts;
-/// Backend response for
+/// Response for
 /// [`MultipartUploadBackend::abort_multipart`](crate::backend::common::MultipartUploadBackend::abort_multipart).
 pub type AbortMultipartResponse = ();
-/// Backend response for
-/// [`MultipartUploadBackend::complete_multipart`](crate::backend::common::MultipartUploadBackend::complete_multipart).
-///
-/// S3-compatible APIs can return HTTP 200 with an error body on complete-multipart.
-/// This struct mirrors that behavior so callers can inspect the error without the
-/// backend having to treat it as a hard failure.
-#[derive(Clone, Debug)]
-pub struct CompleteMultipartResponse {
-    /// An error embedded in the 200 response body, if present.
-    pub error: Option<CompleteMultipartError>,
-}
 
-/// An error embedded in a 200 response from a complete-multipart request.
-#[derive(Clone, Debug)]
-pub struct CompleteMultipartError {
-    /// S3/GCS error code (e.g. `InternalError`).
-    pub code: String,
-    /// Human-readable error description.
-    pub message: String,
-}
+/// Response for
+/// [`MultipartUploadBackend::complete_multipart`](crate::backend::common::MultipartUploadBackend::complete_multipart).
+pub type CompleteMultipartResponse = Option<CompleteMultipartError>;

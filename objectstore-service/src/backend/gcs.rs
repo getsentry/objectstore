@@ -23,7 +23,7 @@ use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, ListedParts, PartNumber, UploadId, UploadPartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use crate::stream::{self, ClientStream};
 
@@ -907,7 +907,7 @@ impl MultipartUploadBackend for GcsBackend {
             })
             .collect();
 
-        Ok(ListedParts {
+        Ok(ListPartsResponse {
             parts,
             is_truncated: parsed.is_truncated,
             next_part_number_marker: parsed.next_part_number_marker,
@@ -981,7 +981,7 @@ impl MultipartUploadBackend for GcsBackend {
                 message: e.message,
             });
 
-        Ok(CompleteMultipartResponse { error })
+        Ok(error)
     }
 }
 
