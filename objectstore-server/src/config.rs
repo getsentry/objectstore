@@ -357,15 +357,6 @@ fn default_enforce() -> bool {
     true
 }
 
-impl Default for AuthZ {
-    fn default() -> Self {
-        Self {
-            enforce: true,
-            keys: BTreeMap::new(),
-        }
-    }
-}
-
 /// Main configuration struct for the objectstore server.
 ///
 /// This is the top-level configuration that combines all server settings including networking,

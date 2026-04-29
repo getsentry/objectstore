@@ -154,7 +154,7 @@ mod tests {
         let err = Services::spawn(config).await.unwrap_err();
         assert!(
             err.to_string()
-                .contains("auth enforcement is enabled but no keys are configured"),
+                .contains("Auth enforcement is enabled but no keys are configured"),
         );
     }
 
