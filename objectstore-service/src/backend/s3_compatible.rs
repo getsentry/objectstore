@@ -26,8 +26,8 @@ use crate::stream::{self, ClientStream};
 /// Configuration for [`S3CompatibleBackend`].
 ///
 /// Supports [Amazon S3] and other S3-compatible services such as MinIO.
-/// Authentication is configured via static credentials (access key ID and
-/// secret access key) in the [`auth`](Self::auth) field.
+/// Authentication uses static SigV4 credentials ([`access_key_id`](Self::access_key_id)
+/// and [`secret_access_key`](Self::secret_access_key)).
 ///
 /// [Amazon S3]: https://aws.amazon.com/s3/
 ///
