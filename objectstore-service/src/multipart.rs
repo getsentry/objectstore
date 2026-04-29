@@ -63,4 +63,21 @@ pub type ListPartsResponse = ListedParts;
 pub type AbortMultipartResponse = ();
 /// Backend response for
 /// [`MultipartUploadBackend::complete_multipart`](crate::backend::common::MultipartUploadBackend::complete_multipart).
-pub type CompleteMultipartResponse = ();
+///
+/// S3-compatible APIs can return HTTP 200 with an error body on complete-multipart.
+/// This struct mirrors that behavior so callers can inspect the error without the
+/// backend having to treat it as a hard failure.
+#[derive(Clone, Debug)]
+pub struct CompleteMultipartResponse {
+    /// An error embedded in the 200 response body, if present.
+    pub error: Option<CompleteMultipartError>,
+}
+
+/// An error embedded in a 200 response from a complete-multipart request.
+#[derive(Clone, Debug)]
+pub struct CompleteMultipartError {
+    /// S3/GCS error code (e.g. `InternalError`).
+    pub code: String,
+    /// Human-readable error description.
+    pub message: String,
+}

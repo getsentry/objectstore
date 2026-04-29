@@ -321,7 +321,7 @@ struct XmlPart {
     size: u64,
 }
 
-/// Request body for a GCS XML API complete multipart upload.
+/// Request body for a GCS XML API complete multipart upload request.
 #[derive(Debug, Serialize)]
 #[serde(rename = "CompleteMultipartUpload")]
 struct XmlCompleteMultipartUpload<'a> {
@@ -974,14 +974,14 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
 
-        if let Ok(err) = quick_xml::de::from_reader::<_, XmlError>(body.as_ref()) {
-            return Err(Error::generic(format!(
-                "GCS: complete multipart upload failed: {} ({})",
-                err.message, err.code
-            )));
-        }
+        let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
+            .ok()
+            .map(|e| crate::multipart::CompleteMultipartError {
+                code: e.code,
+                message: e.message,
+            });
 
-        Ok(())
+        Ok(CompleteMultipartResponse { error })
     }
 }
 
