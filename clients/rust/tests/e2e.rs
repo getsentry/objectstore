@@ -172,16 +172,12 @@ async fn stores_under_given_key() {
 
 #[tokio::test]
 async fn stores_structured_keys() {
-    let server = TestServer::with_config(config::Config {
-        auth: config::AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
