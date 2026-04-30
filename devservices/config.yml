@@ -63,7 +63,7 @@ services:
       - orchestrator=devservices
     restart: unless-stopped
   gcs:
-    image: gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+    build: https://github.com/googleapis/storage-testbench.git#main
     environment:
       GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME: test-bucket
     healthcheck:
