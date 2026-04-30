@@ -820,6 +820,9 @@ impl From<XmlError> for crate::multipart::CompleteMultipartError {
     }
 }
 
+/// XXX: Any change that affects this implementation should be manually tested against real GCS.
+/// That's because the fork of [storage-testbench](https://github.com/googleapis/storage-testbench)
+/// that we test against has an incomplete implementation of the XML multipart API that likely doesn't match GCS's behavior in many cases.
 #[async_trait::async_trait]
 impl MultipartUploadBackend for GcsBackend {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
