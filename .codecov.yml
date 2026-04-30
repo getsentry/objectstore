@@ -6,5 +6,24 @@ coverage:
     patch: false
 
 comment:
-  layout: "diff"
+  layout: "condensed_header, diff, condensed_files, components, condensed_footer"
   require_changes: true
+
+component_management:
+  individual_components:
+    - component_id: rust_backend
+      name: Rust Backend
+      paths:
+        - objectstore-server/**
+        - objectstore-service/**
+        - objectstore-types/**
+
+    - component_id: rust_client
+      name: Rust Client
+      paths:
+        - clients/rust/**
+
+    - component_id: python_client
+      name: Python Client
+      paths:
+        - clients/python/**
