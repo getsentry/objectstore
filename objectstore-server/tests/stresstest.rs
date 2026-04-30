@@ -32,7 +32,8 @@ async fn test_basic() {
         .env("OS__HTTP_ADDR", &addr)
         .env("OS__STORAGE__TYPE", "filesystem")
         .env("OS__STORAGE__PATH", tempdir.path().display().to_string())
-        .env("OS__LOGGING__LEVEL", "warn");
+        .env("OS__LOGGING__LEVEL", "warn")
+        .env("OS__AUTH__ENFORCE", "false");
     if let Ok(statsd_host) = std::env::var("STATSD_HOST") {
         cmd.env("OS__METRICS__ADDR", statsd_host);
     }

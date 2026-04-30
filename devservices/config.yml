@@ -27,6 +27,7 @@ services:
       OS__STORAGE__TYPE: "filesystem"
       OS__STORAGE__PATH: "/data"
       OS__LOGGING__LEVEL: "debug"
+      OS__AUTH__ENFORCE: "false"
     command: run
     healthcheck:
       test: ["CMD", "/bin/entrypoint", "healthcheck"]
