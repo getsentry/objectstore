@@ -9,6 +9,7 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
+use bytes::BytesMut;
 use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
@@ -50,7 +51,7 @@ pub enum BatchError {
     },
 }
 
-async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchError> {
+async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, BatchError> {
     let kind = field
         .headers()
         .get(HEADER_BATCH_OPERATION_KIND)
@@ -103,16 +104,19 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
         }),
         "insert" => {
             let metadata = Metadata::from_headers(field.headers(), "")?;
-            let payload = field.bytes().await?;
-            if payload.len() > MAX_FIELD_SIZE {
-                return Err(BatchError::LimitExceeded(format!(
-                    "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
-                )));
+            let mut payload = BytesMut::new();
+            while let Some(chunk) = field.chunk().await? {
+                if payload.len() + chunk.len() > MAX_FIELD_SIZE {
+                    return Err(BatchError::LimitExceeded(format!(
+                        "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
+                    )));
+                }
+                payload.extend_from_slice(&chunk);
             }
             Operation::Insert(Insert {
                 key,
                 metadata,
-                payload,
+                payload: payload.freeze(),
             })
         }
         _ => {
