@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -128,7 +129,7 @@ jobs:
         with:
           files: lcov.info
           flags: rust
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   test-python:
     name: Test Python
@@ -165,7 +166,7 @@ jobs:
         with:
           files: python-coverage.xml
           flags: python
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   docs:
     name: Build and Publish Documentation
