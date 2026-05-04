@@ -1,102 +1,54 @@
-#![warn(missing_docs)]
-#![warn(missing_debug_implementations)]
-
-//! Stresstest binary for the foundational storage service.
+//! Quick benchmark: single HEAD vs batch EXISTS latency.
+//!
+//! Usage:
+//!   cargo run --bin exists_bench -- -c config.yaml
+//!
+//! Example config (single HEAD, one request per key):
+//!   remote: http://localhost:18888
+//!   count: 500
+//!   batch_size: 0
+//!
+//! Example config (batch EXISTS, 50 keys per batch):
+//!   remote: http://localhost:18888
+//!   count: 500
+//!   batch_size: 50
+//!
+//! batch_size=0 means single HEAD requests (one per key, sequential).
+//! batch_size=N means batch EXISTS requests (N keys per batch, sequential batches).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, bail};
+use anyhow::{Context, Result};
 use argh::FromArgs;
 use futures::StreamExt;
 use objectstore_client::{Client, ExpirationPolicy, OperationResult, Session, Usecase};
+use serde::Deserialize;
 use sketches_ddsketch::DDSketch;
-use stresstest::Workload;
-use stresstest::http::HttpRemote;
-use stresstest::stresstest::Stresstest;
-use stresstest::workload::WorkloadMode;
 use yansi::Paint;
-
-use crate::config::{Config, Mode};
-
-mod config;
-
-/// Stresstester for our foundational storage service
-#[derive(Debug, FromArgs)]
-pub struct Args {
-    /// path to the yaml configuration file
-    #[argh(option, short = 'c')]
-    pub config: PathBuf,
-}
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args: Args = argh::from_env();
-
-    let config_file = std::fs::File::open(args.config).context("failed to open config file")?;
-    let config: Config =
-        serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
-
-    match config.mode {
-        Mode::Stresstest => run_stresstest(config).await,
-        Mode::Exists => run_exists_bench(config).await,
-    }
+/// Benchmark: single HEAD vs batch EXISTS
+#[derive(Debug, FromArgs)]
+struct Args {
+    /// path to the yaml configuration file
+    #[argh(option, short = 'c')]
+    config: PathBuf,
 }
 
-async fn run_stresstest(config: Config) -> anyhow::Result<()> {
-    let duration = config
-        .duration
-        .context("'duration' is required for stresstest mode")?;
-    if config.workloads.is_empty() {
-        bail!("'workloads' is required for stresstest mode");
-    }
-
-    let remote = HttpRemote::new(&config.remote);
-    let mut stresstest = Stresstest::new(remote)
-        .duration(duration)
-        .cleanup(config.cleanup);
-
-    for w in config.workloads {
-        if matches!(w.mode, WorkloadMode::Batch) {
-            if w.actions.reads > 0 || w.actions.deletes > 0 {
-                bail!(
-                    "workload '{}': batch mode only supports writes, but reads={} and deletes={} were configured",
-                    w.name,
-                    w.actions.reads,
-                    w.actions.deletes
-                );
-            }
-            if w.actions.writes == 0 {
-                bail!(
-                    "workload '{}': batch mode requires actions.writes > 0",
-                    w.name
-                );
-            }
-        }
-
-        let workload = Workload::builder(w.name)
-            .concurrency(w.concurrency)
-            .organizations(w.organizations)
-            .mode(w.mode)
-            .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
-            .max_size(w.file_sizes.max.map(|b| b.0))
-            .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
-            .build();
-
-        stresstest = stresstest.workload(workload);
-    }
-
-    stresstest.run().await?;
-    Ok(())
+#[derive(Debug, Deserialize)]
+struct Config {
+    remote: String,
+    count: usize,
+    #[serde(default)]
+    batch_size: usize,
+    seed: Option<usize>,
+    #[serde(default)]
+    long_term_pct: u8,
+    usecase: Option<String>,
 }
-
-// -- exists bench mode --
-
-const SMALL_PAYLOAD_SIZE: usize = 1024;
-const LARGE_PAYLOAD_SIZE: usize = 1024 * 1024 + 1;
 
 fn make_session(remote: &str, usecase_name: &str) -> Session {
     let client = Client::builder(remote)
@@ -111,7 +63,10 @@ fn make_session(remote: &str, usecase_name: &str) -> Session {
         .expect("failed to create session")
 }
 
-async fn seed_objects(session: &Session, n: usize, long_term_pct: u8) -> anyhow::Result<Vec<String>> {
+const SMALL_PAYLOAD_SIZE: usize = 1024; // 1 KiB → Bigtable
+const LARGE_PAYLOAD_SIZE: usize = 1024 * 1024 + 1; // 1 MiB + 1 → GCS
+
+async fn seed_objects(session: &Session, n: usize, long_term_pct: u8) -> Result<Vec<String>> {
     let lt_count = (n as u64 * long_term_pct as u64 / 100) as usize;
     let hv_count = n - lt_count;
     println!("Seeding {n} objects ({hv_count} bigtable, {lt_count} gcs)...");
@@ -233,20 +188,27 @@ fn print_sketch(label: &str, sketch: &DDSketch) {
     );
 }
 
-async fn run_exists_bench(config: Config) -> anyhow::Result<()> {
-    let count = config.count.context("'count' is required for exists mode")?;
-    let seed_count = config.seed.unwrap_or(count);
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Args = argh::from_env();
+
+    let config_file =
+        std::fs::File::open(&args.config).context("failed to open config file")?;
+    let config: Config =
+        serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
+
+    let seed_count = config.seed.unwrap_or(config.count);
     let usecase_name = config.usecase.as_deref().unwrap_or("exists-bench");
     let session = make_session(&config.remote, usecase_name);
     let keys = seed_objects(&session, seed_count, config.long_term_pct).await?;
 
     if config.batch_size == 0 {
-        let sketch = bench_single_head(&session, &keys, count).await;
+        let sketch = bench_single_head(&session, &keys, config.count).await;
         println!("{}", "== Results: Single HEAD ==".bold().green());
         print_sketch("  ", &sketch);
     } else {
         let (batch_sketch, per_op_sketch) =
-            bench_batch_exists(&session, &keys, count, config.batch_size).await;
+            bench_batch_exists(&session, &keys, config.count, config.batch_size).await;
         println!(
             "{}",
             format!(

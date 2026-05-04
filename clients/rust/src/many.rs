@@ -15,9 +15,10 @@ use reqwest::multipart::Part;
 use crate::error::Error;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
-    Session, get, put,
+    DeleteBuilder, DeleteResponse, ExistsBuilder, ExistsResponse, GetBuilder, GetResponse, ObjectKey,
+    PutBuilder, PutResponse, Session, get, put,
 };
+use crate::head::HeadBuilder;
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
@@ -80,6 +81,9 @@ enum BatchOperation {
     Delete {
         key: ObjectKey,
     },
+    Exists {
+        key: ObjectKey,
+    },
 }
 
 impl From<GetBuilder> for BatchOperation {
@@ -124,6 +128,16 @@ impl From<DeleteBuilder> for BatchOperation {
     }
 }
 
+impl From<ExistsBuilder> for BatchOperation {
+    fn from(value: ExistsBuilder) -> Self {
+        let ExistsBuilder {
+            key,
+            session: _session,
+        } = value;
+        BatchOperation::Exists { key }
+    }
+}
+
 impl BatchOperation {
     async fn into_part(self) -> crate::Result<Part> {
         match self {
@@ -144,6 +158,10 @@ impl BatchOperation {
             }
             BatchOperation::Delete { key } => {
                 let headers = operation_headers("delete", Some(&key));
+                Ok(Part::text("").headers(headers))
+            }
+            BatchOperation::Exists { key } => {
+                let headers = operation_headers("exists", Some(&key));
                 Ok(Part::text("").headers(headers))
             }
         }
@@ -179,6 +197,10 @@ pub enum OperationResult {
     Put(ObjectKey, Result<PutResponse, Error>),
     /// The result of a delete operation.
     Delete(ObjectKey, Result<DeleteResponse, Error>),
+    /// The result of an exists operation.
+    ///
+    /// Returns `Ok(true)` if the object exists, `Ok(false)` if not found.
+    Exists(ObjectKey, Result<ExistsResponse, Error>),
     /// An error occurred while parsing or correlating a response part.
     ///
     /// This makes it impossible to attribute the error to a specific operation.
@@ -200,6 +222,9 @@ enum OperationContext {
     Delete {
         key: ObjectKey,
     },
+    Exists {
+        key: ObjectKey,
+    },
 }
 
 impl From<&BatchOperation> for OperationContext {
@@ -216,6 +241,7 @@ impl From<&BatchOperation> for OperationContext {
             },
             BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
             BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+            BatchOperation::Exists { key } => OperationContext::Exists { key: key.clone() },
         }
     }
 }
@@ -223,7 +249,9 @@ impl From<&BatchOperation> for OperationContext {
 impl OperationContext {
     fn key(&self) -> Option<&str> {
         match self {
-            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Get { key, .. }
+            | OperationContext::Delete { key }
+            | OperationContext::Exists { key } => Some(key),
             OperationContext::Insert { key } => key.as_deref(),
         }
     }
@@ -246,6 +274,7 @@ fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
         OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
         OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+        OperationContext::Exists { .. } => OperationResult::Exists(key, Err(error)),
     }
 }
 
@@ -317,8 +346,9 @@ impl OperationResult {
 
         let body = field.bytes().await?;
 
-        let is_error =
-            status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
+        let is_error = status >= 400
+            && !(matches!(ctx, OperationContext::Get { .. }) && status == 404)
+            && !(matches!(ctx, OperationContext::Exists { .. }) && status == 404);
 
         // For error responses, the key may be absent (e.g., server-generated key inserts
         // that fail before execution — the server never generated a key and the client
@@ -343,6 +373,7 @@ impl OperationResult {
                     OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
                     OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
                     OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+                    OperationContext::Exists { .. } => OperationResult::Exists(key, Err(error)),
                 },
             ));
         }
@@ -370,6 +401,9 @@ impl OperationResult {
                 OperationResult::Put(key.clone(), Ok(PutResponse { key }))
             }
             OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
+            OperationContext::Exists { .. } => {
+                OperationResult::Exists(key, Ok(status != 404))
+            }
         };
         Ok((index, result))
     }
@@ -415,6 +449,11 @@ impl OperationResults {
                 }
                 OperationResult::Delete(_, delete) => {
                     if let Err(e) = delete {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Exists(_, exists) => {
+                    if let Err(e) = exists {
                         errs.push(e);
                     }
                 }
@@ -594,6 +633,13 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 key: key.clone(),
             };
             OperationResult::Delete(key, delete.send().await)
+        }
+        BatchOperation::Exists { key } => {
+            let head = HeadBuilder {
+                session: session.clone(),
+                key: key.clone(),
+            };
+            OperationResult::Exists(key, head.send().await)
         }
     }
 }

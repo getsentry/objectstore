@@ -51,8 +51,10 @@ async fn batch(
             let service = &service;
             move |(idx, item)| {
                 let item = item.and_then(|op| {
-                    // Rate-limit check
-                    if !state.rate_limiter.check(&context) {
+                    // Rate-limit check (skip for exists — lightweight metadata-only ops)
+                    if !matches!(op, Operation::Exists(_))
+                        && !state.rate_limiter.check(&context)
+                    {
                         return Err(ApiError::from(BatchError::RateLimited));
                     }
                     // Auth check
