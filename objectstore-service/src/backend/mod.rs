@@ -72,7 +72,7 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
 }
 
 /// Constructs a type-erased [`MultipartUploadBackend`](common::MultipartUploadBackend) for the
-/// long-term tier. Only backends that implement [`MultipartUploadBackend`] are valid here.
+/// long-term tier. Only backends that implement [`MultipartUploadBackend`](common::MultipartUploadBackend) are valid here.
 async fn lt_from_leaf_config(
     config: StorageConfig,
 ) -> Result<Box<dyn common::MultipartUploadBackend>> {
