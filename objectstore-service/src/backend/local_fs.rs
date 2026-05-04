@@ -707,7 +707,7 @@ mod tests {
 
         let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
 
-        backend
+        let etag = backend
             .upload_part(
                 &id,
                 &upload_id,
@@ -732,6 +732,20 @@ mod tests {
             .unwrap();
         assert!(result.is_some(), "expected error for bad etag");
         assert_eq!(result.unwrap().code, "InvalidPart");
+
+        // Upload must survive a failed complete so the client can retry.
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![crate::multipart::CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "retry with correct etag should succeed");
     }
 
     #[tokio::test]
@@ -741,6 +755,18 @@ mod tests {
         let metadata = Metadata::default();
 
         let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let etag = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                5,
+                None,
+                stream::single(b"hello".to_vec()),
+            )
+            .await
+            .unwrap();
 
         let result = backend
             .complete_multipart(
@@ -755,5 +781,19 @@ mod tests {
             .unwrap();
         assert!(result.is_some(), "expected error for missing part");
         assert_eq!(result.unwrap().code, "InvalidPart");
+
+        // Upload must survive a failed complete so the client can retry.
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![crate::multipart::CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "retry with correct part should succeed");
     }
 }

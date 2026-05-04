@@ -329,47 +329,59 @@ impl MultipartUploadBackend for InMemoryBackend {
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        let upload = self
-            .multipart_store
-            .lock()
-            .unwrap()
-            .remove(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+        let key = (id.clone(), upload_id.clone());
 
-        for completed in &parts {
-            match upload.parts.get(&completed.part_number) {
-                None => {
-                    return Ok(Some(crate::multipart::CompleteMultipartError {
-                        code: "InvalidPart".into(),
-                        message: format!("part number {} was not uploaded", completed.part_number),
-                    }));
+        // Validate and assemble while holding the multipart lock, but don't
+        // remove the upload yet — a failed validation must leave it intact so
+        // the client can retry.
+        let assembled = {
+            let store = self.multipart_store.lock().unwrap();
+            let upload = store
+                .get(&key)
+                .ok_or_else(|| Error::generic("multipart upload not found"))?;
+
+            for completed in &parts {
+                match upload.parts.get(&completed.part_number) {
+                    None => {
+                        return Ok(Some(crate::multipart::CompleteMultipartError {
+                            code: "InvalidPart".into(),
+                            message: format!(
+                                "part number {} was not uploaded",
+                                completed.part_number
+                            ),
+                        }));
+                    }
+                    Some(stored) if stored.etag != completed.etag => {
+                        return Ok(Some(crate::multipart::CompleteMultipartError {
+                            code: "InvalidPart".into(),
+                            message: format!(
+                                "etag mismatch for part {}: expected {}, got {}",
+                                completed.part_number, stored.etag, completed.etag
+                            ),
+                        }));
+                    }
+                    _ => {}
                 }
-                Some(stored) if stored.etag != completed.etag => {
-                    return Ok(Some(crate::multipart::CompleteMultipartError {
-                        code: "InvalidPart".into(),
-                        message: format!(
-                            "etag mismatch for part {}: expected {}, got {}",
-                            completed.part_number, stored.etag, completed.etag
-                        ),
-                    }));
-                }
-                _ => {}
             }
-        }
 
-        let mut payload = BytesMut::new();
-        for completed in &parts {
-            let stored = &upload.parts[&completed.part_number];
-            payload.extend_from_slice(&stored.data);
-        }
+            let mut payload = BytesMut::new();
+            for completed in &parts {
+                let stored = &upload.parts[&completed.part_number];
+                payload.extend_from_slice(&stored.data);
+            }
 
-        let mut metadata = upload.metadata;
-        metadata.size = Some(payload.len());
+            let mut metadata = upload.metadata.clone();
+            metadata.size = Some(payload.len());
+
+            (metadata, payload.freeze())
+        };
 
         self.store
             .lock()
             .unwrap()
-            .insert(id.clone(), StoreEntry::Object(metadata, payload.freeze()));
+            .insert(id.clone(), StoreEntry::Object(assembled.0, assembled.1));
+
+        self.multipart_store.lock().unwrap().remove(&key);
 
         Ok(None)
     }
@@ -666,7 +678,7 @@ mod tests {
 
         let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
 
-        backend
+        let etag = backend
             .upload_part(
                 &id,
                 &upload_id,
@@ -691,6 +703,20 @@ mod tests {
             .unwrap();
         assert!(result.is_some(), "expected error for bad etag");
         assert_eq!(result.unwrap().code, "InvalidPart");
+
+        // Upload must survive a failed complete so the client can retry.
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "retry with correct etag should succeed");
     }
 
     #[tokio::test]
@@ -700,6 +726,18 @@ mod tests {
         let metadata = Metadata::default();
 
         let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let etag = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                5,
+                None,
+                stream::single(b"hello".to_vec()),
+            )
+            .await
+            .unwrap();
 
         let result = backend
             .complete_multipart(
@@ -714,5 +752,19 @@ mod tests {
             .unwrap();
         assert!(result.is_some(), "expected error for missing part");
         assert_eq!(result.unwrap().code, "InvalidPart");
+
+        // Upload must survive a failed complete so the client can retry.
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "retry with correct part should succeed");
     }
 }
