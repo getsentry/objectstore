@@ -26,7 +26,6 @@ http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
-mimalloc = { workspace = true }
 num_cpus = "1.17.0"
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
@@ -44,6 +43,7 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower = { version = "0.5.2" }
 tower-http = { version = "0.6.6", default-features = false, features = [

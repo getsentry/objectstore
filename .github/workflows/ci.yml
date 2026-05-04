@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -94,9 +95,19 @@ jobs:
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
             gcr.io/cloud-devrel-public-resources/storage-testbench:latest
 
+      - name: Start MinIO
+        run: |
+          docker run -d \
+            --name minio \
+            -p 8089:9000 \
+            --entrypoint /run-minio.sh \
+            -v $PWD/devservices/run-minio.sh:/run-minio.sh \
+            minio/minio
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
+          rustup component add llvm-tools-preview
 
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
@@ -107,8 +118,18 @@ jobs:
         with:
           key: ${{ github.job }}
 
-      - name: Run Tests
-        run: cargo test --workspace --all-features
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info --locked
+
+      - name: Upload Rust coverage
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: lcov.info
+          flags: rust
+          use_oidc: true
 
   test-python:
     name: Test Python
@@ -136,8 +157,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages --all-groups
 
-      - name: Run tests
-        run: uv run pytest clients/python
+      - name: Run tests with coverage
+        run: uv run pytest clients/python --cov=clients/python/src --cov-report=xml:python-coverage.xml
+
+      - name: Upload Python coverage
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: python-coverage.xml
+          flags: python
+          use_oidc: true
 
   docs:
     name: Build and Publish Documentation

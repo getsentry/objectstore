@@ -17,3 +17,7 @@ profile.json.gz
 /**/target
 **/__pycache__
 /dist
+
+# Coverage
+.coverage
+*.lcov

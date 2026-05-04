@@ -64,6 +64,11 @@ impl Services {
         service.start();
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
+        if config.auth.enforce && key_directory.keys.is_empty() {
+            anyhow::bail!(
+                "Auth enforcement is enabled but no keys are configured. Either disable auth enforcement (dev/test environments) or configure a public key."
+            );
+        }
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
         rate_limiter.start();
 
@@ -130,5 +135,38 @@ async fn track_runtime_metrics(interval: Duration) {
         objectstore_metrics::gauge!(
             "runtime.num_io_driver_fds" = registered_fds - deregistered_fds
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn enforce_without_keys_fails_startup() {
+        let config = Config {
+            auth: crate::config::AuthZ {
+                enforce: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = Services::spawn(config).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Auth enforcement is enabled but no keys are configured"),
+        );
+    }
+
+    #[tokio::test]
+    async fn no_enforce_without_keys_starts_ok() {
+        let config = Config {
+            auth: crate::config::AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(Services::spawn(config).await.is_ok());
     }
 }

@@ -5,6 +5,9 @@ storage:
   type: filesystem
   path: data
 
+auth:
+  enforce: false
+
 logging:
   level: trace
   format: auto

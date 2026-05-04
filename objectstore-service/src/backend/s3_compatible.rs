@@ -339,3 +339,41 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use objectstore_types::scope::{Scope, Scopes};
+
+    use super::*;
+    use crate::backend::common::Backend;
+    use crate::id::ObjectContext;
+
+    // NB: To run these tests, you need to have a MinIO server running. This is done
+    // automatically in CI.
+    //
+    // Refer to the readme for how to set up MinIO via devservices.
+
+    fn create_test_backend() -> S3CompatibleBackend<NoToken> {
+        S3CompatibleBackend::without_token(S3CompatibleConfig {
+            endpoint: "http://localhost:8089".into(),
+            bucket: "test-bucket".into(),
+        })
+    }
+
+    fn make_id() -> ObjectId {
+        ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_nonexistent() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let result = backend.get_metadata(&id).await?;
+        assert!(result.is_none());
+        Ok(())
+    }
+}
