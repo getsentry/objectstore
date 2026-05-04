@@ -73,6 +73,13 @@ pub struct Delete {
     pub key: ObjectKey,
 }
 
+/// An exists operation: checks whether an object exists by key.
+#[derive(Debug)]
+pub struct Exists {
+    /// The key of the object to check.
+    pub key: ObjectKey,
+}
+
 /// A single streaming operation.
 #[derive(Debug)]
 pub enum Operation {
@@ -82,6 +89,8 @@ pub enum Operation {
     Get(Get),
     /// Delete an object.
     Delete(Delete),
+    /// Check if an object exists.
+    Exists(Exists),
 }
 
 impl Operation {
@@ -91,13 +100,16 @@ impl Operation {
             Operation::Insert(op) => op.key.as_ref(),
             Operation::Get(op) => Some(&op.key),
             Operation::Delete(op) => Some(&op.key),
+            Operation::Exists(op) => Some(&op.key),
         }
     }
 
     /// Returns the permission required to perform this operation.
     pub fn permission(&self) -> objectstore_types::auth::Permission {
         match self {
-            Operation::Get(_) => objectstore_types::auth::Permission::ObjectRead,
+            Operation::Get(_) | Operation::Exists(_) => {
+                objectstore_types::auth::Permission::ObjectRead
+            }
             Operation::Insert(_) => objectstore_types::auth::Permission::ObjectWrite,
             Operation::Delete(_) => objectstore_types::auth::Permission::ObjectDelete,
         }
@@ -109,6 +121,7 @@ impl Operation {
             Operation::Insert(_) => "insert",
             Operation::Get(_) => "get",
             Operation::Delete(_) => "delete",
+            Operation::Exists(_) => "exists",
         }
     }
 }
@@ -135,6 +148,13 @@ pub enum OpResponse {
         /// The key that was deleted.
         key: ObjectKey,
     },
+    /// An exists check completed.
+    Exists {
+        /// The key that was checked.
+        key: ObjectKey,
+        /// Whether the object exists.
+        exists: bool,
+    },
 }
 
 impl OpResponse {
@@ -144,6 +164,7 @@ impl OpResponse {
             OpResponse::Inserted { .. } => "insert",
             OpResponse::Got { .. } => "get",
             OpResponse::Deleted { .. } => "delete",
+            OpResponse::Exists { .. } => "exists",
         }
     }
 
@@ -153,6 +174,7 @@ impl OpResponse {
             OpResponse::Inserted { id } => &id.key,
             OpResponse::Got { key, .. } => key,
             OpResponse::Deleted { key } => key,
+            OpResponse::Exists { key, .. } => key,
         }
     }
 }
@@ -178,6 +200,11 @@ impl std::fmt::Debug for OpResponse {
                 .field("response", &format_args!("None"))
                 .finish(),
             OpResponse::Deleted { key } => f.debug_struct("Deleted").field("key", key).finish(),
+            OpResponse::Exists { key, exists } => f
+                .debug_struct("Exists")
+                .field("key", key)
+                .field("exists", exists)
+                .finish(),
         }
     }
 }
@@ -278,6 +305,14 @@ async fn execute_operation(
             let id = ObjectId::new(context, delete.key);
             backend.delete_object(&id).await?;
             Ok(OpResponse::Deleted { key: id.key })
+        }
+        Operation::Exists(exists) => {
+            let id = ObjectId::new(context, exists.key);
+            let found = backend.get_metadata(&id).await?.is_some();
+            Ok(OpResponse::Exists {
+                key: id.key,
+                exists: found,
+            })
         }
     }
 }
@@ -412,6 +447,53 @@ mod tests {
                 !response.key().as_str().is_empty(),
                 "response must have a non-empty key"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_exists_operation() {
+        let service = make_service();
+        let context = make_context();
+
+        service
+            .insert_object(
+                context.clone(),
+                Some("present".into()),
+                Metadata::default(),
+                stream::single("data"),
+            )
+            .await
+            .unwrap();
+
+        let ops = vec![
+            Operation::Exists(Exists {
+                key: "present".into(),
+            }),
+            Operation::Exists(Exists {
+                key: "missing".into(),
+            }),
+        ];
+
+        let executor = service.stream().unwrap();
+        let mut outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
+        outcomes.sort_by_key(|(idx, _)| *idx);
+
+        assert_eq!(outcomes.len(), 2);
+
+        match &outcomes[0].1 {
+            Ok(OpResponse::Exists { key, exists }) => {
+                assert_eq!(key.as_str(), "present");
+                assert!(exists);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        match &outcomes[1].1 {
+            Ok(OpResponse::Exists { key, exists }) => {
+                assert_eq!(key.as_str(), "missing");
+                assert!(!exists);
+            }
+            other => panic!("unexpected result: {other:?}"),
         }
     }
 

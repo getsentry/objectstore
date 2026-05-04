@@ -28,6 +28,7 @@
 //! read. Legacy tombstones expire naturally by TTL/GC; TTI bumps transparently upgrade them
 //! to the new format.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -795,6 +796,193 @@ impl BigTableBackend {
         }
     }
 
+    /// Reads multiple rows by key in a single `ReadRows` RPC.
+    ///
+    /// Returns a map from row key bytes to parsed [`RowData`]. Missing and
+    /// expired rows are omitted from the result.
+    async fn read_rows_batch(
+        &self,
+        paths: &[Vec<u8>],
+        filter: Option<v2::RowFilter>,
+        action: &'static str,
+    ) -> Result<HashMap<Vec<u8>, RowData>> {
+        if paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(v2::RowSet {
+                row_keys: paths.to_vec(),
+                row_ranges: vec![],
+            }),
+            filter,
+            rows_limit: 0,
+            ..Default::default()
+        };
+
+        let response = retry(action, || async {
+            self.bigtable.client().read_rows(request.clone()).await
+        })
+        .await?;
+
+        let now = SystemTime::now();
+        let mut result = HashMap::with_capacity(response.len());
+        for (key, cells) in response {
+            match RowData::from_cells(cells) {
+                Ok(row) if !row.expires_before(now) => {
+                    result.insert(key, row);
+                }
+                Ok(_) => {} // expired
+                Err(e) => {
+                    objectstore_log::warn!(!!&e, "skipping corrupt row in batch read");
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Best-effort batch TTI bump via a single `MutateRows` RPC.
+    ///
+    /// For object rows whose payload was not loaded (metadata-only read), fetches
+    /// payloads in a second `ReadRows` RPC before building the mutations.
+    async fn bump_tti_batch(&self, stale_rows: &[(Vec<u8>, &RowData, &ObjectId)]) {
+        if stale_rows.is_empty() {
+            return;
+        }
+
+        let now = SystemTime::now();
+
+        // Partition: tombstones can be rewritten directly; objects need payload.
+        let mut tombstone_entries = Vec::new();
+        let mut object_paths = Vec::new();
+
+        for (path, row, hv_id) in stale_rows {
+            match row {
+                RowData::Tombstone { target, .. } => {
+                    let target = match parse_redirect_target(target, hv_id) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            objectstore_log::error!(
+                                !!&e,
+                                "invalid redirect target in batch TTI bump"
+                            );
+                            continue;
+                        }
+                    };
+                    let tombstone = Tombstone {
+                        target,
+                        expiration_policy: row.expiration_policy(),
+                    };
+                    match tombstone_mutations(&tombstone, now) {
+                        Ok(mutations) => {
+                            tombstone_entries.push(v2::mutate_rows_request::Entry {
+                                row_key: path.clone(),
+                                mutations: mutations.to_vec(),
+                            });
+                        }
+                        Err(e) => {
+                            objectstore_log::warn!(
+                                !!&e,
+                                "failed to build tombstone mutations in batch TTI bump"
+                            );
+                        }
+                    }
+                }
+                RowData::Object { .. } => {
+                    object_paths.push(path.clone());
+                }
+            }
+        }
+
+        // Fetch payloads for object rows that need a TTI bump.
+        let payloads = if !object_paths.is_empty() {
+            match self
+                .read_rows_batch(
+                    &object_paths,
+                    Some(column_filter(COLUMN_PAYLOAD)),
+                    "tti-bump-batch-payload",
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    objectstore_log::warn!(!!&e, "failed to fetch payloads for batch TTI bump");
+                    return;
+                }
+            }
+        } else {
+            HashMap::new()
+        };
+
+        // Build object mutation entries.
+        let mut object_entries = Vec::new();
+        for (path, row, _) in stale_rows {
+            if let RowData::Object { metadata, .. } = row
+                && let Some(RowData::Object {
+                    payload: fetched_payload,
+                    ..
+                }) = payloads.get(path)
+            {
+                match object_mutations(metadata, fetched_payload.clone(), now) {
+                    Ok(mutations) => {
+                        object_entries.push(v2::mutate_rows_request::Entry {
+                            row_key: path.clone(),
+                            mutations: mutations.to_vec(),
+                        });
+                    }
+                    Err(e) => {
+                        objectstore_log::warn!(
+                            !!&e,
+                            "failed to build object mutations in batch TTI bump"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut all_entries = tombstone_entries;
+        all_entries.append(&mut object_entries);
+
+        if all_entries.is_empty() {
+            return;
+        }
+
+        let request = v2::MutateRowsRequest {
+            table_name: self.table_path.clone(),
+            entries: all_entries,
+            ..Default::default()
+        };
+
+        // Best effort: drain the streaming response, log failures.
+        let result = retry("tti-bump-batch", || async {
+            self.bigtable.client().mutate_rows(request.clone()).await
+        })
+        .await;
+
+        match result {
+            Ok(mut stream) => {
+                while let Ok(Some(response)) = stream.try_next().await {
+                    for entry in response.entries {
+                        if let Some(status) = entry.status
+                            && status.code != 0
+                        {
+                            objectstore_log::warn!(
+                                index = entry.index,
+                                code = status.code,
+                                message = status.message,
+                                "batch TTI bump entry failed"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                objectstore_log::warn!(!!&e, "batch TTI bump MutateRows failed");
+            }
+        }
+    }
+
     /// Executes a `CheckAndMutateRow` request.
     async fn check_and_mutate(
         &self,
@@ -1057,6 +1245,61 @@ impl HighVolumeBackend for BigTableBackend {
 
         self.check_and_mutate(path, predicate, mutations, "compare_and_write")
             .await
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn get_tiered_metadata_batch(&self, ids: &[ObjectId]) -> Result<Vec<TieredMetadata>> {
+        objectstore_log::debug!(
+            count = ids.len(),
+            "Batch metadata read from Bigtable backend"
+        );
+
+        let paths: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|id| id.as_storage_path().to_string().into_bytes())
+            .collect();
+
+        // 1. Single ReadRows with metadata filter for all keys.
+        let found = self
+            .read_rows_batch(&paths, Some(metadata_filter()), "get_tiered_metadata_batch")
+            .await?;
+
+        // 2. Collect rows needing a TTI bump.
+        let stale_rows: Vec<(Vec<u8>, &RowData, &ObjectId)> = paths
+            .iter()
+            .zip(ids.iter())
+            .filter_map(|(path, id)| {
+                let row = found.get(path)?;
+                row.needs_tti_bump().then_some((path.clone(), row, id))
+            })
+            .collect();
+
+        // 3. Best-effort batch TTI bump.
+        self.bump_tti_batch(&stale_rows).await;
+
+        // 4. Map results back in input order.
+        let mut results = Vec::with_capacity(ids.len());
+        for (path, id) in paths.iter().zip(ids.iter()) {
+            let result = match found.get(path) {
+                Some(RowData::Tombstone { meta, target, .. }) => {
+                    match parse_redirect_target(target, id) {
+                        Ok(target) => TieredMetadata::Tombstone(Tombstone {
+                            target,
+                            expiration_policy: meta.expiration_policy,
+                        }),
+                        Err(e) => {
+                            objectstore_log::error!(!!&e, "invalid redirect target in batch read");
+                            TieredMetadata::NotFound
+                        }
+                    }
+                }
+                Some(RowData::Object { metadata, .. }) => TieredMetadata::Object(metadata.clone()),
+                None => TieredMetadata::NotFound,
+            };
+            results.push(result);
+        }
+
+        Ok(results)
     }
 }
 
@@ -2021,6 +2264,95 @@ mod tests {
             other => panic!("expected tombstone, got {other:?}"),
         }
 
+        Ok(())
+    }
+
+    // --- get_tiered_metadata_batch tests ---
+
+    #[tokio::test]
+    async fn test_get_tiered_metadata_batch() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let obj_id = make_id();
+        let obj_meta = Metadata::default();
+        create_object(&backend, &obj_id, &obj_meta, b"payload", SystemTime::now()).await?;
+
+        let tomb_id = make_id();
+        let target_id = make_id();
+        let tombstone = Tombstone {
+            target: target_id.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+        create_tombstone(&backend, &tomb_id, &tombstone, SystemTime::now()).await?;
+
+        let missing_id = make_id();
+
+        let results = backend
+            .get_tiered_metadata_batch(&[obj_id, tomb_id, missing_id])
+            .await?;
+
+        assert_eq!(results.len(), 3);
+        assert!(matches!(&results[0], TieredMetadata::Object(_)));
+        assert!(matches!(&results[1], TieredMetadata::Tombstone(t) if t.target == target_id));
+        assert!(matches!(&results[2], TieredMetadata::NotFound));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_tiered_metadata_batch_tti_bump() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        // Backdate so rows are inside the bump window.
+        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_secs(60);
+
+        let id1 = make_id();
+        create_object(&backend, &id1, &metadata, b"hello", past_now).await?;
+
+        let id2 = make_id();
+        create_object(&backend, &id2, &metadata, b"world", past_now).await?;
+
+        let pre_meta1 = backend.get_metadata(&id1).await?.unwrap();
+        let pre_meta2 = backend.get_metadata(&id2).await?.unwrap();
+
+        // Batch read triggers batch TTI bump.
+        let results = backend
+            .get_tiered_metadata_batch(&[id1.clone(), id2.clone()])
+            .await?;
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], TieredMetadata::Object(_)));
+        assert!(matches!(&results[1], TieredMetadata::Object(_)));
+
+        // Verify expiry was extended.
+        let post_meta1 = backend.get_metadata(&id1).await?.unwrap();
+        let post_meta2 = backend.get_metadata(&id2).await?.unwrap();
+        assert!(
+            post_meta1.time_expires.unwrap() > pre_meta1.time_expires.unwrap(),
+            "batch bump should extend expiry for id1"
+        );
+        assert!(
+            post_meta2.time_expires.unwrap() > pre_meta2.time_expires.unwrap(),
+            "batch bump should extend expiry for id2"
+        );
+
+        // Payload must still be intact.
+        let (_, stream) = backend.get_object(&id1).await?.unwrap();
+        assert_eq!(stream::read_to_vec(stream).await?, b"hello");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_tiered_metadata_batch_empty() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let results = backend.get_tiered_metadata_batch(&[]).await?;
+        assert!(results.is_empty());
         Ok(())
     }
 }

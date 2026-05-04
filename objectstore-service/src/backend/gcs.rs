@@ -619,6 +619,21 @@ impl Backend for GcsBackend {
         })
         .await
     }
+
+    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        objectstore_log::debug!(count = ids.len(), "Batch exists check on GCS backend");
+
+        let futures: Vec<_> = ids
+            .iter()
+            .map(|id| async move {
+                let url = self.object_url(id)?;
+                let meta = self.fetch_gcs_metadata(&url).await?;
+                Ok(meta.is_some())
+            })
+            .collect();
+
+        futures_util::future::try_join_all(futures).await
+    }
 }
 
 #[cfg(test)]
@@ -944,6 +959,79 @@ mod tests {
             "Payload should be returned still compressed, not auto-decompressed"
         );
 
+        Ok(())
+    }
+
+    // --- check_exists_batch tests ---
+
+    #[tokio::test]
+    async fn test_check_exists_batch() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id1 = make_id();
+        backend
+            .put_object(&id1, &Metadata::default(), stream::single("exists1"))
+            .await?;
+
+        let id2 = make_id();
+        backend
+            .put_object(&id2, &Metadata::default(), stream::single("exists2"))
+            .await?;
+
+        let missing = make_id();
+
+        let results = backend.check_exists_batch(&[id1, missing, id2]).await?;
+
+        assert_eq!(results, vec![true, false, true]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_check_exists_batch_tti_bump() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            ..Default::default()
+        };
+
+        let id = make_id();
+        backend
+            .put_object(&id, &metadata, stream::single("tti-test"))
+            .await?;
+
+        // Backdate custom_time so the row is inside the bump window.
+        let object_url = backend.object_url(&id)?;
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        backend.update_custom_time(object_url, old_deadline).await?;
+
+        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+
+        // check_exists_batch uses fetch_gcs_metadata which bumps TTI.
+        let results = backend
+            .check_exists_batch(std::slice::from_ref(&id))
+            .await?;
+        assert_eq!(results, vec![true]);
+
+        let post_meta = backend.get_metadata(&id).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "check_exists_batch should trigger TTI bump: {pre_expiry:?} -> {post_expiry:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_check_exists_batch_empty() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let results = backend.check_exists_batch(&[]).await?;
+        assert!(results.is_empty());
         Ok(())
     }
 }

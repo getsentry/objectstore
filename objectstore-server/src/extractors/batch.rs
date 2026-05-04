@@ -11,7 +11,7 @@ use axum::extract::{
 };
 use bytes::BytesMut;
 use futures::{StreamExt, stream::BoxStream};
-use objectstore_service::streaming::{Delete, Get, Insert, Operation};
+use objectstore_service::streaming::{Delete, Exists, Get, Insert, Operation};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
@@ -119,6 +119,13 @@ async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, Bat
                 payload: payload.freeze(),
             })
         }
+        "exists" => Operation::Exists(Exists {
+            key: key.ok_or_else(|| {
+                BatchError::BadRequest(format!(
+                    "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                ))
+            })?,
+        }),
         _ => {
             return Err(BatchError::BadRequest(format!(
                 "invalid operation kind: {kind}"
@@ -357,6 +364,60 @@ mod tests {
             &operations[4].as_ref().unwrap(),
             Operation::Delete(d) if d.key == "valid"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_exists_operation() {
+        let key = percent_encoding::percent_encode(b"check-me", NON_ALPHANUMERIC);
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: exists\r\n\
+             \r\n\
+             \r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 1);
+
+        let Operation::Exists(exists_op) = &operations[0].as_ref().unwrap() else {
+            panic!("expected exists operation");
+        };
+        assert_eq!(exists_op.key, "check-me");
+    }
+
+    #[tokio::test]
+    async fn test_exists_without_key_is_error() {
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: exists\r\n\
+             \r\n\
+             \r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(&operations[0], Err(BatchError::BadRequest(_))));
     }
 
     #[tokio::test]

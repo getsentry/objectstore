@@ -451,6 +451,57 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
+    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        let start = Instant::now();
+
+        // 1. Batch read from HV — single Bigtable ReadRows RPC.
+        let hv_results = self
+            .inner
+            .high_volume
+            .get_tiered_metadata_batch(ids)
+            .await?;
+
+        // 2. Collect tombstone targets that need LT lookup.
+        let mut tombstone_indices = Vec::new();
+        let mut tombstone_targets = Vec::new();
+        for (i, result) in hv_results.iter().enumerate() {
+            if let TieredMetadata::Tombstone(tombstone) = result {
+                tombstone_indices.push(i);
+                tombstone_targets.push(tombstone.target.clone());
+            }
+        }
+
+        // 3. Batch check LT for tombstone targets (concurrent GCS fetches).
+        let lt_results = if !tombstone_targets.is_empty() {
+            self.inner
+                .long_term
+                .check_exists_batch(&tombstone_targets)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        // 4. Merge results.
+        let mut results = Vec::with_capacity(ids.len());
+        let mut lt_idx = 0;
+        for hv_result in &hv_results {
+            let exists = match hv_result {
+                TieredMetadata::Object(_) => true,
+                TieredMetadata::NotFound => false,
+                TieredMetadata::Tombstone(_) => {
+                    let found = lt_results[lt_idx];
+                    lt_idx += 1;
+                    found
+                }
+            };
+            results.push(exists);
+        }
+
+        objectstore_metrics::record!("exists_batch.latency" = start.elapsed());
+
+        Ok(results)
+    }
+
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let start = Instant::now();
 
@@ -1285,5 +1336,80 @@ mod tests {
             entries.is_empty(),
             "changelog entry not removed after cleanup"
         );
+    }
+
+    // --- check_exists_batch tests ---
+
+    #[tokio::test]
+    async fn check_exists_batch_inline_and_tombstone() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+
+        let inline_id = make_id("inline-exists");
+        storage
+            .put_object(
+                &inline_id,
+                &Default::default(),
+                stream::single(b"small".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let large_id = make_id("large-exists");
+        storage
+            .put_object(
+                &large_id,
+                &Default::default(),
+                stream::single(vec![0xABu8; 2 * 1024 * 1024]),
+            )
+            .await
+            .unwrap();
+
+        let missing_id = make_id("missing-exists");
+
+        let results = storage
+            .check_exists_batch(&[inline_id, large_id, missing_id])
+            .await
+            .unwrap();
+
+        assert_eq!(results, vec![true, true, false]);
+    }
+
+    #[tokio::test]
+    async fn check_exists_batch_all_not_found() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+
+        let ids: Vec<ObjectId> = (0..5).map(|i| make_id(&format!("missing-{i}"))).collect();
+        let results = storage.check_exists_batch(&ids).await.unwrap();
+
+        assert_eq!(results, vec![false; 5]);
+    }
+
+    #[tokio::test]
+    async fn check_exists_batch_orphan_tombstone() {
+        let (storage, hv, lt, _) = make_tiered_storage();
+
+        let id = make_id("orphan");
+        storage
+            .put_object(
+                &id,
+                &Default::default(),
+                stream::single(vec![0xCDu8; 2 * 1024 * 1024]),
+            )
+            .await
+            .unwrap();
+
+        // Delete the LT blob directly, leaving the HV tombstone orphaned.
+        let tombstone = hv.get(&id).expect_tombstone();
+        lt.remove(&tombstone.target);
+
+        let results = storage.check_exists_batch(&[id]).await.unwrap();
+        assert_eq!(results, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn check_exists_batch_empty() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+        let results = storage.check_exists_batch(&[]).await.unwrap();
+        assert!(results.is_empty());
     }
 }

@@ -13,7 +13,7 @@ use objectstore_types::metadata::Metadata;
 use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
-use crate::id::{ObjectContext, ObjectId};
+use crate::id::{ObjectContext, ObjectId, ObjectKey};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -223,6 +223,26 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         self.spawn("delete", async move { inner.delete_object(&id).await })
             .await
+    }
+
+    /// Checks existence of multiple objects in a single batch operation.
+    ///
+    /// Acquires a single concurrency permit for the entire batch. The backend
+    /// may optimize this into fewer RPCs than checking each key individually.
+    pub async fn check_exists_batch(
+        &self,
+        context: ObjectContext,
+        keys: Vec<ObjectKey>,
+    ) -> Result<Vec<bool>> {
+        let ids: Vec<ObjectId> = keys
+            .into_iter()
+            .map(|key| ObjectId::new(context.clone(), key))
+            .collect();
+        let inner = Arc::clone(&self.inner);
+        self.spawn("check_exists_batch", async move {
+            inner.check_exists_batch(&ids).await
+        })
+        .await
     }
 
     /// Waits for all outstanding background operations to complete.

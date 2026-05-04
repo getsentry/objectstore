@@ -34,36 +34,105 @@ pub fn router() -> Router<ServiceState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
 }
 
-/// Applies a per-operation check to a stream of indexed operations.
-///
-/// Errors already in the stream pass through unchanged. For each `Ok(op)`,
-/// `check` is called: if it returns `Err(e)` the item becomes `Err(e)`;
-/// otherwise the item remains `Ok(op)`.
-fn validate<S, E, F>(
-    stream: S,
-    check: F,
-) -> impl futures::Stream<Item = (usize, Result<Operation, E>)> + Send + 'static
-where
-    S: futures::Stream<Item = (usize, Result<Operation, E>)> + Send + 'static,
-    F: Fn(&Operation) -> Result<(), E> + Send + 'static,
-{
-    stream.map(move |(idx, item)| {
-        (
-            idx,
-            item.and_then(|op| {
-                check(&op)?;
-                Ok(op)
-            }),
-        )
-    })
-}
-
 async fn batch(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     requests: BatchOperationStream,
 ) -> Response {
+    // Step 1: collect and validate all operations.
+    let all_ops: Vec<(usize, Result<Operation, ApiError>)> = requests
+        .0
+        .map(|r| r.map_err(ApiError::from))
+        .enumerate()
+        .map({
+            let state = Arc::clone(&state);
+            let context = context.clone();
+            let service = &service;
+            move |(idx, item)| {
+                let item = item.and_then(|op| {
+                    // Rate-limit check
+                    if !state.rate_limiter.check(&context) {
+                        return Err(ApiError::from(BatchError::RateLimited));
+                    }
+                    // Auth check
+                    service.check_permission(op.permission(), &context)?;
+                    // Policy check for inserts
+                    if let Operation::Insert(ref ins) = op {
+                        state
+                            .config
+                            .usecases
+                            .validate(&context.usecase, &ins.metadata)
+                            .map_err(|e| ApiError::Client(e.to_string()))?;
+                    }
+                    Ok(op)
+                });
+                (idx, item)
+            }
+        })
+        .collect()
+        .await;
+
+    // Step 2: partition exists operations from others.
+    let mut exists_ops: Vec<(usize, ObjectKey)> = Vec::new();
+    let exists_errors: Vec<Part> = Vec::new();
+    let mut other_ops: Vec<(usize, Result<Operation, ApiError>)> = Vec::new();
+
+    for (idx, item) in all_ops {
+        match item {
+            Ok(Operation::Exists(exists)) => {
+                exists_ops.push((idx, exists.key));
+            }
+            other => other_ops.push((idx, other)),
+        }
+    }
+
+    // Step 3: execute exists batch.
+    let exists_parts: Vec<Part> = if !exists_ops.is_empty() {
+        let keys: Vec<ObjectKey> = exists_ops.iter().map(|(_, k)| k.clone()).collect();
+        match state
+            .service
+            .check_exists_batch(context.clone(), keys)
+            .await
+        {
+            Ok(results) => exists_ops
+                .iter()
+                .zip(results.into_iter())
+                .map(|((idx, key), found)| {
+                    create_success_part(
+                        *idx,
+                        key,
+                        "exists",
+                        if found {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::NOT_FOUND
+                        },
+                        None,
+                        Bytes::new(),
+                        None,
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                let error = ApiError::Service(e);
+                exists_ops
+                    .iter()
+                    .map(|(idx, _)| create_error_part(*idx, &error))
+                    .collect()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Step 4: execute other operations through the streaming executor (if any).
+    let exists_stream = futures::stream::iter(exists_parts.into_iter().chain(exists_errors));
+
+    if other_ops.is_empty() {
+        return exists_stream.into_multipart_response(rand::random());
+    }
+
     let batch = match state.service.stream() {
         Ok(b) => b,
         Err(e) => return ApiError::Service(e).into_response(),
@@ -71,67 +140,32 @@ async fn batch(
 
     objectstore_metrics::gauge!("service.batch.window" = batch.window());
 
-    // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
-    let parsed = requests.0.map(|r| r.map_err(ApiError::from)).enumerate();
-
-    // Step 2: rate-limit check
-    let rate_limited = validate(parsed, {
-        let state = Arc::clone(&state);
-        let context = context.clone();
-        move |_op| {
-            if state.rate_limiter.check(&context) {
-                Ok(())
-            } else {
-                Err(ApiError::from(BatchError::RateLimited))
-            }
-        }
-    });
-
-    // Step 3: auth check
-    let authorized = validate(rate_limited, {
-        let context = context.clone();
-        move |op| service.check_permission(op.permission(), &context)
-    });
-
-    // Step 4: use case policy validation
-    let policy_checked = validate(authorized, {
-        let state = Arc::clone(&state);
-        let usecase = context.usecase.clone();
-        move |op| {
-            if let Operation::Insert(ins) = op {
-                state
-                    .config
-                    .usecases
-                    .validate(&usecase, &ins.metadata)
-                    .map_err(|e| ApiError::Client(e.to_string()))?;
-            }
-            Ok(())
-        }
-    });
-
-    // Step 5: stamp inserts with time_created and record bandwidth
-    let stamped = policy_checked.map({
-        let state = Arc::clone(&state);
-        let context = context.clone();
-        move |(idx, mut item)| {
+    // Stamp inserts with time_created and record bandwidth.
+    let other_ops: Vec<(usize, Result<Operation, ApiError>)> = other_ops
+        .into_iter()
+        .map(|(idx, mut item)| {
             if let Ok(Operation::Insert(ins)) = &mut item {
                 ins.metadata.time_created = Some(SystemTime::now());
                 state.record_bandwidth(&context, ins.payload.len() as u64);
             }
             (idx, item)
-        }
-    });
+        })
+        .collect();
 
-    // Step 6: execute concurrently, then convert each result to a multipart Part
     let state_ref = Arc::clone(&state);
     let context_ref = context.clone();
-    let responses = batch.execute(context, stamped).then(move |(idx, result)| {
-        let state = Arc::clone(&state_ref);
-        let context = context_ref.clone();
-        async move { convert_to_part(idx, result, &state, &context).await }
-    });
+    let other_stream = batch
+        .execute(context, futures::stream::iter(other_ops))
+        .then(move |(idx, result)| {
+            let state = Arc::clone(&state_ref);
+            let context = context_ref.clone();
+            async move { convert_to_part(idx, result, &state, &context).await }
+        });
 
-    responses.into_multipart_response(rand::random())
+    // Step 5: merge both streams and return as multipart response.
+    exists_stream
+        .chain(other_stream)
+        .into_multipart_response(rand::random())
 }
 
 /// Converts a single operation result to a multipart [`Part`].
@@ -179,6 +213,19 @@ async fn convert_to_part(
             &key,
             "delete",
             StatusCode::NO_CONTENT,
+            None,
+            Bytes::new(),
+            None,
+        ),
+        Ok(OpResponse::Exists { key, exists }) => create_success_part(
+            idx,
+            &key,
+            "exists",
+            if exists {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            },
             None,
             Bytes::new(),
             None,

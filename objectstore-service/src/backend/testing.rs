@@ -99,6 +99,15 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.delete_object(id).await
     }
 
+    /// Intercepts [`Backend::check_exists_batch`]. Default delegates to `inner`.
+    async fn check_exists_batch(
+        &self,
+        inner: &InMemoryBackend,
+        ids: &[ObjectId],
+    ) -> Result<Vec<bool>> {
+        inner.check_exists_batch(ids).await
+    }
+
     /// Intercepts [`Backend::join`]. Default delegates to `inner`.
     async fn join(&self, inner: &InMemoryBackend) {
         inner.join().await
@@ -149,6 +158,15 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         write: TieredWrite,
     ) -> Result<bool> {
         inner.compare_and_write(id, current, write).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::get_tiered_metadata_batch`]. Default delegates to `inner`.
+    async fn get_tiered_metadata_batch(
+        &self,
+        inner: &InMemoryBackend,
+        ids: &[ObjectId],
+    ) -> Result<Vec<TieredMetadata>> {
+        inner.get_tiered_metadata_batch(ids).await
     }
 }
 
@@ -217,6 +235,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.delete_object(&self.inner, id).await
     }
 
+    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        self.hooks.check_exists_batch(&self.inner, ids).await
+    }
+
     async fn join(&self) {
         self.hooks.join(&self.inner).await
     }
@@ -256,5 +278,9 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         self.hooks
             .compare_and_write(&self.inner, id, current, write)
             .await
+    }
+
+    async fn get_tiered_metadata_batch(&self, ids: &[ObjectId]) -> Result<Vec<TieredMetadata>> {
+        self.hooks.get_tiered_metadata_batch(&self.inner, ids).await
     }
 }

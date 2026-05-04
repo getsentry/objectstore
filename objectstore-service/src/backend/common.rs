@@ -56,6 +56,23 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
 
+    /// Checks existence of multiple objects in a single batch operation.
+    ///
+    /// Returns a `Vec<bool>` in the same order as the input IDs, where `true`
+    /// means the object exists. TTI is bumped for objects with a TTI expiration
+    /// policy, consistent with read operations.
+    ///
+    /// The default implementation calls [`get_metadata`](Self::get_metadata)
+    /// sequentially for each ID. Backends may override this for optimized batch
+    /// checking (e.g. a single Bigtable `ReadRows` RPC).
+    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.get_metadata(id).await?.is_some());
+        }
+        Ok(results)
+    }
+
     /// Waits for any outstanding background operations to complete before shutdown.
     ///
     /// The default implementation is a no-op. Backends that spawn background tasks
@@ -174,6 +191,22 @@ pub trait HighVolumeBackend: Backend {
         current: Option<&ObjectId>,
         write: TieredWrite,
     ) -> Result<bool>;
+
+    /// Batch metadata check with tombstone awareness.
+    ///
+    /// Returns a `Vec<TieredMetadata>` in the same order as the input IDs.
+    /// Where the backend supports it, this performs a single round-trip for all
+    /// keys and batch-bumps TTI for stale rows.
+    ///
+    /// The default implementation calls [`get_tiered_metadata`](Self::get_tiered_metadata)
+    /// sequentially for each ID.
+    async fn get_tiered_metadata_batch(&self, ids: &[ObjectId]) -> Result<Vec<TieredMetadata>> {
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.get_tiered_metadata(id).await?);
+        }
+        Ok(results)
+    }
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
