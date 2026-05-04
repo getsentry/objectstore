@@ -1543,4 +1543,103 @@ mod tests {
 
         Ok(())
     }
+
+    async fn multipart_put(
+        backend: &GcsBackend,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: impl Into<bytes::Bytes>,
+    ) -> Result<()> {
+        let payload: bytes::Bytes = payload.into();
+        let upload_id = backend.initiate_multipart(id, metadata).await?;
+        let etag = backend
+            .upload_part(
+                id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await?;
+        let error = backend
+            .complete_multipart(
+                id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await?;
+        assert!(
+            error.is_none(),
+            "complete_multipart returned error: {error:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multipart_ttl_immediate() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            ..Default::default()
+        };
+
+        multipart_put(&backend, &id, &metadata, "hello, world").await?;
+
+        let result = backend.get_object(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multipart_tti_immediate() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            ..Default::default()
+        };
+
+        multipart_put(&backend, &id, &metadata, "hello, world").await?;
+
+        let result = backend.get_object(&id).await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multipart_compressed_payload_roundtrip() -> Result<()> {
+        use objectstore_types::metadata::Compression;
+
+        let backend = create_test_backend().await?;
+
+        let plaintext = b"hello, world (but compressed with zstd)";
+        let compressed = zstd::encode_all(&plaintext[..], 3)?;
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Zstd),
+            ..Default::default()
+        };
+
+        multipart_put(&backend, &id, &metadata, compressed.clone()).await?;
+
+        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+
+        assert_eq!(meta.compression, Some(Compression::Zstd));
+        assert_eq!(
+            payload, compressed,
+            "Payload should be returned still compressed, not auto-decompressed"
+        );
+
+        Ok(())
+    }
 }
