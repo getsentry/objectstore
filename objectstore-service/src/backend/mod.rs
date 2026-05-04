@@ -60,7 +60,7 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
     Ok(match config {
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume).await?;
-            let lt = from_leaf_config(*c.long_term).await?;
+            let lt = lt_from_leaf_config(*c.long_term).await?;
             let log = Box::new(changelog::NoopChangeLog);
             Box::new(tiered::TieredStorage::new(hv, lt, log))
         }
@@ -68,6 +68,21 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
         // is intentional here: any new leaf variant should fall through to
         // from_leaf_config, which will handle it or produce a compile error.
         _ => from_leaf_config(config).await?,
+    })
+}
+
+/// Constructs a type-erased [`MultipartUploadBackend`](common::MultipartUploadBackend) for the
+/// long-term tier. Only backends that implement [`MultipartUploadBackend`] are valid here.
+async fn lt_from_leaf_config(
+    config: StorageConfig,
+) -> Result<Box<dyn common::MultipartUploadBackend>> {
+    Ok(match config {
+        StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
+        StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
+        _ => anyhow::bail!(
+            "long-term backend does not support multipart uploads; \
+             only filesystem and gcs are supported"
+        ),
     })
 }
 

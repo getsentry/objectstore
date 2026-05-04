@@ -40,12 +40,16 @@ use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
-    TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -256,5 +260,66 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         self.hooks
             .compare_and_write(&self.inner, id, current, write)
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: Hooks> MultipartUploadBackend for TestBackend<H> {
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        self.inner.initiate_multipart(id, metadata).await
+    }
+
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<&str>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        self.inner
+            .upload_part(
+                id,
+                upload_id,
+                part_number,
+                content_length,
+                content_md5,
+                body,
+            )
+            .await
+    }
+
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        self.inner
+            .list_parts(id, upload_id, max_parts, part_number_marker)
+            .await
+    }
+
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        self.inner.abort_multipart(id, upload_id).await
+    }
+
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        self.inner.complete_multipart(id, upload_id, parts).await
     }
 }

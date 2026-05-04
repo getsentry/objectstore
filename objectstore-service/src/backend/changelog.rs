@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 
-use crate::backend::common::{Backend, HighVolumeBackend, TieredMetadata};
+use crate::backend::common::{HighVolumeBackend, MultipartUploadBackend, TieredMetadata};
 use crate::error::Result;
 use crate::id::ObjectId;
 
@@ -88,7 +88,7 @@ pub struct ChangeManager {
     /// The backend for small objects (≤ 1 MiB).
     pub(crate) high_volume: Box<dyn HighVolumeBackend>,
     /// The backend for large objects (> 1 MiB).
-    pub(crate) long_term: Box<dyn Backend>,
+    pub(crate) long_term: Box<dyn MultipartUploadBackend>,
     /// Durable write-ahead log for multi-step changes.
     pub(crate) changelog: Box<dyn ChangeLog>,
     /// Tracks outstanding background cleanup operations for graceful shutdown.
@@ -99,7 +99,7 @@ impl ChangeManager {
     /// Creates a new `ChangeManager` with the given backends and changelog.
     pub fn new(
         high_volume: Box<dyn HighVolumeBackend>,
-        long_term: Box<dyn Backend>,
+        long_term: Box<dyn MultipartUploadBackend>,
         changelog: Box<dyn ChangeLog>,
     ) -> Arc<Self> {
         Arc::new(Self {

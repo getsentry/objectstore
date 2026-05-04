@@ -108,12 +108,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
-    TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -219,7 +223,7 @@ impl TieredStorage {
     /// Creates a new `TieredStorage` with the given backends and change log.
     pub fn new(
         high_volume: Box<dyn HighVolumeBackend>,
-        long_term: Box<dyn Backend>,
+        long_term: Box<dyn MultipartUploadBackend>,
         changelog: Box<dyn ChangeLog>,
     ) -> Self {
         let inner = ChangeManager::new(high_volume, long_term, changelog);
@@ -538,6 +542,191 @@ where
             }
         }),
     )
+}
+
+/// Token encoding the multipart upload state for TieredStorage.
+///
+/// Contains only the physical key suffix (no usecase/scopes) and the upstream
+/// upload ID. The full physical [`ObjectId`] is reconstructed by combining the
+/// key with the context from the request's `id` parameter.
+#[derive(Serialize, Deserialize)]
+struct MultipartToken {
+    /// Key portion of the physical revision in LT (e.g. `"myfile/{uuid}"`).
+    physical_key: String,
+    /// Upload ID returned by the LT backend's `initiate_multipart`.
+    upload_id: String,
+}
+
+fn encode_multipart_token(token: &MultipartToken) -> Result<UploadId> {
+    use base64::Engine;
+    let json =
+        serde_json::to_vec(token).map_err(|e| Error::serde("encoding multipart token", e))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_multipart_token(upload_id: &UploadId) -> Result<MultipartToken> {
+    use base64::Engine;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(upload_id.as_bytes())
+        .map_err(|e| Error::generic(format!("invalid multipart upload ID encoding: {e}")))?;
+    serde_json::from_slice(&json).map_err(|e| Error::serde("decoding multipart token", e))
+}
+
+#[async_trait::async_trait]
+impl MultipartUploadBackend for TieredStorage {
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        let physical = new_long_term_revision(id);
+
+        let upstream_upload_id = self
+            .inner
+            .long_term
+            .initiate_multipart(&physical, metadata)
+            .await?;
+
+        encode_multipart_token(&MultipartToken {
+            physical_key: physical.key,
+            upload_id: upstream_upload_id,
+        })
+    }
+
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<&str>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        let token = decode_multipart_token(upload_id)?;
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: token.physical_key,
+        };
+
+        self.inner
+            .long_term
+            .upload_part(
+                &physical,
+                &token.upload_id,
+                part_number,
+                content_length,
+                content_md5,
+                body,
+            )
+            .await
+    }
+
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        let token = decode_multipart_token(upload_id)?;
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: token.physical_key,
+        };
+
+        self.inner
+            .long_term
+            .list_parts(&physical, &token.upload_id, max_parts, part_number_marker)
+            .await
+    }
+
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        let token = decode_multipart_token(upload_id)?;
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: token.physical_key,
+        };
+
+        self.inner
+            .long_term
+            .abort_multipart(&physical, &token.upload_id)
+            .await
+    }
+
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        let token = decode_multipart_token(upload_id)?;
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: token.physical_key,
+        };
+
+        // 1. Complete on the LT backend (assembles parts into a readable object).
+        //    Done before recording the change: protocol errors (invalid part, etag
+        //    mismatch) leave no assembled blob and must not create a changelog entry.
+        let error = self
+            .inner
+            .long_term
+            .complete_multipart(&physical, &token.upload_id, parts)
+            .await?;
+
+        if error.is_some() {
+            return Ok(error);
+        }
+
+        // 2. Retrieve metadata from the completed object for the tombstone.
+        //    Done before recording the change: a transient failure here leaves an
+        //    orphan blob (bounded by TTL) but no changelog entry and no guard that
+        //    would actively delete the just-completed upload.
+        let metadata = self
+            .inner
+            .long_term
+            .get_metadata(&physical)
+            .await?
+            .ok_or_else(|| {
+                Error::generic("completed multipart object not found in long-term storage")
+            })?;
+
+        // 3. Read current HV revision to establish the write precondition.
+        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
+            TieredMetadata::Tombstone(t) => Some(t.target),
+            _ => None,
+        };
+
+        // 4. Record change now that the LT blob exists and needs tracking.
+        let mut guard = self
+            .record_change(Change {
+                id: id.clone(),
+                new: Some(physical.clone()),
+                old: current.clone(),
+            })
+            .await?;
+        guard.advance(ChangePhase::Written);
+
+        // 5. CAS commit: write tombstone only if HV state matches what we saw.
+        let tombstone = Tombstone {
+            target: physical.clone(),
+            expiration_policy: metadata.expiration_policy,
+        };
+        let written = self
+            .inner
+            .high_volume
+            .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
+            .await?;
+
+        // 6. Let the guard handle cleanup based on the CAS outcome.
+        guard.advance(ChangePhase::compare_and_write(written));
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -1284,6 +1473,465 @@ mod tests {
         assert!(
             entries.is_empty(),
             "changelog entry not removed after cleanup"
+        );
+    }
+
+    // --- Multipart upload ---
+
+    #[test]
+    fn multipart_token_roundtrip() {
+        let token = MultipartToken {
+            physical_key: "my-key/01924a6f-7e28-7b9a-9c1d-abcdef123456".into(),
+            upload_id: "upstream-upload-id-abc".into(),
+        };
+        let encoded = encode_multipart_token(&token).unwrap();
+        let decoded = decode_multipart_token(&encoded).unwrap();
+        assert_eq!(decoded.physical_key, token.physical_key);
+        assert_eq!(decoded.upload_id, token.upload_id);
+    }
+
+    #[test]
+    fn multipart_invalid_token_errors() {
+        let result = decode_multipart_token(&"not-valid-base64!!!".into());
+        assert!(result.is_err());
+
+        // Valid base64 but not valid JSON.
+        use base64::Engine;
+        let bad_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json");
+        let result = decode_multipart_token(&bad_json);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn multipart_single_part_roundtrip() {
+        let (storage, hv, lt, _) = make_tiered_storage();
+        let id = make_id("mp-single");
+        let metadata = Metadata {
+            content_type: "application/octet-stream".into(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB
+
+        let upload_id = storage.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload.clone()),
+            )
+            .await
+            .unwrap();
+
+        let error = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(
+            error.is_none(),
+            "complete_multipart returned error: {error:?}"
+        );
+
+        // get_object should follow the tombstone and return the payload.
+        let (got_meta, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+        assert_eq!(got_meta.content_type, "application/octet-stream");
+
+        // HV should have a tombstone, LT should have the object at the physical key.
+        let tombstone = hv.get(&id).expect_tombstone();
+        assert!(
+            tombstone.target.key().starts_with(id.key()),
+            "tombstone target should be a revision key"
+        );
+        lt.get(&tombstone.target).expect_object();
+    }
+
+    #[tokio::test]
+    async fn multipart_multiple_parts() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+        let id = make_id("mp-multi");
+
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let part1 = vec![0xAAu8; 512 * 1024];
+        let part2 = vec![0xBBu8; 512 * 1024];
+        let part3 = vec![0xCCu8; 512 * 1024];
+
+        let etag1 = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                part1.len() as u64,
+                None,
+                stream::single(part1.clone()),
+            )
+            .await
+            .unwrap();
+        let etag2 = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                2,
+                part2.len() as u64,
+                None,
+                stream::single(part2.clone()),
+            )
+            .await
+            .unwrap();
+        let etag3 = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                3,
+                part3.len() as u64,
+                None,
+                stream::single(part3.clone()),
+            )
+            .await
+            .unwrap();
+
+        let error = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![
+                    CompletedPart {
+                        part_number: 1,
+                        etag: etag1,
+                    },
+                    CompletedPart {
+                        part_number: 2,
+                        etag: etag2,
+                    },
+                    CompletedPart {
+                        part_number: 3,
+                        etag: etag3,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(error.is_none());
+
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&part1);
+        expected.extend_from_slice(&part2);
+        expected.extend_from_slice(&part3);
+        assert_eq!(body, expected);
+    }
+
+    #[tokio::test]
+    async fn multipart_abort() {
+        let (storage, hv, _lt, _) = make_tiered_storage();
+        let id = make_id("mp-abort");
+
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        // Upload a part then abort.
+        let payload = vec![0xABu8; 100];
+        storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+
+        storage.abort_multipart(&id, &upload_id).await.unwrap();
+
+        // No tombstone should have been written.
+        hv.get(&id).expect_not_found();
+
+        // The object should not be reachable.
+        assert!(storage.get_object(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn multipart_overwrites_existing_tombstone() {
+        let (storage, hv, lt, _) = make_tiered_storage();
+        let id = make_id("mp-overwrite");
+
+        // First: put a large object via the normal path.
+        let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload1))
+            .await
+            .unwrap();
+        let old_lt_id = hv.get(&id).expect_tombstone().target;
+
+        // Second: overwrite via multipart.
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let payload2 = vec![0xBBu8; 2 * 1024 * 1024];
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload2.len() as u64,
+                None,
+                stream::single(payload2.clone()),
+            )
+            .await
+            .unwrap();
+
+        let error = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(error.is_none());
+
+        // New tombstone should point to a different revision.
+        let new_lt_id = hv.get(&id).expect_tombstone().target;
+        assert_ne!(old_lt_id, new_lt_id);
+
+        // Drain background cleanup.
+        storage.join().await;
+
+        // Old LT blob should be cleaned up.
+        lt.get(&old_lt_id).expect_not_found();
+        lt.get(&new_lt_id).expect_object();
+
+        // Read back the new data.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload2);
+    }
+
+    #[tokio::test]
+    async fn multipart_list_parts() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+        let id = make_id("mp-list");
+
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let part1 = vec![0xAAu8; 100];
+        let part2 = vec![0xBBu8; 200];
+        storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                part1.len() as u64,
+                None,
+                stream::single(part1),
+            )
+            .await
+            .unwrap();
+        storage
+            .upload_part(
+                &id,
+                &upload_id,
+                2,
+                part2.len() as u64,
+                None,
+                stream::single(part2),
+            )
+            .await
+            .unwrap();
+
+        let resp = storage
+            .list_parts(&id, &upload_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(resp.parts.len(), 2);
+        assert_eq!(resp.parts[0].part_number, 1);
+        assert_eq!(resp.parts[0].size, 100);
+        assert_eq!(resp.parts[1].part_number, 2);
+        assert_eq!(resp.parts[1].size, 200);
+    }
+
+    // --- Multipart consistency ---
+
+    /// Initiates a multipart upload, uploads a single part, and returns the
+    /// (upload_id, etag) pair ready for complete_multipart.
+    async fn initiate_and_upload(
+        storage: &TieredStorage,
+        id: &ObjectId,
+        payload: Vec<u8>,
+    ) -> (UploadId, String) {
+        let upload_id = storage
+            .initiate_multipart(id, &Default::default())
+            .await
+            .unwrap();
+        let etag = storage
+            .upload_part(
+                id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+        (upload_id, etag)
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_cas_conflict_cleans_up_new_blob() {
+        let hv = TestBackend::new(CasConflict);
+        let lt = InMemoryBackend::new("lt");
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()), Box::new(log));
+
+        let id = make_id("mp-cas-conflict");
+        let (upload_id, etag) = initiate_and_upload(&storage, &id, vec![0xABu8; 100]).await;
+
+        storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+
+        storage.join().await;
+
+        assert!(
+            lt.is_empty(),
+            "LT blob should be cleaned up after CAS conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_no_orphan_when_cas_fails() {
+        let lt = InMemoryBackend::new("lt");
+        let hv = TestBackend::new(FailCas(false));
+        let log = NoopChangeLog;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt.clone()), Box::new(log));
+
+        let id = make_id("mp-orphan-test");
+        let (upload_id, etag) = initiate_and_upload(&storage, &id, vec![0xABu8; 100]).await;
+
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+
+        storage.join().await;
+
+        assert!(lt.is_empty(), "long-term object not cleaned up");
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_written_cleanup_after_lost_cas_response() {
+        let (storage, hv, lt, log) = make_tiered_storage();
+        let id = make_id("mp-written");
+
+        // First: establish a tombstone via normal put.
+        let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
+        storage
+            .put_object(&id, &Default::default(), stream::single(payload1))
+            .await
+            .unwrap();
+        let tombstone1 = hv.get(&id).expect_tombstone().target;
+
+        // Second: complete a multipart upload through a broken storage where
+        // CAS succeeds but returns an error (simulating lost response).
+        let broken_storage = TieredStorage::new(
+            Box::new(TestBackend::with_inner(hv.clone(), FailCas(true))),
+            Box::new(lt.clone()),
+            Box::new(log.clone()),
+        );
+        let (upload_id, etag) = initiate_and_upload(&broken_storage, &id, vec![0xBBu8; 100]).await;
+        let result = broken_storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+
+        let tombstone2 = hv.get(&id).expect_tombstone().target;
+        assert_ne!(tombstone1, tombstone2);
+
+        // Guard reads HV, sees the new tombstone won, cleans up the old blob.
+        broken_storage.join().await;
+        lt.get(&tombstone1).expect_not_found();
+        lt.get(&tombstone2).expect_object();
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_changelog_entry_removed() {
+        let (storage, _hv, _lt, log) = make_tiered_storage();
+        let id = make_id("mp-changelog");
+
+        let (upload_id, etag) = initiate_and_upload(&storage, &id, vec![0xABu8; 100]).await;
+
+        storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+
+        storage.join().await;
+
+        let entries = log.scan().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "changelog entry not removed after successful multipart complete"
         );
     }
 }

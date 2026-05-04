@@ -2566,6 +2566,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "bigtable_rs",
  "bytes",
  "chrono",
