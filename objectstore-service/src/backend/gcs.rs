@@ -1473,6 +1473,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_multipart_out_of_order_upload() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
+
+        // Non-final parts must be >= 5 MiB.
+        const MIN_PART: usize = 5 * 1024 * 1024;
+        let part1 = vec![b'a'; MIN_PART];
+        let part2 = vec![b'b'; MIN_PART];
+        let part3 = b"cccc".to_vec();
+
+        // Upload parts out of order: 2, 3, 1.
+        let etag2 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                2,
+                part2.len() as u64,
+                None,
+                stream::single(part2.clone()),
+            )
+            .await?;
+        let etag3 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                3,
+                part3.len() as u64,
+                None,
+                stream::single(part3.clone()),
+            )
+            .await?;
+        let etag1 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                part1.len() as u64,
+                None,
+                stream::single(part1.clone()),
+            )
+            .await?;
+
+        // Complete with parts listed in order.
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![
+                    CompletedPart {
+                        part_number: 1,
+                        etag: etag1,
+                    },
+                    CompletedPart {
+                        part_number: 2,
+                        etag: etag2,
+                    },
+                    CompletedPart {
+                        part_number: 3,
+                        etag: etag3,
+                    },
+                ],
+            )
+            .await?;
+        assert!(result.is_none(), "expected no error on complete");
+
+        // Verify reassembly order matches part numbers, not upload order.
+        let (_meta, stream) = backend.get_object(&id).await?.unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&part1);
+        expected.extend_from_slice(&part2);
+        expected.extend_from_slice(&part3);
+        assert_eq!(payload, expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_multipart_list_parts() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
