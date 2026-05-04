@@ -5,19 +5,24 @@
 //! backend is [`Clone`] so tests can hold a handle for direct inspection while
 //! the service owns a boxed copy.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    DeleteResponse, GetResponse, HighVolumeBackend, PutResponse, TieredGet, TieredMetadata,
-    TieredWrite, Tombstone,
+    DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
+    TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
@@ -29,6 +34,21 @@ enum StoreEntry {
 
 type Store = HashMap<ObjectId, StoreEntry>;
 
+#[derive(Clone, Debug)]
+struct MultipartUpload {
+    metadata: Metadata,
+    parts: BTreeMap<PartNumber, UploadedPart>,
+}
+
+#[derive(Clone, Debug)]
+struct UploadedPart {
+    etag: String,
+    data: Bytes,
+    uploaded_at: SystemTime,
+}
+
+type MultipartStore = HashMap<(ObjectId, UploadId), MultipartUpload>;
+
 /// In-memory [`Backend`](super::common::Backend) backed by a `HashMap`.
 ///
 /// Removes the need for filesystem tempdir management in unit tests. The
@@ -38,6 +58,7 @@ type Store = HashMap<ObjectId, StoreEntry>;
 pub struct InMemoryBackend {
     name: &'static str,
     store: Arc<Mutex<Store>>,
+    multipart_store: Arc<Mutex<MultipartStore>>,
 }
 
 impl InMemoryBackend {
@@ -46,6 +67,7 @@ impl InMemoryBackend {
         Self {
             name,
             store: Arc::new(Mutex::new(HashMap::new())),
+            multipart_store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -195,6 +217,164 @@ impl HighVolumeBackend for InMemoryBackend {
     }
 }
 
+#[async_trait::async_trait]
+impl MultipartUploadBackend for InMemoryBackend {
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        let upload_id = uuid::Uuid::now_v7().to_string();
+        let upload = MultipartUpload {
+            metadata: metadata.clone(),
+            parts: BTreeMap::new(),
+        };
+        self.multipart_store
+            .lock()
+            .unwrap()
+            .insert((id.clone(), upload_id.clone()), upload);
+        Ok(upload_id)
+    }
+
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        _content_length: u64,
+        _content_md5: Option<&str>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        let data: BytesMut = body.try_collect().await?;
+        let data = data.freeze();
+        let etag = format!("\"etag-{part_number}-{}\"", data.len());
+
+        let mut store = self.multipart_store.lock().unwrap();
+        let upload = store
+            .get_mut(&(id.clone(), upload_id.clone()))
+            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+
+        upload.parts.insert(
+            part_number,
+            UploadedPart {
+                etag: etag.clone(),
+                data,
+                uploaded_at: SystemTime::now(),
+            },
+        );
+
+        Ok(etag)
+    }
+
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        let store = self.multipart_store.lock().unwrap();
+        let upload = store
+            .get(&(id.clone(), upload_id.clone()))
+            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+
+        let iter = upload
+            .parts
+            .iter()
+            .filter(|(pn, _)| part_number_marker.is_none_or(|marker| **pn > marker));
+
+        let max = max_parts.unwrap_or(u32::MAX) as usize;
+        let all: Vec<_> = iter.collect();
+        let is_truncated = all.len() > max;
+        let page: Vec<_> = all.into_iter().take(max).collect();
+
+        let next_part_number_marker = if is_truncated {
+            page.last().map(|(pn, _)| **pn)
+        } else {
+            None
+        };
+
+        let parts = page
+            .into_iter()
+            .map(|(pn, part)| Part {
+                part_number: *pn,
+                etag: part.etag.clone(),
+                last_modified: part.uploaded_at,
+                size: part.data.len() as u64,
+            })
+            .collect();
+
+        Ok(ListPartsResponse {
+            parts,
+            is_truncated,
+            next_part_number_marker,
+        })
+    }
+
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        self.multipart_store
+            .lock()
+            .unwrap()
+            .remove(&(id.clone(), upload_id.clone()));
+        Ok(())
+    }
+
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        let upload = self
+            .multipart_store
+            .lock()
+            .unwrap()
+            .remove(&(id.clone(), upload_id.clone()))
+            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+
+        for completed in &parts {
+            match upload.parts.get(&completed.part_number) {
+                None => {
+                    return Ok(Some(crate::multipart::CompleteMultipartError {
+                        code: "InvalidPart".into(),
+                        message: format!("part number {} was not uploaded", completed.part_number),
+                    }));
+                }
+                Some(stored) if stored.etag != completed.etag => {
+                    return Ok(Some(crate::multipart::CompleteMultipartError {
+                        code: "InvalidPart".into(),
+                        message: format!(
+                            "etag mismatch for part {}: expected {}, got {}",
+                            completed.part_number, stored.etag, completed.etag
+                        ),
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        let mut payload = BytesMut::new();
+        for completed in &parts {
+            let stored = &upload.parts[&completed.part_number];
+            payload.extend_from_slice(&stored.data);
+        }
+
+        let mut metadata = upload.metadata;
+        metadata.size = Some(payload.len());
+
+        self.store
+            .lock()
+            .unwrap()
+            .insert(id.clone(), StoreEntry::Object(metadata, payload.freeze()));
+
+        Ok(None)
+    }
+}
+
 /// Returns `true` if `entry` matches the expected tombstone redirect state.
 ///
 /// - `expected = None`: matches any non-tombstone (absent or inline object).
@@ -255,5 +435,284 @@ impl Entry {
             Entry::Tombstone(tombstone) => tombstone.clone(),
             _ => panic!("expected tombstone entry, got {:?}", self),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use objectstore_types::metadata::ExpirationPolicy;
+    use objectstore_types::scope::{Scope, Scopes};
+
+    use super::*;
+    use crate::backend::common::Backend;
+    use crate::id::ObjectContext;
+    use crate::stream;
+
+    fn make_id() -> ObjectId {
+        ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        })
+    }
+
+    #[tokio::test]
+    async fn multipart_single_part() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            origin: Some("203.0.113.42".into()),
+            custom: [("foo".into(), "bar".into())].into(),
+            ..Default::default()
+        };
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let data = b"hello, multipart world!";
+        let etag = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                data.len() as u64,
+                None,
+                stream::single(data.to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "expected no error on complete");
+
+        let (meta, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let payload = stream::read_to_vec(body).await.unwrap();
+        assert_eq!(payload, data);
+        assert_eq!(meta.content_type, "text/plain".to_string());
+        assert_eq!(
+            meta.expiration_policy,
+            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+        );
+        assert_eq!(meta.origin, Some("203.0.113.42".into()));
+        assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());
+    }
+
+    #[tokio::test]
+    async fn multipart_multiple_parts() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let part1 = b"aaaa".to_vec();
+        let part2 = b"bbbb".to_vec();
+        let part3 = b"cc".to_vec();
+
+        let etag1 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                part1.len() as u64,
+                None,
+                stream::single(part1.clone()),
+            )
+            .await
+            .unwrap();
+        let etag2 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                2,
+                part2.len() as u64,
+                None,
+                stream::single(part2.clone()),
+            )
+            .await
+            .unwrap();
+        let etag3 = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                3,
+                part3.len() as u64,
+                None,
+                stream::single(part3.clone()),
+            )
+            .await
+            .unwrap();
+
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![
+                    CompletedPart {
+                        part_number: 1,
+                        etag: etag1,
+                    },
+                    CompletedPart {
+                        part_number: 2,
+                        etag: etag2,
+                    },
+                    CompletedPart {
+                        part_number: 3,
+                        etag: etag3,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none());
+
+        let (_, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let payload = stream::read_to_vec(body).await.unwrap();
+        assert_eq!(payload, b"aaaabbbbcc");
+    }
+
+    #[tokio::test]
+    async fn multipart_list_parts() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let etag1 = backend
+            .upload_part(&id, &upload_id, 1, 3, None, stream::single(b"aaa".to_vec()))
+            .await
+            .unwrap();
+        let etag2 = backend
+            .upload_part(&id, &upload_id, 2, 3, None, stream::single(b"bbb".to_vec()))
+            .await
+            .unwrap();
+
+        let list = backend
+            .list_parts(&id, &upload_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(list.parts.len(), 2);
+        assert_eq!(list.parts[0].part_number, 1);
+        assert_eq!(list.parts[0].etag, etag1);
+        assert_eq!(list.parts[0].size, 3);
+        assert_eq!(list.parts[1].part_number, 2);
+        assert_eq!(list.parts[1].etag, etag2);
+        assert_eq!(list.parts[1].size, 3);
+
+        // Pagination
+        let page1 = backend
+            .list_parts(&id, &upload_id, Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(page1.parts.len(), 1);
+        assert_eq!(page1.parts[0].part_number, 1);
+        assert!(page1.is_truncated);
+        assert!(page1.next_part_number_marker.is_some());
+
+        let page2 = backend
+            .list_parts(&id, &upload_id, Some(1), page1.next_part_number_marker)
+            .await
+            .unwrap();
+        assert_eq!(page2.parts.len(), 1);
+        assert_eq!(page2.parts[0].part_number, 2);
+
+        backend.abort_multipart(&id, &upload_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipart_abort() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                5,
+                None,
+                stream::single(b"hello".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        backend.abort_multipart(&id, &upload_id).await.unwrap();
+
+        let result = backend.get_object(&id).await.unwrap();
+        assert!(result.is_none(), "object should not exist after abort");
+    }
+
+    #[tokio::test]
+    async fn multipart_invalid_etag() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        backend
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                5,
+                None,
+                stream::single(b"hello".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag: "wrong-etag".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_some(), "expected error for bad etag");
+        assert_eq!(result.unwrap().code, "InvalidPart");
+    }
+
+    #[tokio::test]
+    async fn multipart_missing_part() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let result = backend
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 99,
+                    etag: "whatever".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(result.is_some(), "expected error for missing part");
+        assert_eq!(result.unwrap().code, "InvalidPart");
     }
 }
