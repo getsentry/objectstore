@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +9,7 @@ use objectstore_types::scope;
 use reqwest::RequestBuilder;
 use url::Url;
 
-use crate::auth::{Permission, TokenGenerator, TokenProvider};
+use crate::auth::TokenProvider;
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -437,30 +436,11 @@ impl Session {
         url
     }
 
-    /// Returns a [`MintTokenBuilder`] that can be used to produce a signed token with
-    /// optional permission and expiry overrides.
-    ///
-    /// If this session was not configured with a [`TokenGenerator`],
-    /// [`MintTokenBuilder::mint`] will return an error.
-    pub fn mint_token(&self) -> MintTokenBuilder<'_> {
+    /// Returns a signed token if a token or generator was provided or `None` otherwise
+    pub fn mint_token(&self) -> crate::Result<Option<String>> {
         match &self.client.token {
             Some(TokenProvider::Generator(generator)) => {
-                MintTokenBuilder(Ok(MintTokenBuilderInner {
-                    generator,
-                    scope: &self.scope,
-                    permissions: None,
-                    expiry_seconds: None,
-                }))
-            }
-            _ => MintTokenBuilder(Err(crate::Error::NoTokenGenerator)),
-        }
-    }
-
-    /// Returns a signed token for internal use (auth headers).
-    fn auth_token(&self) -> crate::Result<Option<String>> {
-        match &self.client.token {
-            Some(TokenProvider::Generator(generator)) => {
-                Ok(Some(generator.sign_for_scope(&self.scope, None, None)?))
+                Ok(Some(generator.sign_for_scope(&self.scope)?))
             }
             Some(TokenProvider::Static(token)) => Ok(Some(token.clone())),
             None => Ok(None),
@@ -485,7 +465,7 @@ impl Session {
     }
 
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
-        if let Some(token) = self.auth_token()? {
+        if let Some(token) = self.mint_token()? {
             builder = builder.header("x-os-auth", format!("Bearer {token}"));
         }
         if self.client.propagate_traces {
@@ -512,72 +492,6 @@ impl Session {
         let url = self.batch_url();
         let builder = self.client.reqwest.post(url);
         self.prepare_builder(builder)
-    }
-}
-
-/// A builder for minting tokens with optional permission and expiry overrides.
-///
-/// Obtained from [`Session::mint_token`].
-///
-/// Errors (such as requesting permissions not granted to the generator) are
-/// accumulated internally and surfaced when [`mint`](Self::mint) is called,
-/// following the same pattern as [`ClientBuilder`].
-#[derive(Debug)]
-pub struct MintTokenBuilder<'a>(crate::Result<MintTokenBuilderInner<'a>>);
-
-#[derive(Debug)]
-struct MintTokenBuilderInner<'a> {
-    generator: &'a TokenGenerator,
-    scope: &'a ScopeInner,
-    permissions: Option<Vec<Permission>>,
-    expiry_seconds: Option<u64>,
-}
-
-impl MintTokenBuilder<'_> {
-    /// Override the permissions for this token.
-    ///
-    /// The provided permissions must be a subset of the generator's configured
-    /// permissions. If any permission is not granted to the generator,
-    /// [`mint`](Self::mint) will return an
-    /// [`Error::PermissionEscalation`](crate::Error::PermissionEscalation) error.
-    pub fn permissions(mut self, permissions: &[Permission]) -> Self {
-        let Ok(ref mut inner) = self.0 else {
-            return self;
-        };
-        let requested: HashSet<Permission> = permissions.iter().copied().collect();
-        let escalated: Vec<_> = requested
-            .difference(inner.generator.configured_permissions())
-            .copied()
-            .collect();
-        if !escalated.is_empty() {
-            self.0 = Err(crate::Error::PermissionEscalation(escalated));
-            return self;
-        }
-        inner.permissions = Some(permissions.to_vec());
-        self
-    }
-
-    /// Override the expiry duration for this token.
-    pub fn expiry_seconds(mut self, expiry_seconds: u64) -> Self {
-        if let Ok(ref mut inner) = self.0 {
-            inner.expiry_seconds = Some(expiry_seconds);
-        }
-        self
-    }
-
-    /// Mint the token, returning the signed JWT string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the requested permissions exceed the generator's
-    /// configured permissions, or if signing fails.
-    pub fn mint(self) -> crate::Result<String> {
-        let inner = self.0?;
-        inner.generator.sign_for_scope(
-            inner.scope,
-            inner.permissions.as_deref(),
-            inner.expiry_seconds,
-        )
     }
 }
 
