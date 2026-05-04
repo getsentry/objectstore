@@ -163,7 +163,7 @@ pub struct TieredStorageConfig {
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     ///
-    /// Must be a backend that implements [`MultipartUploadBackend`](super::common::MultipartUploadBackend).
+    /// Must be a backend that implements [`MultipartUploadBackend`].
     pub long_term: MultipartUploadStorageConfig,
 }
 
@@ -684,26 +684,15 @@ impl MultipartUploadBackend for TieredStorage {
             return Ok(error);
         }
 
-        // 2. Retrieve metadata from the completed object for the tombstone.
-        //    Done before recording the change: a transient failure here leaves an
-        //    orphan blob (bounded by TTL) but no changelog entry and no guard that
-        //    would actively delete the just-completed upload.
-        let metadata = self
-            .inner
-            .long_term
-            .get_metadata(&physical)
-            .await?
-            .ok_or_else(|| {
-                Error::generic("completed multipart object not found in long-term storage")
-            })?;
-
-        // 3. Read current HV revision to establish the write precondition.
+        // 2. Read current HV revision to establish the write precondition.
         let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
 
-        // 4. Record change now that the LT blob exists and needs tracking.
+        // 3. Record change now that the LT blob exists and needs tracking.
+        //    Created before get_metadata so the guard cleans up the assembled
+        //    blob if the metadata read fails.
         let mut guard = self
             .record_change(Change {
                 id: id.clone(),
@@ -712,6 +701,16 @@ impl MultipartUploadBackend for TieredStorage {
             })
             .await?;
         guard.advance(ChangePhase::Written);
+
+        // 4. Retrieve metadata from the completed object for the tombstone.
+        let metadata = self
+            .inner
+            .long_term
+            .get_metadata(&physical)
+            .await?
+            .ok_or_else(|| {
+                Error::generic("completed multipart object not found in long-term storage")
+            })?;
 
         // 5. CAS commit: write tombstone only if HV state matches what we saw.
         let tombstone = Tombstone {
