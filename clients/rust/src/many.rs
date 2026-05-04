@@ -696,7 +696,7 @@ impl ManyBuilder {
     ///
     /// Operations that exceed the per-part size limit are sent as individual requests.
     /// This controls how many such requests can be in-flight simultaneously.
-    /// Defaults to [`DEFAULT_INDIVIDUAL_CONCURRENCY`] if not set.
+    /// Defaults to 5 if not set.
     pub fn max_individual_concurrency(mut self, concurrency: usize) -> Self {
         self.max_individual_concurrency = Some(concurrency);
         self
@@ -706,7 +706,7 @@ impl ManyBuilder {
     ///
     /// Batchable operations are grouped into chunks and sent as multipart batch requests.
     /// This controls how many such batch requests can be in-flight simultaneously.
-    /// Defaults to [`DEFAULT_BATCH_CONCURRENCY`] if not set.
+    /// Defaults to 3 if not set.
     pub fn max_batch_concurrency(mut self, concurrency: usize) -> Self {
         self.max_batch_concurrency = Some(concurrency);
         self
