@@ -16,7 +16,9 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use objectstore_server::config::{AuthZVerificationKey, Config, StorageConfig};
+use objectstore_server::config::{
+    AuthZVerificationKey, Config, MultipartUploadStorageConfig, StorageConfig,
+};
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
 use objectstore_types::auth::Permission;
@@ -134,7 +136,11 @@ fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
             tempdirs.push(dir);
         }
         StorageConfig::Tiered(c) => {
-            replace_fs_paths(&mut c.long_term, tempdirs);
+            if let MultipartUploadStorageConfig::FileSystem(fs) = &mut c.long_term {
+                let dir = tempfile::tempdir().unwrap();
+                fs.path = dir.path().into();
+                tempdirs.push(dir);
+            }
         }
         StorageConfig::S3Compatible(_) | StorageConfig::Gcs(_) | StorageConfig::BigTable(_) => {}
     }

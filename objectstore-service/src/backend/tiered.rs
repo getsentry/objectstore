@@ -111,7 +111,7 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
-use crate::backend::{HighVolumeStorageConfig, StorageConfig};
+use crate::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -137,7 +137,7 @@ fn new_long_term_revision(id: &ObjectId) -> ObjectId {
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
-/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
+/// objects and `long_term` for large objects. Nesting [`super::StorageConfig::Tiered`]
 /// inside another tiered config is not supported.
 ///
 /// # Example
@@ -162,7 +162,9 @@ pub struct TieredStorageConfig {
     /// only BigTable).
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
-    pub long_term: Box<StorageConfig>,
+    ///
+    /// Must be a backend that implements [`MultipartUploadBackend`](super::common::MultipartUploadBackend).
+    pub long_term: MultipartUploadStorageConfig,
 }
 
 /// Two-tier storage backend that routes objects by size.
