@@ -12,7 +12,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
-from objectstore_client.auth import TokenGenerator, TokenProvider
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -228,10 +228,36 @@ class Session:
         self._scope = scope
         self._token = token
 
-    def mint_token(self) -> str | None:
+    def mint_token(
+        self,
+        permissions: list[Permission] | None = None,
+        expiry_seconds: int | None = None,
+    ) -> str:
         """
-        Returns a signed token if a token or generator was provided or `None` otherwise.
+        Returns a signed token.
+
+        When ``permissions`` is ``None``, the generator's default
+        permissions are used. When provided, they must be a subset of
+        the generator's permissions.
+
+        When ``expiry_seconds`` is ``None``, the generator's default
+        expiry is used.
+
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured
+        or if any requested permission is not granted to the
+        generator.
         """
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
+        return self._token.sign_for_scope(
+            self._usecase.name,
+            self._scope,
+            permissions,
+            expiry_seconds,
+        )
+
+    def _auth_token(self) -> str | None:
+        """Returns a token for internal auth headers."""
         if isinstance(self._token, TokenGenerator):
             return self._token.sign_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
@@ -244,7 +270,7 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if token := self.mint_token():
+        if token := self._auth_token():
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
