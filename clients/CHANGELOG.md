@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8
+
+### New Features ✨
+
+- (py-client) Pin `uv_build==0.9.26` by @lcian in [#460](https://github.com/getsentry/objectstore/pull/460)
+
+### Bug Fixes 🐛
+
+- (py-client) Unpin `uv_build` by @lcian in [#459](https://github.com/getsentry/objectstore/pull/459)
+
 ## 0.1.7
 
 ### New Features ✨
