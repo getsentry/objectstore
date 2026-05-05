@@ -329,15 +329,20 @@ fn update_predicate(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> Mutate
 /// Returns a [`MutatePredicate`] that matches rows where no conflicting tombstone exists.
 ///
 /// Mutations run only when the row is conflict-free (`predicate_matched == false`):
-/// no tombstone is present, or the tombstone's redirect already points to `target`.
+/// no live (non-expired) tombstone is present, or the tombstone's redirect already
+/// points to `target`.
 ///
 /// Built as an inverted `Condition` filter:
 /// - Predicate: [`redirect_target_filter`]`(target)` — tombstone already points to `target`?
 /// - True branch: `BlockAllFilter` → 0 cells (already at target, safe state).
-/// - False branch: [`tombstone_filter`] → 0 cells when no tombstone exists.
+/// - False branch: [`live_tombstone_filter`] → 0 cells when no live tombstone exists.
 ///
 /// Both safe states yield 0 cells, so `predicate_matched = false` in both cases.
-fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePredicate {
+fn optional_target_predicate(
+    target: &ObjectId,
+    own_id: &ObjectId,
+    now: SystemTime,
+) -> MutatePredicate {
     MutatePredicate::Exclude(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
@@ -345,10 +350,65 @@ fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePred
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
-                false_filter: Some(Box::new(tombstone_filter())),
+                false_filter: Some(Box::new(live_tombstone_filter(now))),
             },
         ))),
     })
+}
+
+/// Like [`tombstone_filter`], but excludes expired cells in the GC family.
+///
+/// Cells in [`FAMILY_MANUAL`] never expire and always match. Cells in [`FAMILY_GC`]
+/// only match when their timestamp (the expiry deadline) is >= `now`.
+fn live_tombstone_filter(now: SystemTime) -> v2::RowFilter {
+    let now_micros = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+        * 1000;
+
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Interleave(
+            v2::row_filter::Interleave {
+                filters: vec![
+                    // Manual family: never expires.
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                            filters: vec![
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::FamilyNameRegexFilter(
+                                        format!("^{FAMILY_MANUAL}$"),
+                                    )),
+                                },
+                                tombstone_filter(),
+                            ],
+                        })),
+                    },
+                    // GC family: only match non-expired cells.
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                            filters: vec![
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::FamilyNameRegexFilter(
+                                        format!("^{FAMILY_GC}$"),
+                                    )),
+                                },
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::TimestampRangeFilter(
+                                        v2::TimestampRange {
+                                            start_timestamp_micros: now_micros,
+                                            end_timestamp_micros: 0,
+                                        },
+                                    )),
+                                },
+                                tombstone_filter(),
+                            ],
+                        })),
+                    },
+                ],
+            },
+        )),
+    }
 }
 
 /// The condition under which a [`BigTableBackend::check_and_mutate`] write proceeds.
@@ -1044,8 +1104,8 @@ impl HighVolumeBackend for BigTableBackend {
 
         let predicate = match (current, write.target()) {
             (Some(old), Some(new)) => update_predicate(old, new, id),
-            (Some(target), None) => optional_target_predicate(target, id),
-            (None, Some(target)) => optional_target_predicate(target, id),
+            (Some(target), None) => optional_target_predicate(target, id, now),
+            (None, Some(target)) => optional_target_predicate(target, id, now),
             (None, None) => tombstone_predicate(),
         };
 
@@ -2020,6 +2080,48 @@ mod tests {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    /// CAS with `current=None` must succeed when the row holds an expired
+    /// tombstone. The physical row still exists but is logically gone.
+    ///
+    /// Regression: the predicate detected the physical `r` column and rejected
+    /// the write, returning `false` even though the tombstone was expired.
+    #[tokio::test]
+    async fn test_cas_create_tombstone_over_expired() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let old_lt_id = ObjectId::random(id.context().clone());
+        let old_tombstone = Tombstone {
+            target: old_lt_id,
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+
+        // Seed an immediately-expired tombstone.
+        create_tombstone(&backend, &id, &old_tombstone, SystemTime::now()).await?;
+
+        // CAS with current=None must treat the expired row as absent.
+        let new_lt_id = ObjectId::random(id.context().clone());
+        let new_tombstone = Tombstone {
+            target: new_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+        };
+        let committed = backend
+            .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
+            .await?;
+        assert!(
+            committed,
+            "CAS with current=None must succeed over an expired tombstone"
+        );
+
+        // The new tombstone replaced the expired one.
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected new tombstone to be readable");
+        };
+        assert_eq!(t.target, new_lt_id);
 
         Ok(())
     }
