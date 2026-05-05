@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7
+
+### New Features ✨
+
+- (auth) Default auth enforcement to true by @lcian in [#447](https://github.com/getsentry/objectstore/pull/447)
+- (py-client) Add permission and expiry overrides to sign_for_scope by @lcian in [#432](https://github.com/getsentry/objectstore/pull/432)
+
 ## 0.1.6
 
 ### New Features ✨
