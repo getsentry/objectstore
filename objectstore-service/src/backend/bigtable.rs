@@ -2125,4 +2125,111 @@ mod tests {
 
         Ok(())
     }
+
+    /// Swapping an expired tombstone's target must succeed when the caller
+    /// observed the tombstone before it expired and passes the correct target.
+    ///
+    /// The tombstone may expire between the read and the CAS. The predicate
+    /// must still match the physical row's redirect value.
+    #[tokio::test]
+    async fn test_cas_swap_tombstone_over_expired() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let old_lt_id = ObjectId::random(id.context().clone());
+        let old_tombstone = Tombstone {
+            target: old_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+
+        // Seed an immediately-expired tombstone.
+        create_tombstone(&backend, &id, &old_tombstone, SystemTime::now()).await?;
+
+        // Swap with the correct old target must succeed even though the row expired.
+        let new_lt_id = ObjectId::random(id.context().clone());
+        let new_tombstone = Tombstone {
+            target: new_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+        };
+        let swapped = backend
+            .compare_and_write(
+                &id,
+                Some(&old_lt_id),
+                TieredWrite::Tombstone(new_tombstone),
+            )
+            .await?;
+        assert!(
+            swapped,
+            "CAS swap must succeed when the expired tombstone's target matches"
+        );
+
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected new tombstone to be readable");
+        };
+        assert_eq!(t.target, new_lt_id);
+
+        Ok(())
+    }
+
+    /// Deleting an expired tombstone by its target must succeed. The caller
+    /// observed the tombstone before it expired and passes the correct target.
+    #[tokio::test]
+    async fn test_cas_delete_expired_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let lt_id = ObjectId::random(id.context().clone());
+        let tombstone = Tombstone {
+            target: lt_id.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+
+        // Seed an immediately-expired tombstone.
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+
+        // Delete with the correct target must succeed.
+        let deleted = backend
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
+            .await?;
+        assert!(
+            deleted,
+            "CAS delete must succeed when the expired tombstone's target matches"
+        );
+
+        assert!(matches!(
+            backend.get_tiered_metadata(&id).await?,
+            TieredMetadata::NotFound
+        ));
+
+        Ok(())
+    }
+
+    /// Deleting with `current=None` must succeed when the row holds an expired
+    /// tombstone. The expired row is logically absent, so a delete targeting
+    /// an empty row should not be blocked.
+    #[tokio::test]
+    async fn test_cas_delete_over_expired_tombstone() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let lt_id = ObjectId::random(id.context().clone());
+        let tombstone = Tombstone {
+            target: lt_id,
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+
+        // Seed an immediately-expired tombstone.
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+
+        // Delete with current=None must treat the expired row as absent.
+        let deleted = backend
+            .compare_and_write(&id, None, TieredWrite::Delete)
+            .await?;
+        assert!(
+            deleted,
+            "CAS delete with current=None must succeed over an expired tombstone"
+        );
+
+        Ok(())
+    }
 }
