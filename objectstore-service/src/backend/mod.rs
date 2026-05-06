@@ -71,31 +71,6 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
     })
 }
 
-/// Configuration for the long-term backend in a [`tiered::TieredStorageConfig`].
-///
-/// Only backends that implement [`common::MultipartUploadBackend`] are valid here.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum MultipartUploadStorageConfig {
-    /// Local filesystem storage backend (type `"filesystem"`).
-    FileSystem(local_fs::FileSystemConfig),
-
-    /// [Google Cloud Storage] backend (type `"gcs"`).
-    ///
-    /// [Google Cloud Storage]: https://cloud.google.com/storage
-    Gcs(gcs::GcsConfig),
-}
-
-/// Constructs a type-erased [`common::MultipartUploadBackend`] from the given config.
-async fn lt_from_config(
-    config: MultipartUploadStorageConfig,
-) -> Result<Box<dyn common::MultipartUploadBackend>> {
-    Ok(match config {
-        MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
-        MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
-    })
-}
-
 async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
@@ -127,5 +102,30 @@ async fn hv_from_config(
 ) -> anyhow::Result<Box<dyn common::HighVolumeBackend>> {
     Ok(match config {
         HighVolumeStorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
+    })
+}
+
+/// Configuration for the long-term backend in a [`tiered::TieredStorageConfig`].
+///
+/// Only backends that implement [`common::MultipartUploadBackend`] are valid here.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum MultipartUploadStorageConfig {
+    /// Local filesystem storage backend (type `"filesystem"`).
+    FileSystem(local_fs::FileSystemConfig),
+
+    /// [Google Cloud Storage] backend (type `"gcs"`).
+    ///
+    /// [Google Cloud Storage]: https://cloud.google.com/storage
+    Gcs(gcs::GcsConfig),
+}
+
+/// Constructs a type-erased [`common::MultipartUploadBackend`] from the given config.
+async fn lt_from_config(
+    config: MultipartUploadStorageConfig,
+) -> anyhow::Result<Box<dyn common::MultipartUploadBackend>> {
+    Ok(match config {
+        MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
+        MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
     })
 }
