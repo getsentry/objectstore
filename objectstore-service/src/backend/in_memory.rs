@@ -104,7 +104,7 @@ impl super::common::Backend for InMemoryBackend {
         self.name
     }
 
-    fn as_multipart_upload(&self) -> Option<&dyn super::common::MultipartUploadBackend> {
+    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
         Some(self)
     }
 

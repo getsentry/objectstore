@@ -599,7 +599,7 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
-    fn as_multipart_upload(&self) -> Option<&dyn MultipartUploadBackend> {
+    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
         Some(self)
     }
 

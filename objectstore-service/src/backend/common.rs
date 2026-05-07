@@ -68,7 +68,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// The default returns `None`. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Some(self)`.
-    fn as_multipart_upload(&self) -> Option<&dyn MultipartUploadBackend> {
+    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
         None
     }
 }

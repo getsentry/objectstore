@@ -90,6 +90,7 @@ impl ApiError {
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => {
                 objectstore_log::error!(!!self, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR

@@ -87,6 +87,10 @@ pub enum Error {
         #[source]
         cause: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+
+    /// The functionality is not implemented by this instance of the service.
+    #[error("not implemented")]
+    NotImplemented,
 }
 
 impl Error {
@@ -142,6 +146,7 @@ impl Error {
             Self::Panic(_) => Level::ERROR,
             Self::Dropped => Level::ERROR,
             Self::UnexpectedTombstone => Level::ERROR,
+            Self::NotImplemented => Level::WARN,
             Self::Generic { .. } => Level::ERROR,
         }
     }
