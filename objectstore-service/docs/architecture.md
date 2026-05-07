@@ -171,7 +171,7 @@ The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_
 When the configured backend supports it, [`StorageService`] exposes multipart
 upload operations (initiate, upload part, list parts, complete, abort). These
 delegate to the [`MultipartUploadBackend`](backend::common::MultipartUploadBackend)
-trait, accessed via [`Backend::as_multipart_upload`](backend::common::Backend::as_multipart_upload).
+trait, accessed via [`Backend::as_multipart_upload_backend`](backend::common::Backend::as_multipart_upload_backend).
 Multipart operations share the same concurrency limiter as regular operations.
 
 ## Streaming Concurrency
