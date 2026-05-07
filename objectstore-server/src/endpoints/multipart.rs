@@ -80,12 +80,12 @@ struct InitiateResponse {
 
 #[derive(Debug, Serialize)]
 struct UploadPartResponse {
-    e_tag: String,
+    etag: String,
 }
 
 #[derive(Debug, Serialize)]
 struct PartInfo {
-    e_tag: String,
+    etag: String,
     last_modified: u64,
     size: u64,
 }
@@ -199,7 +199,7 @@ async fn upload_part(
         )
         .await?;
 
-    Ok((StatusCode::OK, Json(UploadPartResponse { e_tag: etag })).into_response())
+    Ok((StatusCode::OK, Json(UploadPartResponse { etag })).into_response())
 }
 
 async fn list_parts(
@@ -221,7 +221,7 @@ async fn list_parts(
         .into_iter()
         .map(|p| {
             let info = PartInfo {
-                e_tag: p.etag,
+                etag: p.etag,
                 last_modified: p
                     .last_modified
                     .duration_since(SystemTime::UNIX_EPOCH)
