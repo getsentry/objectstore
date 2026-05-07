@@ -110,8 +110,15 @@ struct ListPartsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletePartRequest {
+    part_number: u32,
+    etag: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CompleteRequest {
-    parts: Vec<String>,
+    parts: Vec<CompletePartRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,10 +290,9 @@ async fn complete(
     let parts: Vec<CompletedPart> = body
         .parts
         .into_iter()
-        .enumerate()
-        .map(|(i, etag)| CompletedPart {
-            part_number: (i as u32) + 1,
-            etag,
+        .map(|p| CompletedPart {
+            part_number: p.part_number,
+            etag: p.etag,
         })
         .collect();
 
