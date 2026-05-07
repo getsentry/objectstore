@@ -15,6 +15,8 @@ use objectstore_service::multipart::CompletedPart;
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
+use objectstore_types::auth::Permission;
+
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
@@ -274,6 +276,8 @@ async fn complete(
     Query(params): Query<UploadIdQuery>,
     Json(body): Json<CompleteRequest>,
 ) -> ApiResult<Response> {
+    service.check_permission(Permission::ObjectWrite, id.context())?;
+
     let key = id.key().to_string();
 
     let parts: Vec<CompletedPart> = body

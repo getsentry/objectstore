@@ -178,7 +178,7 @@ impl AuthAwareService {
         id: ObjectId,
         upload_id: UploadId,
     ) -> ApiResult<AbortMultipartResponse> {
-        self.assert_authorized(Permission::ObjectDelete, id.context())?;
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
         Ok(self.service.abort_multipart(id, upload_id).await?)
     }
 
