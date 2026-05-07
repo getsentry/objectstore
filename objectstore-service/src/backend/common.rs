@@ -158,7 +158,7 @@ pub trait HighVolumeBackend: Backend {
     /// Atomically mutates the row if the current redirect state matches.
     ///
     /// `current` determines the precondition:
-    /// - `None`: succeeds only if no *live* tombstone exists (row absent, inline,
+    /// - `None`: succeeds only if no live tombstone exists (row absent, inline,
     ///   or tombstone present but expired). Expired tombstones that have not yet
     ///   been garbage-collected must not block the write.
     /// - `Some(target)`: succeeds only if a tombstone exists whose redirect
