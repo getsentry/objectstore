@@ -657,7 +657,8 @@ impl ManyBuilder {
         let session = self.session;
         let individual_concurrency = self
             .max_individual_concurrency
-            .unwrap_or(DEFAULT_INDIVIDUAL_CONCURRENCY);
+            .unwrap_or(DEFAULT_INDIVIDUAL_CONCURRENCY)
+            .max(1);
         let batch_concurrency = self
             .max_batch_concurrency
             .unwrap_or(DEFAULT_BATCH_CONCURRENCY)
