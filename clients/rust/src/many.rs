@@ -660,7 +660,8 @@ impl ManyBuilder {
             .unwrap_or(DEFAULT_INDIVIDUAL_CONCURRENCY);
         let batch_concurrency = self
             .max_batch_concurrency
-            .unwrap_or(DEFAULT_BATCH_CONCURRENCY);
+            .unwrap_or(DEFAULT_BATCH_CONCURRENCY)
+            .max(1);
 
         // Classify all operations
         let (batchable, individual, failed) = partition(self.operations).await;
