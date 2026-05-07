@@ -168,6 +168,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Intercepts [`MultipartUploadBackend::upload_part`]. Default delegates to `inner`.
+    #[allow(clippy::too_many_arguments)]
     async fn upload_part(
         &self,
         inner: &InMemoryBackend,
