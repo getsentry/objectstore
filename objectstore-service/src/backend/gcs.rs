@@ -293,59 +293,6 @@ impl serde::Serialize for GcsMetaKey {
     }
 }
 
-/// Response for a GCS XML API initiate multipart request.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlInitiateMultipartUploadResponse {
-    upload_id: String,
-}
-
-/// Response for a GCS XML API list parts request.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlListPartsResponse {
-    #[serde(default)]
-    is_truncated: bool,
-    next_part_number_marker: Option<u32>,
-    #[serde(default, rename = "Part")]
-    parts: Vec<XmlPart>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlPart {
-    part_number: u32,
-    #[serde(rename = "ETag")]
-    e_tag: String,
-    #[serde(with = "humantime_serde")]
-    last_modified: SystemTime,
-    size: u64,
-}
-
-/// Request body for a GCS XML API complete multipart upload request.
-#[derive(Debug, Serialize)]
-#[serde(rename = "CompleteMultipartUpload")]
-struct XmlCompleteMultipartUpload<'a> {
-    #[serde(rename = "Part")]
-    parts: Vec<XmlCompletePart<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlCompletePart<'a> {
-    part_number: PartNumber,
-    #[serde(rename = "ETag")]
-    e_tag: &'a str,
-}
-
-/// Error response for a complete multipart request.
-#[derive(Debug, Deserialize)]
-#[serde(rename = "Error", rename_all = "PascalCase")]
-struct XmlError {
-    code: String,
-    message: String,
-}
-
 /// Builds HTTP headers that encode `metadata` for a GCS XML API request.
 fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
@@ -764,6 +711,108 @@ impl Backend for GcsBackend {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlInitiateMultipartUploadResponse {
+    upload_id: String,
+}
+
+impl From<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
+    fn from(r: XmlInitiateMultipartUploadResponse) -> Self {
+        r.upload_id
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlListPartsResponse {
+    #[serde(default)]
+    is_truncated: bool,
+    next_part_number_marker: Option<u32>,
+    #[serde(default, rename = "Part")]
+    parts: Vec<XmlPart>,
+}
+
+impl From<XmlListPartsResponse> for ListPartsResponse {
+    fn from(xml: XmlListPartsResponse) -> Self {
+        Self {
+            parts: xml.parts.into_iter().map(Into::into).collect(),
+            is_truncated: xml.is_truncated,
+            next_part_number_marker: xml.next_part_number_marker,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlPart {
+    part_number: u32,
+    #[serde(rename = "ETag")]
+    e_tag: String,
+    #[serde(with = "humantime_serde")]
+    last_modified: SystemTime,
+    size: u64,
+}
+
+impl From<XmlPart> for crate::multipart::Part {
+    fn from(p: XmlPart) -> Self {
+        Self {
+            part_number: p.part_number,
+            etag: p.e_tag,
+            last_modified: p.last_modified,
+            size: p.size,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename = "CompleteMultipartUpload")]
+struct XmlCompleteMultipartUpload {
+    #[serde(rename = "Part")]
+    parts: Vec<XmlCompletePart>,
+}
+
+impl From<Vec<CompletedPart>> for XmlCompleteMultipartUpload {
+    fn from(parts: Vec<CompletedPart>) -> Self {
+        Self {
+            parts: parts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct XmlCompletePart {
+    part_number: PartNumber,
+    #[serde(rename = "ETag")]
+    e_tag: String,
+}
+
+impl From<CompletedPart> for XmlCompletePart {
+    fn from(p: CompletedPart) -> Self {
+        Self {
+            part_number: p.part_number,
+            e_tag: p.etag,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "Error", rename_all = "PascalCase")]
+struct XmlError {
+    code: String,
+    message: String,
+}
+
+impl From<XmlError> for crate::multipart::CompleteMultipartError {
+    fn from(e: XmlError) -> Self {
+        Self {
+            code: e.code,
+            message: e.message,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl MultipartUploadBackend for GcsBackend {
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -798,13 +847,13 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
 
-        let result: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
+        let xml: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
             .map_err(|e| Error::Generic {
                 context: "GCS: failed to parse initiate multipart response".to_owned(),
                 cause: Some(Box::new(e)),
             })?;
 
-        Ok(result.upload_id)
+        Ok(xml.into())
     }
 
     #[tracing::instrument(level = "trace", fields(?id, upload_id, part_number), skip_all)]
@@ -883,28 +932,13 @@ impl MultipartUploadBackend for GcsBackend {
             .await
             .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
 
-        let parsed: XmlListPartsResponse =
+        let xml: XmlListPartsResponse =
             quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
                 context: "GCS: failed to parse list parts response".to_owned(),
                 cause: Some(Box::new(e)),
             })?;
 
-        let parts = parsed
-            .parts
-            .into_iter()
-            .map(|p| crate::multipart::Part {
-                part_number: p.part_number,
-                etag: p.e_tag,
-                last_modified: p.last_modified,
-                size: p.size,
-            })
-            .collect();
-
-        Ok(ListPartsResponse {
-            parts,
-            is_truncated: parsed.is_truncated,
-            next_part_number_marker: parsed.next_part_number_marker,
-        })
+        Ok(xml.into())
     }
 
     #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
@@ -938,15 +972,7 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
-        let body = XmlCompleteMultipartUpload {
-            parts: parts
-                .iter()
-                .map(|p| XmlCompletePart {
-                    part_number: p.part_number,
-                    e_tag: &p.etag,
-                })
-                .collect(),
-        };
+        let body = XmlCompleteMultipartUpload::from(parts);
         let xml = quick_xml::se::to_string(&body).map_err(|e| Error::Generic {
             context: "GCS: failed to serialize complete multipart request".into(),
             cause: Some(Box::new(e)),
@@ -969,10 +995,7 @@ impl MultipartUploadBackend for GcsBackend {
 
         let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
             .ok()
-            .map(|e| crate::multipart::CompleteMultipartError {
-                code: e.code,
-                message: e.message,
-            });
+            .map(Into::into);
 
         Ok(error)
     }
