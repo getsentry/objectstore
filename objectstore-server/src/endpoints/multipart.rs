@@ -33,7 +33,7 @@ pub fn router() -> Router<ServiceState> {
         .route("/objects:multipart/{usecase}/{scopes}/", initiate_no_key)
         .route(
             "/objects:multipart/{usecase}/{scopes}/{*key}",
-            routing::put(initiate_put),
+            routing::put(initiate_put).delete(abort),
         )
         .route(
             "/objects:multipart:parts/{usecase}/{scopes}/{*key}",
@@ -42,10 +42,6 @@ pub fn router() -> Router<ServiceState> {
         .route(
             "/objects:multipart:complete/{usecase}/{scopes}/{*key}",
             routing::post(complete),
-        )
-        .route(
-            "/objects:multipart/{usecase}/{scopes}/{*key}",
-            routing::delete(abort),
         )
 }
 
