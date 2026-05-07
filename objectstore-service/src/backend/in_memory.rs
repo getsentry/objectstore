@@ -104,6 +104,10 @@ impl super::common::Backend for InMemoryBackend {
         self.name
     }
 
+    fn as_multipart_upload(&self) -> Option<&dyn super::common::MultipartUploadBackend> {
+        Some(self)
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,

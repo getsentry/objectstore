@@ -71,6 +71,10 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
+    fn as_multipart_upload(&self) -> Option<&dyn MultipartUploadBackend> {
+        Some(self)
+    }
+
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_object(
         &self,

@@ -18,6 +18,22 @@ All object operations live under the `/v1/` prefix:
 | `DELETE` | `/v1/objects/{usecase}/{scopes}/{key}`    | Delete object                |
 | `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
 
+### Multipart Upload Endpoints
+
+| Method   | Path                                                         | Description                          |
+|----------|--------------------------------------------------------------|--------------------------------------|
+| `POST`   | `/v1/objects:multipart:initiate/{usecase}/{scopes}/`         | Initiate upload (server-generated key) |
+| `PUT`    | `/v1/objects:multipart:initiate/{usecase}/{scopes}/{key}`    | Initiate upload (user-provided key)  |
+| `PUT`    | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | Upload a part (`uploadId`, `partNumber` query params) |
+| `GET`    | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | List uploaded parts (`uploadId` query param) |
+| `POST`   | `/v1/objects:multipart:complete/{usecase}/{scopes}/{key}`    | Complete upload (`uploadId` query param) |
+| `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{key}`            | Abort upload (`uploadId` query param) |
+
+The complete endpoint returns `200 OK` immediately with chunked transfer
+encoding, sends whitespace keepalive bytes while the backend assembles the
+object, then writes the final JSON result (success or error) into the response
+body. Clients must parse the body to determine the actual outcome.
+
 Scopes are encoded in the URL path using Matrix URI syntax:
 `org=123;project=456`. An underscore (`_`) represents empty scopes.
 

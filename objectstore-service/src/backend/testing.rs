@@ -269,6 +269,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.name()
     }
 
+    fn as_multipart_upload(&self) -> Option<&dyn MultipartUploadBackend> {
+        Some(self)
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,

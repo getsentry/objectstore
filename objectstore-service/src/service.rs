@@ -14,6 +14,10 @@ use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -232,6 +236,121 @@ impl StorageService {
     /// after the HTTP server has stopped accepting new requests.
     pub async fn join(&self) {
         self.inner.join().await;
+    }
+
+    // --- Multipart upload operations ---
+
+    fn require_multipart(&self) -> Result<()> {
+        if self.inner.as_multipart_upload().is_none() {
+            return Err(Error::generic(
+                "multipart uploads not supported by this storage backend",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Initiates a new multipart upload.
+    pub async fn initiate_multipart(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        self.require_multipart()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("initiate_multipart", async move {
+            inner
+                .as_multipart_upload()
+                .unwrap()
+                .initiate_multipart(&id, &metadata)
+                .await
+        })
+        .await
+    }
+
+    /// Uploads a single part.
+    pub async fn upload_part(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<String>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        self.require_multipart()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("upload_part", async move {
+            inner
+                .as_multipart_upload()
+                .unwrap()
+                .upload_part(
+                    &id,
+                    &upload_id,
+                    part_number,
+                    content_length,
+                    content_md5.as_deref(),
+                    body,
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Lists the parts uploaded so far.
+    pub async fn list_parts(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        self.require_multipart()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("list_parts", async move {
+            inner
+                .as_multipart_upload()
+                .unwrap()
+                .list_parts(&id, &upload_id, max_parts, part_number_marker)
+                .await
+        })
+        .await
+    }
+
+    /// Aborts a multipart upload.
+    pub async fn abort_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        self.require_multipart()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("abort_multipart", async move {
+            inner
+                .as_multipart_upload()
+                .unwrap()
+                .abort_multipart(&id, &upload_id)
+                .await
+        })
+        .await
+    }
+
+    /// Finalizes a multipart upload.
+    pub async fn complete_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        self.require_multipart()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("complete_multipart", async move {
+            inner
+                .as_multipart_upload()
+                .unwrap()
+                .complete_multipart(&id, &upload_id, parts)
+                .await
+        })
+        .await
     }
 }
 

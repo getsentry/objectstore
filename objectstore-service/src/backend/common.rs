@@ -62,6 +62,15 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// (such as [`TieredStorage`](super::tiered::TieredStorage)) should override this
     /// to wait for those tasks to complete.
     async fn join(&self) {}
+
+    /// Returns a reference to the [`MultipartUploadBackend`] implementation,
+    /// if this backend supports multipart uploads.
+    ///
+    /// The default returns `None`. Backends that implement
+    /// [`MultipartUploadBackend`] should override this to return `Some(self)`.
+    fn as_multipart_upload(&self) -> Option<&dyn MultipartUploadBackend> {
+        None
+    }
 }
 
 /// Trait for backends that support our S3-style multipart upload protocol.
