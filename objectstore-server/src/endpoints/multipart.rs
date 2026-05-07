@@ -24,25 +24,21 @@ use crate::extractors::body::MeteredBody;
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
-    let initiate_collection = routing::post(initiate_post);
-    let initiate_object = routing::put(initiate_put);
-
-    let parts = routing::put(upload_part).get(list_parts);
-
+    let initiate_no_key = routing::post(initiate_post);
     Router::new()
         .route(
-            "/objects:multipart:initiate/{usecase}/{scopes}",
-            initiate_collection.clone(),
+            "/objects:multipart/{usecase}/{scopes}",
+            initiate_no_key.clone(),
+        )
+        .route("/objects:multipart/{usecase}/{scopes}/", initiate_no_key)
+        .route(
+            "/objects:multipart/{usecase}/{scopes}/{*key}",
+            routing::put(initiate_put),
         )
         .route(
-            "/objects:multipart:initiate/{usecase}/{scopes}/",
-            initiate_collection,
+            "/objects:multipart:parts/{usecase}/{scopes}/{*key}",
+            routing::get(list_parts).put(upload_part),
         )
-        .route(
-            "/objects:multipart:initiate/{usecase}/{scopes}/{*key}",
-            initiate_object,
-        )
-        .route("/objects:multipart:parts/{usecase}/{scopes}/{*key}", parts)
         .route(
             "/objects:multipart:complete/{usecase}/{scopes}/{*key}",
             routing::post(complete),
@@ -56,20 +52,17 @@ pub fn router() -> Router<ServiceState> {
 // --- Query parameter types ---
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct UploadPartQuery {
     upload_id: String,
     part_number: u32,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct UploadIdQuery {
     upload_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ListPartsQuery {
     upload_id: String,
     max_parts: Option<u32>,
@@ -79,7 +72,6 @@ struct ListPartsQuery {
 // --- Request/Response types ---
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct InitiateResponse {
     upload_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,13 +79,11 @@ struct InitiateResponse {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct UploadPartResponse {
     e_tag: String,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct PartInfo {
     e_tag: String,
     last_modified: u64,
@@ -101,7 +91,6 @@ struct PartInfo {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ListPartsResponse {
     parts: BTreeMap<u32, PartInfo>,
     is_truncated: bool,
@@ -110,7 +99,6 @@ struct ListPartsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct CompletePartRequest {
     part_number: u32,
     etag: String,
@@ -122,7 +110,6 @@ struct CompleteRequest {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct CompleteSuccessResponse {
     key: String,
 }
@@ -142,40 +129,33 @@ struct CompleteErrorResponse {
 
 async fn initiate_post(
     service: AuthAwareService,
-    State(state): State<ServiceState>,
+    state: State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    metadata.time_created = Some(SystemTime::now());
-
-    state
-        .config
-        .usecases
-        .validate(&context.usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
-
     let id = ObjectId::optional(context, None);
-    let key = id.key().to_string();
-    let upload_id = service.initiate_multipart(id, metadata).await?;
-
-    Ok((
-        StatusCode::OK,
-        Json(InitiateResponse {
-            upload_id,
-            key: Some(key),
-        }),
-    )
-        .into_response())
+    let key = Some(id.key().to_string());
+    initiate_inner(service, state, id, key, headers).await
 }
 
 async fn initiate_put(
     service: AuthAwareService,
-    State(state): State<ServiceState>,
+    state: State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
+    initiate_inner(service, state, id, None, headers).await
+}
+
+async fn initiate_inner(
+    service: AuthAwareService,
+    State(state): State<ServiceState>,
+    id: ObjectId,
+    key: Option<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
+    // TODO: maybe do this on finalize?
     metadata.time_created = Some(SystemTime::now());
 
     state
@@ -186,14 +166,7 @@ async fn initiate_put(
 
     let upload_id = service.initiate_multipart(id, metadata).await?;
 
-    Ok((
-        StatusCode::OK,
-        Json(InitiateResponse {
-            upload_id,
-            key: None,
-        }),
-    )
-        .into_response())
+    Ok((StatusCode::OK, Json(InitiateResponse { upload_id, key })).into_response())
 }
 
 async fn upload_part(
