@@ -232,6 +232,18 @@ pub(crate) async fn maybe_compress(
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "objectstore.put",
+            level = "debug",
+            skip_all,
+            fields(
+                key = self.key.as_deref().unwrap_or("<server-assigned>"),
+                compression = ?self.metadata.compression,
+            )
+        )
+    )]
     pub async fn send(self) -> crate::Result<PutResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,

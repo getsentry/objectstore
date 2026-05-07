@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 # See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211
 tokio = { version = "1.45.0", default-features = false, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
+tracing = { version = "0.1", optional = true, features = ["log"] }
 url = "2.5.7"
 
 [dev-dependencies]
@@ -42,3 +43,4 @@ default = ["native-tls", "hickory-dns"]
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 hickory-dns = ["reqwest/hickory-dns"]
+tracing = ["dep:tracing"]

@@ -434,6 +434,15 @@ impl OperationResults {
     }
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        name = "objectstore.many.batch",
+        level = "trace",
+        skip_all,
+        fields(operations = operations.len())
+    )
+)]
 async fn send_batch(
     session: &Session,
     operations: Vec<BatchOperation>,
@@ -563,6 +572,9 @@ async fn partition(
 
 /// Executes a single operation as an individual (non-batch) request.
 async fn execute_individual(op: BatchOperation, session: &Session) -> OperationResult {
+    #[cfg(feature = "tracing")]
+    tracing::trace!("executing operation as individual request");
+
     match op {
         BatchOperation::Get {
             key,
@@ -612,6 +624,8 @@ async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Ve
     match send_batch(session, operations).await {
         Ok(results) => results,
         Err(e) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(error = %e, "batch request failed, reporting error for all operations");
             let shared = Arc::new(e);
             contexts
                 .into_iter()
@@ -653,6 +667,15 @@ impl ManyBuilder {
     /// Consumes this builder, returning a lazy stream over all the enqueued operations' results.
     ///
     /// The results are not guaranteed to be in the order they were originally enqueued in.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "objectstore.many",
+            level = "debug",
+            skip_all,
+            fields(operations = self.operations.len())
+        )
+    )]
     pub async fn send(self) -> OperationResults {
         let session = self.session;
         let individual_concurrency = self
@@ -664,6 +687,14 @@ impl ManyBuilder {
 
         // Classify all operations
         let (batchable, individual, failed) = partition(self.operations).await;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            batchable = batchable.len(),
+            individual = individual.len(),
+            failed = failed.len(),
+            "classified operations"
+        );
 
         // Execute individual requests for items that are too large, concurrently
         let individual_results = futures_util::stream::iter(individual)

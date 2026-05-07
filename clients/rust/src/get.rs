@@ -85,6 +85,18 @@ impl GetBuilder {
     }
 
     /// Sends the get request.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "objectstore.get",
+            level = "debug",
+            skip_all,
+            fields(
+                key = self.key.as_str(),
+                decompress = self.decompress,
+            )
+        )
+    )]
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
         let response = self
             .session
@@ -92,6 +104,8 @@ impl GetBuilder {
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
+            #[cfg(feature = "tracing")]
+            tracing::trace!("object not found");
             return Ok(None);
         }
         let response = response.error_for_status()?;

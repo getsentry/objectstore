@@ -22,6 +22,15 @@ pub struct DeleteBuilder {
 
 impl DeleteBuilder {
     /// Sends the delete request.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "objectstore.delete",
+            level = "debug",
+            skip_all,
+            fields(key = self.key.as_str())
+        )
+    )]
     pub async fn send(self) -> crate::Result<DeleteResponse> {
         self.session
             .request(reqwest::Method::DELETE, &self.key)?
