@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::ToSocketAddrs;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
@@ -455,16 +454,24 @@ impl GcsBackend {
     ///
     /// Unlike [`object_url`](Self::object_url) (JSON API at
     /// `/storage/v1/b/{bucket}/o/{name}`), this produces
-    /// `/{bucket}/{name}` for the S3-compatible XML API used by
+    /// `/{bucket}/{path_segments}` for the S3-compatible XML API used by
     /// multipart uploads.
     fn xml_object_url(&self, id: &ObjectId) -> Result<Url> {
-        Url::parse(&format!(
-            "{}/{}/{}",
-            self.endpoint.as_str(),
-            &self.bucket,
-            id.as_storage_path(),
-        ))
-        .map_err(|_| Error::generic("GCS: failed to build XML object URL"))
+        let mut url = self.endpoint.clone();
+        {
+            let mut segments = url.path_segments_mut().map_err(|()| Error::Generic {
+                context: format!(
+                    "GCS: invalid endpoint URL, {} cannot be a base",
+                    self.endpoint
+                ),
+                cause: None,
+            })?;
+            segments.push(&self.bucket);
+            for part in id.as_storage_path().to_string().split('/') {
+                segments.push(part);
+            }
+        }
+        Ok(url)
     }
 
     /// Creates a request builder with the appropriate authentication.
