@@ -31,9 +31,7 @@ impl Session {
     pub fn create_multipart_upload(&self) -> InitiateBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
-            // Multipart part uploads are sent as raw bytes. Callers must opt in
-            // explicitly if they want metadata that advertises compression.
-            compression: None,
+            compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
 
@@ -72,9 +70,8 @@ impl InitiateBuilder {
 
     /// Sets an explicit compression algorithm.
     ///
-    /// Multipart uploads default to no compression, even if the session usecase
-    /// has a default compression configured. When set, each uploaded part is
-    /// compressed client-side before it is sent.
+    /// By default, the compression algorithm set on this Session's Usecase is used.
+    /// When set, each uploaded part is compressed client-side before it is sent.
     pub fn compression(self, compression: impl Into<Option<crate::Compression>>) -> Self {
         MetadataBuilder::compression(self, compression)
     }
