@@ -30,6 +30,10 @@ pub enum ApiError {
     /// Errors encountered when parsing or executing a batch request.
     #[error("batch error: {0}")]
     Batch(#[from] BatchError),
+
+    /// Internal server errors.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Result type for API operations.

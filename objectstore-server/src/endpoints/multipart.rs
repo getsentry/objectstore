@@ -9,6 +9,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
 use bytes::Bytes;
+use futures::StreamExt;
+use http::HeaderValue;
+use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::CompletedPart;
@@ -62,16 +65,15 @@ struct UploadIdQuery {
 struct ListPartsQuery {
     upload_id: String,
     max_parts: Option<u32>,
-    part_number_marker: Option<u32>,
+    next_part_number_marker: Option<u32>,
 }
 
 // --- Request/Response types ---
 
 #[derive(Debug, Serialize)]
 struct InitiateResponse {
+    key: String,
     upload_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,7 +84,7 @@ struct UploadPartResponse {
 #[derive(Debug, Serialize)]
 struct PartInfo {
     etag: String,
-    last_modified: u64,
+    last_modified: u128,
     size: u64,
 }
 
@@ -123,6 +125,15 @@ struct CompleteErrorResponse {
 
 // --- Handlers ---
 
+async fn initiate_put(
+    service: AuthAwareService,
+    state: State<ServiceState>,
+    Xt(id): Xt<ObjectId>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    initiate_inner(service, state, id, headers).await
+}
+
 async fn initiate_post(
     service: AuthAwareService,
     state: State<ServiceState>,
@@ -130,28 +141,17 @@ async fn initiate_post(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let id = ObjectId::optional(context, None);
-    let key = Some(id.key().to_string());
-    initiate_inner(service, state, id, key, headers).await
-}
-
-async fn initiate_put(
-    service: AuthAwareService,
-    state: State<ServiceState>,
-    Xt(id): Xt<ObjectId>,
-    headers: HeaderMap,
-) -> ApiResult<Response> {
-    initiate_inner(service, state, id, None, headers).await
+    initiate_inner(service, state, id, headers).await
 }
 
 async fn initiate_inner(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     id: ObjectId,
-    key: Option<String>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    // TODO: maybe do this on finalize?
+    // TODO: Should we do this on finalize instead? It will require one more metadata request.
     metadata.time_created = Some(SystemTime::now());
 
     state
@@ -160,9 +160,13 @@ async fn initiate_inner(
         .validate(&id.context().usecase, &metadata)
         .map_err(|e| ApiError::Client(e.to_string()))?;
 
-    let upload_id = service.initiate_multipart(id, metadata).await?;
+    let upload_id = service.initiate_multipart(id.clone(), metadata).await?;
 
-    Ok((StatusCode::OK, Json(InitiateResponse { upload_id, key })).into_response())
+    let response = Json(InitiateResponse {
+        key: id.key().to_owned(),
+        upload_id,
+    });
+    Ok((StatusCode::OK, response).into_response())
 }
 
 async fn upload_part(
@@ -195,7 +199,8 @@ async fn upload_part(
         )
         .await?;
 
-    Ok((StatusCode::OK, Json(UploadPartResponse { etag })).into_response())
+    let response = Json(UploadPartResponse { etag });
+    Ok((StatusCode::OK, response).into_response())
 }
 
 async fn list_parts(
@@ -208,7 +213,7 @@ async fn list_parts(
             id,
             params.upload_id,
             params.max_parts,
-            params.part_number_marker,
+            params.next_part_number_marker,
         )
         .await?;
 
@@ -222,28 +227,28 @@ async fn list_parts(
                     .last_modified
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs(),
+                    .as_millis(),
                 size: p.size,
             };
             (p.part_number, info)
         })
         .collect();
 
-    Ok(Json(ListPartsResponse {
+    let response = Json(ListPartsResponse {
         parts,
         is_truncated: response.is_truncated,
         next_part_number_marker: response.next_part_number_marker,
-    })
-    .into_response())
+    });
+    Ok((StatusCode::OK, response).into_response())
 }
 
 async fn abort(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
     Query(params): Query<UploadIdQuery>,
-) -> ApiResult<impl IntoResponse> {
+) -> ApiResult<Response> {
     service.abort_multipart(id, params.upload_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn complete(
@@ -267,21 +272,20 @@ async fn complete(
 
     let upload_id = params.upload_id;
 
-    let body_stream = async_stream::stream! {
-        let mut keepalive = tokio::time::interval(Duration::from_secs(10));
-        // Consume the first tick immediately (it fires at t=0).
-        keepalive.tick().await;
+    // This operation can take a while at the service level, so we stream whitespace to the client
+    // until we have a response body, to keep the connection from being terminated.
+    let stream = async_stream::stream! {
+        let fut = service.complete_multipart(id, upload_id, parts);
+        tokio::pin!(fut);
 
-        let result_fut = service.complete_multipart(id, upload_id, parts);
-        tokio::pin!(result_fut);
-
+        let mut keepalive = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
-                result = &mut result_fut => {
-                    let json = match result {
+                res = &mut fut => {
+                    let serialized = match res {
                         Ok(None) => serde_json::to_vec(
                             &CompleteSuccessResponse { key },
-                        ).unwrap(),
+                        ),
                         Ok(Some(err)) => serde_json::to_vec(
                             &CompleteErrorResponse {
                                 error: CompleteErrorDetail {
@@ -289,29 +293,38 @@ async fn complete(
                                     message: err.message,
                                 },
                             },
-                        ).unwrap(),
+                        ),
+                        // TODO(lcian): Construct more precise error code and message, given that
+                        // we have a structured `ApiError`.
                         Err(e) => serde_json::to_vec(
                             &CompleteErrorResponse {
                                 error: CompleteErrorDetail {
-                                    code: "internal".into(),
+                                    code: "internal error".into(),
                                     message: e.to_string(),
                                 },
                             },
-                        ).unwrap(),
+                        ),
                     };
-                    yield Ok::<_, Infallible>(Bytes::from(json));
+                    // Fallback to avoid `unwrap()`. This should never happen in practice.
+                    let serialized = serialized.unwrap_or_else(|_| {
+                        br#"{"error":{"code":"internal error","message":"unexpected error, please report a bug"}}"#.to_vec()
+                    });
+
+                    yield Bytes::from(serialized);
                     break;
                 }
                 _ = keepalive.tick() => {
-                    yield Ok::<_, Infallible>(Bytes::from_static(b" "));
+                    yield Bytes::from_static(b" ");
                 }
             }
         }
     };
+    let stream = stream.map(|s| Ok::<_, Infallible>(s));
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(Body::from_stream(body_stream))
-        .unwrap())
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
