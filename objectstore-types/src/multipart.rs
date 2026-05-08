@@ -1,8 +1,4 @@
 //! Types for the multipart upload protocol.
-//!
-//! These types are shared between the server (which serializes them) and the
-//! client (which deserializes them), ensuring both sides agree on the JSON
-//! wire format.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -68,7 +64,7 @@ pub struct CompleteRequest {
 /// Successful response from completing a multipart upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteSuccessResponse {
-    /// The final object key.
+    /// The object key.
     pub key: String,
 }
 
@@ -82,9 +78,6 @@ pub struct CompleteErrorDetail {
 }
 
 /// Error response from completing a multipart upload.
-///
-/// The complete endpoint returns HTTP 200 regardless of success or failure
-/// (following the S3 pattern), so errors are communicated in the response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteErrorResponse {
     /// The error detail.

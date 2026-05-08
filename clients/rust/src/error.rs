@@ -44,15 +44,12 @@ pub enum Error {
         /// The error message.
         message: String,
     },
-    /// Error returned by the multipart complete endpoint in its response body.
-    ///
-    /// The complete endpoint always returns HTTP 200 (following the S3 pattern)
-    /// but may signal failure in the JSON body.
+    /// Error returned when attempting to complete a multipart upload.
     #[error("multipart complete failed ({code}): {message}")]
     MultipartComplete {
-        /// Error code from the server.
+        /// The error code or kind.
         code: String,
-        /// Human-readable error message.
+        /// The error message.
         message: String,
     },
 }
