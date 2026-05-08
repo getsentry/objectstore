@@ -2566,6 +2566,7 @@ name = "objectstore-client"
 version = "0.1.9"
 dependencies = [
  "async-compression",
+ "base64",
  "bytes",
  "futures-util",
  "infer",

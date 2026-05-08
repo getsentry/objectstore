@@ -150,14 +150,14 @@ impl MultipartUpload {
 
     /// Uploads a part from an in-memory buffer.
     ///
-    /// An optional base64-encoded Content-MD5 digest can be provided for
-    /// server-side integrity verification. When compression is enabled on this
-    /// upload, the digest must match the transmitted compressed part bytes.
+    /// An optional raw MD5 digest can be provided for server-side integrity
+    /// verification. When compression is enabled on this upload, the digest
+    /// must match the transmitted compressed part bytes.
     pub async fn put(
         &self,
         body: impl Into<Bytes>,
         part_number: u32,
-        content_md5: Option<&str>,
+        content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<String> {
         let (body, content_length) = self
             .prepare_part_body(MultipartPart::Buffer(body.into()), None)
@@ -168,15 +168,15 @@ impl MultipartUpload {
 
     /// Uploads a part from a stream. The caller must provide the exact content length.
     ///
-    /// An optional base64-encoded Content-MD5 digest can be provided for
-    /// server-side integrity verification. When compression is enabled on this
-    /// upload, the digest must match the transmitted compressed part bytes.
+    /// An optional raw MD5 digest can be provided for server-side integrity
+    /// verification. When compression is enabled on this upload, the digest
+    /// must match the transmitted compressed part bytes.
     pub async fn put_stream(
         &self,
         stream: ClientStream,
         content_length: u64,
         part_number: u32,
-        content_md5: Option<&str>,
+        content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<String> {
         let (body, content_length) = self
             .prepare_part_body(MultipartPart::Stream(stream), Some(content_length))
@@ -218,8 +218,10 @@ impl MultipartUpload {
         body: Body,
         content_length: u64,
         part_number: u32,
-        content_md5: Option<&str>,
+        content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<String> {
+        use base64::Engine;
+
         let mut builder = self
             .session
             .multipart_request(
@@ -235,7 +237,8 @@ impl MultipartUpload {
             .body(body);
 
         if let Some(md5) = content_md5 {
-            builder = builder.header("content-md5", md5);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(md5);
+            builder = builder.header("content-md5", encoded);
         }
 
         let response: UploadPartResponse = builder.send().await?.error_for_status()?.json().await?;
