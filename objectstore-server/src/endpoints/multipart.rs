@@ -276,6 +276,7 @@ async fn complete(
         tokio::pin!(fut);
 
         let mut keepalive = tokio::time::interval(Duration::from_secs(1));
+        keepalive.tick().await;
         loop {
             tokio::select! {
                 res = &mut fut => {
