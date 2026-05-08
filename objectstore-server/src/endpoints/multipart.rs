@@ -124,6 +124,13 @@ struct CompleteErrorResponse {
     error: CompleteErrorDetail,
 }
 
+fn validate_part_number(part_number: u32) -> ApiResult<()> {
+    if part_number == 0 {
+        return Err(ApiError::Client("part_number must be >= 1".into()));
+    }
+    Ok(())
+}
+
 // --- Handlers ---
 
 async fn initiate_put(
@@ -152,7 +159,7 @@ async fn initiate_inner(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    // TODO: Should we do this on finalize instead? It will require one more metadata request.
+    // TODO: Do this in `complete` instead, when we have a Service API to mutate metadata.
     metadata.time_created = Some(SystemTime::now());
 
     state
@@ -183,6 +190,7 @@ async fn upload_part(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
+    validate_part_number(params.part_number)?;
 
     let content_md5 = headers
         .get("content-md5")
@@ -255,6 +263,9 @@ async fn complete(
     Json(body): Json<CompleteRequest>,
 ) -> ApiResult<Response> {
     service.check_permission(Permission::ObjectWrite, id.context())?;
+    for part in &body.parts {
+        validate_part_number(part.part_number)?;
+    }
 
     let key = id.key().to_string();
 

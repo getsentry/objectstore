@@ -491,6 +491,33 @@ async fn test_upload_part_missing_content_length() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_upload_part_zero_part_number() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .put(server.url("/v1/objects:multipart/test/org=1/zero-part-upload"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let initiate: InitiateResponse = response.json().await?;
+    let upload_id = &initiate.upload_id;
+
+    let response = client
+        .put(server.url(&format!(
+            "/v1/objects:multipart:parts/test/org=1/zero-part-upload?upload_id={upload_id}&part_number=0"
+        )))
+        .header("content-length", "4")
+        .body("data")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
 // --- Missing upload_id query param ---
 
 #[tokio::test]
@@ -505,6 +532,33 @@ async fn test_missing_upload_id_on_complete() -> Result<()> {
         .post(server.url("/v1/objects:multipart:complete/test/org=1/some-key"))
         .header("content-type", "application/json")
         .body(complete_body.to_string())
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_complete_zero_part_number() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .put(server.url("/v1/objects:multipart/test/org=1/zero-part-complete"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let initiate: InitiateResponse = response.json().await?;
+    let upload_id = &initiate.upload_id;
+
+    let response = client
+        .post(server.url(&format!(
+            "/v1/objects:multipart:complete/test/org=1/zero-part-complete?upload_id={upload_id}"
+        )))
+        .header("content-type", "application/json")
+        .body(r#"{"parts":[{"part_number":0,"etag":"fake"}]}"#)
         .send()
         .await?;
 
