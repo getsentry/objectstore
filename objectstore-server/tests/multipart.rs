@@ -36,6 +36,17 @@ struct CompleteSuccessResponse {
     key: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CompleteErrorDetail {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteErrorResponse {
+    error: CompleteErrorDetail,
+}
+
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
         auth: AuthZ {
@@ -47,11 +58,11 @@ async fn test_server() -> TestServer {
     .await
 }
 
-/// Sends a complete request and asserts success. Returns the key from the response.
+/// Sends a complete request and returns the trimmed response body.
 ///
 /// The complete endpoint uses a streaming response with keepalive whitespace, so we
-/// trim the response body before parsing.
-async fn complete_and_assert(
+/// trim the response body before returning.
+async fn send_complete(
     client: &reqwest::Client,
     url: &str,
     parts: &[(&str, &str)],
@@ -73,13 +84,18 @@ async fn complete_and_assert(
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     let text = response.text().await?;
-    let trimmed = text.trim();
-    assert!(
-        !trimmed.contains("\"error\""),
-        "complete returned error: {trimmed}"
-    );
-    let parsed: CompleteSuccessResponse = serde_json::from_str(trimmed)?;
+    Ok(text.trim().to_string())
+}
 
+/// Sends a complete request and asserts success. Returns the key from the response.
+async fn complete_and_assert(
+    client: &reqwest::Client,
+    url: &str,
+    parts: &[(&str, &str)],
+) -> Result<String> {
+    let body = send_complete(client, url, parts).await?;
+    let parsed: CompleteSuccessResponse = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("expected success response, got {body:?}: {e}"))?;
     Ok(parsed.key)
 }
 
@@ -508,6 +524,57 @@ async fn test_missing_upload_id_on_abort() -> Result<()> {
         .await?;
 
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+// --- Complete with invalid etag ---
+
+#[tokio::test]
+async fn test_complete_invalid_etag() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Initiate
+    let response = client
+        .put(server.url("/v1/objects:multipart/test/org=1/bad-etag-key"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let initiate: InitiateResponse = response.json().await?;
+    let upload_id = &initiate.upload_id;
+
+    // 2. Upload a part
+    let response = client
+        .put(server.url(&format!(
+            "/v1/objects:multipart:parts/test/org=1/bad-etag-key?upload_id={upload_id}&part_number=1"
+        )))
+        .header("content-length", "4")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // 3. Complete with a wrong etag
+    let body = send_complete(
+        &client,
+        &server.url(&format!(
+            "/v1/objects:multipart:complete/test/org=1/bad-etag-key?upload_id={upload_id}"
+        )),
+        &[("1", "wrong-etag")],
+    )
+    .await?;
+
+    let err: CompleteErrorResponse = serde_json::from_str(&body)?;
+    assert!(!err.error.code.is_empty());
+    assert!(!err.error.message.is_empty());
+
+    // 4. Object should not exist
+    let response = client
+        .get(server.url("/v1/objects/test/org=1/bad-etag-key"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     Ok(())
 }
