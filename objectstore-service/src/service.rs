@@ -266,6 +266,13 @@ impl StorageService {
     }
 
     /// Uploads a single part.
+    ///
+    /// Note that this requires a `content_length`.
+    /// This grants us the broadest and most seamless compatibility when it comes to backends.
+    /// For example, MinIO rejects `UploadPart` requests without a `Content-Length` on plain PUT
+    /// requests.
+    /// This can be worked around by using AWS SigV4 chunked streaming requests, which we could use
+    /// if one day we'll have a usecase where the client doesn't know the part length upfront.
     pub async fn upload_part(
         &self,
         id: ObjectId,

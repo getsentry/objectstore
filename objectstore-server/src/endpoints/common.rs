@@ -99,6 +99,11 @@ impl ApiError {
                 objectstore_log::error!(!!self, "error handling request");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+
+            ApiError::Internal(_) => {
+                objectstore_log::error!(!!self, "internal error");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 }

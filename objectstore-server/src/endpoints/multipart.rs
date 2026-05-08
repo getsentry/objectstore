@@ -84,7 +84,8 @@ struct UploadPartResponse {
 #[derive(Debug, Serialize)]
 struct PartInfo {
     etag: String,
-    last_modified: u128,
+    #[serde(with = "humantime_serde")]
+    last_modified: SystemTime,
     size: u64,
 }
 
@@ -223,11 +224,7 @@ async fn list_parts(
         .map(|p| {
             let info = PartInfo {
                 etag: p.etag,
-                last_modified: p
-                    .last_modified
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis(),
+                last_modified: p.last_modified,
                 size: p.size,
             };
             (p.part_number, info)
