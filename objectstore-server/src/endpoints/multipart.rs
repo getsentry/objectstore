@@ -316,7 +316,7 @@ async fn complete(
             }
         }
     };
-    let stream = stream.map(|s| Ok::<_, Infallible>(s));
+    let stream = stream.map(Ok::<_, Infallible>);
 
     let mut headers = HeaderMap::new();
     headers.insert(
