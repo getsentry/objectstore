@@ -44,6 +44,17 @@ pub enum Error {
         /// The error message.
         message: String,
     },
+    /// Error returned by the multipart complete endpoint in its response body.
+    ///
+    /// The complete endpoint always returns HTTP 200 (following the S3 pattern)
+    /// but may signal failure in the JSON body.
+    #[error("multipart complete failed ({code}): {message}")]
+    MultipartComplete {
+        /// Error code from the server.
+        code: String,
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

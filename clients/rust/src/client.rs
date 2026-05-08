@@ -493,6 +493,30 @@ impl Session {
         let builder = self.client.reqwest.post(url);
         self.prepare_builder(builder)
     }
+
+    pub(crate) fn request_url(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> crate::Result<RequestBuilder> {
+        let builder = self.client.reqwest.request(method, url);
+        self.prepare_builder(builder)
+    }
+
+    pub(crate) fn multipart_url(&self, prefix: &str, object_key: &str) -> Url {
+        let mut url = self.client.service_url.clone();
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .push(prefix)
+            .push(&self.scope.usecase.name)
+            .push(&self.scope.scopes.as_api_path().to_string());
+        if !object_key.is_empty() {
+            segments.extend(object_key.split("/"));
+        }
+        drop(segments);
+        url
+    }
 }
 
 #[cfg(test)]

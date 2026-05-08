@@ -3,49 +3,10 @@
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-struct InitiateResponse {
-    key: String,
-    upload_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UploadPartResponse {
-    etag: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct PartInfo {
-    etag: String,
-    last_modified: String,
-    size: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListPartsResponse {
-    parts: std::collections::BTreeMap<u32, PartInfo>,
-    is_truncated: bool,
-    next_part_number_marker: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteSuccessResponse {
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteErrorDetail {
-    code: String,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteErrorResponse {
-    error: CompleteErrorDetail,
-}
+use objectstore_types::multipart::{
+    CompleteErrorResponse, CompleteSuccessResponse, InitiateResponse, ListPartsResponse,
+    UploadPartResponse,
+};
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {

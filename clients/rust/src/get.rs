@@ -128,7 +128,9 @@ pub(crate) fn maybe_decompress(
     match (metadata.compression, decompress && !encoding_accepted) {
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
-            ReaderStream::new(ZstdDecoder::new(StreamReader::new(stream))).boxed()
+            let mut decoder = ZstdDecoder::new(StreamReader::new(stream));
+            decoder.multiple_members(true);
+            ReaderStream::new(decoder).boxed()
         }
         _ => stream,
     }
@@ -228,6 +230,24 @@ mod tests {
         let mut metadata = no_compression_metadata();
         let out = maybe_decompress(stream, &mut metadata, true, &[Compression::Zstd]);
         assert_eq!(collect(out).await, payload);
+        assert_eq!(metadata.compression, None);
+    }
+
+    #[tokio::test]
+    async fn zstd_concatenated_frames_decompress() {
+        let payload1 = b"hello ";
+        let payload2 = b"world";
+        let compressed1 = collect(compressed_zstd_stream(payload1)).await;
+        let compressed2 = collect(compressed_zstd_stream(payload2)).await;
+        let stream = futures_util::stream::iter([
+            Ok::<_, std::io::Error>(bytes::Bytes::from(compressed1)),
+            Ok::<_, std::io::Error>(bytes::Bytes::from(compressed2)),
+        ])
+        .boxed();
+
+        let mut metadata = zstd_metadata();
+        let out = maybe_decompress(stream, &mut metadata, true, &[]);
+        assert_eq!(collect(out).await, b"hello world");
         assert_eq!(metadata.compression, None);
     }
 }

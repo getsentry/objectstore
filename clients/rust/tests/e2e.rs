@@ -1,19 +1,16 @@
+mod common;
+
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
-use std::sync::LazyLock;
 
+use common::{TEST_EDDSA_PRIVKEY, test_server, test_token_generator};
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_client::{
-    Client, Error, OperationResult, Permission, SecretKey, TokenGenerator, Usecase,
-};
-use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
+use objectstore_client::{Client, Error, OperationResult, Permission, Usecase};
+use objectstore_test::server::TEST_EDDSA_KID;
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 use serde::Serialize;
-
-pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
-    LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
 
 #[derive(Serialize)]
 struct JwtClaims {
@@ -51,25 +48,6 @@ fn sign_static_token(usecase: &str, scopes: &[(&str, &str)]) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(TEST_EDDSA_KID.into());
     encode(&header, &claims, &encoding_key).unwrap()
-}
-
-async fn test_server() -> TestServer {
-    TestServer::with_config(config::Config {
-        auth: config::AuthZ {
-            enforce: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
-}
-
-fn test_token_generator() -> TokenGenerator {
-    TokenGenerator::new(SecretKey {
-        kid: TEST_EDDSA_KID.into(),
-        secret_key: TEST_EDDSA_PRIVKEY.clone(),
-    })
-    .unwrap()
 }
 
 #[tokio::test]

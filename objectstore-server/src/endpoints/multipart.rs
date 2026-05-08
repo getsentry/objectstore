@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::time::{Duration, SystemTime};
 
@@ -15,9 +14,13 @@ use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
+use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
-use serde::{Deserialize, Serialize};
-
+use objectstore_types::multipart::{
+    CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
+    InitiateResponse, ListPartsResponse, PartInfo, UploadPartResponse,
+};
+use serde::Deserialize;
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
@@ -66,62 +69,12 @@ struct ListPartsQuery {
     part_number_marker: Option<PartNumber>,
 }
 
-// --- Request/Response types ---
-
-#[derive(Debug, Serialize)]
-struct InitiateResponse {
-    key: String,
-    upload_id: UploadId,
+fn validate_part_number(part_number: u32) -> ApiResult<()> {
+    if part_number == 0 {
+        return Err(ApiError::Client("part_number must be >= 1".into()));
+    }
+    Ok(())
 }
-
-#[derive(Debug, Serialize)]
-struct UploadPartResponse {
-    etag: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PartInfo {
-    etag: String,
-    #[serde(with = "humantime_serde")]
-    last_modified: SystemTime,
-    size: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct ListPartsResponse {
-    parts: BTreeMap<PartNumber, PartInfo>,
-    is_truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_part_number_marker: Option<PartNumber>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompletePartRequest {
-    part_number: PartNumber,
-    etag: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteRequest {
-    parts: Vec<CompletePartRequest>,
-}
-
-#[derive(Debug, Serialize)]
-struct CompleteSuccessResponse {
-    key: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CompleteErrorDetail {
-    code: String,
-    message: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CompleteErrorResponse {
-    error: CompleteErrorDetail,
-}
-
 // --- Handlers ---
 
 async fn initiate_put(

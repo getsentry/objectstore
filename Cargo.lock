@@ -2702,6 +2702,7 @@ version = "0.1.9"
 dependencies = [
  "http 1.4.0",
  "humantime",
+ "humantime-serde",
  "insta",
  "mediatype",
  "serde",

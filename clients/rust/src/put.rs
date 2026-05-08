@@ -17,6 +17,64 @@ pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::{ClientStream, ObjectKey, Session};
 
+/// A builder that carries per-object [`Metadata`].
+///
+/// This trait provides the common configuration methods shared by every builder
+/// that attaches metadata to an upload (e.g. [`PutBuilder`], `InitiateBuilder`).
+pub trait MetadataBuilder: Sized {
+    /// Returns a mutable reference to the metadata being built.
+    fn metadata_mut(&mut self) -> &mut Metadata;
+
+    /// Sets an explicit compression algorithm to be used for this payload.
+    ///
+    /// [`None`] should be used if no compression should be performed by the client,
+    /// either because the payload is uncompressible (such as a media format), or if the user
+    /// will handle any kind of compression, without the clients knowledge.
+    ///
+    /// By default, the compression algorithm set on this Session's Usecase is used.
+    fn compression(mut self, compression: impl Into<Option<Compression>>) -> Self {
+        self.metadata_mut().compression = compression.into();
+        self
+    }
+
+    /// Sets the expiration policy of the object to be uploaded.
+    ///
+    /// By default, the expiration policy set on this Session's Usecase is used.
+    fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
+        self.metadata_mut().expiration_policy = expiration_policy;
+        self
+    }
+
+    /// Sets the content type of the object to be uploaded.
+    ///
+    /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
+    /// `content_type` based on magic bytes.
+    fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
+        self.metadata_mut().content_type = content_type.into();
+        self
+    }
+
+    /// Sets the origin of the object, typically the IP address of the original source.
+    fn origin(mut self, origin: impl Into<String>) -> Self {
+        self.metadata_mut().origin = Some(origin.into());
+        self
+    }
+
+    /// This sets the custom metadata to the provided map.
+    ///
+    /// It will clear any previously set metadata.
+    fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
+        self.metadata_mut().custom = metadata.into();
+        self
+    }
+
+    /// Appends the `key`/`value` to the custom metadata of this object.
+    fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata_mut().custom.insert(key.into(), value.into());
+        self
+    }
+}
+
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
 pub struct PutResponse {
@@ -107,6 +165,12 @@ pub struct PutBuilder {
     pub(crate) body: PutBody,
 }
 
+impl MetadataBuilder for PutBuilder {
+    fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.metadata
+    }
+}
+
 impl PutBuilder {
     /// Sets an explicit object key.
     ///
@@ -124,26 +188,23 @@ impl PutBuilder {
     /// will handle any kind of compression, without the clients knowledge.
     ///
     /// By default, the compression algorithm set on this Session's Usecase is used.
-    pub fn compression(mut self, compression: impl Into<Option<Compression>>) -> Self {
-        self.metadata.compression = compression.into();
-        self
+    pub fn compression(self, compression: impl Into<Option<Compression>>) -> Self {
+        MetadataBuilder::compression(self, compression)
     }
 
     /// Sets the expiration policy of the object to be uploaded.
     ///
     /// By default, the expiration policy set on this Session's Usecase is used.
-    pub fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
-        self.metadata.expiration_policy = expiration_policy;
-        self
+    pub fn expiration_policy(self, expiration_policy: ExpirationPolicy) -> Self {
+        MetadataBuilder::expiration_policy(self, expiration_policy)
     }
 
     /// Sets the content type of the object to be uploaded.
     ///
     /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
     /// `content_type` based on magic bytes.
-    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        self.metadata.content_type = content_type.into();
-        self
+    pub fn content_type(self, content_type: impl Into<Cow<'static, str>>) -> Self {
+        MetadataBuilder::content_type(self, content_type)
     }
 
     /// Sets the origin of the object, typically the IP address of the original source.
@@ -163,23 +224,20 @@ impl PutBuilder {
     ///     .unwrap();
     /// # }
     /// ```
-    pub fn origin(mut self, origin: impl Into<String>) -> Self {
-        self.metadata.origin = Some(origin.into());
-        self
+    pub fn origin(self, origin: impl Into<String>) -> Self {
+        MetadataBuilder::origin(self, origin)
     }
 
     /// This sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.
-    pub fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
-        self.metadata.custom = metadata.into();
-        self
+    pub fn set_metadata(self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
+        MetadataBuilder::set_metadata(self, metadata)
     }
 
-    /// Appends they `key`/`value` to the custom metadata of this object.
-    pub fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.metadata.custom.insert(key.into(), value.into());
-        self
+    /// Appends the `key`/`value` to the custom metadata of this object.
+    pub fn append_metadata(self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        MetadataBuilder::append_metadata(self, key, value)
     }
 }
 
