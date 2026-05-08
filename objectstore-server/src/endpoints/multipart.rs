@@ -65,7 +65,7 @@ struct UploadIdQuery {
 struct ListPartsQuery {
     upload_id: String,
     max_parts: Option<u32>,
-    next_part_number_marker: Option<u32>,
+    part_number_marker: Option<u32>,
 }
 
 // --- Request/Response types ---
@@ -214,7 +214,7 @@ async fn list_parts(
             id,
             params.upload_id,
             params.max_parts,
-            params.next_part_number_marker,
+            params.part_number_marker,
         )
         .await?;
 

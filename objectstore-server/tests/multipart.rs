@@ -368,7 +368,7 @@ async fn test_list_parts_pagination() -> Result<()> {
     let marker = page1.next_part_number_marker.unwrap();
     let response = client
         .get(server.url(&format!(
-            "/v1/objects:multipart:parts/test/org=1/paginated-key?upload_id={upload_id}&max_parts=2&next_part_number_marker={marker}"
+            "/v1/objects:multipart:parts/test/org=1/paginated-key?upload_id={upload_id}&max_parts=2&part_number_marker={marker}"
         )))
         .send()
         .await?;
