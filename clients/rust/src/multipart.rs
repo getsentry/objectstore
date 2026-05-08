@@ -111,9 +111,9 @@ impl InitiateBuilder {
             None => reqwest::Method::POST,
         };
 
-        let key_str = self.key.as_deref().unwrap_or_default();
-        let url = self.session.multipart_url("objects:multipart", key_str);
-        let mut builder = self.session.request_url(method, url)?;
+        let mut builder =
+            self.session
+                .multipart_request(method, None, self.key.as_deref(), vec![])?;
 
         builder = builder.headers(self.metadata.to_headers("")?);
 
@@ -223,16 +223,17 @@ impl MultipartUpload {
         part_number: u32,
         content_md5: Option<&str>,
     ) -> crate::Result<String> {
-        let mut url = self
-            .session
-            .multipart_url("objects:multipart:parts", &self.key);
-        url.query_pairs_mut()
-            .append_pair("upload_id", &self.upload_id)
-            .append_pair("part_number", &part_number.to_string());
-
         let mut builder = self
             .session
-            .request_url(reqwest::Method::PUT, url)?
+            .multipart_request(
+                reqwest::Method::PUT,
+                Some("parts"),
+                Some(&self.key),
+                vec![
+                    ("upload_id", self.upload_id.clone()),
+                    ("part_number", part_number.to_string()),
+                ],
+            )?
             .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(body);
 
@@ -250,21 +251,20 @@ impl MultipartUpload {
         max_parts: Option<u32>,
         part_number_marker: Option<u32>,
     ) -> crate::Result<ListPartsResponse> {
-        let mut url = self
-            .session
-            .multipart_url("objects:multipart:parts", &self.key);
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("upload_id", &self.upload_id);
-            if let Some(max) = max_parts {
-                pairs.append_pair("max_parts", &max.to_string());
-            }
-            if let Some(marker) = part_number_marker {
-                pairs.append_pair("part_number_marker", &marker.to_string());
-            }
+        let mut params = vec![("upload_id", self.upload_id.clone())];
+        if let Some(max) = max_parts {
+            params.push(("max_parts", max.to_string()));
+        }
+        if let Some(marker) = part_number_marker {
+            params.push(("part_number_marker", marker.to_string()));
         }
 
-        let builder = self.session.request_url(reqwest::Method::GET, url)?;
+        let builder = self.session.multipart_request(
+            reqwest::Method::GET,
+            Some("parts"),
+            Some(&self.key),
+            params,
+        )?;
 
         let response: ListPartsResponse = builder.send().await?.error_for_status()?.json().await?;
         Ok(response)
@@ -272,11 +272,18 @@ impl MultipartUpload {
 
     /// Aborts this multipart upload, discarding any uploaded parts.
     pub async fn abort(self) -> crate::Result<()> {
-        let mut url = self.session.multipart_url("objects:multipart", &self.key);
-        url.query_pairs_mut()
-            .append_pair("upload_id", &self.upload_id);
-
-        let builder = self.session.request_url(reqwest::Method::DELETE, url)?;
+        let MultipartUpload {
+            session,
+            key,
+            upload_id,
+            compression: _,
+        } = self;
+        let builder = session.multipart_request(
+            reqwest::Method::DELETE,
+            None,
+            Some(&key),
+            vec![("upload_id", upload_id)],
+        )?;
         builder.send().await?.error_for_status()?;
         Ok(())
     }
@@ -287,15 +294,19 @@ impl MultipartUpload {
     /// the response body even with HTTP 200 (following the S3 pattern), which is
     /// surfaced as [`crate::Error::MultipartComplete`].
     pub async fn complete(self, parts: Vec<CompletePart>) -> crate::Result<String> {
-        let mut url = self
-            .session
-            .multipart_url("objects:multipart:complete", &self.key);
-        url.query_pairs_mut()
-            .append_pair("upload_id", &self.upload_id);
-
-        let builder = self
-            .session
-            .request_url(reqwest::Method::POST, url)?
+        let MultipartUpload {
+            session,
+            key,
+            upload_id,
+            compression: _,
+        } = self;
+        let builder = session
+            .multipart_request(
+                reqwest::Method::POST,
+                Some("complete"),
+                Some(&key),
+                vec![("upload_id", upload_id)],
+            )?
             .json(&CompleteRequest { parts });
 
         // The complete endpoint streams whitespace as keepalive before the JSON
