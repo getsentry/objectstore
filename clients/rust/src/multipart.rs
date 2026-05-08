@@ -1,10 +1,4 @@
-use std::borrow::Cow;
-use std::collections::BTreeMap;
-use std::io::Cursor;
-
-use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
-use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompletePart, CompleteRequest, CompleteSuccessResponse, InitiateResponse,
@@ -12,9 +6,7 @@ use objectstore_types::multipart::{
 };
 use reqwest::Body;
 use serde::Deserialize;
-use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::put::MetadataBuilder;
 use crate::{ClientStream, ObjectKey, Session};
 
 pub use objectstore_types::multipart::CompletePart as MultipartCompletePart;
@@ -28,6 +20,11 @@ enum CompleteResponse {
 
 impl Session {
     /// Creates a builder for initiating a multipart upload.
+    ///
+    /// The returned [`InitiateBuilder`] inherits the session's default compression
+    /// and expiration settings. Unlike single-object uploads, the client does
+    /// **not** compress parts — the caller must pre-compress each part to match
+    /// the compression algorithm set in metadata.
     pub fn create_multipart_upload(&self) -> InitiateBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
@@ -44,6 +41,12 @@ impl Session {
 }
 
 /// A builder for initiating a multipart upload.
+///
+/// Metadata set here (compression, expiration, content type, etc.) is sent to
+/// the server when [`send`](Self::send) is called. Note that unlike
+/// single-object uploads, the client does **not** compress parts automatically —
+/// if compression is configured, the caller must pre-compress each part before
+/// uploading it via [`MultipartUpload::put`] or [`MultipartUpload::put_stream`].
 #[derive(Debug)]
 pub struct InitiateBuilder {
     session: Session,
@@ -51,13 +54,9 @@ pub struct InitiateBuilder {
     key: Option<ObjectKey>,
 }
 
-impl MetadataBuilder for InitiateBuilder {
-    fn metadata_mut(&mut self) -> &mut Metadata {
-        &mut self.metadata
-    }
-}
-
 impl InitiateBuilder {
+    metadata_builder_methods!(metadata);
+
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -66,39 +65,6 @@ impl InitiateBuilder {
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
-    }
-
-    /// Sets an explicit compression algorithm.
-    ///
-    /// By default, the compression algorithm set on this Session's Usecase is used.
-    /// When set, each uploaded part is compressed client-side before it is sent.
-    pub fn compression(self, compression: impl Into<Option<crate::Compression>>) -> Self {
-        MetadataBuilder::compression(self, compression)
-    }
-
-    /// Sets the expiration policy.
-    pub fn expiration_policy(self, expiration_policy: crate::ExpirationPolicy) -> Self {
-        MetadataBuilder::expiration_policy(self, expiration_policy)
-    }
-
-    /// Sets the content type.
-    pub fn content_type(self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        MetadataBuilder::content_type(self, content_type)
-    }
-
-    /// Sets the origin.
-    pub fn origin(self, origin: impl Into<String>) -> Self {
-        MetadataBuilder::origin(self, origin)
-    }
-
-    /// Sets the custom metadata map.
-    pub fn set_metadata(self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
-        MetadataBuilder::set_metadata(self, metadata)
-    }
-
-    /// Appends a key/value to the custom metadata.
-    pub fn append_metadata(self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        MetadataBuilder::append_metadata(self, key, value)
     }
 
     /// Sends the initiate request and returns a [`MultipartUpload`] handle.
@@ -120,7 +86,6 @@ impl InitiateBuilder {
             session: self.session,
             key: response.key,
             upload_id: response.upload_id,
-            compression: self.metadata.compression,
         })
     }
 }
@@ -129,12 +94,17 @@ impl InitiateBuilder {
 ///
 /// Returned by [`InitiateBuilder::send`]. Use it to upload parts, list parts,
 /// and complete or abort the upload.
+///
+/// Parts are uploaded as-is — the client does **not** compress them. If the
+/// upload was initiated with compression metadata, the caller is responsible
+/// for pre-compressing each part before calling [`put`](Self::put) or
+/// [`put_stream`](Self::put_stream). `content_length` and `content_md5` always
+/// refer to the bytes actually transmitted.
 #[derive(Debug)]
 pub struct MultipartUpload {
     session: Session,
     key: String,
     upload_id: String,
-    compression: Option<crate::Compression>,
 }
 
 impl MultipartUpload {
@@ -151,26 +121,24 @@ impl MultipartUpload {
     /// Uploads a part from an in-memory buffer.
     ///
     /// An optional raw MD5 digest can be provided for server-side integrity
-    /// verification. When compression is enabled on this upload, the digest
-    /// must match the transmitted compressed part bytes.
+    /// verification. The digest must match the bytes being transmitted.
     pub async fn put(
         &self,
         body: impl Into<Bytes>,
         part_number: u32,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<String> {
-        let (body, content_length) = self
-            .prepare_part_body(MultipartPart::Buffer(body.into()), None)
-            .await?;
-        self.upload_part(body, content_length, part_number, content_md5)
+        let bytes = body.into();
+        let content_length = bytes.len() as u64;
+        self.upload_part(bytes.into(), content_length, part_number, content_md5)
             .await
     }
 
-    /// Uploads a part from a stream. The caller must provide the exact content length.
+    /// Uploads a part from a stream.
     ///
+    /// The caller must provide the exact `content_length` of the stream.
     /// An optional raw MD5 digest can be provided for server-side integrity
-    /// verification. When compression is enabled on this upload, the digest
-    /// must match the transmitted compressed part bytes.
+    /// verification. The digest must match the bytes being transmitted.
     pub async fn put_stream(
         &self,
         stream: ClientStream,
@@ -178,39 +146,13 @@ impl MultipartUpload {
         part_number: u32,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<String> {
-        let (body, content_length) = self
-            .prepare_part_body(MultipartPart::Stream(stream), Some(content_length))
-            .await?;
-        self.upload_part(body, content_length, part_number, content_md5)
-            .await
-    }
-
-    async fn prepare_part_body(
-        &self,
-        part: MultipartPart,
-        content_length: Option<u64>,
-    ) -> crate::Result<(Body, u64)> {
-        match (self.compression, part) {
-            (None, MultipartPart::Buffer(bytes)) => Ok((bytes.clone().into(), bytes.len() as u64)),
-            (None, MultipartPart::Stream(stream)) => Ok((
-                Body::wrap_stream(stream),
-                content_length.expect("stream parts require content_length"),
-            )),
-            (Some(crate::Compression::Zstd), MultipartPart::Buffer(bytes)) => {
-                let stream = ReaderStream::new(ZstdEncoder::new(Cursor::new(bytes)))
-                    .map_err(std::io::Error::other)
-                    .boxed();
-                let compressed = collect_stream_bytes(stream).await?;
-                Ok((compressed.clone().into(), compressed.len() as u64))
-            }
-            (Some(crate::Compression::Zstd), MultipartPart::Stream(stream)) => {
-                let stream = ReaderStream::new(ZstdEncoder::new(StreamReader::new(stream)))
-                    .map_err(std::io::Error::other)
-                    .boxed();
-                let compressed = collect_stream_bytes(stream).await?;
-                Ok((compressed.clone().into(), compressed.len() as u64))
-            }
-        }
+        self.upload_part(
+            Body::wrap_stream(stream),
+            content_length,
+            part_number,
+            content_md5,
+        )
+        .await
     }
 
     async fn upload_part(
@@ -272,17 +214,11 @@ impl MultipartUpload {
 
     /// Aborts this multipart upload, discarding any uploaded parts.
     pub async fn abort(self) -> crate::Result<()> {
-        let MultipartUpload {
-            session,
-            key,
-            upload_id,
-            compression: _,
-        } = self;
-        let builder = session.multipart_request(
+        let builder = self.session.multipart_request(
             reqwest::Method::DELETE,
             None,
-            Some(&key),
-            vec![("upload_id", upload_id)],
+            Some(&self.key),
+            vec![("upload_id", self.upload_id)],
         )?;
         builder.send().await?.error_for_status()?;
         Ok(())
@@ -294,18 +230,13 @@ impl MultipartUpload {
     /// the response body even with HTTP 200 (following the S3 pattern), which is
     /// surfaced as [`crate::Error::MultipartComplete`].
     pub async fn complete(self, parts: Vec<CompletePart>) -> crate::Result<String> {
-        let MultipartUpload {
-            session,
-            key,
-            upload_id,
-            compression: _,
-        } = self;
-        let builder = session
+        let builder = self
+            .session
             .multipart_request(
                 reqwest::Method::POST,
                 Some("complete"),
-                Some(&key),
-                vec![("upload_id", upload_id)],
+                Some(&self.key),
+                vec![("upload_id", self.upload_id)],
             )?
             .json(&CompleteRequest { parts });
 
@@ -323,14 +254,4 @@ impl MultipartUpload {
             }),
         }
     }
-}
-
-enum MultipartPart {
-    Buffer(Bytes),
-    Stream(ClientStream),
-}
-
-async fn collect_stream_bytes(stream: ClientStream) -> crate::Result<Bytes> {
-    let bytes = stream.try_collect::<bytes::BytesMut>().await?;
-    Ok(bytes.freeze())
 }

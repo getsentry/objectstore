@@ -1,7 +1,6 @@
 use std::fmt;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
-use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
@@ -13,67 +12,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
-
-use crate::{ClientStream, ObjectKey, Session};
-
-/// A builder that carries per-object [`Metadata`].
-///
-/// This trait provides the common configuration methods shared by every builder
-/// that attaches metadata to an upload (e.g. [`PutBuilder`], `InitiateBuilder`).
-pub trait MetadataBuilder: Sized {
-    /// Returns a mutable reference to the metadata being built.
-    fn metadata_mut(&mut self) -> &mut Metadata;
-
-    /// Sets an explicit compression algorithm to be used for this payload.
-    ///
-    /// [`None`] should be used if no compression should be performed by the client,
-    /// either because the payload is uncompressible (such as a media format), or if the user
-    /// will handle any kind of compression, without the clients knowledge.
-    ///
-    /// By default, the compression algorithm set on this Session's Usecase is used.
-    fn compression(mut self, compression: impl Into<Option<Compression>>) -> Self {
-        self.metadata_mut().compression = compression.into();
-        self
-    }
-
-    /// Sets the expiration policy of the object to be uploaded.
-    ///
-    /// By default, the expiration policy set on this Session's Usecase is used.
-    fn expiration_policy(mut self, expiration_policy: ExpirationPolicy) -> Self {
-        self.metadata_mut().expiration_policy = expiration_policy;
-        self
-    }
-
-    /// Sets the content type of the object to be uploaded.
-    ///
-    /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
-    /// `content_type` based on magic bytes.
-    fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        self.metadata_mut().content_type = content_type.into();
-        self
-    }
-
-    /// Sets the origin of the object, typically the IP address of the original source.
-    fn origin(mut self, origin: impl Into<String>) -> Self {
-        self.metadata_mut().origin = Some(origin.into());
-        self
-    }
-
-    /// This sets the custom metadata to the provided map.
-    ///
-    /// It will clear any previously set metadata.
-    fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
-        self.metadata_mut().custom = metadata.into();
-        self
-    }
-
-    /// Appends the `key`/`value` to the custom metadata of this object.
-    fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.metadata_mut().custom.insert(key.into(), value.into());
-        self
-    }
-}
+use crate::{ClientStream, Compression, ObjectKey, Session};
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -165,13 +104,9 @@ pub struct PutBuilder {
     pub(crate) body: PutBody,
 }
 
-impl MetadataBuilder for PutBuilder {
-    fn metadata_mut(&mut self) -> &mut Metadata {
-        &mut self.metadata
-    }
-}
-
 impl PutBuilder {
+    metadata_builder_methods!(metadata);
+
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -179,65 +114,6 @@ impl PutBuilder {
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
-    }
-
-    /// Sets an explicit compression algorithm to be used for this payload.
-    ///
-    /// [`None`] should be used if no compression should be performed by the client,
-    /// either because the payload is uncompressible (such as a media format), or if the user
-    /// will handle any kind of compression, without the clients knowledge.
-    ///
-    /// By default, the compression algorithm set on this Session's Usecase is used.
-    pub fn compression(self, compression: impl Into<Option<Compression>>) -> Self {
-        MetadataBuilder::compression(self, compression)
-    }
-
-    /// Sets the expiration policy of the object to be uploaded.
-    ///
-    /// By default, the expiration policy set on this Session's Usecase is used.
-    pub fn expiration_policy(self, expiration_policy: ExpirationPolicy) -> Self {
-        MetadataBuilder::expiration_policy(self, expiration_policy)
-    }
-
-    /// Sets the content type of the object to be uploaded.
-    ///
-    /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
-    /// `content_type` based on magic bytes.
-    pub fn content_type(self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        MetadataBuilder::content_type(self, content_type)
-    }
-
-    /// Sets the origin of the object, typically the IP address of the original source.
-    ///
-    /// This is an optional but encouraged field that tracks where the payload was
-    /// originally obtained from. For example, the IP address of the Sentry SDK or CLI
-    /// that uploaded the data.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # async fn example(session: objectstore_client::Session) {
-    /// session.put("data")
-    ///     .origin("203.0.113.42")
-    ///     .send()
-    ///     .await
-    ///     .unwrap();
-    /// # }
-    /// ```
-    pub fn origin(self, origin: impl Into<String>) -> Self {
-        MetadataBuilder::origin(self, origin)
-    }
-
-    /// This sets the custom metadata to the provided map.
-    ///
-    /// It will clear any previously set metadata.
-    pub fn set_metadata(self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
-        MetadataBuilder::set_metadata(self, metadata)
-    }
-
-    /// Appends the `key`/`value` to the custom metadata of this object.
-    pub fn append_metadata(self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        MetadataBuilder::append_metadata(self, key, value)
     }
 }
 

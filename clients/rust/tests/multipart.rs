@@ -67,8 +67,12 @@ async fn compressed_upload_flow() {
     let part1_data = b"hello ";
     let part2_data = b"world!";
 
-    let etag1 = upload.put(part1_data.as_slice(), 1, None).await.unwrap();
-    let etag2 = upload.put(part2_data.as_slice(), 2, None).await.unwrap();
+    // Caller is responsible for pre-compressing parts.
+    let part1_compressed = zstd::encode_all(&part1_data[..], 0).unwrap();
+    let part2_compressed = zstd::encode_all(&part2_data[..], 0).unwrap();
+
+    let etag1 = upload.put(part1_compressed, 1, None).await.unwrap();
+    let etag2 = upload.put(part2_compressed, 2, None).await.unwrap();
 
     let key = upload
         .complete(vec![
