@@ -22,7 +22,7 @@ use argh::FromArgs;
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
-use stresstest::workload::WorkloadMode;
+use stresstest::workload::{MultipartConfig, WorkloadMode};
 
 use crate::config::Config;
 
@@ -70,6 +70,34 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        let multipart = if let Some(mp) = w.multipart {
+            if matches!(w.mode, WorkloadMode::Batch) {
+                bail!(
+                    "workload '{}': multipart uploads are not supported in batch mode",
+                    w.name
+                );
+            }
+            if mp.part_size.0 < 5 * 1024 * 1024 {
+                bail!(
+                    "workload '{}': multipart part_size must be at least 5 MiB, got {}",
+                    w.name,
+                    mp.part_size
+                );
+            }
+            if mp.concurrency == 0 {
+                bail!(
+                    "workload '{}': multipart concurrency must be at least 1",
+                    w.name
+                );
+            }
+            Some(MultipartConfig {
+                concurrency: mp.concurrency,
+                part_size: mp.part_size.0,
+            })
+        } else {
+            None
+        };
+
         let workload = Workload::builder(w.name)
             .concurrency(w.concurrency)
             .organizations(w.organizations)
@@ -77,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
             .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
             .max_size(w.file_sizes.max.map(|b| b.0))
             .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
+            .multipart(multipart)
             .build();
 
         stresstest = stresstest.workload(workload);

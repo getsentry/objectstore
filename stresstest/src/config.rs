@@ -29,6 +29,14 @@ pub struct Workload {
     pub file_sizes: FileSizes,
     #[serde(default)]
     pub actions: Actions,
+    #[serde(default)]
+    pub multipart: Option<MultipartConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MultipartConfig {
+    pub concurrency: usize,
+    pub part_size: ByteSize,
 }
 
 fn default_concurrency() -> usize {

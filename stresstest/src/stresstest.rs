@@ -251,6 +251,8 @@ async fn run_workload(
         WorkloadMode::Throughput => 100,
     };
 
+    let multipart_config = workload.multipart.clone().map(Arc::new);
+
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let start = Instant::now();
     let deadline = tokio::time::Instant::now() + duration;
@@ -281,6 +283,7 @@ async fn run_workload(
                 };
 
 
+                let multipart_config = multipart_config.clone();
                 let task = async move {
                     let start = Instant::now();
                     match action {
@@ -293,7 +296,14 @@ async fn run_workload(
                                 usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
                             }
 
-                            match remote.write(&usecase, organization_id, payload).await {
+                            let use_multipart = multipart_config.is_some() && file_size > 1024;
+                            let result = if use_multipart {
+                                remote.write_multipart(&usecase, organization_id, payload, multipart_config.as_ref().unwrap()).await
+                            } else {
+                                remote.write(&usecase, organization_id, payload).await
+                            };
+
+                            match result {
                                 Ok(object_key) => {
                                     let external_id = (usecase, organization_id, object_key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
