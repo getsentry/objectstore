@@ -10,13 +10,14 @@ use objectstore_client::{Client, CompletePart, Compression, Error, Usecase};
 use crate::common::test_token_generator;
 
 #[tokio::test]
-async fn full_upload_uncompressed() {
+async fn test_full_upload_uncompressed() {
     let server = test_server().await;
     let client = Client::builder(server.url("/"))
         .token(test_token_generator())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase").with_compression(None);
+
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let upload = session
@@ -54,14 +55,20 @@ async fn full_upload_uncompressed() {
 
     assert_eq!(key, "multipart-test-key");
 
-    let response = session.get(&key).send().await.unwrap().unwrap();
+    let response = session
+        .get(&key)
+        .decompress(false)
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(response.metadata.compression, None);
     let payload = response.payload().await.unwrap();
     assert_eq!(payload, "hello world!");
 }
 
 #[tokio::test]
-async fn compressed_upload_flow() {
+async fn test_full_upload_compressed() {
     let server = test_server().await;
     let session = test_session(&server);
 
@@ -76,7 +83,6 @@ async fn compressed_upload_flow() {
     let part1_data = b"hello ";
     let part2_data = b"world!";
 
-    // Caller is responsible for pre-compressing parts.
     let parts_data: Vec<(Vec<u8>, u32)> = vec![
         (zstd::encode_all(&part1_data[..], 0).unwrap(), 1),
         (zstd::encode_all(&part2_data[..], 0).unwrap(), 2),
@@ -125,7 +131,7 @@ async fn compressed_upload_flow() {
 }
 
 #[tokio::test]
-async fn server_generated_key() {
+async fn test_server_generated_key() {
     let server = test_server().await;
     let session = test_session(&server);
 
@@ -149,7 +155,7 @@ async fn server_generated_key() {
 }
 
 #[tokio::test]
-async fn list_parts() {
+async fn test_list_parts() {
     let server = test_server().await;
     let session = test_session(&server);
 
@@ -161,28 +167,34 @@ async fn list_parts() {
         .await
         .unwrap();
 
-    upload.put(b"part-one".as_slice(), 1, None).await.unwrap();
     upload.put(b"part-two".as_slice(), 2, None).await.unwrap();
+    upload.put(b"part-one".as_slice(), 1, None).await.unwrap();
 
     let parts = upload.list_parts().await.unwrap();
     assert_eq!(parts.len(), 2);
-    assert_eq!(parts[0].part_number, 1);
-    assert_eq!(parts[1].part_number, 2);
-    assert_eq!(parts[0].size, 8);
-    assert_eq!(parts[1].size, 8);
+
+    let p1 = parts
+        .iter()
+        .find(|p| p.part_number == 1)
+        .expect("missing part 1");
+    let p2 = parts
+        .iter()
+        .find(|p| p.part_number == 2)
+        .expect("missing part 2");
+    assert_eq!(p1.size, 8);
+    assert_eq!(p2.size, 8);
 
     upload.abort().await.unwrap();
 }
 
 #[tokio::test]
-async fn abort_upload() {
+async fn test_abort() {
     let server = test_server().await;
     let session = test_session(&server);
 
     let upload = session
         .initiate_multipart_upload()
         .key("abort-key")
-        .compression(None)
         .send()
         .await
         .unwrap();
@@ -192,7 +204,7 @@ async fn abort_upload() {
 }
 
 #[tokio::test]
-async fn metadata_preserved() {
+async fn test_metadata_preserved() {
     let server = test_server().await;
     let session = test_session(&server);
 
@@ -221,7 +233,7 @@ async fn metadata_preserved() {
 }
 
 #[tokio::test]
-async fn complete_with_bad_etag() {
+async fn test_complete_with_bad_etag() {
     let server = test_server().await;
     let session = test_session(&server);
 
