@@ -2,8 +2,6 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-#[macro_use]
-mod macros;
 mod auth;
 mod client;
 mod delete;

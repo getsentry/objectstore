@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
@@ -55,8 +58,6 @@ pub struct InitiateBuilder {
 }
 
 impl InitiateBuilder {
-    metadata_builder_methods!(metadata);
-
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -64,6 +65,55 @@ impl InitiateBuilder {
     /// request.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|k| !k.is_empty());
+        self
+    }
+
+    /// Sets the compression algorithm recorded in this object's metadata.
+    ///
+    /// Unlike single-object uploads, the client does **not** compress multipart
+    /// parts automatically. The caller is responsible for pre-compressing each
+    /// part to match this algorithm before uploading it via
+    /// [`MultipartUpload::put`] or [`MultipartUpload::put_stream`].
+    ///
+    /// Pass [`None`] to disable compression entirely.
+    ///
+    /// By default, the compression algorithm set on this Session's Usecase is used.
+    pub fn compression(mut self, compression: impl Into<Option<crate::Compression>>) -> Self {
+        self.metadata.compression = compression.into();
+        self
+    }
+
+    /// Sets the expiration policy of the object to be uploaded.
+    ///
+    /// By default, the expiration policy set on this Session's Usecase is used.
+    pub fn expiration_policy(mut self, expiration_policy: crate::ExpirationPolicy) -> Self {
+        self.metadata.expiration_policy = expiration_policy;
+        self
+    }
+
+    /// Sets the content type of the object to be uploaded.
+    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
+        self.metadata.content_type = content_type.into();
+        self
+    }
+
+    /// Sets the origin of the object, typically the IP address of the original source.
+    pub fn origin(mut self, origin: impl Into<String>) -> Self {
+        self.metadata.origin = Some(origin.into());
+        self
+    }
+
+    /// Sets the custom metadata to the provided map.
+    ///
+    /// It will clear any previously set metadata.
+    pub fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
+        self.metadata.custom = metadata.into();
+        self
+    }
+
+    /// Appends the `key`/`value` to the custom metadata of this object.
+    pub fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.custom.insert(key.into(), value.into());
         self
     }
 
