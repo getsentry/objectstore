@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompletePart, CompleteRequest, CompleteSuccessResponse, InitiateResponse,
@@ -9,10 +11,15 @@ use objectstore_types::multipart::{
 };
 use reqwest::Body;
 use serde::Deserialize;
+use tokio::io::AsyncRead;
+use tokio_util::io::ReaderStream;
 
 use crate::{ClientStream, ObjectKey, Session};
 
 pub use objectstore_types::multipart::CompletePart as MultipartCompletePart;
+pub use objectstore_types::multipart::ETag;
+pub use objectstore_types::multipart::PartInfo;
+pub use objectstore_types::multipart::UploadId;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -51,12 +58,13 @@ impl Session {
 
     /// Resumes an existing multipart upload from its key and upload ID.
     ///
-    /// This reconstructs a [`MultipartUpload`] handle from previously obtained identifiers.
+    /// This reconstructs a [`MultipartUpload`] handle from previously obtained identifiers, and
+    /// doesn't make any network calls.
     /// Use this to resume an upload after a process restart or to continue an upload initiated elsewhere.
     pub fn resume_multipart_upload(
         &self,
         key: impl Into<ObjectKey>,
-        upload_id: impl Into<String>,
+        upload_id: impl Into<UploadId>,
     ) -> MultipartUpload {
         MultipartUpload {
             session: self.clone(),
@@ -174,74 +182,95 @@ impl InitiateMultipartBuilder {
     }
 }
 
-/// Represents an ongoing MultipartUpload, tied to a specific [`Session`] and `upload_id`.
+/// Represents an ongoing Multipart Upload, tied to a specific [`Session`] and [`UploadId`].
 ///
-/// Create a Session using [`Session::initiate_multipart_upload`] or
-/// [`Session:resume_multipart_upload`].
+/// Create a Multipart Upload handle using [`Session::initiate_multipart_upload`] or [`Session:resume_multipart_upload`].
 #[derive(Debug)]
 pub struct MultipartUpload {
     session: Session,
     key: String,
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 impl MultipartUpload {
     /// Returns the upload session identifier.
-    pub fn id(&self) -> &str {
+    pub fn upload_id(&self) -> &UploadId {
         &self.upload_id
     }
 
-    /// Returns the object key.
-    pub fn key(&self) -> &str {
+    /// Returns the key of the object that this upload will create.
+    pub fn key(&self) -> &ObjectKey {
         &self.key
     }
 
-    /// Uploads a part from an in-memory buffer.
+    /// Uploads a part using a [`Bytes`]-like payload.
     ///
-    /// An optional raw MD5 digest can be provided for server-side integrity
-    /// verification. The digest must match the bytes being transmitted.
+    /// IMPORTANT: unlike single-object uploads, the client does not automatically compress
+    /// contents based on this upload's `Metadata::compression`.
+    /// The caller is responsible to compress the payload in accordance with the `compression`,
+    /// and, optionally, to pass the `content_md5` of the compressed payload.
     pub async fn put(
         &self,
         body: impl Into<Bytes>,
         part_number: u32,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<String> {
+    ) -> crate::Result<ETag> {
         let bytes = body.into();
         let content_length = bytes.len() as u64;
-        self.upload_part(bytes.into(), content_length, part_number, content_md5)
+        self.upload_part(bytes.into(), part_number, content_length, content_md5)
             .await
     }
 
-    /// Uploads a part from a stream.
+    /// Uploads a part using a streaming payload.
     ///
-    /// The caller must provide the exact `content_length` of the stream.
-    /// An optional raw MD5 digest can be provided for server-side integrity
-    /// verification. The digest must match the bytes being transmitted.
+    /// IMPORTANT: unlike single-object uploads, the client does not automatically compress
+    /// contents based on this upload's `Metadata::compression`.
+    /// The caller is responsible to compress the payload in accordance with the `compression`,
+    /// and to pass the `content_length` and, optionally, `content_md5` of the compressed payload.
     pub async fn put_stream(
         &self,
         stream: ClientStream,
-        content_length: u64,
         part_number: u32,
+        content_length: u64,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<String> {
+    ) -> crate::Result<ETag> {
         self.upload_part(
             Body::wrap_stream(stream),
-            content_length,
             part_number,
+            content_length,
             content_md5,
         )
         .await
     }
 
+    /// Uploads a part from an [`AsyncRead`] source.
+    ///
+    /// IMPORTANT: unlike single-object uploads, the client does not automatically compress
+    /// contents based on this upload's `Metadata::compression`.
+    /// The caller is responsible to compress the payload in accordance with the `compression`,
+    /// and to pass the `content_length` and, optionally, `content_md5` of the compressed payload.
+    pub async fn put_read<R>(
+        &self,
+        reader: R,
+        part_number: u32,
+        content_length: u64,
+        content_md5: Option<&[u8; 16]>,
+    ) -> crate::Result<ETag>
+    where
+        R: AsyncRead + Send + Sync + 'static,
+    {
+        let stream = ReaderStream::new(reader).boxed();
+        self.put_stream(stream, part_number, content_length, content_md5)
+            .await
+    }
+
     async fn upload_part(
         &self,
         body: Body,
-        content_length: u64,
         part_number: u32,
+        content_length: u64,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<String> {
-        use base64::Engine;
-
+    ) -> crate::Result<ETag> {
         let mut builder = self
             .session
             .multipart_request(
@@ -265,8 +294,23 @@ impl MultipartUpload {
         Ok(response.etag)
     }
 
-    /// Lists the parts that have been uploaded for this multipart upload.
-    pub async fn list_parts(
+    /// Lists all parts that have been uploaded for this multipart upload.
+    pub async fn list_parts(&self) -> crate::Result<BTreeMap<u32, PartInfo>> {
+        let mut all_parts = BTreeMap::new();
+        let mut marker = None;
+
+        loop {
+            let page = self.list_parts_page(None, marker).await?;
+            all_parts.extend(page.parts);
+
+            if !page.is_truncated {
+                return Ok(all_parts);
+            }
+            marker = page.next_part_number_marker;
+        }
+    }
+
+    async fn list_parts_page(
         &self,
         max_parts: Option<u32>,
         part_number_marker: Option<u32>,
@@ -290,7 +334,7 @@ impl MultipartUpload {
         Ok(response)
     }
 
-    /// Aborts this multipart upload, discarding any uploaded parts.
+    /// Aborts this multipart upload.
     pub async fn abort(self) -> crate::Result<()> {
         let builder = self.session.multipart_request(
             reqwest::Method::DELETE,
@@ -303,11 +347,7 @@ impl MultipartUpload {
     }
 
     /// Completes the multipart upload, assembling all parts into the final object.
-    ///
-    /// Returns the final object key on success. The server may return an error in
-    /// the response body even with HTTP 200 (following the S3 pattern), which is
-    /// surfaced as [`crate::Error::MultipartComplete`].
-    pub async fn complete(self, parts: Vec<CompletePart>) -> crate::Result<String> {
+    pub async fn complete(self, parts: Vec<CompletePart>) -> crate::Result<ObjectKey> {
         let builder = self
             .session
             .multipart_request(
@@ -318,11 +358,6 @@ impl MultipartUpload {
             )?
             .json(&CompleteRequest { parts });
 
-        // The complete endpoint streams whitespace as keepalive before the JSON
-        // payload. serde_json (used by reqwest's .json()) skips leading whitespace,
-        // so we can deserialize directly.
-        //
-        // The response is always HTTP 200 (S3 pattern) — errors are in the body.
         let response = builder.send().await?.error_for_status()?;
         match response.json::<CompleteResponse>().await? {
             CompleteResponse::Success(s) => Ok(s.key),

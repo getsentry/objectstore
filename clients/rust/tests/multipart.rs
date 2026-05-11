@@ -18,7 +18,7 @@ async fn full_upload_flow() {
         .unwrap();
 
     assert_eq!(upload.key(), "multipart-test-key");
-    assert!(!upload.id().is_empty());
+    assert!(!upload.upload_id().is_empty());
 
     let part1_data = b"hello ";
     let part2_data = b"world!";
@@ -160,13 +160,12 @@ async fn list_parts() {
     upload.put(b"part-one".as_slice(), 1, None).await.unwrap();
     upload.put(b"part-two".as_slice(), 2, None).await.unwrap();
 
-    let parts = upload.list_parts(None, None).await.unwrap();
-    assert_eq!(parts.parts.len(), 2);
-    assert!(parts.parts.contains_key(&1));
-    assert!(parts.parts.contains_key(&2));
-    assert_eq!(parts.parts[&1].size, 8);
-    assert_eq!(parts.parts[&2].size, 8);
-    assert!(!parts.is_truncated);
+    let parts = upload.list_parts().await.unwrap();
+    assert_eq!(parts.len(), 2);
+    assert!(parts.contains_key(&1));
+    assert!(parts.contains_key(&2));
+    assert_eq!(parts[&1].size, 8);
+    assert_eq!(parts[&2].size, 8);
 
     upload.abort().await.unwrap();
 }

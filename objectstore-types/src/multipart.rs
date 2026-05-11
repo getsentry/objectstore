@@ -5,27 +5,33 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+/// Identifier for a multipart upload session.
+pub type UploadId = String;
+
+/// Opaque entity tag identifying a specific version of an uploaded part.
+pub type ETag = String;
+
 /// Response from initiating a multipart upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitiateResponse {
     /// The object key (server-generated or user-provided).
     pub key: String,
     /// The upload session identifier for subsequent requests.
-    pub upload_id: String,
+    pub upload_id: UploadId,
 }
 
 /// Response from uploading a single part.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadPartResponse {
     /// Opaque identifier of the uploaded part.
-    pub etag: String,
+    pub etag: ETag,
 }
 
 /// Information about a single uploaded part, as returned by list-parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartInfo {
     /// Opaque identifier of the part.
-    pub etag: String,
+    pub etag: ETag,
     /// When the part was last modified.
     #[serde(with = "humantime_serde")]
     pub last_modified: SystemTime,
@@ -51,7 +57,7 @@ pub struct CompletePart {
     /// The part number.
     pub part_number: u32,
     /// The etag returned when this part was uploaded.
-    pub etag: String,
+    pub etag: ETag,
 }
 
 /// Request body for completing a multipart upload.

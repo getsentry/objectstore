@@ -18,7 +18,7 @@ use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
-    InitiateResponse, ListPartsResponse, PartInfo, UploadPartResponse,
+    InitiateResponse, ListPartsResponse, PartInfo, UploadId, UploadPartResponse,
 };
 use serde::Deserialize;
 use crate::auth::AuthAwareService;
