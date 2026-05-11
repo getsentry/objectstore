@@ -2,9 +2,6 @@
 name = "objectstore"
 version = "0.0.0"
 requires-python = ">=3.11"
-dependencies = [
-    "devservices>=1.2.2",
-]
 
 [tool.uv]
 required-version = ">=0.9.18"

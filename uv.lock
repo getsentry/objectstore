@@ -288,9 +288,6 @@ wheels = [
 name = "objectstore"
 version = "0.0.0"
 source = { virtual = "." }
-dependencies = [
-    { name = "devservices" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -307,7 +304,6 @@ docs = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "devservices", specifier = ">=1.2.2" }]
 
 [package.metadata.requires-dev]
 dev = [
