@@ -13,6 +13,7 @@ async fn full_upload_flow() {
     let upload = session
         .create_multipart_upload()
         .key("multipart-test-key")
+        .compression(None)
         .send()
         .await
         .unwrap();
