@@ -172,13 +172,11 @@ async fn list_parts(
     let parts = response
         .parts
         .into_iter()
-        .map(|p| {
-            let info = PartInfo {
-                etag: p.etag,
-                last_modified: p.last_modified,
-                size: p.size,
-            };
-            (p.part_number, info)
+        .map(|p| PartInfo {
+            part_number: p.part_number,
+            etag: p.etag,
+            last_modified: p.last_modified,
+            size: p.size,
         })
         .collect();
 

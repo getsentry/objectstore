@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
-    CompleteErrorDetail, CompletePart, CompleteRequest, CompleteSuccessResponse, InitiateResponse,
+    CompleteErrorDetail, CompleteRequest, CompleteSuccessResponse, InitiateResponse,
     ListPartsResponse, UploadPartResponse,
 };
 use reqwest::Body;
@@ -16,7 +16,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{ClientStream, ObjectKey, Session};
 
-pub use objectstore_types::multipart::CompletePart as MultipartCompletePart;
+pub use objectstore_types::multipart::CompletePart;
 pub use objectstore_types::multipart::ETag;
 pub use objectstore_types::multipart::PartInfo;
 pub use objectstore_types::multipart::UploadId;
@@ -214,7 +214,7 @@ impl MultipartUpload {
         body: impl Into<Bytes>,
         part_number: u32,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<ETag> {
+    ) -> crate::Result<CompletePart> {
         let bytes = body.into();
         let content_length = bytes.len() as u64;
         self.upload_part(bytes.into(), part_number, content_length, content_md5)
@@ -233,7 +233,7 @@ impl MultipartUpload {
         part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<ETag> {
+    ) -> crate::Result<CompletePart> {
         self.upload_part(
             Body::wrap_stream(stream),
             part_number,
@@ -255,7 +255,7 @@ impl MultipartUpload {
         part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<ETag>
+    ) -> crate::Result<CompletePart>
     where
         R: AsyncRead + Send + Sync + 'static,
     {
@@ -270,7 +270,7 @@ impl MultipartUpload {
         part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
-    ) -> crate::Result<ETag> {
+    ) -> crate::Result<CompletePart> {
         let mut builder = self
             .session
             .multipart_request(
@@ -291,12 +291,15 @@ impl MultipartUpload {
         }
 
         let response: UploadPartResponse = builder.send().await?.error_for_status()?.json().await?;
-        Ok(response.etag)
+        Ok(CompletePart {
+            part_number,
+            etag: response.etag,
+        })
     }
 
     /// Lists all parts that have been uploaded for this multipart upload.
-    pub async fn list_parts(&self) -> crate::Result<BTreeMap<u32, PartInfo>> {
-        let mut all_parts = BTreeMap::new();
+    pub async fn list_parts(&self) -> crate::Result<Vec<PartInfo>> {
+        let mut all_parts = Vec::new();
         let mut marker = None;
 
         loop {
@@ -347,7 +350,10 @@ impl MultipartUpload {
     }
 
     /// Completes the multipart upload, assembling all parts into the final object.
-    pub async fn complete(self, parts: Vec<CompletePart>) -> crate::Result<ObjectKey> {
+    pub async fn complete(
+        self,
+        parts: impl IntoIterator<Item = CompletePart>,
+    ) -> crate::Result<ObjectKey> {
         let builder = self
             .session
             .multipart_request(
@@ -356,7 +362,9 @@ impl MultipartUpload {
                 Some(&self.key),
                 Some(vec![("upload_id", self.upload_id)]),
             )?
-            .json(&CompleteRequest { parts });
+            .json(&CompleteRequest {
+                parts: parts.into_iter().collect(),
+            });
 
         let response = builder.send().await?.error_for_status()?;
         match response.json::<CompleteResponse>().await? {

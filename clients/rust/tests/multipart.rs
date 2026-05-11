@@ -3,7 +3,9 @@
 mod common;
 
 use common::{test_server, test_session};
-use objectstore_client::{Client, Compression, Error, MultipartCompletePart, Usecase};
+use futures_util::StreamExt as _;
+use futures_util::stream;
+use objectstore_client::{Client, CompletePart, Compression, Error, Usecase};
 
 use crate::common::test_token_generator;
 
@@ -27,32 +29,32 @@ async fn full_upload_uncompressed() {
     assert_eq!(upload.key(), "multipart-test-key");
     assert!(!upload.upload_id().is_empty());
 
-    let part1_data = b"hello ";
-    let part2_data = b"world!";
-
     // Multipart uploads don't auto-compress; caller must pre-compress each part.
-    let part1_compressed = zstd::encode_all(&part1_data[..], 0).unwrap();
-    let part2_compressed = zstd::encode_all(&part2_data[..], 0).unwrap();
+    let parts_data: Vec<(Vec<u8>, u32)> = vec![
+        (zstd::encode_all(&b"hello "[..], 0).unwrap(), 1),
+        (zstd::encode_all(&b"world!"[..], 0).unwrap(), 2),
+    ];
 
-    let etag1 = upload.put(part1_compressed, 1, None).await.unwrap();
-    let etag2 = upload.put(part2_compressed, 2, None).await.unwrap();
+    let results: Vec<_> = stream::iter(
+        parts_data
+            .into_iter()
+            .map(|(data, part_number)| upload.put(data, part_number, None)),
+    )
+    .buffer_unordered(2)
+    .collect()
+    .await;
 
-    assert!(!etag1.is_empty());
-    assert!(!etag2.is_empty());
+    let mut parts = Vec::new();
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(part) => parts.push(part),
+            Err(e) => errors.push(e),
+        }
+    }
+    assert!(errors.is_empty(), "part uploads failed: {errors:?}");
 
-    let key = upload
-        .complete(vec![
-            MultipartCompletePart {
-                part_number: 1,
-                etag: etag1,
-            },
-            MultipartCompletePart {
-                part_number: 2,
-                etag: etag2,
-            },
-        ])
-        .await
-        .unwrap();
+    let key = upload.complete(parts).await.unwrap();
 
     assert_eq!(key, "multipart-test-key");
 
@@ -80,25 +82,31 @@ async fn compressed_upload_flow() {
     let part2_data = b"world!";
 
     // Caller is responsible for pre-compressing parts.
-    let part1_compressed = zstd::encode_all(&part1_data[..], 0).unwrap();
-    let part2_compressed = zstd::encode_all(&part2_data[..], 0).unwrap();
+    let parts_data: Vec<(Vec<u8>, u32)> = vec![
+        (zstd::encode_all(&part1_data[..], 0).unwrap(), 1),
+        (zstd::encode_all(&part2_data[..], 0).unwrap(), 2),
+    ];
 
-    let etag1 = upload.put(part1_compressed, 1, None).await.unwrap();
-    let etag2 = upload.put(part2_compressed, 2, None).await.unwrap();
+    let results: Vec<_> = stream::iter(
+        parts_data
+            .into_iter()
+            .map(|(data, part_number)| upload.put(data, part_number, None)),
+    )
+    .buffer_unordered(2)
+    .collect()
+    .await;
 
-    let key = upload
-        .complete(vec![
-            MultipartCompletePart {
-                part_number: 1,
-                etag: etag1,
-            },
-            MultipartCompletePart {
-                part_number: 2,
-                etag: etag2,
-            },
-        ])
-        .await
-        .unwrap();
+    let mut parts = Vec::new();
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(part) => parts.push(part),
+            Err(e) => errors.push(e),
+        }
+    }
+    assert!(errors.is_empty(), "part uploads failed: {errors:?}");
+
+    let key = upload.complete(parts).await.unwrap();
 
     let response = session
         .get(&key)
@@ -135,15 +143,9 @@ async fn server_generated_key() {
 
     assert!(!upload.key().is_empty());
 
-    let etag = upload.put(b"data".as_slice(), 1, None).await.unwrap();
+    let part = upload.put(b"data".as_slice(), 1, None).await.unwrap();
 
-    let key = upload
-        .complete(vec![MultipartCompletePart {
-            part_number: 1,
-            etag,
-        }])
-        .await
-        .unwrap();
+    let key = upload.complete([part]).await.unwrap();
 
     assert!(!key.is_empty());
 
@@ -169,10 +171,10 @@ async fn list_parts() {
 
     let parts = upload.list_parts().await.unwrap();
     assert_eq!(parts.len(), 2);
-    assert!(parts.contains_key(&1));
-    assert!(parts.contains_key(&2));
-    assert_eq!(parts[&1].size, 8);
-    assert_eq!(parts[&2].size, 8);
+    assert_eq!(parts[0].part_number, 1);
+    assert_eq!(parts[1].part_number, 2);
+    assert_eq!(parts[0].size, 8);
+    assert_eq!(parts[1].size, 8);
 
     upload.abort().await.unwrap();
 }
@@ -210,15 +212,9 @@ async fn metadata_preserved() {
         .await
         .unwrap();
 
-    let etag = upload.put(b"payload".as_slice(), 1, None).await.unwrap();
+    let part = upload.put(b"payload".as_slice(), 1, None).await.unwrap();
 
-    let key = upload
-        .complete(vec![MultipartCompletePart {
-            part_number: 1,
-            etag,
-        }])
-        .await
-        .unwrap();
+    let key = upload.complete([part]).await.unwrap();
 
     let response = session.get(&key).send().await.unwrap().unwrap();
     assert_eq!(response.metadata.content_type, "text/plain");
@@ -245,7 +241,7 @@ async fn complete_with_bad_etag() {
     upload.put(b"real data".as_slice(), 1, None).await.unwrap();
 
     let result = upload
-        .complete(vec![MultipartCompletePart {
+        .complete(vec![CompletePart {
             part_number: 1,
             etag: "bogus-etag".to_string(),
         }])

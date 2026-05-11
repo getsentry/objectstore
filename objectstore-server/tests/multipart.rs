@@ -153,10 +153,10 @@ async fn test_multipart_full_flow() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 2);
-    assert!(list.parts.contains_key(&1));
-    assert!(list.parts.contains_key(&2));
-    assert_eq!(list.parts[&1].size, part1_data.len() as u64);
-    assert_eq!(list.parts[&2].size, part2_data.len() as u64);
+    assert_eq!(list.parts[0].part_number, 1);
+    assert_eq!(list.parts[1].part_number, 2);
+    assert_eq!(list.parts[0].size, part1_data.len() as u64);
+    assert_eq!(list.parts[1].size, part2_data.len() as u64);
     assert!(!list.is_truncated);
 
     // 5. Complete
@@ -394,8 +394,9 @@ async fn test_upload_part_overwrite() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 1);
-    assert_eq!(list.parts[&1].etag, second_etag.etag);
-    assert_eq!(list.parts[&1].size, 6);
+    assert_eq!(list.parts[0].part_number, 1);
+    assert_eq!(list.parts[0].etag, second_etag.etag);
+    assert_eq!(list.parts[0].size, 6);
 
     // 5. Complete with the overwritten part
     complete_and_assert(

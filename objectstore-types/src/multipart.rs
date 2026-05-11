@@ -1,6 +1,5 @@
 //! Types for the multipart upload protocol.
 
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +29,8 @@ pub struct UploadPartResponse {
 /// Information about a single uploaded part, as returned by list-parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartInfo {
+    /// The part number.
+    pub part_number: u32,
     /// Opaque identifier of the part.
     pub etag: ETag,
     /// When the part was last modified.
@@ -39,11 +40,20 @@ pub struct PartInfo {
     pub size: u64,
 }
 
+impl From<PartInfo> for CompletePart {
+    fn from(info: PartInfo) -> Self {
+        Self {
+            part_number: info.part_number,
+            etag: info.etag,
+        }
+    }
+}
+
 /// Response from listing parts of a multipart upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListPartsResponse {
-    /// Map of part number to part information.
-    pub parts: BTreeMap<u32, PartInfo>,
+    /// Parts uploaded so far.
+    pub parts: Vec<PartInfo>,
     /// Whether the response was truncated.
     pub is_truncated: bool,
     /// Marker for the next page of results, if truncated.
