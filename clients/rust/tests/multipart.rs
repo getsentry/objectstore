@@ -29,11 +29,7 @@ async fn full_upload_uncompressed() {
     assert_eq!(upload.key(), "multipart-test-key");
     assert!(!upload.upload_id().is_empty());
 
-    // Multipart uploads don't auto-compress; caller must pre-compress each part.
-    let parts_data: Vec<(Vec<u8>, u32)> = vec![
-        (zstd::encode_all(&b"hello "[..], 0).unwrap(), 1),
-        (zstd::encode_all(&b"world!"[..], 0).unwrap(), 2),
-    ];
+    let parts_data: Vec<(&[u8], u32)> = vec![(b"hello ", 1), (b"world!", 2)];
 
     let results: Vec<_> = stream::iter(
         parts_data
@@ -58,7 +54,6 @@ async fn full_upload_uncompressed() {
 
     assert_eq!(key, "multipart-test-key");
 
-    // The client decompresses concatenated zstd frames (multiple_members) transparently.
     let response = session.get(&key).send().await.unwrap().unwrap();
     assert_eq!(response.metadata.compression, None);
     let payload = response.payload().await.unwrap();
