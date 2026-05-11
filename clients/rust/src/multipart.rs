@@ -312,7 +312,7 @@ impl MultipartUpload {
             marker = page.next_part_number_marker;
             if marker.is_none() {
                 return Err(crate::Error::MalformedResponse(
-                    "server returned is_truncated=true but no next_part_number_marker".into(),
+                    "server returned is_truncated=true but no next_part_number_marker. Please report a bug.".into(),
                 ));
             }
         }
