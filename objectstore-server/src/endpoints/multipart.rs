@@ -135,8 +135,6 @@ async fn upload_part(
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
 
-    // Content-MD5 must be base64-encoded per RFC 1864; passed through to the
-    // storage backend for integrity verification.
     let content_md5 = headers
         .get("content-md5")
         .and_then(|v| v.to_str().ok())
