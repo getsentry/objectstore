@@ -45,7 +45,7 @@ impl Session {
     pub fn initiate_multipart_upload(&self) -> InitiateMultipartBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
-            compression: Some(self.scope.usecase().compression()),
+            compression: self.scope.usecase().compression(),
             ..Default::default()
         };
 

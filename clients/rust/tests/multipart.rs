@@ -3,12 +3,19 @@
 mod common;
 
 use common::{test_server, test_session};
-use objectstore_client::{Compression, Error, MultipartCompletePart};
+use objectstore_client::{Client, Compression, Error, MultipartCompletePart, Usecase};
+
+use crate::common::test_token_generator;
 
 #[tokio::test]
-async fn full_upload_flow() {
+async fn full_upload_uncompressed() {
     let server = test_server().await;
-    let session = test_session(&server);
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase").with_compression(None);
+    let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let upload = session
         .initiate_multipart_upload()

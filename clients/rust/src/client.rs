@@ -151,7 +151,7 @@ impl ClientBuilder {
 #[derive(Debug, Clone)]
 pub struct Usecase {
     name: Arc<str>,
-    compression: Compression,
+    compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
 }
 
@@ -160,7 +160,7 @@ impl Usecase {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.into(),
-            compression: Compression::Zstd,
+            compression: Some(Compression::Zstd),
             expiration_policy: Default::default(),
         }
     }
@@ -173,7 +173,7 @@ impl Usecase {
 
     /// Returns the compression algorithm to use for operations within this usecase.
     #[inline]
-    pub fn compression(&self) -> Compression {
+    pub fn compression(&self) -> Option<Compression> {
         self.compression
     }
 
@@ -181,10 +181,10 @@ impl Usecase {
     ///
     /// It's still possible to override this default on each operation's builder.
     ///
-    /// By default, [`Compression::Zstd`] is used.
-    pub fn with_compression(self, compression: Compression) -> Self {
+    /// By default, [`Compression::Zstd`] is used. Pass [`None`] to disable compression.
+    pub fn with_compression(self, compression: impl Into<Option<Compression>>) -> Self {
         Self {
-            compression,
+            compression: compression.into(),
             ..self
         }
     }
