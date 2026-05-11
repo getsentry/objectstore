@@ -17,12 +17,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use argh::FromArgs;
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
-use stresstest::workload::{MultipartConfig, WorkloadMode};
 
 use crate::config::Config;
 
@@ -53,50 +52,8 @@ async fn main() -> anyhow::Result<()> {
         .cleanup(config.cleanup);
 
     for w in config.workloads {
-        if matches!(w.mode, WorkloadMode::Batch) {
-            if w.actions.reads > 0 || w.actions.deletes > 0 {
-                bail!(
-                    "workload '{}': batch mode only supports writes, but reads={} and deletes={} were configured",
-                    w.name,
-                    w.actions.reads,
-                    w.actions.deletes
-                );
-            }
-            if w.actions.writes == 0 {
-                bail!(
-                    "workload '{}': batch mode requires actions.writes > 0",
-                    w.name
-                );
-            }
-        }
-
-        let multipart = if let Some(mp) = w.multipart {
-            if matches!(w.mode, WorkloadMode::Batch) {
-                bail!(
-                    "workload '{}': multipart uploads are not supported in batch mode",
-                    w.name
-                );
-            }
-            if mp.part_size.0 < 5 * 1024 * 1024 {
-                bail!(
-                    "workload '{}': multipart part_size must be at least 5 MiB, got {}",
-                    w.name,
-                    mp.part_size
-                );
-            }
-            if mp.concurrency == 0 {
-                bail!(
-                    "workload '{}': multipart concurrency must be at least 1",
-                    w.name
-                );
-            }
-            Some(MultipartConfig {
-                concurrency: mp.concurrency,
-                part_size: mp.part_size.0,
-            })
-        } else {
-            None
-        };
+        w.validate()?;
+        let multipart = w.multipart_config();
 
         let workload = Workload::builder(w.name)
             .concurrency(w.concurrency)

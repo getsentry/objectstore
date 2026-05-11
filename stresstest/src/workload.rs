@@ -23,7 +23,7 @@ pub struct MultipartConfig {
 }
 
 /// Defines how the workload schedules its operations.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadMode {
     /// The workload runs with fixed concurrency as fast as possible.
