@@ -13,7 +13,6 @@ async fn full_upload_flow() {
     let upload = session
         .create_multipart_upload()
         .key("multipart-test-key")
-        .compression(None)
         .send()
         .await
         .unwrap();
@@ -24,8 +23,12 @@ async fn full_upload_flow() {
     let part1_data = b"hello ";
     let part2_data = b"world!";
 
-    let etag1 = upload.put(part1_data.as_slice(), 1, None).await.unwrap();
-    let etag2 = upload.put(part2_data.as_slice(), 2, None).await.unwrap();
+    // Multipart uploads don't auto-compress; caller must pre-compress each part.
+    let part1_compressed = zstd::encode_all(&part1_data[..], 0).unwrap();
+    let part2_compressed = zstd::encode_all(&part2_data[..], 0).unwrap();
+
+    let etag1 = upload.put(part1_compressed, 1, None).await.unwrap();
+    let etag2 = upload.put(part2_compressed, 2, None).await.unwrap();
 
     assert!(!etag1.is_empty());
     assert!(!etag2.is_empty());
@@ -46,6 +49,7 @@ async fn full_upload_flow() {
 
     assert_eq!(key, "multipart-test-key");
 
+    // The client decompresses concatenated zstd frames (multiple_members) transparently.
     let response = session.get(&key).send().await.unwrap().unwrap();
     assert_eq!(response.metadata.compression, None);
     let payload = response.payload().await.unwrap();
