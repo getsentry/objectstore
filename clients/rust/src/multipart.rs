@@ -184,7 +184,7 @@ impl InitiateMultipartBuilder {
 
 /// Represents an ongoing Multipart Upload, tied to a specific [`Session`] and [`UploadId`].
 ///
-/// Create a Multipart Upload handle using [`Session::initiate_multipart_upload`] or [`Session:resume_multipart_upload`].
+/// Create a Multipart Upload handle using [`Session::initiate_multipart_upload`] or [`Session::resume_multipart_upload`].
 #[derive(Debug)]
 pub struct MultipartUpload {
     session: Session,
