@@ -464,6 +464,7 @@ impl Session {
         url
     }
 
+    #[cfg(feature = "multipart")]
     fn multipart_url(
         &self,
         suffix: Option<&'static str>,
@@ -530,6 +531,7 @@ impl Session {
         self.prepare_builder(builder)
     }
 
+    #[cfg(feature = "multipart")]
     pub(crate) fn multipart_request(
         &self,
         method: reqwest::Method,
