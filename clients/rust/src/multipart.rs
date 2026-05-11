@@ -310,6 +310,11 @@ impl MultipartUpload {
                 return Ok(all_parts);
             }
             marker = page.next_part_number_marker;
+            if marker.is_none() {
+                return Err(crate::Error::MalformedResponse(
+                    "server returned is_truncated=true but no next_part_number_marker".into(),
+                ));
+            }
         }
     }
 
