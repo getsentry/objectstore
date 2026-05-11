@@ -48,6 +48,22 @@ impl Session {
             key: None,
         }
     }
+
+    /// Resumes an existing multipart upload from its key and upload ID.
+    ///
+    /// This reconstructs a [`MultipartUpload`] handle from previously obtained identifiers.
+    /// Use this to resume an upload after a process restart or to continue an upload initiated elsewhere.
+    pub fn resume_multipart_upload(
+        &self,
+        key: impl Into<ObjectKey>,
+        upload_id: impl Into<String>,
+    ) -> MultipartUpload {
+        MultipartUpload {
+            session: self.clone(),
+            key: key.into(),
+            upload_id: upload_id.into(),
+        }
+    }
 }
 
 /// A builder for initiating a multipart upload.
