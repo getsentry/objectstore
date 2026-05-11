@@ -40,7 +40,7 @@ zstd = "0.13.3"
 
 [features]
 default = ["native-tls", "hickory-dns"]
-multipart-low-level = []
+multipart = []
 
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
@@ -49,4 +49,4 @@ hickory-dns = ["reqwest/hickory-dns"]
 [[test]]
 name = "multipart"
 path = "tests/multipart.rs"
-required-features = ["multipart-low-level"]
+required-features = ["multipart"]
