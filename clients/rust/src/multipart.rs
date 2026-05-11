@@ -24,18 +24,25 @@ enum CompleteResponse {
 impl Session {
     /// Creates a builder for initiating a multipart upload.
     ///
-    /// The returned [`InitiateBuilder`] inherits the session's default compression
-    /// and expiration settings. Unlike single-object uploads, the client does
-    /// **not** compress parts — the caller must pre-compress each part to match
-    /// the compression algorithm set in metadata.
-    pub fn create_multipart_upload(&self) -> InitiateBuilder {
+    /// The returned [`InitiateMultipartBuilder`] inherits the session's default compression
+    /// and expiration settings.
+    ///
+    /// IMPORTANT: unlike single-object uploads, the client does not automatically compress the
+    /// contents of [`MultipartUpload::put`]/[`MultipartUpload::put_stream`] based on the
+    /// configured `compression`.
+    /// The caller is responsible to compress the payload in accordance with the configured
+    /// `compression`.
+    /// That's because we require `content_length` on each part to be the length of the compressed
+    /// content, which we wouldn't be able to know beforehand if `objectstore_client` automatically
+    /// compressed payloads on the fly.
+    pub fn initiate_multipart_upload(&self) -> InitiateMultipartBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
             compression: Some(self.scope.usecase().compression()),
             ..Default::default()
         };
 
-        InitiateBuilder {
+        InitiateMultipartBuilder {
             session: self.clone(),
             metadata,
             key: None,
@@ -44,25 +51,18 @@ impl Session {
 }
 
 /// A builder for initiating a multipart upload.
-///
-/// Metadata set here (compression, expiration, content type, etc.) is sent to
-/// the server when [`send`](Self::send) is called. Note that unlike
-/// single-object uploads, the client does **not** compress parts automatically —
-/// if compression is configured, the caller must pre-compress each part before
-/// uploading it via [`MultipartUpload::put`] or [`MultipartUpload::put_stream`].
 #[derive(Debug)]
-pub struct InitiateBuilder {
+pub struct InitiateMultipartBuilder {
     session: Session,
     metadata: Metadata,
     key: Option<ObjectKey>,
 }
 
-impl InitiateBuilder {
+impl InitiateMultipartBuilder {
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
-    /// server will automatically assign a random key, which is then returned from the initiate
-    /// request.
+    /// server will automatically assign a random key, which is then returned from this request.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|k| !k.is_empty());
         self
@@ -70,12 +70,11 @@ impl InitiateBuilder {
 
     /// Sets the compression algorithm recorded in this object's metadata.
     ///
-    /// Unlike single-object uploads, the client does **not** compress multipart
-    /// parts automatically. The caller is responsible for pre-compressing each
-    /// part to match this algorithm before uploading it via
-    /// [`MultipartUpload::put`] or [`MultipartUpload::put_stream`].
-    ///
-    /// Pass [`None`] to disable compression entirely.
+    /// IMPORTANT: unlike single-object uploads, the client does not automatically compress the
+    /// contents of [`MultipartUpload::put`]/[`MultipartUpload::put_stream`] based on the
+    /// configured `compression`.
+    /// The caller is responsible to compress the payload in accordance with the configured
+    /// `compression`.
     ///
     /// By default, the compression algorithm set on this Session's Usecase is used.
     pub fn compression(mut self, compression: impl Into<Option<crate::Compression>>) -> Self {
@@ -92,12 +91,31 @@ impl InitiateBuilder {
     }
 
     /// Sets the content type of the object to be uploaded.
+    ///
+    /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
+    /// `content_type` based on magic bytes.
     pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
         self.metadata.content_type = content_type.into();
         self
     }
 
     /// Sets the origin of the object, typically the IP address of the original source.
+    ///
+    /// This is an optional but encouraged field that tracks where the payload was
+    /// originally obtained from. For example, the IP address of the Sentry SDK or CLI
+    /// that uploaded the data.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) {
+    /// session.initiate_multipart_upload()
+    ///     .origin("203.0.113.42")
+    ///     .send()
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
     pub fn origin(mut self, origin: impl Into<String>) -> Self {
         self.metadata.origin = Some(origin.into());
         self
@@ -126,7 +144,7 @@ impl InitiateBuilder {
 
         let mut builder =
             self.session
-                .multipart_request(method, None, self.key.as_deref(), vec![])?;
+                .multipart_request(method, None, self.key.as_deref(), None)?;
 
         builder = builder.headers(self.metadata.to_headers("")?);
 
@@ -140,16 +158,10 @@ impl InitiateBuilder {
     }
 }
 
-/// Handle to an in-progress multipart upload.
+/// Represents an ongoing MultipartUpload, tied to a specific [`Session`] and `upload_id`.
 ///
-/// Returned by [`InitiateBuilder::send`]. Use it to upload parts, list parts,
-/// and complete or abort the upload.
-///
-/// Parts are uploaded as-is — the client does **not** compress them. If the
-/// upload was initiated with compression metadata, the caller is responsible
-/// for pre-compressing each part before calling [`put`](Self::put) or
-/// [`put_stream`](Self::put_stream). `content_length` and `content_md5` always
-/// refer to the bytes actually transmitted.
+/// Create a Session using [`Session::initiate_multipart_upload`] or
+/// [`Session:resume_multipart_upload`].
 #[derive(Debug)]
 pub struct MultipartUpload {
     session: Session,
@@ -220,10 +232,10 @@ impl MultipartUpload {
                 reqwest::Method::PUT,
                 Some("parts"),
                 Some(&self.key),
-                vec![
+                Some(vec![
                     ("upload_id", self.upload_id.clone()),
                     ("part_number", part_number.to_string()),
-                ],
+                ]),
             )?
             .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(body);
@@ -255,7 +267,7 @@ impl MultipartUpload {
             reqwest::Method::GET,
             Some("parts"),
             Some(&self.key),
-            params,
+            Some(params),
         )?;
 
         let response: ListPartsResponse = builder.send().await?.error_for_status()?.json().await?;
@@ -268,7 +280,7 @@ impl MultipartUpload {
             reqwest::Method::DELETE,
             None,
             Some(&self.key),
-            vec![("upload_id", self.upload_id)],
+            Some(vec![("upload_id", self.upload_id)]),
         )?;
         builder.send().await?.error_for_status()?;
         Ok(())
@@ -286,7 +298,7 @@ impl MultipartUpload {
                 reqwest::Method::POST,
                 Some("complete"),
                 Some(&self.key),
-                vec![("upload_id", self.upload_id)],
+                Some(vec![("upload_id", self.upload_id)]),
             )?
             .json(&CompleteRequest { parts });
 

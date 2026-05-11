@@ -11,7 +11,7 @@ async fn full_upload_flow() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("multipart-test-key")
         .send()
         .await
@@ -62,7 +62,7 @@ async fn compressed_upload_flow() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("multipart-compressed-key")
         .compression(Compression::Zstd)
         .send()
@@ -120,7 +120,7 @@ async fn server_generated_key() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .compression(None)
         .send()
         .await
@@ -150,7 +150,7 @@ async fn list_parts() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("list-parts-key")
         .compression(None)
         .send()
@@ -177,7 +177,7 @@ async fn abort_upload() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("abort-key")
         .compression(None)
         .send()
@@ -194,7 +194,7 @@ async fn metadata_preserved() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("metadata-key")
         .compression(None)
         .content_type("text/plain")
@@ -229,7 +229,7 @@ async fn complete_with_bad_etag() {
     let session = test_session(&server);
 
     let upload = session
-        .create_multipart_upload()
+        .initiate_multipart_upload()
         .key("bad-etag-key")
         .compression(None)
         .send()

@@ -468,7 +468,7 @@ impl Session {
         &self,
         suffix: Option<&'static str>,
         object_key: Option<&str>,
-        query_pairs: Vec<(&str, String)>,
+        query_pairs: Option<Vec<(&str, String)>>,
     ) -> Url {
         let mut url = self.client.service_url.clone();
 
@@ -490,8 +490,10 @@ impl Session {
         drop(segments);
         {
             let mut pairs = url.query_pairs_mut();
-            for (key, value) in query_pairs {
-                pairs.append_pair(key, &value);
+            if let Some(query_pairs) = query_pairs {
+                for (key, value) in query_pairs {
+                    pairs.append_pair(key, &value);
+                }
             }
         }
 
@@ -533,7 +535,7 @@ impl Session {
         method: reqwest::Method,
         action: Option<&'static str>,
         object_key: Option<&str>,
-        query_pairs: Vec<(&str, String)>,
+        query_pairs: Option<Vec<(&str, String)>>,
     ) -> crate::Result<RequestBuilder> {
         let url = self.multipart_url(action, object_key, query_pairs);
         let builder = self.client.reqwest.request(method, url);
