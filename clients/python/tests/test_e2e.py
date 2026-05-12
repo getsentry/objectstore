@@ -14,8 +14,9 @@ import urllib3
 import zstandard
 from objectstore_client import Client, Usecase
 from objectstore_client.auth import Permission, TokenGenerator
-from objectstore_client.client import RequestError
+from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
+from objectstore_client.multipart import CompletePart, MultipartCompleteError
 from objectstore_client.scope import Scope
 
 TEST_EDDSA_KID: str = "test_kid"
@@ -342,3 +343,196 @@ def test_connect_timeout() -> None:
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         session.put(b"test data", compression="zstd")
+
+
+def test_multipart_full_cycle_uncompressed(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-uncompressed")
+    assert upload.key == "mp-uncompressed"
+    assert upload.upload_id
+
+    part1 = upload.upload_part(b"hello ", part_number=1)
+    part2 = upload.upload_part(b"world!", part_number=2)
+
+    final_key = upload.complete([part1, part2])
+    assert final_key == "mp-uncompressed"
+
+    retrieved = session.get(final_key)
+    assert retrieved.payload.read() == b"hello world!"
+
+
+def test_multipart_full_cycle_compressed(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(
+        key="mp-compressed",
+        compression="zstd",
+    )
+
+    cctx = zstandard.ZstdCompressor()
+    compressed_part1 = cctx.compress(b"hello ")
+    compressed_part2 = cctx.compress(b"world!")
+
+    part1 = upload.upload_part(compressed_part1, part_number=1)
+    part2 = upload.upload_part(compressed_part2, part_number=2)
+
+    final_key = upload.complete([part1, part2])
+
+    # Verify raw compressed round-trip
+    retrieved = session.get(final_key, decompress=False)
+    assert retrieved.metadata.compression == "zstd"
+    raw = retrieved.payload.read()
+    assert raw == compressed_part1 + compressed_part2
+
+    # Verify transparent decompression
+    retrieved = session.get(final_key)
+    assert retrieved.metadata.compression is None
+    assert retrieved.payload.read() == b"hello world!"
+
+
+def test_multipart_server_generated_key(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload()
+    assert upload.key
+
+    part = upload.upload_part(b"data", part_number=1)
+    final_key = upload.complete([part])
+    assert final_key
+
+    retrieved = session.get(final_key)
+    assert retrieved.payload.read() == b"data"
+
+
+def test_multipart_list_parts(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-list-parts")
+
+    upload.upload_part(b"part-two", part_number=2)
+    upload.upload_part(b"part-one", part_number=1)
+
+    parts = upload.list_parts()
+    assert len(parts) == 2
+
+    p1 = next(p for p in parts if p.part_number == 1)
+    p2 = next(p for p in parts if p.part_number == 2)
+    assert p1.size == 8
+    assert p2.size == 8
+
+    upload.abort()
+
+
+def test_multipart_abort(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-abort")
+    upload.upload_part(b"some data", part_number=1)
+    upload.abort()
+
+
+def test_multipart_metadata_preserved(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(
+        key="mp-metadata",
+        content_type="text/plain",
+        origin="203.0.113.42",
+        metadata={"my-key": "my-value"},
+    )
+
+    part = upload.upload_part(b"payload", part_number=1)
+    final_key = upload.complete([part])
+
+    retrieved = session.get(final_key)
+    assert retrieved.metadata.content_type == "text/plain"
+    assert retrieved.metadata.origin == "203.0.113.42"
+    assert retrieved.metadata.custom.get("my-key") == "my-value"
+
+
+def test_multipart_complete_with_bad_etag(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-bad-etag")
+    upload.upload_part(b"real data", part_number=1)
+
+    with pytest.raises(MultipartCompleteError) as exc_info:
+        upload.complete([CompletePart(part_number=1, etag="bogus-etag")])
+
+    assert exc_info.value.code
+    assert exc_info.value.status == 200
+
+
+def test_multipart_resume(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-resume")
+    saved_key = upload.key
+    saved_upload_id = upload.upload_id
+
+    upload.upload_part(b"first", part_number=1)
+
+    # Simulate resuming from saved state
+    resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
+    assert resumed.key == saved_key
+    assert resumed.upload_id == saved_upload_id
+
+    resumed.upload_part(b"second", part_number=2)
+
+    existing = resumed.list_parts()
+    assert len(existing) == 2
+
+    parts = [p.to_complete_part() for p in existing]
+    final_key = resumed.complete(parts)
+
+    retrieved = session.get(final_key)
+    assert retrieved.payload.read() == b"firstsecond"

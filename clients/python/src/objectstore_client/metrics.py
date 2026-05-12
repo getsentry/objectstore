@@ -83,6 +83,7 @@ class StorageMetricEmitter:
         # These may be set during or after the enclosed operation
         self.start: int | None = None
         self.elapsed: float | None = None
+        self.size: int | None = None
         self.uncompressed_size: int | None = None
         self.compressed_size: int | None = None
         self.compression: str = "unknown"
@@ -100,6 +101,13 @@ class StorageMetricEmitter:
             f"storage.{self.operation}.size", value, tags=tags, unit="byte"
         )
         self.uncompressed_size = value
+
+    def record_size(self, value: int) -> None:
+        tags = {"usecase": self.usecase}
+        self.backend.distribution(
+            f"storage.{self.operation}.size", value, tags=tags, unit="byte"
+        )
+        self.size = value
 
     def record_compressed_size(self, value: int, compression: str = "unknown") -> None:
         tags = {"usecase": self.usecase, "compression": compression}
@@ -123,6 +131,19 @@ class StorageMetricEmitter:
     def maybe_record_throughputs(self) -> None:
         if not self.elapsed or self.elapsed <= 0:
             return None
+
+        if self.size:
+            tags = {"usecase": self.usecase}
+            self.backend.distribution(
+                f"storage.{self.operation}.throughput",
+                self.size / self.elapsed,
+                tags=tags,
+            )
+            self.backend.distribution(
+                f"storage.{self.operation}.inverse_throughput",
+                self.elapsed / self.size,
+                tags=tags,
+            )
 
         sizes = []
         if self.uncompressed_size:
