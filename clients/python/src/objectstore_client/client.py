@@ -441,6 +441,22 @@ class Session:
         """
         return self._make_url(key, full=True)
 
+    def delete(self, key: str) -> None:
+        """
+        Deletes the blob with the given `key`.
+        """
+
+        headers = self._make_headers()
+        with measure_storage_operation(
+            self._metrics_backend, "delete", self._usecase.name
+        ):
+            response = self._pool.request(
+                "DELETE",
+                self._make_url(key),
+                headers=headers,
+            )
+            raise_for_status(response)
+
     def initiate_multipart_upload(
         self,
         *,
@@ -510,19 +526,3 @@ class Session:
         after a process restart or to continue an upload started elsewhere.
         """
         return MultipartUpload(self, key, upload_id)
-
-    def delete(self, key: str) -> None:
-        """
-        Deletes the blob with the given `key`.
-        """
-
-        headers = self._make_headers()
-        with measure_storage_operation(
-            self._metrics_backend, "delete", self._usecase.name
-        ):
-            response = self._pool.request(
-                "DELETE",
-                self._make_url(key),
-                headers=headers,
-            )
-            raise_for_status(response)
