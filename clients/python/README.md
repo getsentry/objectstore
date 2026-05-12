@@ -91,6 +91,60 @@ Arbitrary key-value pairs can be attached to objects and retrieved on download.
 session.put(b"payload", metadata={"source": "upload-service"})
 ```
 
+### Multipart Upload API
+
+For large objects, use multipart uploads to upload parts independently and then
+assemble them into a final object.
+
+**Important:** unlike single-object uploads, multipart uploads do **not**
+auto-compress. The `compression` passed to `initiate_multipart_upload` only sets
+the object's metadata. If compression is enabled, you must compress each part
+before calling `upload_part`.
+
+```python
+import zstandard
+
+from objectstore_client import MultipartCompleteError
+
+upload = session.initiate_multipart_upload(
+    key="my-large-object",
+    compression="zstd",
+    metadata={"source": "upload-service"},
+)
+
+compressor = zstandard.ZstdCompressor()
+part1 = upload.upload_part(compressor.compress(b"part1"), part_number=1)
+part2 = upload.upload_part(compressor.compress(b"part2"), part_number=2)
+
+try:
+    key = upload.complete([part1, part2])
+except MultipartCompleteError:
+    upload.abort()
+    raise
+```
+
+You can also let the server generate the final object key:
+
+```python
+upload = session.initiate_multipart_upload()
+part = upload.upload_part(b"payload", part_number=1)
+key = upload.complete([part])
+```
+
+To resume an in-progress multipart upload after a process restart, persist the
+`key` and `upload_id`, then reconstruct the upload handle later:
+
+```python
+saved_key = upload.key
+saved_upload_id = upload.upload_id
+
+resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
+existing_parts = resumed.list_parts()
+
+parts = [part.to_complete_part() for part in existing_parts]
+key = resumed.complete(parts)
+```
+
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication
