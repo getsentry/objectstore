@@ -132,27 +132,18 @@ class StorageMetricEmitter:
         if not self.elapsed or self.elapsed <= 0:
             return None
 
+        sizes: list[tuple[int, str | None]] = []
         if self.size:
-            tags = {"usecase": self.usecase}
-            self.backend.distribution(
-                f"storage.{self.operation}.throughput",
-                self.size / self.elapsed,
-                tags=tags,
-            )
-            self.backend.distribution(
-                f"storage.{self.operation}.inverse_throughput",
-                self.elapsed / self.size,
-                tags=tags,
-            )
-
-        sizes = []
+            sizes.append((self.size, None))
         if self.uncompressed_size:
             sizes.append((self.uncompressed_size, "none"))
         if self.compressed_size:
             sizes.append((self.compressed_size, self.compression))
 
         for size, compression in sizes:
-            tags = {"usecase": self.usecase, "compression": compression}
+            tags: dict[str, str] = {"usecase": self.usecase}
+            if compression is not None:
+                tags["compression"] = compression
             self.backend.distribution(
                 f"storage.{self.operation}.throughput", size / self.elapsed, tags=tags
             )
