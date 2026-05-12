@@ -87,13 +87,17 @@ jobs:
             google/cloud-sdk \
             /run-bigtable.sh
 
+      - name: Build GCS Emulator
+        run: |
+          docker build -t gcs-emulator-local https://github.com/getsentry/google-cloud-storage-testbench.git#main
+
       - name: Start GCS Emulator
         run: |
           docker run -d \
             --name gcs-emulator \
             -p 8087:9000 \
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
-            gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+            gcs-emulator-local
 
       - name: Start MinIO
         run: |
