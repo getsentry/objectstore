@@ -13,7 +13,6 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
 from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
-from objectstore_client.errors import RequestError as _RequestError
 from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
@@ -31,8 +30,6 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
-
-RequestError = _RequestError
 
 
 class GetResponse(NamedTuple):

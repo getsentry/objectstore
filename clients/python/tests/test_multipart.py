@@ -4,7 +4,6 @@ from typing import Any
 
 import pytest
 from objectstore_client import Client, Usecase
-from objectstore_client.client import RequestError as ClientRequestError
 from objectstore_client.errors import RequestError
 from objectstore_client.metrics import Tags
 from objectstore_client.multipart import CompletePart, MultipartUpload
@@ -62,10 +61,6 @@ class FakeResponse:
         if self._json_data is not None:
             return self._json_data
         return json.loads(self.data.decode("utf-8"))
-
-
-def test_request_error_is_reexported_from_client_module() -> None:
-    assert ClientRequestError is RequestError
 
 
 def test_upload_part_validates_bytes_content_length() -> None:
