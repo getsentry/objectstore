@@ -104,7 +104,7 @@ before calling `upload_part`.
 ```python
 import zstandard
 
-from objectstore_client import MultipartCompleteError
+from objectstore_client.multipart import MultipartCompleteError
 
 upload = session.initiate_multipart_upload(
     key="my-large-object",
