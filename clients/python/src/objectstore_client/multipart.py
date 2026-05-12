@@ -53,8 +53,8 @@ class MultipartUpload:
     """
     Handle for an in-progress multipart upload.
 
-    Create via :meth:`Session.initiate_multipart_upload` or
-    :meth:`Session.resume_multipart_upload`.
+    Create via :meth:`~objectstore_client.client.Session.initiate_multipart_upload` or
+    :meth:`~objectstore_client.client.Session.resume_multipart_upload`.
     """
 
     def __init__(self, session: Session, key: str, upload_id: str):
@@ -81,8 +81,9 @@ class MultipartUpload:
         """
         Uploads a single part.
 
-        IMPORTANT: Unlike :meth:`Session.put`, this does **not**
-        automatically compress `contents`.
+        IMPORTANT: Unlike
+        :meth:`~objectstore_client.client.Session.put`,
+        this does **not** automatically compress `contents`.
         The caller must pre-compress each part according to the
         compression set as part of the metadata when initiating
         the upload.
@@ -215,7 +216,7 @@ class MultipartUpload:
 
         with measure_storage_operation(
             self._session._metrics_backend,
-            "multipart_complete",
+            "multipart.complete",
             self._session._usecase.name,
         ):
             response = self._session._pool.request(
