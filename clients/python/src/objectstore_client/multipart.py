@@ -79,7 +79,7 @@ class MultipartUpload:
         contents: bytes | IO[bytes],
         part_number: int,
         *,
-        content_length: int | None = None,
+        content_length: int,
         content_md5: bytes | None = None,
     ) -> CompletePart:
         """Upload a single part.
@@ -89,21 +89,22 @@ class MultipartUpload:
         the caller must compress each part before passing it here.
 
         Args:
-            contents: The part data. When ``bytes``, ``content_length`` is
-                derived automatically. When ``IO[bytes]``, ``content_length``
-                **must** be provided.
+            contents: The part data.
             part_number: 1-indexed part number.
-            content_length: Required when *contents* is a stream.
+            content_length: The length in bytes of the payload being uploaded.
+                When multipart compression is enabled, this must be the length
+                of the already-compressed part bytes.
             content_md5: Optional raw 16-byte MD5 digest of the (possibly
                 compressed) contents. Base64-encoded internally for the
                 ``Content-MD5`` header.
         """
         if isinstance(contents, bytes):
-            content_length = len(contents)
+            if len(contents) != content_length:
+                raise ValueError(
+                    "content_length must match the size of the provided bytes payload"
+                )
             body: bytes | IO[bytes] = BytesIO(contents)
         else:
-            if content_length is None:
-                raise ValueError("content_length is required when contents is a stream")
             body = contents
 
         if content_md5 is not None and len(content_md5) != 16:

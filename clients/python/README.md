@@ -113,8 +113,18 @@ upload = session.initiate_multipart_upload(
 )
 
 compressor = zstandard.ZstdCompressor()
-part1 = upload.upload_part(compressor.compress(b"part1"), part_number=1)
-part2 = upload.upload_part(compressor.compress(b"part2"), part_number=2)
+compressed_part1 = compressor.compress(b"part1")
+compressed_part2 = compressor.compress(b"part2")
+part1 = upload.upload_part(
+    compressed_part1,
+    part_number=1,
+    content_length=len(compressed_part1),
+)
+part2 = upload.upload_part(
+    compressed_part2,
+    part_number=2,
+    content_length=len(compressed_part2),
+)
 
 try:
     key = upload.complete([part1, part2])
@@ -127,7 +137,7 @@ You can also let the server generate the final object key:
 
 ```python
 upload = session.initiate_multipart_upload()
-part = upload.upload_part(b"payload", part_number=1)
+part = upload.upload_part(b"payload", part_number=1, content_length=len(b"payload"))
 key = upload.complete([part])
 ```
 

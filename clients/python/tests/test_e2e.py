@@ -7,6 +7,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from datetime import timedelta
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,16 @@ TEST_EDDSA_PRIVKEY_PATH: str = (
 TEST_EDDSA_PUBKEY_PATH: str = (
     os.path.dirname(os.path.realpath(__file__)) + "/ed25519.public.pem"
 )
+
+
+class UnrewindableStream(BytesIO):
+    """Read-only stream that cannot report or restore position."""
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        raise OSError("stream is not seekable")
+
+    def tell(self) -> int:
+        raise OSError("stream does not expose a stable position")
 
 
 class TestTokenGenerator:
@@ -358,13 +369,13 @@ def test_multipart_full_cycle_uncompressed(server_url: str) -> None:
     assert upload.key == "mp-uncompressed"
     assert upload.upload_id
 
-    part1 = upload.upload_part(b"hello ", part_number=1)
-    part2 = upload.upload_part(b"world!", part_number=2)
+    part1 = upload.upload_part(b"hello ", part_number=1, content_length=6)
+    part2 = upload.upload_part(b"world!", part_number=2, content_length=6)
 
     final_key = upload.complete([part1, part2])
     assert final_key == "mp-uncompressed"
 
-    retrieved = session.get(final_key)
+    retrieved = session.get(final_key, decompress=False)
     assert retrieved.payload.read() == b"hello world!"
 
 
@@ -386,8 +397,12 @@ def test_multipart_full_cycle_compressed(server_url: str) -> None:
     compressed_part1 = cctx.compress(b"hello ")
     compressed_part2 = cctx.compress(b"world!")
 
-    part1 = upload.upload_part(compressed_part1, part_number=1)
-    part2 = upload.upload_part(compressed_part2, part_number=2)
+    part1 = upload.upload_part(
+        compressed_part1, part_number=1, content_length=len(compressed_part1)
+    )
+    part2 = upload.upload_part(
+        compressed_part2, part_number=2, content_length=len(compressed_part2)
+    )
 
     final_key = upload.complete([part1, part2])
 
@@ -398,6 +413,76 @@ def test_multipart_full_cycle_compressed(server_url: str) -> None:
     assert raw == compressed_part1 + compressed_part2
 
     # Verify transparent decompression
+    retrieved = session.get(final_key)
+    assert retrieved.metadata.compression is None
+    assert retrieved.payload.read() == b"hello world!"
+
+
+def test_multipart_streaming_part_upload_uncompressed(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-streaming-uncompressed")
+
+    part1_payload = b"hello "
+    part2_payload = b"world!"
+    part1 = upload.upload_part(
+        UnrewindableStream(part1_payload),
+        part_number=1,
+        content_length=len(part1_payload),
+    )
+    part2 = upload.upload_part(
+        UnrewindableStream(part2_payload),
+        part_number=2,
+        content_length=len(part2_payload),
+    )
+
+    final_key = upload.complete([part1, part2])
+
+    retrieved = session.get(final_key)
+    assert retrieved.payload.read() == b"hello world!"
+
+
+def test_multipart_streaming_part_upload_compressed(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(
+        key="mp-streaming-compressed",
+        compression="zstd",
+    )
+
+    cctx = zstandard.ZstdCompressor()
+    compressed_part1 = cctx.compress(b"hello ")
+    compressed_part2 = cctx.compress(b"world!")
+
+    part1 = upload.upload_part(
+        UnrewindableStream(compressed_part1),
+        part_number=1,
+        content_length=len(compressed_part1),
+    )
+    part2 = upload.upload_part(
+        UnrewindableStream(compressed_part2),
+        part_number=2,
+        content_length=len(compressed_part2),
+    )
+
+    final_key = upload.complete([part1, part2])
+
+    retrieved = session.get(final_key, decompress=False)
+    assert retrieved.metadata.compression == "zstd"
+    assert retrieved.payload.read() == compressed_part1 + compressed_part2
+
     retrieved = session.get(final_key)
     assert retrieved.metadata.compression is None
     assert retrieved.payload.read() == b"hello world!"
@@ -415,7 +500,7 @@ def test_multipart_server_generated_key(server_url: str) -> None:
     upload = session.initiate_multipart_upload()
     assert upload.key
 
-    part = upload.upload_part(b"data", part_number=1)
+    part = upload.upload_part(b"data", part_number=1, content_length=4)
     final_key = upload.complete([part])
     assert final_key
 
@@ -434,8 +519,8 @@ def test_multipart_list_parts(server_url: str) -> None:
 
     upload = session.initiate_multipart_upload(key="mp-list-parts")
 
-    upload.upload_part(b"part-two", part_number=2)
-    upload.upload_part(b"part-one", part_number=1)
+    upload.upload_part(b"part-two", part_number=2, content_length=8)
+    upload.upload_part(b"part-one", part_number=1, content_length=8)
 
     parts = upload.list_parts()
     assert len(parts) == 2
@@ -458,7 +543,7 @@ def test_multipart_abort(server_url: str) -> None:
     session = client.session(usecase, org=42, project=1337)
 
     upload = session.initiate_multipart_upload(key="mp-abort")
-    upload.upload_part(b"some data", part_number=1)
+    upload.upload_part(b"some data", part_number=1, content_length=9)
     upload.abort()
 
 
@@ -478,7 +563,7 @@ def test_multipart_metadata_preserved(server_url: str) -> None:
         metadata={"my-key": "my-value"},
     )
 
-    part = upload.upload_part(b"payload", part_number=1)
+    part = upload.upload_part(b"payload", part_number=1, content_length=7)
     final_key = upload.complete([part])
 
     retrieved = session.get(final_key)
@@ -497,7 +582,7 @@ def test_multipart_complete_with_bad_etag(server_url: str) -> None:
     session = client.session(usecase, org=42, project=1337)
 
     upload = session.initiate_multipart_upload(key="mp-bad-etag")
-    upload.upload_part(b"real data", part_number=1)
+    upload.upload_part(b"real data", part_number=1, content_length=9)
 
     with pytest.raises(MultipartCompleteError) as exc_info:
         upload.complete([CompletePart(part_number=1, etag="bogus-etag")])
@@ -519,14 +604,14 @@ def test_multipart_resume(server_url: str) -> None:
     saved_key = upload.key
     saved_upload_id = upload.upload_id
 
-    upload.upload_part(b"first", part_number=1)
+    upload.upload_part(b"first", part_number=1, content_length=5)
 
     # Simulate resuming from saved state
     resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
     assert resumed.key == saved_key
     assert resumed.upload_id == saved_upload_id
 
-    resumed.upload_part(b"second", part_number=2)
+    resumed.upload_part(b"second", part_number=2, content_length=6)
 
     existing = resumed.list_parts()
     assert len(existing) == 2

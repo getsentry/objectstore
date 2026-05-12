@@ -68,6 +68,15 @@ def test_request_error_is_reexported_from_client_module() -> None:
     assert ClientRequestError is RequestError
 
 
+def test_upload_part_validates_bytes_content_length() -> None:
+    client = Client("http://127.0.0.1:8888")
+    session = client.session(Usecase("testing"), org=1)
+    upload = MultipartUpload(session, "key", "upload-id")
+
+    with pytest.raises(ValueError, match="content_length must match"):
+        upload.upload_part(b"payload", part_number=1, content_length=1)
+
+
 def test_multipart_complete_raises_http_errors_before_parsing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -108,7 +117,9 @@ def test_multipart_put_part_metrics_use_distinct_namespace_without_compression_t
     )
 
     upload = session.initiate_multipart_upload(key="key", compression="zstd")
-    part = upload.upload_part(b"compressed", part_number=1)
+    part = upload.upload_part(
+        b"compressed", part_number=1, content_length=len(b"compressed")
+    )
 
     assert part.etag == "part-etag"
     size_metrics = [
