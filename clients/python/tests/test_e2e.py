@@ -621,3 +621,35 @@ def test_multipart_resume(server_url: str) -> None:
 
     retrieved = session.get(final_key)
     assert retrieved.payload.read() == b"firstsecond"
+
+
+def test_multipart_concurrent_part_uploads(server_url: str) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    session = client.session(usecase, org=42, project=1337)
+
+    upload = session.initiate_multipart_upload(key="mp-concurrent")
+
+    chunks = [f"chunk-{i}".encode() for i in range(8)]
+
+    def upload_part(part_number: int, data: bytes) -> CompletePart:
+        return upload.upload_part(
+            data, part_number=part_number, content_length=len(data)
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(upload_part, i + 1, chunk) for i, chunk in enumerate(chunks)
+        ]
+        parts = [f.result() for f in futures]
+
+    final_key = upload.complete(parts)
+
+    retrieved = session.get(final_key)
+    assert retrieved.payload.read() == b"".join(chunks)

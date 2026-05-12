@@ -96,12 +96,13 @@ session.put(b"payload", metadata={"source": "upload-service"})
 For large objects, use multipart uploads to upload parts independently and then
 assemble them into a final object.
 
-**Important:** unlike single-object uploads, multipart uploads do **not**
-auto-compress. The `compression` passed to `initiate_multipart_upload` only sets
-the object's metadata. If compression is enabled, you must compress each part
-before calling `upload_part`.
+**Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
+The caller must pre-compress each part according to the compression set as part of the metadata
+when initiating the upload.
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
+
 import zstandard
 
 from objectstore_client.multipart import MultipartCompleteError
@@ -113,21 +114,23 @@ upload = session.initiate_multipart_upload(
 )
 
 compressor = zstandard.ZstdCompressor()
-compressed_part1 = compressor.compress(b"part1")
-compressed_part2 = compressor.compress(b"part2")
-part1 = upload.upload_part(
-    compressed_part1,
-    part_number=1,
-    content_length=len(compressed_part1),
-)
-part2 = upload.upload_part(
-    compressed_part2,
-    part_number=2,
-    content_length=len(compressed_part2),
-)
+chunks = [b"part1", b"part2", b"part3", b"part4"]
+
+def upload_part(part_number: int, data: bytes):
+    compressed = compressor.compress(data)
+    return upload.upload_part(
+        compressed, part_number=part_number, content_length=len(compressed)
+    )
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [
+        executor.submit(upload_part, i + 1, chunk)
+        for i, chunk in enumerate(chunks)
+    ]
+    parts = [f.result() for f in futures]
 
 try:
-    key = upload.complete([part1, part2])
+    key = upload.complete(parts)
 except MultipartCompleteError:
     upload.abort()
     raise
