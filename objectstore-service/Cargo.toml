@@ -22,6 +22,7 @@ humantime-serde = { workspace = true }
 objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
+quick-xml = { version = "0.38.4", features = ["serialize"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = [
     "hickory-dns",

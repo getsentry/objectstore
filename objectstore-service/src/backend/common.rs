@@ -81,6 +81,7 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
         upload_id: &UploadId,
         part_number: PartNumber,
         content_length: u64,
+        content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse>;
 
