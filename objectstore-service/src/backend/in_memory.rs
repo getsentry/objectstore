@@ -331,6 +331,9 @@ impl MultipartUploadBackend for InMemoryBackend {
     ) -> Result<CompleteMultipartResponse> {
         let key = (id.clone(), upload_id.clone());
 
+        // TODO: validate that parts are in ascending part_number order and reject with
+        // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
+
         // Validate and assemble while holding the multipart lock, but don't
         // remove the upload yet — a failed validation must leave it intact so
         // the client can retry.

@@ -346,6 +346,9 @@ impl MultipartUploadBackend for LocalFsBackend {
                 cause,
             })?;
 
+        // TODO: validate that parts are in ascending part_number order and reject with
+        // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
+
         // Validate all parts (headers only) before writing anything
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
