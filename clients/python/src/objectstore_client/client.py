@@ -467,16 +467,16 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
     ) -> MultipartUpload:
-        """Initiate a multipart upload.
+        """
+        Initiates a multipart upload.
 
         Returns a :class:`~objectstore_client.multipart.MultipartUpload` handle
         that can be used to upload parts, list parts, complete, or abort.
 
         **Important:** unlike :meth:`put`, the ``compression`` parameter only
-        records the compression algorithm in the object's metadata.  It does
-        **not** auto-compress part data.  The caller is responsible for
-        compressing each part in accordance with the chosen algorithm before
-        passing it to
+        records the compression algorithm in the object's metadata.
+        The caller is responsible for compressing each part in accordance with the
+        chosen algorithm before passing it to
         :meth:`~objectstore_client.multipart.MultipartUpload.upload_part`.
         """
         if compression and compression not in ("none", "zstd"):
@@ -506,7 +506,7 @@ class Session:
             key = None
 
         with measure_storage_operation(
-            self._metrics_backend, "multipart_initiate", self._usecase.name
+            self._metrics_backend, "multipart.initiate", self._usecase.name
         ):
             response = self._pool.request(
                 "POST" if not key else "PUT",
@@ -520,9 +520,11 @@ class Session:
             return MultipartUpload(self, res["key"], res["upload_id"])
 
     def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
-        """Reconstruct a multipart upload handle from a prior initiate.
+        """
+        Reconstructs a multipart upload handle.
 
-        This does not make any network calls.  Use it to resume an upload
-        after a process restart or to continue an upload started elsewhere.
+        This does not make any network calls.
+        Use it to resume an upload after a process restart or to
+        continue an upload started elsewhere.
         """
         return MultipartUpload(self, key, upload_id)

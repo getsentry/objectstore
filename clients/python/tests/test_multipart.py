@@ -69,7 +69,7 @@ def test_upload_part_validates_bytes_content_length() -> None:
     upload = MultipartUpload(session, "key", "upload-id")
 
     with pytest.raises(ValueError, match="content_length must match"):
-        upload.upload_part(b"payload", part_number=1, content_length=1)
+        upload.put_part(b"payload", part_number=1, content_length=1)
 
 
 def test_multipart_complete_raises_http_errors_before_parsing(
@@ -112,7 +112,7 @@ def test_multipart_put_part_metrics_use_distinct_namespace_without_compression_t
     )
 
     upload = session.initiate_multipart_upload(key="key", compression="zstd")
-    part = upload.upload_part(
+    part = upload.put_part(
         b"compressed", part_number=1, content_length=len(b"compressed")
     )
 

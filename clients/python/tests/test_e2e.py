@@ -369,8 +369,8 @@ def test_multipart_full_cycle_uncompressed(server_url: str) -> None:
     assert upload.key == "mp-uncompressed"
     assert upload.upload_id
 
-    part1 = upload.upload_part(b"hello ", part_number=1, content_length=6)
-    part2 = upload.upload_part(b"world!", part_number=2, content_length=6)
+    part1 = upload.put_part(b"hello ", part_number=1, content_length=6)
+    part2 = upload.put_part(b"world!", part_number=2, content_length=6)
 
     final_key = upload.complete([part1, part2])
     assert final_key == "mp-uncompressed"
@@ -397,10 +397,10 @@ def test_multipart_full_cycle_compressed(server_url: str) -> None:
     compressed_part1 = cctx.compress(b"hello ")
     compressed_part2 = cctx.compress(b"world!")
 
-    part1 = upload.upload_part(
+    part1 = upload.put_part(
         compressed_part1, part_number=1, content_length=len(compressed_part1)
     )
-    part2 = upload.upload_part(
+    part2 = upload.put_part(
         compressed_part2, part_number=2, content_length=len(compressed_part2)
     )
 
@@ -431,12 +431,12 @@ def test_multipart_streaming_part_upload_uncompressed(server_url: str) -> None:
 
     part1_payload = b"hello "
     part2_payload = b"world!"
-    part1 = upload.upload_part(
+    part1 = upload.put_part(
         UnrewindableStream(part1_payload),
         part_number=1,
         content_length=len(part1_payload),
     )
-    part2 = upload.upload_part(
+    part2 = upload.put_part(
         UnrewindableStream(part2_payload),
         part_number=2,
         content_length=len(part2_payload),
@@ -466,12 +466,12 @@ def test_multipart_streaming_part_upload_compressed(server_url: str) -> None:
     compressed_part1 = cctx.compress(b"hello ")
     compressed_part2 = cctx.compress(b"world!")
 
-    part1 = upload.upload_part(
+    part1 = upload.put_part(
         UnrewindableStream(compressed_part1),
         part_number=1,
         content_length=len(compressed_part1),
     )
-    part2 = upload.upload_part(
+    part2 = upload.put_part(
         UnrewindableStream(compressed_part2),
         part_number=2,
         content_length=len(compressed_part2),
@@ -500,7 +500,7 @@ def test_multipart_server_generated_key(server_url: str) -> None:
     upload = session.initiate_multipart_upload()
     assert upload.key
 
-    part = upload.upload_part(b"data", part_number=1, content_length=4)
+    part = upload.put_part(b"data", part_number=1, content_length=4)
     final_key = upload.complete([part])
     assert final_key
 
@@ -519,8 +519,8 @@ def test_multipart_list_parts(server_url: str) -> None:
 
     upload = session.initiate_multipart_upload(key="mp-list-parts")
 
-    upload.upload_part(b"part-two", part_number=2, content_length=8)
-    upload.upload_part(b"part-one", part_number=1, content_length=8)
+    upload.put_part(b"part-two", part_number=2, content_length=8)
+    upload.put_part(b"part-one", part_number=1, content_length=8)
 
     parts = upload.list_parts()
     assert len(parts) == 2
@@ -543,7 +543,7 @@ def test_multipart_abort(server_url: str) -> None:
     session = client.session(usecase, org=42, project=1337)
 
     upload = session.initiate_multipart_upload(key="mp-abort")
-    upload.upload_part(b"some data", part_number=1, content_length=9)
+    upload.put_part(b"some data", part_number=1, content_length=9)
     upload.abort()
 
 
@@ -563,7 +563,7 @@ def test_multipart_metadata_preserved(server_url: str) -> None:
         metadata={"my-key": "my-value"},
     )
 
-    part = upload.upload_part(b"payload", part_number=1, content_length=7)
+    part = upload.put_part(b"payload", part_number=1, content_length=7)
     final_key = upload.complete([part])
 
     retrieved = session.get(final_key)
@@ -582,7 +582,7 @@ def test_multipart_complete_with_bad_etag(server_url: str) -> None:
     session = client.session(usecase, org=42, project=1337)
 
     upload = session.initiate_multipart_upload(key="mp-bad-etag")
-    upload.upload_part(b"real data", part_number=1, content_length=9)
+    upload.put_part(b"real data", part_number=1, content_length=9)
 
     with pytest.raises(MultipartCompleteError) as exc_info:
         upload.complete([CompletePart(part_number=1, etag="bogus-etag")])
@@ -604,14 +604,14 @@ def test_multipart_resume(server_url: str) -> None:
     saved_key = upload.key
     saved_upload_id = upload.upload_id
 
-    upload.upload_part(b"first", part_number=1, content_length=5)
+    upload.put_part(b"first", part_number=1, content_length=5)
 
     # Simulate resuming from saved state
     resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
     assert resumed.key == saved_key
     assert resumed.upload_id == saved_upload_id
 
-    resumed.upload_part(b"second", part_number=2, content_length=6)
+    resumed.put_part(b"second", part_number=2, content_length=6)
 
     existing = resumed.list_parts()
     assert len(existing) == 2
@@ -638,14 +638,12 @@ def test_multipart_concurrent_part_uploads(server_url: str) -> None:
 
     chunks = [f"chunk-{i}".encode() for i in range(8)]
 
-    def upload_part(part_number: int, data: bytes) -> CompletePart:
-        return upload.upload_part(
-            data, part_number=part_number, content_length=len(data)
-        )
+    def put_part(part_number: int, data: bytes) -> CompletePart:
+        return upload.put_part(data, part_number=part_number, content_length=len(data))
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(upload_part, i + 1, chunk) for i, chunk in enumerate(chunks)
+            executor.submit(put_part, i + 1, chunk) for i, chunk in enumerate(chunks)
         ]
         parts = [f.result() for f in futures]
 

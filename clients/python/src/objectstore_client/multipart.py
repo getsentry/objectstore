@@ -26,7 +26,7 @@ class CompletePart:
 
 @dataclass
 class PartInfo:
-    """Information about an uploaded part, as returned by list_parts."""
+    """Information about an uploaded part"""
 
     part_number: int
     etag: str
@@ -38,12 +38,7 @@ class PartInfo:
 
 
 class MultipartCompleteError(RequestError):
-    """Error returned in the body of a multipart complete response.
-
-    Multipart assembly failures are conveyed inside a 200 JSON response body,
-    but ordinary HTTP 4xx/5xx errors may still be returned before assembly
-    starts.
-    """
+    """Error returned as part of a multipart:complete response's body."""
 
     def __init__(self, code: str, message: str):
         super().__init__(
@@ -55,7 +50,8 @@ class MultipartCompleteError(RequestError):
 
 
 class MultipartUpload:
-    """Handle for an in-progress multipart upload.
+    """
+    Handle for an in-progress multipart upload.
 
     Create via :meth:`Session.initiate_multipart_upload` or
     :meth:`Session.resume_multipart_upload`.
@@ -74,34 +70,37 @@ class MultipartUpload:
     def upload_id(self) -> str:
         return self._upload_id
 
-    def upload_part(
+    def put_part(
         self,
         contents: bytes | IO[bytes],
-        part_number: int,
         *,
+        part_number: int,
         content_length: int,
         content_md5: bytes | None = None,
     ) -> CompletePart:
-        """Upload a single part.
+        """
+        Uploads a single part.
 
-        Unlike :meth:`Session.put`, this does **not** automatically compress
-        the contents. If the multipart upload was initiated with compression,
-        the caller must compress each part before passing it here.
+        IMPORTANT: Unlike :meth:`Session.put`, this does **not**
+        automatically compress `contents`.
+        The caller must pre-compress each part according to the
+        compression set as part of the metadata when initiating
+        the upload.
 
         Args:
-            contents: The part data.
+            contents: The part data. If this upload was initiated
+                with compression, this must be pre-compressed.
             part_number: 1-indexed part number.
-            content_length: The length in bytes of the payload being uploaded.
-                When multipart compression is enabled, this must be the length
-                of the already-compressed part bytes.
-            content_md5: Optional raw 16-byte MD5 digest of the (possibly
-                compressed) contents. Base64-encoded internally for the
-                ``Content-MD5`` header.
+            content_length: The length in bytes of the payload
+                being uploaded. If this upload was initiated with
+                compression, this must be the post-compression
+                length.
+            content_md5: Optional raw MD5 digest of `contents`.
         """
         if isinstance(contents, bytes):
             if len(contents) != content_length:
                 raise ValueError(
-                    "content_length must match the size of the provided bytes payload"
+                    "content_length must match the size of the provided payload"
                 )
             body: bytes | IO[bytes] = BytesIO(contents)
         else:
