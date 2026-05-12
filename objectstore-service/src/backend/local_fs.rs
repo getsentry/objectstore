@@ -228,12 +228,16 @@ impl MultipartUploadBackend for LocalFsBackend {
         writer.write_all(header_line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
-        tokio::io::copy(&mut reader, &mut writer)
+        let _bytes_copied = tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
                 None => e.into(),
             })?;
+
+        // TODO: validate bytes_copied against content_length and return a BadRequest-style
+        // error. Needs a service-layer error variant that maps to HTTP 400 without abusing
+        // ClientError (which is meant for stream errors).
 
         writer.flush().await?;
         let file = writer.into_inner();
