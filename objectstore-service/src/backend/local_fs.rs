@@ -5,11 +5,10 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::time::SystemTime;
 
-use bytes::BytesMut;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
@@ -195,7 +194,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         part_number: PartNumber,
-        _content_length: u64,
+        content_length: u64,
         _content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
@@ -204,13 +203,12 @@ impl MultipartUploadBackend for LocalFsBackend {
             return Err(Error::generic("multipart upload not found"));
         }
 
-        let data: BytesMut = body.try_collect().await?;
-        let etag = format!("\"etag-{part_number}-{}\"", data.len());
+        let etag = format!("\"etag-{part_number}-{content_length}\"");
 
         let header = serde_json::json!({
             "etag": etag,
             "uploaded_at": SystemTime::now(),
-            "size": data.len(),
+            "size": content_length,
         });
         let header_line = serde_json::to_string(&header).map_err(|cause| Error::Serde {
             context: "failed to serialize part header".to_string(),
@@ -224,11 +222,23 @@ impl MultipartUploadBackend for LocalFsBackend {
             .truncate(true)
             .open(part_path)
             .await?;
+
+        let mut reader = pin!(StreamReader::new(body));
         let mut writer = BufWriter::new(file);
         writer.write_all(header_line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
-        writer.write_all(&data).await?;
+
+        tokio::io::copy(&mut reader, &mut writer)
+            .await
+            .map_err(|e| match stream::unpack_client_error(&e) {
+                Some(ce) => Error::Client(ce),
+                None => e.into(),
+            })?;
+
         writer.flush().await?;
+        let file = writer.into_inner();
+        file.sync_data().await?;
+        drop(file);
 
         Ok(etag)
     }
@@ -332,8 +342,7 @@ impl MultipartUploadBackend for LocalFsBackend {
                 cause,
             })?;
 
-        // Validate and assemble parts
-        let mut payload = Vec::new();
+        // Validate all parts (headers only) before writing anything
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
             if !tokio::fs::try_exists(&part_path).await? {
@@ -363,15 +372,39 @@ impl MultipartUploadBackend for LocalFsBackend {
                     ),
                 }));
             }
-
-            let mut part_data = Vec::new();
-            reader.read_to_end(&mut part_data).await?;
-            payload.extend_from_slice(&part_data);
         }
 
-        // Write the final object using put_object
-        let stream = stream::single(payload);
-        self.put_object(id, &metadata, stream).await?;
+        // Stream parts directly to the final object file
+        let path = self.path.join(id.as_storage_path().to_string());
+        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .await?;
+        let mut writer = BufWriter::new(file);
+
+        let metadata_json = serde_json::to_string(&metadata).map_err(|cause| Error::Serde {
+            context: "failed to serialize metadata".to_string(),
+            cause,
+        })?;
+        writer.write_all(metadata_json.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+
+        for completed in &parts {
+            let part_path = dir.join(format!("{}.part", completed.part_number));
+            let file = tokio::fs::File::open(&part_path).await?;
+            let mut reader = BufReader::new(file);
+            let mut header_line = String::new();
+            reader.read_line(&mut header_line).await?;
+            tokio::io::copy(&mut reader, &mut writer).await?;
+        }
+
+        writer.flush().await?;
+        let file = writer.into_inner();
+        file.sync_data().await?;
+        drop(file);
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await?;
