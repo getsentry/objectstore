@@ -8,8 +8,10 @@ use objectstore_types::auth::Permission;
 use crate::config::{AuthZ, AuthZVerificationKey};
 
 fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
-    let key_content = std::fs::read_to_string(filename).context("reading key")?;
-    DecodingKey::from_ed_pem(key_content.as_bytes()).context("parsing key")
+    let key_content = std::fs::read_to_string(filename)
+        .with_context(|| format!("reading key from {:?}", filename))?;
+    DecodingKey::from_ed_pem(key_content.as_bytes())
+        .with_context(|| format!("parsing key from {:?}", filename))
 }
 
 /// Configures the EdDSA public key(s) and permissions used to verify tokens from a single `kid`.
@@ -41,7 +43,9 @@ impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
             key_versions: key_config
                 .key_files
                 .iter()
-                .map(|filename| read_key_from_file(filename))
+                .map(|filename| {
+                    read_key_from_file(filename).inspect_err(|e| objectstore_log::error!("{:?}", e))
+                })
                 .collect::<anyhow::Result<Vec<DecodingKey>>>()?,
         })
     }
