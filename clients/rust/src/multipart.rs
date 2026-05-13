@@ -359,6 +359,9 @@ impl MultipartUpload {
         self,
         parts: impl IntoIterator<Item = CompletePart>,
     ) -> crate::Result<ObjectKey> {
+        let mut parts: Vec<_> = parts.into_iter().collect();
+        parts.sort_by_key(|p| p.part_number);
+
         let builder = self
             .session
             .multipart_request(
@@ -367,9 +370,7 @@ impl MultipartUpload {
                 Some(&self.key),
                 Some(vec![("upload_id", self.upload_id)]),
             )?
-            .json(&CompleteRequest {
-                parts: parts.into_iter().collect(),
-            });
+            .json(&CompleteRequest { parts });
 
         let response = builder.send().await?.error_for_status()?;
         match response.json::<CompleteResponse>().await? {
