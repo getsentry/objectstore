@@ -31,13 +31,15 @@ const MAX_BATCH_OPS: usize = 1000;
 /// Maximum amount of bytes to send as a part's body in a batch request.
 const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 
-/// Operations that are guaranteed to exceed `MAX_BATCH_PART_SIZE` are executed using requests to
-/// the individual object endpoint, rather than the batch endpoint.
-/// This determines the maximum number of such requests that can be executed concurrently.
-const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
+/// Default maximum number of concurrent individual (non-batch) requests.
+///
+/// Can be overridden via [`ManyBuilder::max_individual_concurrency`].
+const DEFAULT_INDIVIDUAL_CONCURRENCY: usize = 5;
 
-/// Maximum number of requests to the batch endpoint that can be executed concurrently.
-const MAX_BATCH_CONCURRENCY: usize = 3;
+/// Default maximum number of concurrent batch requests.
+///
+/// Can be overridden via [`ManyBuilder::max_batch_concurrency`].
+const DEFAULT_BATCH_CONCURRENCY: usize = 3;
 
 /// Maximum total body size (pre-compression) to include in a single batch request.
 const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
@@ -50,6 +52,8 @@ const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 pub struct ManyBuilder {
     session: Session,
     operations: Vec<BatchOperation>,
+    max_individual_concurrency: Option<usize>,
+    max_batch_concurrency: Option<usize>,
 }
 
 impl Session {
@@ -61,6 +65,8 @@ impl Session {
         ManyBuilder {
             session: self.clone(),
             operations: vec![],
+            max_individual_concurrency: None,
+            max_batch_concurrency: None,
         }
     }
 }
@@ -695,6 +701,14 @@ impl ManyBuilder {
     /// The results are not guaranteed to be in the order they were originally enqueued in.
     pub async fn send(self) -> OperationResults {
         let session = self.session;
+        let individual_concurrency = self
+            .max_individual_concurrency
+            .unwrap_or(DEFAULT_INDIVIDUAL_CONCURRENCY)
+            .max(1);
+        let batch_concurrency = self
+            .max_batch_concurrency
+            .unwrap_or(DEFAULT_BATCH_CONCURRENCY)
+            .max(1);
 
         // Classify all operations
         let (batchable, individual, failed) = partition(self.operations).await;
@@ -708,7 +722,7 @@ impl ManyBuilder {
                     async move { execute_individual(op, &session).await }
                 }
             })
-            .buffer_unordered(MAX_INDIVIDUAL_CONCURRENCY);
+            .buffer_unordered(individual_concurrency);
 
         // Chunk batchable operations and execute as batch requests, concurrently
         let batch_results = futures_util::stream::iter(iter_batches(batchable))
@@ -716,7 +730,7 @@ impl ManyBuilder {
                 let session = session.clone();
                 async move { execute_batch(chunk, &session).await }
             })
-            .buffer_unordered(MAX_BATCH_CONCURRENCY)
+            .buffer_unordered(batch_concurrency)
             .flat_map(futures_util::stream::iter);
 
         let results = futures_util::stream::iter(failed)
@@ -724,6 +738,26 @@ impl ManyBuilder {
             .chain(batch_results);
 
         OperationResults(results.boxed())
+    }
+
+    /// Sets the maximum number of concurrent individual (non-batch) requests.
+    ///
+    /// Operations that exceed the per-part size limit are sent as individual requests.
+    /// This controls how many such requests can be in-flight simultaneously.
+    /// Defaults to 5 if not set.
+    pub fn max_individual_concurrency(mut self, concurrency: usize) -> Self {
+        self.max_individual_concurrency = Some(concurrency);
+        self
+    }
+
+    /// Sets the maximum number of concurrent batch requests.
+    ///
+    /// Batchable operations are grouped into chunks and sent as multipart batch requests.
+    /// This controls how many such batch requests can be in-flight simultaneously.
+    /// Defaults to 3 if not set.
+    pub fn max_batch_concurrency(mut self, concurrency: usize) -> Self {
+        self.max_batch_concurrency = Some(concurrency);
+        self
     }
 
     /// Enqueues an operation.

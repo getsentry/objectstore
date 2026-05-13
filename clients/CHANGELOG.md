@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.8
+
+### New Features ✨
+
+- (py-client) Pin `uv_build==0.9.26` by @lcian in [#460](https://github.com/getsentry/objectstore/pull/460)
+
+### Bug Fixes 🐛
+
+- (py-client) Unpin `uv_build` by @lcian in [#459](https://github.com/getsentry/objectstore/pull/459)
+
+## 0.1.7
+
+### New Features ✨
+
+- (auth) Default auth enforcement to true by @lcian in [#447](https://github.com/getsentry/objectstore/pull/447)
+- (py-client) Add permission and expiry overrides to sign_for_scope by @lcian in [#432](https://github.com/getsentry/objectstore/pull/432)
+
 ## 0.1.6
 
 ### New Features ✨

@@ -59,7 +59,7 @@ jobs:
       - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install dependencies
-        run: uv sync --all-packages --all-groups
+        run: uv sync --all-packages --all-groups --locked
 
       - name: Format
         run: uv run ruff format
@@ -87,13 +87,17 @@ jobs:
             google/cloud-sdk \
             /run-bigtable.sh
 
+      - name: Build GCS Emulator
+        run: |
+          docker build -t gcs-emulator-local https://github.com/getsentry/google-cloud-storage-testbench.git#main
+
       - name: Start GCS Emulator
         run: |
           docker run -d \
             --name gcs-emulator \
             -p 8087:9000 \
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
-            gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+            gcs-emulator-local
 
       - name: Start MinIO
         run: |
@@ -155,7 +159,7 @@ jobs:
       - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install dependencies
-        run: uv sync --all-packages --all-groups
+        run: uv sync --all-packages --all-groups --locked
 
       - name: Run tests with coverage
         run: uv run pytest clients/python --cov=clients/python/src --cov-report=xml:python-coverage.xml
@@ -201,7 +205,7 @@ jobs:
       - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
 
       - name: Install Python dependencies
-        run: uv sync --all-packages --all-groups
+        run: uv sync --all-packages --all-groups --locked
 
       - name: Build Python Docs
         run: |
