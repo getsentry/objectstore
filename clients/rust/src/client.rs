@@ -489,12 +489,10 @@ impl Session {
             segments.extend(object_key.split("/"));
         }
         drop(segments);
-        {
+        if let Some(query_pairs) = query_pairs {
             let mut pairs = url.query_pairs_mut();
-            if let Some(query_pairs) = query_pairs {
-                for (key, value) in query_pairs {
-                    pairs.append_pair(key, &value);
-                }
+            for (key, value) in query_pairs {
+                pairs.append_pair(key, &value);
             }
         }
 
