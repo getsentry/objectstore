@@ -210,8 +210,13 @@ class MultipartUpload:
         headers = self._session._make_headers()
         headers["Content-Type"] = "application/json"
 
+        sorted_parts = sorted(parts, key=lambda p: p.part_number)
         request_body = json.dumps(
-            {"parts": [{"part_number": p.part_number, "etag": p.etag} for p in parts]}
+            {
+                "parts": [
+                    {"part_number": p.part_number, "etag": p.etag} for p in sorted_parts
+                ]
+            }
         ).encode("utf-8")
 
         with measure_storage_operation(
