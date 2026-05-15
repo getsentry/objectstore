@@ -33,9 +33,6 @@ class PartInfo:
     last_modified: datetime
     size: int
 
-    def to_complete_part(self) -> CompletePart:
-        return CompletePart(part_number=self.part_number, etag=self.etag)
-
 
 class MultipartCompleteError(RequestError):
     """Error returned as part of a multipart:complete response's body."""
@@ -196,7 +193,7 @@ class MultipartUpload:
         )
         raise_for_status(response)
 
-    def complete(self, parts: Sequence[CompletePart]) -> str:
+    def complete(self, parts: Sequence[CompletePart | PartInfo]) -> str:
         """Completes the multipart upload, assembling all parts into the final object.
 
         Returns the final object key.

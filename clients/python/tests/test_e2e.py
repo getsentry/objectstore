@@ -616,8 +616,7 @@ def test_multipart_resume(server_url: str) -> None:
     existing = resumed.list_parts()
     assert len(existing) == 2
 
-    parts = [p.to_complete_part() for p in existing]
-    final_key = resumed.complete(parts)
+    final_key = resumed.complete(existing)
 
     retrieved = session.get(final_key)
     assert retrieved.payload.read() == b"firstsecond"
