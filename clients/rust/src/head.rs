@@ -10,6 +10,7 @@ impl Session {
     /// Retrieves metadata for the object with the given `key` via an HTTP HEAD request.
     ///
     /// Returns `Some(Metadata)` if the object exists, `None` if not found.
+    /// If the object exists and uses a TTI expiration policy, this also bumps its TTI.
     pub fn head(&self, key: &str) -> HeadBuilder {
         HeadBuilder {
             session: self.clone(),
