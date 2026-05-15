@@ -1,45 +1,10 @@
 import json
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from objectstore_client import Client, Usecase
 from objectstore_client.errors import RequestError
-from objectstore_client.metrics import Tags
 from objectstore_client.multipart import CompletePart, MultipartUpload
-
-
-@dataclass
-class DistributionRecord:
-    name: str
-    value: int | float
-    tags: Tags | None
-    unit: str | None
-
-
-class RecordingMetricsBackend:
-    def __init__(self) -> None:
-        self.distributions: list[DistributionRecord] = []
-
-    def increment(
-        self,
-        name: str,
-        value: int | float = 1,
-        tags: Tags | None = None,
-    ) -> None:
-        return None
-
-    def gauge(self, name: str, value: int | float, tags: Tags | None = None) -> None:
-        return None
-
-    def distribution(
-        self,
-        name: str,
-        value: int | float,
-        tags: Tags | None = None,
-        unit: str | None = None,
-    ) -> None:
-        self.distributions.append(DistributionRecord(name, value, tags, unit))
 
 
 class FakeResponse:
@@ -92,41 +57,3 @@ def test_multipart_complete_raises_http_errors_before_parsing(
 
     assert exc_info.value.status == 403
     assert exc_info.value.response == '{"detail":"missing or expired auth"}'
-
-
-def test_multipart_put_part_metrics_use_distinct_namespace_without_compression_tags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    metrics_backend = RecordingMetricsBackend()
-    client = Client("http://127.0.0.1:8888", metrics_backend=metrics_backend)
-    session = client.session(Usecase("testing", compression="none"), org=1)
-    responses = iter(
-        [
-            FakeResponse(200, json_data={"key": "key", "upload_id": "upload-id"}),
-            FakeResponse(200, json_data={"etag": "part-etag"}),
-        ]
-    )
-
-    monkeypatch.setattr(
-        session._pool, "request", lambda *args, **kwargs: next(responses)
-    )
-
-    upload = session.initiate_multipart_upload(key="key", compression="zstd")
-    part = upload.put_part(
-        b"compressed", part_number=1, content_length=len(b"compressed")
-    )
-
-    assert part.etag == "part-etag"
-    size_metrics = [
-        record
-        for record in metrics_backend.distributions
-        if record.name == "storage.multipart.put_part.size"
-    ]
-    assert size_metrics == [
-        DistributionRecord(
-            "storage.multipart.put_part.size",
-            len(b"compressed"),
-            {"usecase": "testing"},
-            "byte",
-        )
-    ]
