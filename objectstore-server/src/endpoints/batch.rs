@@ -183,6 +183,41 @@ async fn convert_to_part(
             Bytes::new(),
             None,
         ),
+        Ok(OpResponse::Head {
+            key,
+            metadata: Some(metadata),
+        }) => {
+            let metadata_headers = metadata.to_headers("").map_err(|err| {
+                ApiError::from(BatchError::ResponseSerialization {
+                    context: "serializing object metadata".to_owned(),
+                    cause: Box::new(err),
+                })
+            });
+            match metadata_headers {
+                Ok(headers) => create_success_part(
+                    idx,
+                    &key,
+                    "head",
+                    StatusCode::NO_CONTENT,
+                    None,
+                    Bytes::new(),
+                    Some(headers),
+                ),
+                Err(e) => create_error_part(idx, &e),
+            }
+        }
+        Ok(OpResponse::Head {
+            key,
+            metadata: None,
+        }) => create_success_part(
+            idx,
+            &key,
+            "head",
+            StatusCode::NOT_FOUND,
+            None,
+            Bytes::new(),
+            None,
+        ),
         Err(error) => create_error_part(idx, &error),
     }
 }

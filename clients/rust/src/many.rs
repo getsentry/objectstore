@@ -15,8 +15,8 @@ use reqwest::multipart::Part;
 use crate::error::Error;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
-    Session, get, put,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, HeadResponse, ObjectKey,
+    PutBuilder, PutResponse, Session, get, put,
 };
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
@@ -86,6 +86,9 @@ enum BatchOperation {
     Delete {
         key: ObjectKey,
     },
+    Head {
+        key: ObjectKey,
+    },
 }
 
 impl From<GetBuilder> for BatchOperation {
@@ -130,6 +133,16 @@ impl From<DeleteBuilder> for BatchOperation {
     }
 }
 
+impl From<HeadBuilder> for BatchOperation {
+    fn from(value: HeadBuilder) -> Self {
+        let HeadBuilder {
+            key,
+            session: _session,
+        } = value;
+        BatchOperation::Head { key }
+    }
+}
+
 impl BatchOperation {
     async fn into_part(self) -> crate::Result<Part> {
         match self {
@@ -150,6 +163,10 @@ impl BatchOperation {
             }
             BatchOperation::Delete { key } => {
                 let headers = operation_headers("delete", Some(&key));
+                Ok(Part::text("").headers(headers))
+            }
+            BatchOperation::Head { key } => {
+                let headers = operation_headers("head", Some(&key));
                 Ok(Part::text("").headers(headers))
             }
         }
@@ -185,6 +202,10 @@ pub enum OperationResult {
     Put(ObjectKey, Result<PutResponse, Error>),
     /// The result of a delete operation.
     Delete(ObjectKey, Result<DeleteResponse, Error>),
+    /// The result of a head (metadata-only) operation.
+    ///
+    /// Returns `Ok(None)` if the object was not found.
+    Head(ObjectKey, Result<HeadResponse, Error>),
     /// An error occurred while parsing or correlating a response part.
     ///
     /// This makes it impossible to attribute the error to a specific operation.
@@ -206,6 +227,9 @@ enum OperationContext {
     Delete {
         key: ObjectKey,
     },
+    Head {
+        key: ObjectKey,
+    },
 }
 
 impl From<&BatchOperation> for OperationContext {
@@ -222,6 +246,7 @@ impl From<&BatchOperation> for OperationContext {
             },
             BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
             BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+            BatchOperation::Head { key } => OperationContext::Head { key: key.clone() },
         }
     }
 }
@@ -229,7 +254,9 @@ impl From<&BatchOperation> for OperationContext {
 impl OperationContext {
     fn key(&self) -> Option<&str> {
         match self {
-            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Get { key, .. }
+            | OperationContext::Delete { key }
+            | OperationContext::Head { key } => Some(key),
             OperationContext::Insert { key } => key.as_deref(),
         }
     }
@@ -252,6 +279,7 @@ fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
         OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
         OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+        OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
     }
 }
 
@@ -323,8 +351,11 @@ impl OperationResult {
 
         let body = field.bytes().await?;
 
-        let is_error =
-            status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
+        let is_error = status >= 400
+            && !(matches!(
+                ctx,
+                OperationContext::Get { .. } | OperationContext::Head { .. }
+            ) && status == 404);
 
         // For error responses, the key may be absent (e.g., server-generated key inserts
         // that fail before execution — the server never generated a key and the client
@@ -349,6 +380,7 @@ impl OperationResult {
                     OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
                     OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
                     OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+                    OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
                 },
             ));
         }
@@ -376,6 +408,14 @@ impl OperationResult {
                 OperationResult::Put(key.clone(), Ok(PutResponse { key }))
             }
             OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
+            OperationContext::Head { .. } => {
+                if status == 404 {
+                    OperationResult::Head(key, Ok(None))
+                } else {
+                    let metadata = Metadata::from_headers(&headers, "")?;
+                    OperationResult::Head(key, Ok(Some(metadata)))
+                }
+            }
         };
         Ok((index, result))
     }
@@ -421,6 +461,11 @@ impl OperationResults {
                 }
                 OperationResult::Delete(_, delete) => {
                     if let Err(e) = delete {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Head(_, head) => {
+                    if let Err(e) = head {
                         errs.push(e);
                     }
                 }
@@ -533,7 +578,9 @@ async fn classify(op: BatchOperation) -> Classified {
                 _ => Classified::Individual(op),
             }
         }
-        other => Classified::Batchable(other, 0),
+        other @ (BatchOperation::Get { .. }
+        | BatchOperation::Delete { .. }
+        | BatchOperation::Head { .. }) => Classified::Batchable(other, 0),
     }
 }
 
@@ -600,6 +647,13 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 key: key.clone(),
             };
             OperationResult::Delete(key, delete.send().await)
+        }
+        BatchOperation::Head { key } => {
+            let head = HeadBuilder {
+                session: session.clone(),
+                key: key.clone(),
+            };
+            OperationResult::Head(key, head.send().await)
         }
     }
 }
