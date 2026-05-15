@@ -26,9 +26,7 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 
-
-import objectstore_client  # noqa: E402
-
-# Prevent autodoc from documenting re-exported symbols in the top-level package,
-# so each class has a single Sphinx target under its defining submodule.
-objectstore_client.__all__ = []
+# Re-exported symbols in __init__.py create duplicate Sphinx targets
+# (e.g. objectstore_client.Session vs objectstore_client.client.Session).
+# This is the most specific suppression Sphinx supports for that warning.
+suppress_warnings = ["ref.python"]
