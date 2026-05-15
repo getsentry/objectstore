@@ -210,11 +210,7 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
     }
 }
 
-/// Wraps an inner filter so it only matches live (non-expired) cells.
-///
-/// Cells in [`FAMILY_MANUAL`] never expire: the inner filter is applied directly.
-/// Cells in [`FAMILY_GC`] are first narrowed by a [`TimestampRangeFilter`] that
-/// excludes cells whose expiry deadline (stored as the cell timestamp) is before now.
+/// Wraps `inner` so that it only matches live (non-expired) cells.
 fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
     let now_micros = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -226,6 +222,7 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![
+                    // Manual family: never expires.
                     v2::RowFilter {
                         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
                             filters: vec![
@@ -238,6 +235,7 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
                             ],
                         })),
                     },
+                    // GC family: only match non-expired cells.
                     v2::RowFilter {
                         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
                             filters: vec![
@@ -272,14 +270,14 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
 /// After legacy tombstones expire naturally this simplifies to just
 /// `column_filter(COLUMN_REDIRECT)`.
 fn tombstone_filter() -> v2::RowFilter {
-    let inner = v2::RowFilter {
+    let filter = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![column_filter(COLUMN_REDIRECT), legacy_tombstone_filter()],
             },
         )),
     };
-    live_row_filter(inner)
+    live_row_filter(filter)
 }
 
 /// Returns a [`MutatePredicate`] that matches any tombstone row.
@@ -348,13 +346,14 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     // Also match legacy tombstones that resolve to the HV id:
     // - empty `r` value (written before the redirect column stored the path)
     // - legacy `m` column format (`is_redirect_tombstone: true`)
-    live_row_filter(v2::RowFilter {
+    let filter = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![exact_match, empty_redirect_match, legacy_tombstone_filter()],
             },
         )),
-    })
+    };
+    live_row_filter(filter)
 }
 
 /// Returns a [`MutatePredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
