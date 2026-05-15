@@ -25,3 +25,10 @@ autodoc_default_options = {
     "undoc-members": True,
     "show-inheritance": True,
 }
+
+
+import objectstore_client  # noqa: E402
+
+# Prevent autodoc from documenting re-exported symbols in the top-level package,
+# so each class has a single Sphinx target under its defining submodule.
+objectstore_client.__all__ = []
