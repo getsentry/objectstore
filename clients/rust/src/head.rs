@@ -10,6 +10,9 @@ pub type HeadResponse = Option<Metadata>;
 
 impl Session {
     /// Checks whether an object exists and retrieves its metadata.
+    ///
+    /// If the object exists and has a TTI expiration policy, this is considered an access, and
+    /// therefore bumps its expiration.
     pub fn head(&self, key: &str) -> HeadBuilder {
         HeadBuilder {
             session: self.clone(),

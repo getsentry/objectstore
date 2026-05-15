@@ -578,9 +578,7 @@ async fn classify(op: BatchOperation) -> Classified {
                 _ => Classified::Individual(op),
             }
         }
-        other @ (BatchOperation::Get { .. }
-        | BatchOperation::Delete { .. }
-        | BatchOperation::Head { .. }) => Classified::Batchable(other, 0),
+        other => Classified::Batchable(other, 0),
     }
 }
 
