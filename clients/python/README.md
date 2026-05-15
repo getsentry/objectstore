@@ -136,14 +136,6 @@ except MultipartCompleteError:
     raise
 ```
 
-You can also let the server generate the final object key:
-
-```python
-upload = session.initiate_multipart_upload()
-part = upload.upload_part(b"payload", part_number=1, content_length=len(b"payload"))
-key = upload.complete([part])
-```
-
 To resume an in-progress multipart upload after a process restart, persist the
 `key` and `upload_id`, then reconstruct the upload handle later:
 
