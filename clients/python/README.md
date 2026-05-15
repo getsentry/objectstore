@@ -146,7 +146,9 @@ saved_upload_id = upload.upload_id
 resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
 existing_parts = resumed.list_parts()
 
-key = resumed.complete(existing_parts)
+# Upload missing parts...
+
+key = resumed.complete(new_parts + existing_parts)
 ```
 
 ### Authentication
