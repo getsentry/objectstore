@@ -25,7 +25,3 @@ autodoc_default_options = {
     "undoc-members": True,
     "show-inheritance": True,
 }
-
-# Session is re-exported from __init__.py and defined in client.py,
-# causing ambiguous cross-reference warnings with -W.
-suppress_warnings = ["ref.python"]
