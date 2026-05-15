@@ -153,6 +153,38 @@ async fn deletes_stores_stuff() {
 }
 
 #[tokio::test]
+async fn head_returns_metadata() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session
+        .put("head test body")
+        .compression(None)
+        .key("head-key")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    // HEAD on an existing object returns metadata
+    let metadata = session.head(&stored_id).send().await.unwrap();
+    assert!(metadata.is_some());
+    let metadata = metadata.unwrap();
+    assert_eq!(metadata.compression, None);
+    assert!(metadata.time_created.is_some());
+
+    // HEAD on a non-existent object returns None
+    let metadata = session.head("nonexistent-key").send().await.unwrap();
+    assert!(metadata.is_none());
+}
+
+#[tokio::test]
 async fn stores_under_given_key() {
     let server = test_server().await;
 

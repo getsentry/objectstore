@@ -13,11 +13,10 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
-use crate::head::HeadBuilder;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
-    Session, TouchBuilder, TouchResponse, get, put,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, ObjectKey, PutBuilder,
+    PutResponse, Session, TouchBuilder, TouchResponse, get, put,
 };
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
