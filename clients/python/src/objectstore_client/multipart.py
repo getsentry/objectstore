@@ -42,7 +42,7 @@ class MultipartCompleteError(RequestError):
 
     def __init__(self, code: str, message: str):
         super().__init__(
-            f"Multipart complete failed ({code}): {message}",
+            f"Multipart upload completion failed ({code}): {message}",
             status=200,
             response=message,
         )
