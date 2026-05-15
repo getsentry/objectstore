@@ -51,10 +51,8 @@ async fn batch(
             let service = &service;
             move |(idx, item)| {
                 let item = item.and_then(|op| {
-                    // Rate-limit check (skip for exists — lightweight metadata-only ops)
-                    if !matches!(op, Operation::Exists(_))
-                        && !state.rate_limiter.check(&context)
-                    {
+                    // Rate-limit check (skip for touch — lightweight existence checks)
+                    if !matches!(op, Operation::Touch(_)) && !state.rate_limiter.check(&context) {
                         return Err(ApiError::from(BatchError::RateLimited));
                     }
                     // Auth check
@@ -75,36 +73,32 @@ async fn batch(
         .collect()
         .await;
 
-    // Step 2: partition exists operations from others.
-    let mut exists_ops: Vec<(usize, ObjectKey)> = Vec::new();
-    let exists_errors: Vec<Part> = Vec::new();
+    // Step 2: partition touch operations from others.
+    let mut touch_ops: Vec<(usize, ObjectKey)> = Vec::new();
+    let touch_errors: Vec<Part> = Vec::new();
     let mut other_ops: Vec<(usize, Result<Operation, ApiError>)> = Vec::new();
 
     for (idx, item) in all_ops {
         match item {
-            Ok(Operation::Exists(exists)) => {
-                exists_ops.push((idx, exists.key));
+            Ok(Operation::Touch(touch)) => {
+                touch_ops.push((idx, touch.key));
             }
             other => other_ops.push((idx, other)),
         }
     }
 
-    // Step 3: execute exists batch.
-    let exists_parts: Vec<Part> = if !exists_ops.is_empty() {
-        let keys: Vec<ObjectKey> = exists_ops.iter().map(|(_, k)| k.clone()).collect();
-        match state
-            .service
-            .check_exists_batch(context.clone(), keys)
-            .await
-        {
-            Ok(results) => exists_ops
+    // Step 3: execute touch batch.
+    let touch_parts: Vec<Part> = if !touch_ops.is_empty() {
+        let keys: Vec<ObjectKey> = touch_ops.iter().map(|(_, k)| k.clone()).collect();
+        match state.service.touch_batch(context.clone(), keys).await {
+            Ok(results) => touch_ops
                 .iter()
                 .zip(results.into_iter())
                 .map(|((idx, key), found)| {
                     create_success_part(
                         *idx,
                         key,
-                        "exists",
+                        "touch",
                         if found {
                             StatusCode::OK
                         } else {
@@ -118,7 +112,7 @@ async fn batch(
                 .collect(),
             Err(e) => {
                 let error = ApiError::Service(e);
-                exists_ops
+                touch_ops
                     .iter()
                     .map(|(idx, _)| create_error_part(*idx, &error))
                     .collect()
@@ -129,10 +123,10 @@ async fn batch(
     };
 
     // Step 4: execute other operations through the streaming executor (if any).
-    let exists_stream = futures::stream::iter(exists_parts.into_iter().chain(exists_errors));
+    let touch_stream = futures::stream::iter(touch_parts.into_iter().chain(touch_errors));
 
     if other_ops.is_empty() {
-        return exists_stream.into_multipart_response(rand::random());
+        return touch_stream.into_multipart_response(rand::random());
     }
 
     let batch = match state.service.stream() {
@@ -165,7 +159,7 @@ async fn batch(
         });
 
     // Step 5: merge both streams and return as multipart response.
-    exists_stream
+    touch_stream
         .chain(other_stream)
         .into_multipart_response(rand::random())
 }
@@ -219,11 +213,11 @@ async fn convert_to_part(
             Bytes::new(),
             None,
         ),
-        Ok(OpResponse::Exists { key, exists }) => create_success_part(
+        Ok(OpResponse::Touched { key, found }) => create_success_part(
             idx,
             &key,
-            "exists",
-            if exists {
+            "touch",
+            if found {
                 StatusCode::OK
             } else {
                 StatusCode::NOT_FOUND

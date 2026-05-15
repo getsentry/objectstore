@@ -225,11 +225,11 @@ impl StorageService {
             .await
     }
 
-    /// Checks existence of multiple objects in a single batch operation.
+    /// Touches multiple objects in a single batch operation.
     ///
     /// Acquires a single concurrency permit for the entire batch. The backend
-    /// may optimize this into fewer RPCs than checking each key individually.
-    pub async fn check_exists_batch(
+    /// may optimize this into fewer RPCs than touching each key individually.
+    pub async fn touch_batch(
         &self,
         context: ObjectContext,
         keys: Vec<ObjectKey>,
@@ -239,10 +239,8 @@ impl StorageService {
             .map(|key| ObjectId::new(context.clone(), key))
             .collect();
         let inner = Arc::clone(&self.inner);
-        self.spawn("check_exists_batch", async move {
-            inner.check_exists_batch(&ids).await
-        })
-        .await
+        self.spawn("touch_batch", async move { inner.touch_batch(&ids).await })
+            .await
     }
 
     /// Waits for all outstanding background operations to complete.

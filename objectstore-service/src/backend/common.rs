@@ -56,7 +56,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
 
-    /// Checks existence of multiple objects in a single batch operation.
+    /// Touches multiple objects in a single batch operation.
     ///
     /// Returns a `Vec<bool>` in the same order as the input IDs, where `true`
     /// means the object exists. TTI is bumped for objects with a TTI expiration
@@ -64,8 +64,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// The default implementation calls [`get_metadata`](Self::get_metadata)
     /// sequentially for each ID. Backends may override this for optimized batch
-    /// checking (e.g. a single Bigtable `ReadRows` RPC).
-    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+    /// lookups (e.g. a single Bigtable `ReadRows` RPC).
+    async fn touch_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
             results.push(self.get_metadata(id).await?.is_some());

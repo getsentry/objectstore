@@ -451,7 +451,7 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
-    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+    async fn touch_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
         let start = Instant::now();
 
         // 1. Batch read from HV — single Bigtable ReadRows RPC.
@@ -473,10 +473,7 @@ impl Backend for TieredStorage {
 
         // 3. Batch check LT for tombstone targets (concurrent GCS fetches).
         let lt_results = if !tombstone_targets.is_empty() {
-            self.inner
-                .long_term
-                .check_exists_batch(&tombstone_targets)
-                .await?
+            self.inner.long_term.touch_batch(&tombstone_targets).await?
         } else {
             Vec::new()
         };
@@ -1338,10 +1335,10 @@ mod tests {
         );
     }
 
-    // --- check_exists_batch tests ---
+    // --- touch_batch tests ---
 
     #[tokio::test]
-    async fn check_exists_batch_inline_and_tombstone() {
+    async fn touch_batch_inline_and_tombstone() {
         let (storage, _hv, _lt, _) = make_tiered_storage();
 
         let inline_id = make_id("inline-exists");
@@ -1367,7 +1364,7 @@ mod tests {
         let missing_id = make_id("missing-exists");
 
         let results = storage
-            .check_exists_batch(&[inline_id, large_id, missing_id])
+            .touch_batch(&[inline_id, large_id, missing_id])
             .await
             .unwrap();
 
@@ -1375,17 +1372,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_exists_batch_all_not_found() {
+    async fn touch_batch_all_not_found() {
         let (storage, _hv, _lt, _) = make_tiered_storage();
 
         let ids: Vec<ObjectId> = (0..5).map(|i| make_id(&format!("missing-{i}"))).collect();
-        let results = storage.check_exists_batch(&ids).await.unwrap();
+        let results = storage.touch_batch(&ids).await.unwrap();
 
         assert_eq!(results, vec![false; 5]);
     }
 
     #[tokio::test]
-    async fn check_exists_batch_orphan_tombstone() {
+    async fn touch_batch_orphan_tombstone() {
         let (storage, hv, lt, _) = make_tiered_storage();
 
         let id = make_id("orphan");
@@ -1402,14 +1399,14 @@ mod tests {
         let tombstone = hv.get(&id).expect_tombstone();
         lt.remove(&tombstone.target);
 
-        let results = storage.check_exists_batch(&[id]).await.unwrap();
+        let results = storage.touch_batch(&[id]).await.unwrap();
         assert_eq!(results, vec![false]);
     }
 
     #[tokio::test]
-    async fn check_exists_batch_empty() {
+    async fn touch_batch_empty() {
         let (storage, _hv, _lt, _) = make_tiered_storage();
-        let results = storage.check_exists_batch(&[]).await.unwrap();
+        let results = storage.touch_batch(&[]).await.unwrap();
         assert!(results.is_empty());
     }
 }

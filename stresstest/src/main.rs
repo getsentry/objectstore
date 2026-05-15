@@ -1,23 +1,30 @@
+//! This is a stresstest binary which can run different [`Workload`]s against
+//! a backend storage service.
+//!
+//! The [`Workload`] currently supports configuring a *LogNormal* distribution
+//! of file sizes, defined by the `p50` and `p99` of file sizes.
+//! This models our real-world distribution of many small files, with a long
+//! tail of larger files as well.
+//!
+//! It also allows configuring a distribution of actions, such as write, read or delete.
+//! The goal is that we have a lot of *write-heavy* workloads which only write
+//! blobs, but never read those.
+//!
+//! *Read* or *delete* actions are using a *zipfian* distribution, meaning that
+//! more recently written blobs are the ones that will be read/deleted.
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-//! Stresstest binary for the foundational storage service.
-
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use argh::FromArgs;
-use futures::StreamExt;
-use objectstore_client::{Client, ExpirationPolicy, OperationResult, Session, Usecase};
-use sketches_ddsketch::DDSketch;
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
 use stresstest::workload::WorkloadMode;
-use yansi::Paint;
 
-use crate::config::{Config, Mode};
+use crate::config::Config;
 
 mod config;
 
@@ -40,23 +47,9 @@ async fn main() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
-    match config.mode {
-        Mode::Stresstest => run_stresstest(config).await,
-        Mode::Exists => run_exists_bench(config).await,
-    }
-}
-
-async fn run_stresstest(config: Config) -> anyhow::Result<()> {
-    let duration = config
-        .duration
-        .context("'duration' is required for stresstest mode")?;
-    if config.workloads.is_empty() {
-        bail!("'workloads' is required for stresstest mode");
-    }
-
     let remote = HttpRemote::new(&config.remote);
     let mut stresstest = Stresstest::new(remote)
-        .duration(duration)
+        .duration(config.duration)
         .cleanup(config.cleanup);
 
     for w in config.workloads {
@@ -90,175 +83,6 @@ async fn run_stresstest(config: Config) -> anyhow::Result<()> {
     }
 
     stresstest.run().await?;
-    Ok(())
-}
-
-// -- exists bench mode --
-
-const SMALL_PAYLOAD_SIZE: usize = 1024;
-const LARGE_PAYLOAD_SIZE: usize = 1024 * 1024 + 1;
-
-fn make_session(remote: &str, usecase_name: &str) -> Session {
-    let client = Client::builder(remote)
-        .configure_reqwest(|r| r.no_hickory_dns())
-        .build()
-        .expect("failed to build client");
-    let usecase = Usecase::new(usecase_name)
-        .with_expiration_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
-    usecase
-        .for_project(1, 1)
-        .session(&client)
-        .expect("failed to create session")
-}
-
-async fn seed_objects(session: &Session, n: usize, long_term_pct: u8) -> anyhow::Result<Vec<String>> {
-    let lt_count = (n as u64 * long_term_pct as u64 / 100) as usize;
-    let hv_count = n - lt_count;
-    println!("Seeding {n} objects ({hv_count} bigtable, {lt_count} gcs)...");
-
-    let small_payload = vec![0xABu8; SMALL_PAYLOAD_SIZE];
-    let large_payload = vec![0xCDu8; LARGE_PAYLOAD_SIZE];
-    let mut keys = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let is_large = i >= hv_count;
-        let payload = if is_large {
-            large_payload.clone()
-        } else {
-            small_payload.clone()
-        };
-        let key = format!("bench/{i}");
-        session
-            .put(payload)
-            .key(&key)
-            .compression(None)
-            .send()
-            .await
-            .with_context(|| format!("failed to seed object {i}"))?;
-        keys.push(key);
-
-        if (i + 1) % 100 == 0 {
-            println!("  seeded {}/{n}", i + 1);
-        }
-    }
-    println!("Seeding complete.");
-    Ok(keys)
-}
-
-async fn bench_single_head(session: &Session, keys: &[String], count: usize) -> DDSketch {
-    println!("\nRunning {count} sequential HEAD requests...\n");
-    let mut sketch = DDSketch::default();
-
-    for i in 0..count {
-        let key = &keys[i % keys.len()];
-        let start = Instant::now();
-        let exists = session
-            .head(key)
-            .send()
-            .await
-            .expect("HEAD request failed");
-        let elapsed = start.elapsed();
-        assert!(exists, "expected object to exist: {key}");
-        sketch.add(elapsed.as_secs_f64());
-    }
-
-    sketch
-}
-
-async fn bench_batch_exists(
-    session: &Session,
-    keys: &[String],
-    count: usize,
-    batch_size: usize,
-) -> (DDSketch, DDSketch) {
-    let num_batches = (count + batch_size - 1) / batch_size;
-    println!(
-        "\nRunning {count} EXISTS checks in {num_batches} sequential batches of {batch_size}...\n"
-    );
-    let mut batch_sketch = DDSketch::default();
-    let mut per_op_sketch = DDSketch::default();
-
-    let mut done = 0;
-    for batch_idx in 0..num_batches {
-        let remaining = count - done;
-        let this_batch = remaining.min(batch_size);
-
-        let mut many = session.many();
-        for j in 0..this_batch {
-            let key_idx = (batch_idx * batch_size + j) % keys.len();
-            many = many.push(session.exists(&keys[key_idx]));
-        }
-
-        let start = Instant::now();
-        let mut results = many.send().await;
-        while let Some(result) = results.next().await {
-            match result {
-                OperationResult::Exists(_, Ok(exists)) => {
-                    assert!(exists, "expected object to exist");
-                }
-                OperationResult::Exists(key, Err(e)) => {
-                    panic!("exists check failed for {key}: {e}");
-                }
-                other => {
-                    panic!("unexpected result: {other:?}");
-                }
-            }
-        }
-        let batch_elapsed = start.elapsed();
-        batch_sketch.add(batch_elapsed.as_secs_f64());
-
-        let per_op = batch_elapsed.as_secs_f64() / this_batch as f64;
-        for _ in 0..this_batch {
-            per_op_sketch.add(per_op);
-        }
-
-        done += this_batch;
-    }
-
-    (batch_sketch, per_op_sketch)
-}
-
-fn print_sketch(label: &str, sketch: &DDSketch) {
-    if sketch.count() == 0 {
-        return;
-    }
-    let avg = Duration::from_secs_f64(sketch.sum().unwrap() / sketch.count() as f64);
-    let p50 = Duration::from_secs_f64(sketch.quantile(0.5).unwrap().unwrap());
-    let p90 = Duration::from_secs_f64(sketch.quantile(0.9).unwrap().unwrap());
-    let p99 = Duration::from_secs_f64(sketch.quantile(0.99).unwrap().unwrap());
-    let total = Duration::from_secs_f64(sketch.sum().unwrap());
-    println!(
-        "{label}{} ops | avg: {avg:.2?} | p50: {p50:.2?} | p90: {p90:.2?} | p99: {p99:.2?} | total: {total:.2?}",
-        sketch.count().bold()
-    );
-}
-
-async fn run_exists_bench(config: Config) -> anyhow::Result<()> {
-    let count = config.count.context("'count' is required for exists mode")?;
-    let seed_count = config.seed.unwrap_or(count);
-    let usecase_name = config.usecase.as_deref().unwrap_or("exists-bench");
-    let session = make_session(&config.remote, usecase_name);
-    let keys = seed_objects(&session, seed_count, config.long_term_pct).await?;
-
-    if config.batch_size == 0 {
-        let sketch = bench_single_head(&session, &keys, count).await;
-        println!("{}", "== Results: Single HEAD ==".bold().green());
-        print_sketch("  ", &sketch);
-    } else {
-        let (batch_sketch, per_op_sketch) =
-            bench_batch_exists(&session, &keys, count, config.batch_size).await;
-        println!(
-            "{}",
-            format!(
-                "== Results: Batch EXISTS (batch_size={}) ==",
-                config.batch_size
-            )
-            .bold()
-            .green()
-        );
-        print_sketch("  per-batch: ", &batch_sketch);
-        print_sketch("  per-op (amortized): ", &per_op_sketch);
-    }
 
     Ok(())
 }

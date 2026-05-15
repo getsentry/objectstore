@@ -11,7 +11,7 @@ use axum::extract::{
 };
 use bytes::BytesMut;
 use futures::{StreamExt, stream::BoxStream};
-use objectstore_service::streaming::{Delete, Exists, Get, Insert, Operation};
+use objectstore_service::streaming::{Delete, Get, Insert, Operation, Touch};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
@@ -119,7 +119,7 @@ async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, Bat
                 payload: payload.freeze(),
             })
         }
-        "exists" => Operation::Exists(Exists {
+        "touch" => Operation::Touch(Touch {
             key: key.ok_or_else(|| {
                 BatchError::BadRequest(format!(
                     "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
@@ -367,12 +367,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exists_operation() {
+    async fn test_touch_operation() {
         let key = percent_encoding::percent_encode(b"check-me", NON_ALPHANUMERIC);
         let body = format!(
             "--boundary\r\n\
              {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
-             {HEADER_BATCH_OPERATION_KIND}: exists\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: touch\r\n\
              \r\n\
              \r\n\
              --boundary--\r\n",
@@ -390,17 +390,17 @@ mod tests {
         let operations: Vec<_> = batch_request.0.collect().await;
         assert_eq!(operations.len(), 1);
 
-        let Operation::Exists(exists_op) = &operations[0].as_ref().unwrap() else {
-            panic!("expected exists operation");
+        let Operation::Touch(touch_op) = &operations[0].as_ref().unwrap() else {
+            panic!("expected touch operation");
         };
-        assert_eq!(exists_op.key, "check-me");
+        assert_eq!(touch_op.key, "check-me");
     }
 
     #[tokio::test]
-    async fn test_exists_without_key_is_error() {
+    async fn test_touch_without_key_is_error() {
         let body = format!(
             "--boundary\r\n\
-             {HEADER_BATCH_OPERATION_KIND}: exists\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: touch\r\n\
              \r\n\
              \r\n\
              --boundary--\r\n",

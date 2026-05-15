@@ -99,13 +99,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.delete_object(id).await
     }
 
-    /// Intercepts [`Backend::check_exists_batch`]. Default delegates to `inner`.
-    async fn check_exists_batch(
-        &self,
-        inner: &InMemoryBackend,
-        ids: &[ObjectId],
-    ) -> Result<Vec<bool>> {
-        inner.check_exists_batch(ids).await
+    /// Intercepts [`Backend::touch_batch`]. Default delegates to `inner`.
+    async fn touch_batch(&self, inner: &InMemoryBackend, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        inner.touch_batch(ids).await
     }
 
     /// Intercepts [`Backend::join`]. Default delegates to `inner`.
@@ -235,8 +231,8 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.delete_object(&self.inner, id).await
     }
 
-    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
-        self.hooks.check_exists_batch(&self.inner, ids).await
+    async fn touch_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+        self.hooks.touch_batch(&self.inner, ids).await
     }
 
     async fn join(&self) {

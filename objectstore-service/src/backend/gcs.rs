@@ -717,7 +717,7 @@ impl Backend for GcsBackend {
         .await
     }
 
-    async fn check_exists_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
+    async fn touch_batch(&self, ids: &[ObjectId]) -> Result<Vec<bool>> {
         objectstore_log::debug!(count = ids.len(), "Batch exists check on GCS backend");
 
         let futures: Vec<_> = ids
@@ -1353,10 +1353,10 @@ mod tests {
         Ok(())
     }
 
-    // --- check_exists_batch tests ---
+    // --- touch_batch tests ---
 
     #[tokio::test]
-    async fn test_check_exists_batch() -> Result<()> {
+    async fn test_touch_batch() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id1 = make_id();
@@ -1371,7 +1371,7 @@ mod tests {
 
         let missing = make_id();
 
-        let results = backend.check_exists_batch(&[id1, missing, id2]).await?;
+        let results = backend.touch_batch(&[id1, missing, id2]).await?;
 
         assert_eq!(results, vec![true, false, true]);
 
@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_exists_batch_tti_bump() -> Result<()> {
+    async fn test_touch_batch_tti_bump() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
@@ -1402,26 +1402,24 @@ mod tests {
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
         let pre_expiry = pre_meta.time_expires.unwrap();
 
-        // check_exists_batch uses fetch_gcs_metadata which bumps TTI.
-        let results = backend
-            .check_exists_batch(std::slice::from_ref(&id))
-            .await?;
+        // touch_batch uses fetch_gcs_metadata which bumps TTI.
+        let results = backend.touch_batch(std::slice::from_ref(&id)).await?;
         assert_eq!(results, vec![true]);
 
         let post_meta = backend.get_metadata(&id).await?.unwrap();
         let post_expiry = post_meta.time_expires.unwrap();
         assert!(
             post_expiry > pre_expiry,
-            "check_exists_batch should trigger TTI bump: {pre_expiry:?} -> {post_expiry:?}"
+            "touch_batch should trigger TTI bump: {pre_expiry:?} -> {post_expiry:?}"
         );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_check_exists_batch_empty() -> Result<()> {
+    async fn test_touch_batch_empty() -> Result<()> {
         let backend = create_test_backend().await?;
-        let results = backend.check_exists_batch(&[]).await?;
+        let results = backend.touch_batch(&[]).await?;
         assert!(results.is_empty());
         Ok(())
     }

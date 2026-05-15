@@ -8,34 +8,13 @@ use stresstest::workload::WorkloadMode;
 pub struct Config {
     pub remote: String,
 
-    #[serde(default)]
-    pub mode: Mode,
+    #[serde(with = "humantime_serde")]
+    pub duration: Duration,
 
-    #[serde(default, with = "humantime_serde")]
-    pub duration: Option<Duration>,
-
-    #[serde(default)]
     pub workloads: Vec<Workload>,
 
     #[serde(default)]
     pub cleanup: bool,
-
-    // exists-bench fields
-    pub count: Option<usize>,
-    #[serde(default)]
-    pub batch_size: usize,
-    pub seed: Option<usize>,
-    #[serde(default)]
-    pub long_term_pct: u8,
-    pub usecase: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    #[default]
-    Stresstest,
-    Exists,
 }
 
 #[derive(Debug, Deserialize)]
