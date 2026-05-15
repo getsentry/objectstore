@@ -157,9 +157,11 @@ async fn example_batch() -> Result<()> {
             OperationResult::Put(_key, Ok(_response)) => { /* ... */ }
             OperationResult::Get(_key, Ok(_object)) => { /* ... */ }
             OperationResult::Delete(_key, Ok(_response)) => { /* ... */ }
+            OperationResult::Touch(_key, Ok(_found)) => { /* ... */ }
             OperationResult::Put(_key, Err(_e))
             | OperationResult::Get(_key, Err(_e))
-            | OperationResult::Delete(_key, Err(_e)) => { /* handle per-op error */ }
+            | OperationResult::Delete(_key, Err(_e))
+            | OperationResult::Touch(_key, Err(_e)) => { /* handle per-op error */ }
             OperationResult::Error(_e) => { /* unattributable error */ }
         }
     }

@@ -13,10 +13,11 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
+use crate::head::HeadBuilder;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, ObjectKey, PutBuilder,
-    PutResponse, Session, TouchBuilder, TouchResponse, get, put,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
+    Session, TouchBuilder, TouchResponse, get, put,
 };
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
@@ -642,7 +643,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 session: session.clone(),
                 key: key.clone(),
             };
-            OperationResult::Touch(key, head.send().await)
+            OperationResult::Touch(key, head.send().await.map(|m| m.is_some()))
         }
     }
 }

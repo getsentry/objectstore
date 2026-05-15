@@ -21,7 +21,6 @@ pub use client::*;
 pub use delete::*;
 pub use error::*;
 pub use get::*;
-pub use head::*;
 pub use key::*;
 pub use many::*;
 pub use put::*;
