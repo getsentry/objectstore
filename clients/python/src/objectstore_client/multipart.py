@@ -140,7 +140,7 @@ class MultipartUpload:
             return CompletePart(part_number=part_number, etag=res["etag"])
 
     def list_parts(self) -> list[PartInfo]:
-        """List all uploaded parts, auto-paginating."""
+        """Lists all uploaded parts."""
         all_parts: list[PartInfo] = []
         marker: int | None = None
 
@@ -184,7 +184,7 @@ class MultipartUpload:
                 )
 
     def abort(self) -> None:
-        """Abort this multipart upload, cleaning up server-side state."""
+        """Aborts this multipart upload, cleaning up server-side state."""
         query = urlencode({"upload_id": self._upload_id})
         url = self._session._make_multipart_url(None, self._key, query)
         headers = self._session._make_headers()
@@ -197,13 +197,13 @@ class MultipartUpload:
         raise_for_status(response)
 
     def complete(self, parts: Sequence[CompletePart]) -> str:
-        """Complete the multipart upload, assembling all parts into the final object.
+        """Completes the multipart upload, assembling all parts into the final object.
 
         Returns the final object key.
 
         Raises :class:`MultipartCompleteError` if the server reports an error
-        during assembly in a 200 response body. Ordinary non-2xx HTTP errors are
-        still raised as :class:`RequestError`.
+        during assembly, or :class:`RequestError` if the server returns a non-2XX
+        response.
         """
         query = urlencode({"upload_id": self._upload_id})
         url = self._session._make_multipart_url("complete", self._key, query)
@@ -234,16 +234,11 @@ class MultipartUpload:
             )
             raise_for_status(response)
 
-            # Successful completion responses may include keepalive whitespace.
             raw = (response.data or b"").decode("utf-8").strip()
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                raise RequestError(
-                    "Failed to parse multipart complete response",
-                    status=response.status,
-                    response=raw,
-                )
+                raise ValueError("Failed to parse multipart complete response")
 
             if "error" in data:
                 raise MultipartCompleteError(
