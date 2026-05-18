@@ -73,6 +73,13 @@ pub struct Delete {
     pub key: ObjectKey,
 }
 
+/// A head (metadata-only) operation: checks existence and retrieves metadata by key.
+#[derive(Debug)]
+pub struct Head {
+    /// The key of the object to check.
+    pub key: ObjectKey,
+}
+
 /// A single streaming operation.
 #[derive(Debug)]
 pub enum Operation {
@@ -82,6 +89,8 @@ pub enum Operation {
     Get(Get),
     /// Delete an object.
     Delete(Delete),
+    /// Head (metadata-only) check for an object.
+    Head(Head),
 }
 
 impl Operation {
@@ -91,13 +100,16 @@ impl Operation {
             Operation::Insert(op) => op.key.as_ref(),
             Operation::Get(op) => Some(&op.key),
             Operation::Delete(op) => Some(&op.key),
+            Operation::Head(op) => Some(&op.key),
         }
     }
 
     /// Returns the permission required to perform this operation.
     pub fn permission(&self) -> objectstore_types::auth::Permission {
         match self {
-            Operation::Get(_) => objectstore_types::auth::Permission::ObjectRead,
+            Operation::Get(_) | Operation::Head(_) => {
+                objectstore_types::auth::Permission::ObjectRead
+            }
             Operation::Insert(_) => objectstore_types::auth::Permission::ObjectWrite,
             Operation::Delete(_) => objectstore_types::auth::Permission::ObjectDelete,
         }
@@ -109,6 +121,7 @@ impl Operation {
             Operation::Insert(_) => "insert",
             Operation::Get(_) => "get",
             Operation::Delete(_) => "delete",
+            Operation::Head(_) => "head",
         }
     }
 }
@@ -135,6 +148,13 @@ pub enum OpResponse {
         /// The key that was deleted.
         key: ObjectKey,
     },
+    /// A head (metadata-only) check completed.
+    Head {
+        /// The key that was checked.
+        key: ObjectKey,
+        /// The metadata, or `None` if the object was not found.
+        metadata: Option<Metadata>,
+    },
 }
 
 impl OpResponse {
@@ -144,6 +164,7 @@ impl OpResponse {
             OpResponse::Inserted { .. } => "insert",
             OpResponse::Got { .. } => "get",
             OpResponse::Deleted { .. } => "delete",
+            OpResponse::Head { .. } => "head",
         }
     }
 
@@ -153,6 +174,7 @@ impl OpResponse {
             OpResponse::Inserted { id } => &id.key,
             OpResponse::Got { key, .. } => key,
             OpResponse::Deleted { key } => key,
+            OpResponse::Head { key, .. } => key,
         }
     }
 }
@@ -178,6 +200,11 @@ impl std::fmt::Debug for OpResponse {
                 .field("response", &format_args!("None"))
                 .finish(),
             OpResponse::Deleted { key } => f.debug_struct("Deleted").field("key", key).finish(),
+            OpResponse::Head { key, metadata } => f
+                .debug_struct("Head")
+                .field("key", key)
+                .field("metadata", &metadata.is_some())
+                .finish(),
         }
     }
 }
@@ -278,6 +305,14 @@ async fn execute_operation(
             let id = ObjectId::new(context, delete.key);
             backend.delete_object(&id).await?;
             Ok(OpResponse::Deleted { key: id.key })
+        }
+        Operation::Head(head) => {
+            let id = ObjectId::new(context, head.key);
+            let metadata = backend.get_metadata(&id).await?;
+            Ok(OpResponse::Head {
+                key: id.key,
+                metadata,
+            })
         }
     }
 }
@@ -412,6 +447,53 @@ mod tests {
                 !response.key().as_str().is_empty(),
                 "response must have a non-empty key"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_head_operation() {
+        let service = make_service();
+        let context = make_context();
+
+        service
+            .insert_object(
+                context.clone(),
+                Some("exists".into()),
+                Metadata::default(),
+                stream::single("data"),
+            )
+            .await
+            .unwrap();
+
+        let ops = vec![
+            Operation::Head(Head {
+                key: "exists".into(),
+            }),
+            Operation::Head(Head {
+                key: "missing".into(),
+            }),
+        ];
+
+        let executor = service.stream().unwrap();
+        let mut outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
+        outcomes.sort_by_key(|(idx, _)| *idx);
+
+        assert_eq!(outcomes.len(), 2);
+
+        match &outcomes[0].1 {
+            Ok(OpResponse::Head {
+                key,
+                metadata: Some(_),
+            }) => assert_eq!(key.as_str(), "exists"),
+            other => panic!("expected Head with metadata, got: {other:?}"),
+        }
+
+        match &outcomes[1].1 {
+            Ok(OpResponse::Head {
+                key,
+                metadata: None,
+            }) => assert_eq!(key.as_str(), "missing"),
+            other => panic!("expected Head with None, got: {other:?}"),
         }
     }
 

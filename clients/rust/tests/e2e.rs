@@ -698,3 +698,89 @@ async fn put_file_with_compression() {
     let received = response.payload().await.unwrap();
     assert_eq!(received, body);
 }
+
+#[tokio::test]
+async fn head_returns_metadata() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session
+        .put("hello head!")
+        .compression(None)
+        .key("head-test-key")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let metadata = session.head(&stored_id).send().await.unwrap();
+    assert!(metadata.is_some());
+    let metadata = metadata.unwrap();
+    assert!(metadata.time_created.is_some());
+
+    let missing = session.head("nonexistent-key").send().await.unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn batch_head_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    session
+        .many()
+        .push(session.put("obj-a").compression(None).key("head-a"))
+        .push(session.put("obj-b").compression(None).key("head-b"))
+        .send()
+        .await
+        .error_for_failures()
+        .await
+        .unwrap_or_else(|e| panic!("setup failures: {:?}", e.collect::<Vec<_>>()));
+
+    let results: Vec<_> = session
+        .many()
+        .push(session.head("head-a"))
+        .push(session.head("head-b"))
+        .push(session.head("head-missing"))
+        .send()
+        .await
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 3);
+
+    let mut heads = BTreeMap::new();
+    for result in results {
+        match result {
+            OperationResult::Head(key, inner) => {
+                heads.insert(key, inner);
+            }
+            other => panic!("Expected Head result, got: {:?}", other),
+        }
+    }
+
+    let head_a = heads.remove("head-a").expect("missing head-a").unwrap();
+    assert!(head_a.is_some());
+    assert!(head_a.unwrap().time_created.is_some());
+
+    let head_b = heads.remove("head-b").expect("missing head-b").unwrap();
+    assert!(head_b.is_some());
+
+    let head_missing = heads
+        .remove("head-missing")
+        .expect("missing head-missing")
+        .unwrap();
+    assert!(head_missing.is_none());
+}
