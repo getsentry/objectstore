@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9
+
+### New Features ✨
+
+- (rust-client) Make concurrency configurable in ManyBuilder by @lcian in [#457](https://github.com/getsentry/objectstore/pull/457)
+- (server/rust-client) Add batchable HEAD operation by @lcian in [#478](https://github.com/getsentry/objectstore/pull/478)
+
 ## 0.1.8
 
 ### New Features ✨
