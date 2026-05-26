@@ -41,6 +41,7 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 
+use crate::backend::changelog::{Change, ChangeId, ChangeLog};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
@@ -144,6 +145,8 @@ const REQUEST_RETRY_COUNT: usize = 2;
 /// How many times to retry a CAS mutation before giving up and returning an error.
 const CAS_RETRY_COUNT: usize = 3;
 
+/// Column qualifier for changelog entry data in the `fc` family.
+const COLUMN_CHANGE: &[u8] = b"c";
 /// Column that stores the raw payload (compressed).
 const COLUMN_PAYLOAD: &[u8] = b"p";
 /// Column that stores metadata in JSON.
@@ -162,6 +165,19 @@ const FILTER_META: &[u8] = b"^[mrt]$";
 const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
+/// Column family for the write-ahead changelog. Requires `max_versions = 1` GC policy.
+const FAMILY_CHANGELOG: &str = "fc";
+
+/// Row key prefix for all changelog entries.
+///
+/// All changelog rows have keys of the form `~changelog/{change_id}`. The `~` prefix
+/// sorts after all regular storage paths, isolating changelog rows from data.
+const CHANGE_PREFIX: &[u8] = b"~changelog/";
+/// Minimum age of a changelog entry's cell timestamp before recovery may claim it.
+///
+/// Entries younger than this threshold are assumed to belong to an active operation
+/// and are skipped by the recovery scan.
+const CHANGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// BigTable storage backend for high-volume, low-latency object storage.
 pub struct BigTableBackend {
@@ -1153,6 +1169,258 @@ fn is_retryable(error: &BigTableError) -> bool {
     }
 }
 
+/// Builds the BigTable row key for a changelog entry: `~changelog/{change_id}`.
+fn change_key(id: &ChangeId) -> Vec<u8> {
+    format!("~changelog/{id}").into_bytes()
+}
+
+/// Parses a changelog row key back into a [`ChangeId`].
+///
+/// Returns `None` if the key does not match the `~changelog/{uuid}` format.
+fn parse_change_id(row_key: &[u8]) -> Option<ChangeId> {
+    let s = std::str::from_utf8(row_key).ok()?;
+    let uuid_str = s.strip_prefix("~changelog/")?;
+    ChangeId::from_uuid_str(uuid_str)
+}
+
+/// Returns the current time as a millisecond-aligned microsecond BigTable timestamp.
+fn now_micros() -> Result<i64> {
+    let millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| Error::Generic {
+            context: "system time is before UNIX epoch".to_owned(),
+            cause: Some(Box::new(e)),
+        })?
+        .as_millis();
+    let micros = millis * 1000;
+    micros.try_into().map_err(|e| Error::Generic {
+        context: format!("timestamp {micros}µs overflows i64"),
+        cause: Some(Box::new(e)),
+    })
+}
+
+/// Builds a row filter matching changelog entries whose heartbeat is stale.
+///
+/// The filter matches the `d` column where the most recent cell timestamp is
+/// strictly older than `cutoff_micros` (i.e., the operation that wrote it has
+/// not bumped its heartbeat recently enough).
+fn changelog_staleness_filter(cutoff_micros: i64) -> v2::RowFilter {
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_CHANGE),
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::CellsPerColumnLimitFilter(1)),
+                },
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::TimestampRangeFilter(
+                        v2::TimestampRange {
+                            start_timestamp_micros: 0,
+                            end_timestamp_micros: cutoff_micros,
+                        },
+                    )),
+                },
+            ],
+        })),
+    }
+}
+
+/// Serialized form of a [`Change`] stored in the changelog column.
+///
+/// Object IDs are stored as storage path strings so the format is
+/// self-describing and independent of the in-memory representation.
+#[derive(Debug, Deserialize, Serialize)]
+struct ChangeRecord {
+    id: String,
+    new: Option<String>,
+    old: Option<String>,
+}
+
+fn serialize_change(change: &Change) -> Result<Vec<u8>> {
+    let record = ChangeRecord {
+        id: change.id.as_storage_path().to_string(),
+        new: change
+            .new
+            .as_ref()
+            .map(|id| id.as_storage_path().to_string()),
+        old: change
+            .old
+            .as_ref()
+            .map(|id| id.as_storage_path().to_string()),
+    };
+    serde_json::to_vec(&record)
+        .map_err(|cause| Error::serde("failed to serialize changelog entry", cause))
+}
+
+fn deserialize_change(data: &[u8]) -> Result<Change> {
+    let record: ChangeRecord = serde_json::from_slice(data)
+        .map_err(|cause| Error::serde("failed to deserialize changelog entry", cause))?;
+    let id = ObjectId::from_storage_path(&record.id)
+        .ok_or_else(|| Error::generic("corrupt changelog entry: invalid object id"))?;
+    let new = parse_optional_object_id(record.new.as_deref())?;
+    let old = parse_optional_object_id(record.old.as_deref())?;
+    Ok(Change { id, new, old })
+}
+
+fn parse_optional_object_id(path: Option<&str>) -> Result<Option<ObjectId>> {
+    path.map(|p| {
+        ObjectId::from_storage_path(p)
+            .ok_or_else(|| Error::generic("corrupt changelog entry: invalid storage path"))
+    })
+    .transpose()
+}
+
+/// Claims a stale changelog entry via compare-and-swap.
+///
+/// Atomically rewrites the entry with a fresh timestamp iff the cell timestamp
+/// is still older than `cutoff_micros`. Returns `true` if claimed, `false` if
+/// another instance already refreshed it.
+///
+/// Takes only the two fields needed from [`BigTableBackend`] so the caller
+/// can avoid cloning the entire backend for the `'static` stream closure.
+async fn claim_changelog_entry(
+    bigtable: &BigTableConnection,
+    table_path: &str,
+    id: &ChangeId,
+    change: &Change,
+    cutoff_micros: i64,
+) -> Result<bool> {
+    let row_key = change_key(id);
+    let value = serialize_change(change)?;
+    let timestamp_micros = now_micros()?;
+    let claim_mutation = mutation(mutation::Mutation::SetCell(mutation::SetCell {
+        family_name: FAMILY_CHANGELOG.to_owned(),
+        column_qualifier: COLUMN_CHANGE.to_owned(),
+        timestamp_micros,
+        value,
+    }));
+
+    let filter = changelog_staleness_filter(cutoff_micros);
+    let request = v2::CheckAndMutateRowRequest {
+        table_name: table_path.to_owned(),
+        row_key,
+        predicate_filter: Some(filter),
+        true_mutations: vec![claim_mutation],
+        false_mutations: vec![],
+        ..Default::default()
+    };
+
+    let result = retry("changelog-claim", || async {
+        bigtable
+            .client()
+            .check_and_mutate_row(request.clone())
+            .await
+    })
+    .await?;
+
+    Ok(result.predicate_matched)
+}
+
+/// Parses a raw BigTable row into a `(ChangeId, Change)` pair.
+///
+/// Returns `None` if the row key is not a changelog entry or the `c` column is absent
+/// (both indicate rows that should be silently skipped).
+fn changelog_entry_from_row(
+    row_key: Vec<u8>,
+    cells: Vec<RowCell>,
+) -> Result<Option<(ChangeId, Change)>> {
+    let id = match parse_change_id(&row_key) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let cell = match cells.into_iter().find(|c| c.qualifier == COLUMN_CHANGE) {
+        Some(cell) => cell,
+        None => return Ok(None),
+    };
+    let change = deserialize_change(&cell.value)?;
+    Ok(Some((id, change)))
+}
+
+/// Processes one row from a changelog scan: deserializes it and attempts a CAS claim.
+///
+/// Returns `Ok(Some(...))` if the row was claimed, `Ok(None)` if it was intentionally
+/// skipped (already claimed by another instance, or not a valid changelog row), and
+/// `Err` if a recoverable error occurred that the caller should log.
+async fn process_scan_row(
+    row_key: Vec<u8>,
+    cells: Vec<RowCell>,
+    bigtable: &BigTableConnection,
+    table_path: &str,
+    cutoff_micros: i64,
+) -> Result<Option<(ChangeId, Change)>> {
+    let Some((id, change)) = changelog_entry_from_row(row_key, cells)? else {
+        return Ok(None);
+    };
+
+    let claimed = claim_changelog_entry(bigtable, table_path, &id, &change, cutoff_micros).await?;
+    Ok(claimed.then_some((id, change)))
+}
+
+#[async_trait::async_trait]
+impl ChangeLog for BigTableBackend {
+    async fn record(&self, id: &ChangeId, change: &Change) -> Result<()> {
+        let mutation = mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_CHANGELOG.to_owned(),
+            column_qualifier: COLUMN_CHANGE.to_owned(),
+            timestamp_micros: now_micros()?,
+            value: serialize_change(change)?,
+        }));
+
+        self.mutate(change_key(id), [mutation], "changelog-record")
+            .await?;
+
+        Ok(())
+    }
+
+    async fn remove(&self, id: &ChangeId) -> Result<()> {
+        self.mutate(change_key(id), [delete_row_mutation()], "changelog-remove")
+            .await?;
+
+        Ok(())
+    }
+
+    async fn scan(&self, max: u16) -> Result<Vec<(ChangeId, Change)>> {
+        // Compute the staleness cutoff: entries with cell timestamp older than
+        // this were written by operations that are no longer bumping heartbeats.
+        let staleness_threshold_micros = CHANGE_THRESHOLD.as_millis() as i64 * 1000;
+        let cutoff_micros = now_micros()? - staleness_threshold_micros;
+
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            filter: Some(changelog_staleness_filter(cutoff_micros)),
+            rows_limit: max.into(),
+            ..Default::default()
+        };
+
+        let rows = retry("changelog-scan", || async {
+            self.bigtable
+                .client()
+                .read_rows_with_prefix(request.clone(), CHANGE_PREFIX.to_vec())
+                .await
+        })
+        .await?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for (row_key, cells) in rows {
+            match process_scan_row(
+                row_key,
+                cells,
+                &self.bigtable,
+                &self.table_path,
+                cutoff_micros,
+            )
+            .await
+            {
+                Ok(Some(entry)) => entries.push(entry),
+                Ok(None) => {}
+                Err(e) => objectstore_log::error!(!!&e, "Failed to process changelog scan row"),
+            }
+        }
+
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1161,6 +1429,7 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::changelog::ChangeId;
     use crate::id::ObjectContext;
     use crate::stream;
 
@@ -2020,6 +2289,164 @@ mod tests {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    // --- Section 5: ChangeLog ---
+
+    fn make_change(key: &str) -> (ObjectId, Change) {
+        let id = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+        let new_blob = ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        });
+        let change = Change {
+            id: id.clone(),
+            new: Some(new_blob),
+            old: None,
+        };
+        let _ = key; // for test naming clarity only
+        (id, change)
+    }
+
+    /// Record then remove: scan returns nothing.
+    #[tokio::test]
+    async fn changelog_record_remove_scan() -> Result<()> {
+        let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
+        let backend = create_test_backend().await?;
+        let change_id = ChangeId::new();
+        let (_, change) = make_change("cr-obj");
+
+        backend.record(&change_id, &change).await?;
+        backend.remove(&change_id).await?;
+
+        let entries: Vec<_> = backend.scan(100).await?;
+        assert!(
+            entries.iter().all(|(id, _)| id != &change_id),
+            "removed entry must not appear in scan"
+        );
+
+        Ok(())
+    }
+
+    /// Remove a nonexistent entry: should not error.
+    #[tokio::test]
+    async fn changelog_remove_nonexistent_is_ok() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let change_id = ChangeId::new();
+
+        backend.remove(&change_id).await?;
+
+        Ok(())
+    }
+
+    /// A freshly recorded entry is NOT stale yet, so scan skips it.
+    #[tokio::test]
+    async fn changelog_fresh_entry_not_returned_by_scan() -> Result<()> {
+        let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
+        let backend = create_test_backend().await?;
+        let change_id = ChangeId::new();
+        let (_, change) = make_change("fresh-obj");
+
+        backend.record(&change_id, &change).await?;
+
+        let entries: Vec<_> = backend.scan(100).await?;
+        // The freshly-written entry has a current timestamp — scan must skip it.
+        assert!(
+            entries.iter().all(|(id, _)| id != &change_id),
+            "fresh entry must not appear in scan"
+        );
+
+        // Clean up.
+        backend.remove(&change_id).await?;
+
+        Ok(())
+    }
+
+    // Serializes all changelog tests that call `scan()`.
+    //
+    // All bigtable changelog tests share the same emulator table. Any concurrent `scan()` call
+    // reads ALL stale entries in the table and tries to claim them via CAS, so tests that write
+    // stale entries and then assert scan returns them can lose their entry to a sibling test's
+    // scan. Holding this lock for the duration of every test that calls `scan()` prevents that.
+    //
+    // `std::sync::Mutex` (not `tokio::sync::Mutex`) is required because each `#[tokio::test]`
+    // creates its own runtime; a tokio mutex is runtime-bound and cannot synchronize across them.
+    static CHANGELOG_SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Write an entry with an old timestamp directly (bypassing heartbeat),
+    /// then verify scan claims it.
+    #[tokio::test]
+    async fn changelog_stale_entry_claimed_by_scan() -> Result<()> {
+        let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
+        let backend = create_test_backend().await?;
+        let change_id = ChangeId::new();
+        let (_, change) = make_change("stale-obj");
+
+        // Write the entry with a timestamp that is already past the staleness threshold.
+        let stale_micros = now_micros()? - CHANGE_THRESHOLD.as_millis() as i64 * 1000 * 2;
+        let value = serialize_change(&change)?;
+        let set_cell = mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_CHANGELOG.to_owned(),
+            column_qualifier: COLUMN_CHANGE.to_owned(),
+            timestamp_micros: stale_micros,
+            value,
+        }));
+        backend
+            .mutate(change_key(&change_id), [set_cell], "test-setup")
+            .await?;
+
+        // Scan should claim and return it.
+        let entries: Vec<_> = backend.scan(100).await?;
+        assert!(
+            entries.iter().any(|(id, _)| id == &change_id),
+            "stale entry must be claimed by scan"
+        );
+
+        // Clean up.
+        backend.remove(&change_id).await?;
+
+        Ok(())
+    }
+
+    /// A stale entry claimed by one scan instance is not claimed again by a concurrent scan.
+    #[tokio::test]
+    async fn changelog_stale_entry_claimed_once() -> Result<()> {
+        let _guard = CHANGELOG_SCAN_LOCK.lock().unwrap();
+        let backend = create_test_backend().await?;
+        let change_id = ChangeId::new();
+        let (_, change) = make_change("once-obj");
+
+        // Write a stale entry.
+        let stale_micros = now_micros()? - CHANGE_THRESHOLD.as_millis() as i64 * 1000 * 2;
+        let value = serialize_change(&change)?;
+        let set_cell = mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_CHANGELOG.to_owned(),
+            column_qualifier: COLUMN_CHANGE.to_owned(),
+            timestamp_micros: stale_micros,
+            value,
+        }));
+        backend
+            .mutate(change_key(&change_id), [set_cell], "test-setup")
+            .await?;
+
+        // First scan claims the entry (bumps timestamp to now).
+        let first: Vec<_> = backend.scan(100).await?;
+        let claimed_first = first.iter().any(|(id, _)| id == &change_id);
+
+        // Second scan should NOT return the same entry (timestamp is now fresh).
+        let second: Vec<_> = backend.scan(100).await?;
+        let claimed_second = second.iter().any(|(id, _)| id == &change_id);
+
+        assert!(claimed_first, "first scan must claim the entry");
+        assert!(!claimed_second, "second scan must not reclaim the entry");
+
+        // Clean up.
+        backend.remove(&change_id).await?;
 
         Ok(())
     }
