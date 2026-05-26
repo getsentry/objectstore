@@ -1966,8 +1966,11 @@ mod tests {
         );
         manager.recover().await.unwrap();
 
-        // The LT blob must not have been cleaned up, as the write eventually went through.
+        // The LT blob has not been cleaned up, as the write eventually went through.
         lt_inner.get(&physical).expect_object();
+        // The tombstone still points to the blob.
+        let tombstone = hv.get(&id).expect_tombstone();
+        assert_eq!(tombstone.target, physical);
         // The change has been removed from the log.
         let remaining = log.scan().await.unwrap();
         assert!(remaining.is_empty());
