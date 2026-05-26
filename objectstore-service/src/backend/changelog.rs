@@ -141,7 +141,8 @@ impl ChangeManager {
     /// Records the change to the log and returns a guard in the `Assembling` state.
     ///
     /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state.
-    /// This has the effect of deferring cleanup, e.g. to let the user retry the assembly.
+    /// Unlike other states, this guard does nothing on drop, deferring cleanup to
+    /// [`Change::cleanup_after`] via the [`ChangeLog`].
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
         let token = self.tracker.token();
 
