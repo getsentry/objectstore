@@ -210,6 +210,58 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
     }
 }
 
+/// Wraps `inner` so that it only matches live (non-expired) cells.
+fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
+    let now_micros = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+        * 1000;
+
+    v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Interleave(
+            v2::row_filter::Interleave {
+                filters: vec![
+                    // Manual family: never expires.
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                            filters: vec![
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::FamilyNameRegexFilter(
+                                        format!("^{FAMILY_MANUAL}$"),
+                                    )),
+                                },
+                                inner.clone(),
+                            ],
+                        })),
+                    },
+                    // GC family: only match non-expired cells.
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                            filters: vec![
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::FamilyNameRegexFilter(
+                                        format!("^{FAMILY_GC}$"),
+                                    )),
+                                },
+                                v2::RowFilter {
+                                    filter: Some(v2::row_filter::Filter::TimestampRangeFilter(
+                                        v2::TimestampRange {
+                                            start_timestamp_micros: now_micros,
+                                            end_timestamp_micros: 0,
+                                        },
+                                    )),
+                                },
+                                inner,
+                            ],
+                        })),
+                    },
+                ],
+            },
+        )),
+    }
+}
+
 /// Builds a raw row filter that matches any tombstone row, new- or legacy-format.
 ///
 /// New format: presence of the `r` column.
@@ -218,18 +270,14 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
 /// After legacy tombstones expire naturally this simplifies to just
 /// `column_filter(COLUMN_REDIRECT)`.
 fn tombstone_filter() -> v2::RowFilter {
-    v2::RowFilter {
+    let filter = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
-                filters: vec![
-                    // Current: redirect column is present.
-                    column_filter(COLUMN_REDIRECT),
-                    // Legacy: metadata column JSON format.
-                    legacy_tombstone_filter(),
-                ],
+                filters: vec![column_filter(COLUMN_REDIRECT), legacy_tombstone_filter()],
             },
         )),
-    }
+    };
+    live_row_filter(filter)
 }
 
 /// Returns a [`MutatePredicate`] that matches any tombstone row.
@@ -281,7 +329,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     };
 
     if target != own_id {
-        return exact_match;
+        return live_row_filter(exact_match);
     }
 
     let empty_redirect_match = v2::RowFilter {
@@ -298,13 +346,14 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     // Also match legacy tombstones that resolve to the HV id:
     // - empty `r` value (written before the redirect column stored the path)
     // - legacy `m` column format (`is_redirect_tombstone: true`)
-    v2::RowFilter {
+    let filter = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![exact_match, empty_redirect_match, legacy_tombstone_filter()],
             },
         )),
-    }
+    };
+    live_row_filter(filter)
 }
 
 /// Returns a [`MutatePredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
@@ -2025,6 +2074,71 @@ mod tests {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    // --- Section 6: Expired Tombstone Handling ---
+
+    /// CAS with `current=None` must succeed when the row holds an expired
+    /// tombstone. The physical row still exists but is logically gone.
+    #[tokio::test]
+    async fn test_cas_create_tombstone_over_expired() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let old_lt_id = ObjectId::random(id.context().clone());
+        let old_tombstone = Tombstone {
+            target: old_lt_id,
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+        create_tombstone(&backend, &id, &old_tombstone, SystemTime::now()).await?;
+
+        let new_lt_id = ObjectId::random(id.context().clone());
+        let new_tombstone = Tombstone {
+            target: new_lt_id.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+        };
+        let committed = backend
+            .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
+            .await?;
+        assert!(
+            committed,
+            "CAS with current=None must succeed over an expired tombstone"
+        );
+
+        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected new tombstone to be readable");
+        };
+        assert_eq!(t.target, new_lt_id);
+
+        Ok(())
+    }
+
+    /// `put_non_tombstone` must succeed when the row holds only an expired
+    /// tombstone — the expired row is logically absent.
+    #[tokio::test]
+    async fn test_put_non_tombstone_over_expired() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let lt_id = ObjectId::random(id.context().clone());
+        let tombstone = Tombstone {
+            target: lt_id,
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+
+        let result = backend
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"data"))
+            .await?;
+        assert_eq!(
+            result, None,
+            "put_non_tombstone must succeed (return None) over an expired tombstone"
+        );
+
+        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"data");
 
         Ok(())
     }
