@@ -365,7 +365,7 @@ impl ChangeState {
             ChangePhase::Assembling { .. } => {
                 objectstore_log::error!(
                     change = ?self.change,
-                    "Assembling change should not reach in-process cleanup"
+                    "Assembling change reached in-process cleanup, ignoring (this should not happen)"
                 );
                 return;
             }
@@ -437,13 +437,7 @@ impl ChangeState {
 impl Drop for ChangeState {
     fn drop(&mut self) {
         match self.phase {
-            ChangePhase::Completed => {}
-            ChangePhase::Assembling { .. } => {
-                objectstore_log::debug!(
-                    change = ?self.change,
-                    "Assembling change deferred to persistent changelog recovery"
-                );
-            }
+            ChangePhase::Completed | ChangePhase::Assembling { .. } => {}
             _ => {
                 objectstore_log::error!(
                     change = ?self.change,
@@ -483,6 +477,8 @@ impl Drop for ChangeGuard {
         {
             handle.spawn(state.cleanup());
         }
+
+        // NB: Drop of `ChangeState` logs an error if cleanup is not scheduled.
     }
 }
 
