@@ -236,18 +236,6 @@ pub struct InMemoryChangeLog {
     entries: Arc<Mutex<HashMap<ChangeId, Change>>>,
 }
 
-#[cfg(test)]
-impl InMemoryChangeLog {
-    /// Sets `cleanup_after` to the past for all entries, making them immediately
-    /// eligible for [`ChangeLog::scan`].
-    pub fn expire_all(&self) {
-        let mut entries = self.entries.lock().expect("lock poisoned");
-        for change in entries.values_mut() {
-            change.cleanup_after = Some(SystemTime::UNIX_EPOCH);
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl ChangeLog for InMemoryChangeLog {
     async fn record(&self, id: &ChangeId, change: &Change) -> Result<()> {
@@ -274,6 +262,17 @@ impl ChangeLog for InMemoryChangeLog {
             .map(|(id, change)| (id.clone(), change.clone()))
             .collect();
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+impl InMemoryChangeLog {
+    /// Sets [`Change::cleanup_after`] to the past for all entries, forcing them to be returned by a subsequent [`ChangeLog::scan`].
+    pub fn expire_all(&self) {
+        let mut entries = self.entries.lock().expect("lock poisoned");
+        for change in entries.values_mut() {
+            change.cleanup_after = Some(SystemTime::UNIX_EPOCH);
+        }
     }
 }
 
@@ -354,18 +353,11 @@ impl ChangeState {
             // For `Recovered`, we must first check the state of the tombstone.
             ChangePhase::Recovered => self.read_tombstone().await,
             ChangePhase::Recorded => self.change.old.clone(),
-            ChangePhase::Assembling => {
-                objectstore_log::error!(
-                    change = ?self.change,
-                    "Assembling change reached in-process cleanup, ignoring (this should not happen)"
-                );
-                return;
-            }
             // For `Written`, the CAS outcome is unknown — read HV to determine it.
             ChangePhase::Written => self.read_tombstone().await,
             ChangePhase::Lost => self.change.old.clone(),
             ChangePhase::Updated => self.change.new.clone(),
-            ChangePhase::Completed => return, // unreachable
+            ChangePhase::Assembling | ChangePhase::Completed => return, // unreachable
         };
 
         if current != self.change.old
@@ -429,7 +421,7 @@ impl ChangeState {
 impl Drop for ChangeState {
     fn drop(&mut self) {
         match self.phase {
-            ChangePhase::Completed | ChangePhase::Assembling => {}
+            ChangePhase::Assembling | ChangePhase::Completed => {}
             _ => {
                 objectstore_log::error!(
                     change = ?self.change,
