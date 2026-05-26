@@ -144,6 +144,10 @@ impl ContentRange {
         self.end - self.start + 1
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns `true` if this range covers the entire object.
     pub fn is_full(&self) -> bool {
         self.total == 0 || (self.start == 0 && self.len() == self.total)
