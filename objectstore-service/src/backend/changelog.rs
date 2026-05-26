@@ -141,8 +141,8 @@ impl ChangeManager {
     /// Records the change to the log and returns a guard in the `Assembling` state.
     ///
     /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state.
-    /// Unlike other states, this guard does nothing on drop, deferring cleanup to
-    /// [`Change::cleanup_after`] via the [`ChangeLog`].
+    /// Unlike other states, this guard does nothing on drop, leaving the burden of cleaning up to
+    /// the [`ChangeLog`].
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
         let token = self.tracker.token();
 
@@ -456,8 +456,8 @@ impl ChangeGuard {
 impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
+            && state.phase != ChangePhase::Assembling
             && state.phase != ChangePhase::Completed
-            && !matches!(state.phase, ChangePhase::Assembling)
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             handle.spawn(state.cleanup());
