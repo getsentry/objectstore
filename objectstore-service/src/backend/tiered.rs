@@ -1761,7 +1761,10 @@ mod tests {
             upload_id: &UploadId,
             parts: Vec<CompletedPart>,
         ) -> Result<CompleteMultipartResponse> {
-            inner.complete_multipart(id, upload_id, parts).await?;
+            inner
+                .complete_multipart(id, upload_id, parts)
+                .await
+                .unwrap();
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "simulated lost response",
@@ -1774,7 +1777,7 @@ mod tests {
     /// skipped (the blob must survive) and the changelog entry must persist for
     /// a future recovery scan.
     #[tokio::test]
-    async fn assembling_guard_skips_cleanup_and_preserves_log_entry() {
+    async fn assembling_guard_defers_cleanup() {
         let lt_inner = InMemoryBackend::new("lt");
         let log = InMemoryChangeLog::default();
         let storage = TieredStorage::new(
@@ -1826,16 +1829,167 @@ mod tests {
             !lt_inner.is_empty(),
             "LT blob should survive Assembling guard drop"
         );
+    }
 
-        // The changelog entry must persist for future recovery.
-        // scan() filters by cleanup_after (24h in the future), so the entry is hidden.
-        let entries = log.scan().await.unwrap();
-        assert!(
-            entries.is_empty(),
-            "entry should be filtered by scan() due to cleanup_after"
+    /// End-to-end: `complete_multipart` assembles the blob but the response is
+    /// lost. After the grace period expires, changelog recovery deletes the
+    /// orphaned blob because no tombstone was ever committed.
+    #[tokio::test]
+    async fn assembling_recovery_cleans_up_orphaned_blob() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(TestBackend::with_inner(
+                lt_inner.clone(),
+                CompleteMultipartThenFail,
+            )),
+            Box::new(log.clone()),
         );
-        // But the entry is still in the log.
-        assert_eq!(log.len(), 1, "changelog entry must persist");
+
+        let id = make_id("mp-orphan-e2e");
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let tiered_id: TieredUploadId = (&upload_id).try_into().unwrap();
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: tiered_id.revision,
+        };
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+
+        // complete_multipart assembles the blob but the response is lost.
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+        storage.join().await;
+
+        // Blob exists, no tombstone committed.
+        lt_inner.get(&physical).expect_object();
+        hv.get(&id).expect_not_found();
+
+        // Simulate the grace period expiring and run recovery.
+        log.expire_all();
+        let manager = ChangeManager::new(
+            Box::new(hv.clone()),
+            Box::new(lt_inner.clone()),
+            Box::new(log.clone()),
+        );
+        manager.recover().await.unwrap();
+
+        // Orphaned blob must be cleaned up.
+        lt_inner.get(&physical).expect_not_found();
+        let remaining = log.scan().await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "changelog entry not removed after recovery"
+        );
+    }
+
+    /// End-to-end: `complete_multipart` assembles the blob and the response is
+    /// lost, but a retry succeeds and commits the tombstone. After the grace
+    /// period expires, changelog recovery preserves the referenced blob.
+    #[tokio::test]
+    async fn assembling_recovery_preserves_blob_when_retry_committed() {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(TestBackend::with_inner(
+                lt_inner.clone(),
+                CompleteMultipartThenFail,
+            )),
+            Box::new(log.clone()),
+        );
+
+        let id = make_id("mp-retry-e2e");
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let tiered_id: TieredUploadId = (&upload_id).try_into().unwrap();
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: tiered_id.revision,
+        };
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+
+        // complete_multipart assembles the blob but the response is lost.
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+        storage.join().await;
+
+        // Simulate a successful retry that committed the tombstone.
+        let tombstone = Tombstone {
+            target: physical.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+        hv.compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .await
+            .unwrap();
+
+        // Simulate the grace period expiring and run recovery.
+        log.expire_all();
+        let manager = ChangeManager::new(
+            Box::new(hv.clone()),
+            Box::new(lt_inner.clone()),
+            Box::new(log.clone()),
+        );
+        manager.recover().await.unwrap();
+
+        // Blob must still exist — the tombstone references it.
+        lt_inner.get(&physical).expect_object();
+        let remaining = log.scan().await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "changelog entry not removed after recovery"
+        );
     }
 
     #[tokio::test]

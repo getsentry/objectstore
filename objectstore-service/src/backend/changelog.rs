@@ -144,7 +144,7 @@ impl ChangeManager {
     /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
     /// This has the effect that cleanup will only be performed after the deadline has passed.
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let cleanup_after = change.cleanup_after.unwrap_or_else(|| SystemTime::now());
+        let cleanup_after = change.cleanup_after.unwrap_or_else(SystemTime::now);
         let token = self.tracker.token();
 
         let id = ChangeId::new();
@@ -238,15 +238,15 @@ pub struct InMemoryChangeLog {
     entries: Arc<Mutex<HashMap<ChangeId, Change>>>,
 }
 
+#[cfg(test)]
 impl InMemoryChangeLog {
-    /// Returns the total number of entries, ignoring `cleanup_after` filtering.
-    pub fn len(&self) -> usize {
-        self.entries.lock().expect("lock poisoned").len()
-    }
-
-    /// Returns `true` if the log contains no entries, ignoring `cleanup_after` filtering.
-    pub fn is_empty(&self) -> bool {
-        self.entries.lock().expect("lock poisoned").is_empty()
+    /// Sets `cleanup_after` to the past for all entries, making them immediately
+    /// eligible for [`ChangeLog::scan`].
+    pub fn expire_all(&self) {
+        let mut entries = self.entries.lock().expect("lock poisoned");
+        for change in entries.values_mut() {
+            change.cleanup_after = Some(SystemTime::UNIX_EPOCH);
+        }
     }
 }
 
