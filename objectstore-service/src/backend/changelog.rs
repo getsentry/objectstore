@@ -144,7 +144,7 @@ impl ChangeManager {
     /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
     /// This has the effect that cleanup will only be performed after the deadline has passed.
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let deadline = change
+        let cleanup_after = change
             .cleanup_after
             .expect("assembling Change must have a cleanup_after deadline");
 
@@ -156,7 +156,7 @@ impl ChangeManager {
         let state = ChangeState {
             id,
             change,
-            phase: ChangePhase::Assembling { deadline },
+            phase: ChangePhase::Assembling { cleanup_after },
             manager: self.clone(),
             _token: token,
         };
@@ -319,7 +319,7 @@ pub enum ChangePhase {
     /// Therefore, cleanup of changes in this phase is deferred.
     Assembling {
         /// Earliest time at which this entry becomes eligible for cleanup.
-        deadline: SystemTime,
+        cleanup_after: SystemTime,
     },
     /// LT upload has succeeded and the tombstone is being updated.
     Written,
