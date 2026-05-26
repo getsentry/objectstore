@@ -1773,7 +1773,7 @@ mod tests {
         }
     }
 
-    /// `self.lt.complete_multipart` assembles the blob successfully, but somehow returns an error.
+    /// `complete_multipart` on the inner LT backend assembles the blob successfully, but somehow returns an error.
     /// After `MULTIPART_COMPLETE_CLEANUP_DELAY`, `ChangeLog` recovery deletes the orphaned blob.
     #[tokio::test]
     async fn cleans_up_orphan_after_failed_multipart_complete() {
