@@ -27,7 +27,8 @@ impl ByteRange {
     /// Only `bytes=` ranges with a single specifier are accepted. Multi-range
     /// requests (containing commas) and non-`bytes` units are rejected.
     pub fn parse(header: &str) -> Result<Self, RangeError> {
-        let spec = header
+        let lower = header.to_ascii_lowercase();
+        let spec = lower
             .strip_prefix("bytes=")
             .ok_or(RangeError::UnknownUnit)?;
 
@@ -220,6 +221,15 @@ mod tests {
             ByteRange::parse("bytes=0-10, 20-30"),
             Err(RangeError::MultiRangeNotSupported)
         );
+    }
+
+    #[test]
+    fn parse_case_insensitive() {
+        assert_eq!(
+            ByteRange::parse("Bytes=0-499"),
+            Ok(ByteRange::FromTo(0, 499))
+        );
+        assert_eq!(ByteRange::parse("BYTES=100-"), Ok(ByteRange::From(100)));
     }
 
     #[test]

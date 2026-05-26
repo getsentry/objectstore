@@ -74,7 +74,7 @@ async fn object_get(
                 .map_err(|_| ApiError::Client("invalid Range header".into()))?;
             match ByteRange::parse(header_str) {
                 Ok(range) => Some(range),
-                Err(RangeError::UnknownUnit) => None,
+                Err(RangeError::UnknownUnit | RangeError::MultiRangeNotSupported) => None,
                 Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
             }
         }
