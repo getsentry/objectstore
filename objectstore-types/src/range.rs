@@ -144,6 +144,7 @@ impl ContentRange {
         self.end - self.start + 1
     }
 
+    /// Returns `true` if this range is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
