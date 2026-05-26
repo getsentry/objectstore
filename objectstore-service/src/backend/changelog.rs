@@ -36,10 +36,6 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum delay for exponential backoff retries in background cleanup tasks.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Amount of time for which a change is kept in the Assembling state before becoming eligible for
-/// cleanup.
-const ASSEMBLING_CLEANUP_DELAY: Duration = Duration::from_hours(24);
-
 /// Unique identifier for a change log entry.
 ///
 /// Generated per-operation as a UUIDv7. In durable storage, scoped to the
@@ -82,8 +78,7 @@ pub struct Change {
     pub old: Option<ObjectId>,
     /// Earliest time at which this entry becomes eligible for cleanup.
     ///
-    /// [`ChangeLog::scan`] automatically filters out entries whose deadline has not yet been
-    /// reached.
+    /// [`ChangeLog::scan`] filters out the entry, unless the deadline has passed.
     pub cleanup_after: Option<SystemTime>,
 }
 
@@ -143,12 +138,15 @@ impl ChangeManager {
         Ok(ChangeGuard { state: Some(state) })
     }
 
-    /// Records the change to the log and returns a guard.
+    /// Records the change to the log and returns a guard in the `Assembling` state.
     ///
-    /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state and
-    /// cleanup is only attempted after `ASSEMBLING_CLEANUP_DELAY`.
-    pub async fn record_assembling(self: Arc<Self>, mut change: Change) -> Result<ChangeGuard> {
-        change.cleanup_after = Some(SystemTime::now() + ASSEMBLING_CLEANUP_DELAY);
+    /// Behaves like [`Self::record`], except that the guard is created in the
+    /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
+    /// This has the affect that cleanup will only be performed after the deadline has passed.
+    pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
+        let deadline = change
+            .cleanup_after
+            .expect("assembling Change must have a cleanup_after deadline");
 
         let token = self.tracker.token();
 
@@ -158,9 +156,7 @@ impl ChangeManager {
         let state = ChangeState {
             id,
             change,
-            phase: ChangePhase::Assembling {
-                deadline: SystemTime::now() + ASSEMBLING_CLEANUP_DELAY,
-            },
+            phase: ChangePhase::Assembling { deadline },
             manager: self.clone(),
             _token: token,
         };
