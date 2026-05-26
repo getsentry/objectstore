@@ -142,7 +142,7 @@ impl ChangeManager {
     ///
     /// Behaves like [`Self::record`], except that the guard is created in the
     /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
-    /// This has the affect that cleanup will only be performed after the deadline has passed.
+    /// This has the effect that cleanup will only be performed after the deadline has passed.
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
         let deadline = change
             .cleanup_after
