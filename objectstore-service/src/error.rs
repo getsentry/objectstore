@@ -73,6 +73,13 @@ pub enum Error {
     #[error("unexpected tombstone")]
     UnexpectedTombstone,
 
+    /// The requested byte range is not satisfiable for the object's size.
+    #[error("range not satisfiable (object size: {total} bytes)")]
+    RangeNotSatisfiable {
+        /// Total size of the object in bytes.
+        total: u64,
+    },
+
     /// The service has reached its concurrency limit and cannot accept more operations.
     #[error("concurrency limit reached")]
     AtCapacity,
@@ -132,6 +139,7 @@ impl Error {
             // Malformed client input at DEBUG level
             Self::Client(_) => Level::DEBUG,
             Self::Metadata(_) => Level::DEBUG,
+            Self::RangeNotSatisfiable { .. } => Level::DEBUG,
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures

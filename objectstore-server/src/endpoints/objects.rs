@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::{ByteRange, RangeError};
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
@@ -64,15 +65,63 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let context = id.context().clone();
-    let Some((metadata, stream)) = service.get_object(id).await? else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+    let byte_range = match headers.get(http::header::RANGE) {
+        Some(value) => {
+            let header_str = value
+                .to_str()
+                .map_err(|_| ApiError::Client("invalid Range header".into()))?;
+            match ByteRange::parse(header_str) {
+                Ok(range) => Some(range),
+                Err(RangeError::UnknownUnit) => None,
+                Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
+            }
+        }
+        None => None,
     };
-    let stream = state.meter_stream(stream, &context);
 
-    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
-    Ok((headers, Body::from_stream(stream)).into_response())
+    let context = id.context().clone();
+    let result = service.get_object(id, byte_range).await;
+
+    let (metadata, content_range, stream) = match result {
+        Ok(Some(tuple)) => tuple,
+        Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(http::header::CONTENT_RANGE, format!("bytes */{total}"))],
+                [(http::header::ACCEPT_RANGES, "bytes")],
+            )
+                .into_response());
+        }
+        Err(e) => return Err(e),
+    };
+
+    let stream = state.meter_stream(stream, &context);
+    let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+
+    let status = if content_range.is_full() {
+        StatusCode::OK
+    } else {
+        StatusCode::PARTIAL_CONTENT
+    };
+
+    let mut response = (status, metadata_headers, Body::from_stream(stream)).into_response();
+    let resp_headers = response.headers_mut();
+    resp_headers.insert(http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    resp_headers.insert(
+        http::header::CONTENT_LENGTH,
+        content_range.len().to_string().parse().unwrap(),
+    );
+    if !content_range.is_full() {
+        resp_headers.insert(
+            http::header::CONTENT_RANGE,
+            content_range.to_header_value().parse().unwrap(),
+        );
+    }
+
+    Ok(response)
 }
 
 async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {

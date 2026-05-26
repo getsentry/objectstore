@@ -5,6 +5,7 @@ use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
 
@@ -163,22 +164,32 @@ where
         &self,
         method: Method,
         id: &ObjectId,
+        extra_headers: Option<reqwest::header::HeaderMap>,
     ) -> Result<Option<(Metadata, reqwest::Response)>> {
         let object_url = self.object_url(id);
 
-        let response = self
-            .request(method, &object_url)
-            .await?
-            .send()
-            .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send request".to_string(),
-                cause,
-            })?;
+        let mut builder = self.request(method, &object_url).await?;
+        if let Some(headers) = extra_headers {
+            builder = builder.headers(headers);
+        }
+        let response = builder.send().await.map_err(|cause| Error::Reqwest {
+            context: "S3: failed to send request".to_string(),
+            cause,
+        })?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
             return Ok(None);
+        }
+
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            let total = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(ContentRange::parse_unsatisfiable_total)
+                .unwrap_or(0);
+            return Err(Error::RangeNotSatisfiable { total });
         }
 
         let response = response
@@ -294,21 +305,40 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
-        let Some((metadata, response)) = self.request_object(Method::GET, id).await? else {
+        let extra_headers = range.map(|r| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::RANGE, r.to_header_value().parse().unwrap());
+            headers
+        });
+
+        let Some((metadata, response)) =
+            self.request_object(Method::GET, id, extra_headers).await?
+        else {
             return Ok(None);
         };
 
+        let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(ContentRange::parse)
+                .unwrap_or_else(|| ContentRange::full(metadata.size.unwrap_or(0) as u64))
+        } else {
+            ContentRange::full(metadata.size.unwrap_or(0) as u64)
+        };
+
         let stream = response.bytes_stream().map_err(io::Error::other);
-        Ok(Some((metadata, stream.boxed())))
+        Ok(Some((metadata, content_range, stream.boxed())))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
-        let response = self.request_object(Method::HEAD, id).await?;
+        let response = self.request_object(Method::HEAD, id, None).await?;
         Ok(response.map(|(metadata, _)| metadata))
     }
 

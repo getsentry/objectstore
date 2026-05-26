@@ -7,8 +7,9 @@ use std::time::SystemTime;
 
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::{ByteRange, ContentRange};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
@@ -115,7 +116,7 @@ impl Backend for LocalFsBackend {
 
     // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
@@ -141,8 +142,30 @@ impl Backend for LocalFsBackend {
             .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
         metadata.size = Some(payload_size as usize);
 
-        let stream = ReaderStream::new(reader);
-        Ok(Some((metadata, stream.boxed())))
+        let content_range = match range {
+            Some(byte_range) => match byte_range.resolve(payload_size) {
+                Some(cr) => cr,
+                None => {
+                    return Err(Error::RangeNotSatisfiable {
+                        total: payload_size,
+                    });
+                }
+            },
+            None => ContentRange::full(payload_size),
+        };
+
+        if content_range.is_full() {
+            let stream = ReaderStream::new(reader);
+            return Ok(Some((metadata, content_range, stream.boxed())));
+        }
+
+        use tokio::io::AsyncSeekExt;
+        reader
+            .seek(std::io::SeekFrom::Current(content_range.start as i64))
+            .await?;
+        let limited = reader.take(content_range.len());
+        let stream = ReaderStream::new(limited);
+        Ok(Some((metadata, content_range, stream.boxed())))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -460,7 +483,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (read_metadata, stream) = backend.get_object(&id).await.unwrap().unwrap();
+        let (read_metadata, _, stream) = backend.get_object(&id, None).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(
@@ -578,7 +601,7 @@ mod tests {
             .unwrap();
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let (meta, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
         let payload: BytesMut = body.try_collect().await.unwrap();
         assert_eq!(payload.as_ref(), data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -659,7 +682,7 @@ mod tests {
             .unwrap();
         assert!(result.is_none());
 
-        let (_, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let (_, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
         let payload: BytesMut = body.try_collect().await.unwrap();
         assert_eq!(payload.as_ref(), b"aaaabbbbcc");
     }
@@ -735,7 +758,7 @@ mod tests {
 
         backend.abort_multipart(&id, &upload_id).await.unwrap();
 
-        let result = backend.get_object(&id).await.unwrap();
+        let result = backend.get_object(&id, None).await.unwrap();
         assert!(result.is_none(), "object should not exist after abort");
     }
 

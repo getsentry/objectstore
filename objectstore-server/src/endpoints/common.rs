@@ -89,6 +89,9 @@ impl ApiError {
 
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
+                StatusCode::RANGE_NOT_SATISFIABLE
+            }
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(_) => {
                 objectstore_log::error!(!!self, "error handling request");

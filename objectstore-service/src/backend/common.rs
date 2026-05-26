@@ -3,6 +3,7 @@
 use std::fmt;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 
 use bytes::Bytes;
 
@@ -22,7 +23,7 @@ pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERS
 /// Backend response for put operations.
 pub type PutResponse = ();
 /// Backend response for get operations.
-pub type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, ContentRange, PayloadStream)>;
 /// Backend response for metadata-only get operations.
 pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
@@ -42,15 +43,20 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         stream: ClientStream,
     ) -> Result<PutResponse>;
 
-    /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse>;
+    /// Retrieves an object at the given path, returning its metadata, the
+    /// content range describing which bytes are in the stream, and the payload.
+    ///
+    /// When `range` is `Some`, backends that support partial reads should
+    /// return only the requested byte range. Backends that do not support
+    /// partial reads may ignore the range and return the full object.
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse>;
 
     /// Retrieves only the metadata for an object, without the payload.
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         Ok(self
-            .get_object(id)
+            .get_object(id, None)
             .await?
-            .map(|(metadata, _stream)| metadata))
+            .map(|(metadata, _range, _stream)| metadata))
     }
 
     /// Deletes the object at the given path.
@@ -145,7 +151,10 @@ pub trait HighVolumeBackend: Backend {
     ///
     /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet>;
+    ///
+    /// See [`Backend::get_object`] for the semantics of `range`.
+    async fn get_tiered_object(&self, id: &ObjectId, range: Option<ByteRange>)
+    -> Result<TieredGet>;
 
     /// Retrieves only metadata with explicit tombstone awareness.
     ///
@@ -200,7 +209,7 @@ pub struct Tombstone {
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
 pub enum TieredGet {
     /// A real object was found.
-    Object(Metadata, PayloadStream),
+    Object(Metadata, ContentRange, PayloadStream),
     /// A redirect tombstone was found; the real object lives in the long-term backend.
     Tombstone(Tombstone),
     /// No entry exists at this key.
@@ -210,9 +219,10 @@ pub enum TieredGet {
 impl fmt::Debug for TieredGet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TieredGet::Object(metadata, _stream) => f
+            TieredGet::Object(metadata, content_range, _stream) => f
                 .debug_tuple("Object")
                 .field(metadata)
+                .field(content_range)
                 .finish_non_exhaustive(),
             TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
             TieredGet::NotFound => write!(f, "NotFound"),

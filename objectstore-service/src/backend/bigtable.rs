@@ -38,6 +38,7 @@ use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 
@@ -909,9 +910,11 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        match self.get_tiered_object(id).await? {
-            TieredGet::Object(metadata, payload) => Ok(Some((metadata, payload))),
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+        match self.get_tiered_object(id, range).await? {
+            TieredGet::Object(metadata, content_range, payload) => {
+                Ok(Some((metadata, content_range, payload)))
+            }
             TieredGet::Tombstone(_) => Err(Error::UnexpectedTombstone),
             TieredGet::NotFound => Ok(None),
         }
@@ -988,7 +991,11 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+    async fn get_tiered_object(
+        &self,
+        id: &ObjectId,
+        _range: Option<ByteRange>,
+    ) -> Result<TieredGet> {
         objectstore_log::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -1008,7 +1015,8 @@ impl HighVolumeBackend for BigTableBackend {
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
                 metadata.size = Some(payload.len());
-                TieredGet::Object(metadata, crate::stream::single(payload))
+                let content_range = ContentRange::full(payload.len() as u64);
+                TieredGet::Object(metadata, content_range, crate::stream::single(payload))
             }
         })
     }
@@ -1351,7 +1359,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        let (obj_meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (obj_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"hello, world");
         assert_eq!(obj_meta.content_type, metadata.content_type);
@@ -1370,7 +1378,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_object(&id, None).await?.is_none());
         assert!(backend.get_metadata(&id).await?.is_none());
         backend.delete_object(&id).await?;
 
@@ -1396,7 +1404,7 @@ mod tests {
             .put_object(&id, &second_metadata, stream::single("world"))
             .await?;
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"world");
         assert_eq!(meta.custom, second_metadata.custom);
@@ -1413,7 +1421,7 @@ mod tests {
         create_object(&backend, &id, &metadata, b"hello", SystemTime::now()).await?;
         backend.delete_object(&id).await?;
 
-        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_object(&id, None).await?.is_none());
 
         Ok(())
     }
@@ -1442,7 +1450,7 @@ mod tests {
         create_object(&backend, &id1, &metadata, b"hello, world", past_now).await?;
 
         // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
-        let (pre_obj_meta, _) = backend.get_object(&id1).await?.unwrap();
+        let (pre_obj_meta, _, _) = backend.get_object(&id1, None).await?.unwrap();
         let pre_obj_expiry = pre_obj_meta.time_expires.unwrap();
 
         // A second get_metadata reads the freshly bumped row.
@@ -1467,7 +1475,7 @@ mod tests {
         assert!(post_expiry > pre_expiry, "bump should extend expiry");
 
         // Payload must be intact after the loaded=false bump (which re-fetches the payload).
-        let (_, stream) = backend.get_object(&id2).await?.unwrap();
+        let (_, _, stream) = backend.get_object(&id2, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"hello, world");
 
@@ -1517,7 +1525,7 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
 
-        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_object(&id, None).await?.is_none());
 
         Ok(())
     }
@@ -1536,7 +1544,7 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
 
-        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_object(&id, None).await?.is_none());
 
         Ok(())
     }
@@ -1556,7 +1564,7 @@ mod tests {
         // empty
         let id = make_id();
         assert!(matches!(
-            backend.get_tiered_object(&id).await?,
+            backend.get_tiered_object(&id, None).await?,
             TieredGet::NotFound
         ));
         assert!(matches!(
@@ -1573,7 +1581,9 @@ mod tests {
         };
         create_object(&backend, &id, &put_meta, b"payload", SystemTime::now()).await?;
 
-        let TieredGet::Object(obj_meta, obj_stream) = backend.get_tiered_object(&id).await? else {
+        let TieredGet::Object(obj_meta, _, obj_stream) =
+            backend.get_tiered_object(&id, None).await?
+        else {
             panic!("expected TieredGet::Object");
         };
         let obj_payload = stream::read_to_vec(obj_stream).await?;
@@ -1596,7 +1606,7 @@ mod tests {
         };
         create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
-        match backend.get_tiered_object(&hv_id).await? {
+        match backend.get_tiered_object(&hv_id, None).await? {
             TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
         }
@@ -1624,7 +1634,7 @@ mod tests {
             .put_non_tombstone(&id, &metadata, Bytes::from_static(b"first"))
             .await?;
         assert_eq!(result, None, "expected None on empty row");
-        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"first");
 
         // object: put_non_tombstone on existing object replaces payload, returns None.
@@ -1634,7 +1644,7 @@ mod tests {
             .put_non_tombstone(&id, &metadata, Bytes::from_static(b"new"))
             .await?;
         assert_eq!(result, None, "expected None when overwriting object");
-        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"new");
 
         // tombstone: put_non_tombstone returns Some(Tombstone) and leaves tombstone intact.
@@ -1682,7 +1692,7 @@ mod tests {
         let metadata = Metadata::default();
         create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
         assert_eq!(backend.delete_non_tombstone(&id).await?, None);
-        assert!(backend.get_object(&id).await?.is_none());
+        assert!(backend.get_object(&id, None).await?.is_none());
 
         // tombstone
         let id = make_id();
@@ -1736,14 +1746,14 @@ mod tests {
         };
         assert_eq!(t.target, lt_id, "target must round-trip via r column");
         assert_eq!(t.expiration_policy, expiration_policy);
-        match backend.get_tiered_object(&hv_id).await? {
+        match backend.get_tiered_object(&hv_id, None).await? {
             TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "round-trip via r column"),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
         }
 
         // Legacy reads must error rather than leak tombstone data.
         assert!(matches!(
-            backend.get_object(&hv_id).await,
+            backend.get_object(&hv_id, None).await,
             Err(Error::UnexpectedTombstone)
         ));
         assert!(matches!(
@@ -1842,7 +1852,7 @@ mod tests {
             .compare_and_write(&id, Some(&lt_id), write.clone())
             .await?;
         assert!(swapped, "expected CAS success with correct target");
-        let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
+        let TieredGet::Object(_, _, stream) = backend.get_tiered_object(&id, None).await? else {
             panic!("expected inline object after swap");
         };
         assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
@@ -1865,7 +1875,7 @@ mod tests {
         let committed = backend.compare_and_write(&id, None, write).await?;
         assert!(committed, "expected CAS success on empty row");
 
-        let TieredGet::Object(_, stream) = backend.get_tiered_object(&id).await? else {
+        let TieredGet::Object(_, _, stream) = backend.get_tiered_object(&id, None).await? else {
             panic!("expected Object after CAS-create");
         };
         assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
@@ -1946,7 +1956,7 @@ mod tests {
         };
         assert_eq!(t.expiration_policy, ExpirationPolicy::Manual);
         assert!(matches!(
-            backend.get_tiered_object(&id).await?,
+            backend.get_tiered_object(&id, None).await?,
             TieredGet::Tombstone(_)
         ));
 
@@ -2137,7 +2147,7 @@ mod tests {
             "put_non_tombstone must succeed (return None) over an expired tombstone"
         );
 
-        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"data");
 
         Ok(())

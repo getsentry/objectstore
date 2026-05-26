@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use objectstore_types::range::{ByteRange, ContentRange};
+
 use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
@@ -118,15 +120,16 @@ impl super::common::Backend for InMemoryBackend {
         Ok(())
     }
 
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, _range: Option<ByteRange>) -> Result<GetResponse> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
             Some(StoreEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
+                let content_range = ContentRange::full(bytes.len() as u64);
                 let stream = crate::stream::single(bytes);
-                Ok(Some((metadata, stream)))
+                Ok(Some((metadata, content_range, stream)))
             }
         }
     }
@@ -156,14 +159,19 @@ impl HighVolumeBackend for InMemoryBackend {
         Ok(None)
     }
 
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
+    async fn get_tiered_object(
+        &self,
+        id: &ObjectId,
+        _range: Option<ByteRange>,
+    ) -> Result<TieredGet> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredGet::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredGet::Tombstone(tombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
-                TieredGet::Object(metadata, crate::stream::single(bytes))
+                let content_range = ContentRange::full(bytes.len() as u64);
+                TieredGet::Object(metadata, content_range, crate::stream::single(bytes))
             }
         })
     }
@@ -512,7 +520,7 @@ mod tests {
             .unwrap();
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let (meta, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
         let payload = stream::read_to_vec(body).await.unwrap();
         assert_eq!(payload, data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -593,7 +601,7 @@ mod tests {
             .unwrap();
         assert!(result.is_none());
 
-        let (_, body) = backend.get_object(&id).await.unwrap().unwrap();
+        let (_, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
         let payload = stream::read_to_vec(body).await.unwrap();
         assert_eq!(payload, b"aaaabbbbcc");
     }
@@ -669,7 +677,7 @@ mod tests {
 
         backend.abort_multipart(&id, &upload_id).await.unwrap();
 
-        let result = backend.get_object(&id).await.unwrap();
+        let result = backend.get_object(&id, None).await.unwrap();
         assert!(result.is_none(), "object should not exist after abort");
     }
 

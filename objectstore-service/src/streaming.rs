@@ -289,7 +289,7 @@ async fn execute_operation(
     match op {
         Operation::Get(get) => {
             let id = ObjectId::new(context, get.key);
-            let response = backend.get_object(&id).await?;
+            let response = backend.get_object(&id, None).await?;
             Ok(OpResponse::Got {
                 key: id.key,
                 response,

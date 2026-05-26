@@ -105,6 +105,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::ByteRange;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
@@ -411,17 +412,21 @@ impl Backend for TieredStorage {
         Ok(())
     }
 
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let start = Instant::now();
 
-        let hv_result = self.inner.high_volume.get_tiered_object(id).await?;
+        let hv_result = self.inner.high_volume.get_tiered_object(id, range).await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
-            TieredGet::Object(metadata, stream) => {
-                (Some((metadata, stream)), BackendChoice::HighVolume)
-            }
+            TieredGet::Object(metadata, content_range, stream) => (
+                Some((metadata, content_range, stream)),
+                BackendChoice::HighVolume,
+            ),
             TieredGet::Tombstone(tombstone) => (
-                self.inner.long_term.get_object(&tombstone.target).await?,
+                self.inner
+                    .long_term
+                    .get_object(&tombstone.target, range)
+                    .await?,
                 BackendChoice::LongTerm,
             ),
         };
@@ -434,7 +439,7 @@ impl Backend for TieredStorage {
             backend_type = backend_type,
         );
 
-        if let Some((ref metadata, _)) = result {
+        if let Some((ref metadata, _, _)) = result {
             if let Some(size) = metadata.size {
                 objectstore_metrics::record!(
                     "get.size" = size,
@@ -870,7 +875,7 @@ mod tests {
         let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
 
-        assert!(storage.get_object(&id).await.unwrap().is_none());
+        assert!(storage.get_object(&id, None).await.unwrap().is_none());
         assert!(storage.get_metadata(&id).await.unwrap().is_none());
     }
 
@@ -898,7 +903,7 @@ mod tests {
         assert!(hv.contains(&id), "expected in high-volume");
         assert!(!lt.contains(&id), "leaked to long-term");
 
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -941,7 +946,7 @@ mod tests {
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
 
         // get_object follows the tombstone and returns the correct payload.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -1014,7 +1019,7 @@ mod tests {
         lt.get(&lt_id_1).expect_not_found();
         lt.get(&lt_id_2).expect_object();
 
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload2);
     }
@@ -1034,7 +1039,7 @@ mod tests {
         storage.delete_object(&id).await.unwrap();
 
         hv.get(&id).expect_not_found();
-        assert!(storage.get_object(&id).await.unwrap().is_none());
+        assert!(storage.get_object(&id, None).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1106,7 +1111,7 @@ mod tests {
 
         // The orphaned GCS blob remains but the object is unreachable through the service.
         assert!(
-            storage.get_object(&id).await.unwrap().is_none(),
+            storage.get_object(&id, None).await.unwrap().is_none(),
             "object should be unreachable after tombstone is deleted"
         );
     }
@@ -1259,7 +1264,7 @@ mod tests {
         lt.remove(&lt_id);
 
         assert!(
-            storage.get_object(&id).await.unwrap().is_none(),
+            storage.get_object(&id, None).await.unwrap().is_none(),
             "orphan tombstone should resolve to None on get_object"
         );
         assert!(
@@ -1296,7 +1301,7 @@ mod tests {
             .unwrap();
 
         // get_object must follow the tombstone and find the object via the lt_id target.
-        let (_, s) = storage.get_object(&hv_id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&hv_id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 

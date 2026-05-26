@@ -9,6 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::{ByteRange, ContentRange};
 
 use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
@@ -18,7 +19,7 @@ use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
 /// Service response for [`StorageService::get_object`].
-pub type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, ContentRange, PayloadStream)>;
 /// Service response for [`StorageService::get_metadata`].
 pub type MetadataResponse = Option<Metadata>;
 /// Service response for [`StorageService::insert_object`].
@@ -206,9 +207,13 @@ impl StorageService {
     }
 
     /// Streams the contents of an object.
-    pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
+    ///
+    /// When `range` is `Some`, backends that support partial reads return only
+    /// the requested byte range. The returned [`ContentRange`] always describes
+    /// which bytes are in the stream, whether partial or full.
+    pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn("get", async move { inner.get_object(&id).await })
+        self.spawn("get", async move { inner.get_object(&id, range).await })
             .await
     }
 
@@ -243,6 +248,7 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
     use objectstore_types::metadata::Metadata;
+    use objectstore_types::range::ByteRange;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -298,7 +304,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(key).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -324,7 +330,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(key).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -367,7 +373,7 @@ mod tests {
             .unwrap();
 
         // Sanity: the object is readable through the service (follows the tombstone).
-        let (_, stream) = service.get_object(id.clone()).await.unwrap().unwrap();
+        let (_, _, stream) = service.get_object(id.clone(), None).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload_len);
 
@@ -375,11 +381,11 @@ mod tests {
         service.delete_object(id.clone()).await.unwrap();
 
         // The tombstone in BigTable should be gone, so the service returns None.
-        let after_delete = service.get_object(id.clone()).await.unwrap();
+        let after_delete = service.get_object(id.clone(), None).await.unwrap();
         assert!(after_delete.is_none(), "tombstone not deleted");
 
         // The real object in GCS must also be gone — no orphan.
-        let orphan = gcs_backend.get_object(&id).await.unwrap();
+        let orphan = gcs_backend.get_object(&id, None).await.unwrap();
         assert!(orphan.is_none(), "object leaked");
     }
 
@@ -399,7 +405,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, stream) = service.get_object(id).await.unwrap().unwrap();
+        let (_, _, stream) = service.get_object(id, None).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.as_ref(), b"hello world");
     }
@@ -423,7 +429,7 @@ mod tests {
 
         service.delete_object(id.clone()).await.unwrap();
 
-        let after = service.get_object(id).await.unwrap();
+        let after = service.get_object(id, None).await.unwrap();
         assert!(after.is_none());
     }
 
@@ -436,6 +442,7 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
+            _range: Option<ByteRange>,
         ) -> Result<GetResponse> {
             panic!("intentional panic in get_object");
         }
@@ -446,7 +453,7 @@ mod tests {
         let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)));
 
         let id = ObjectId::new(make_context(), "panic-test".into());
-        let result = service.get_object(id).await;
+        let result = service.get_object(id, None).await;
 
         let Err(Error::Panic(msg)) = result else {
             panic!("expected Panic error");
@@ -642,11 +649,11 @@ mod tests {
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
-        let result = service.get_object(id.clone()).await;
+        let result = service.get_object(id.clone(), None).await;
         assert!(matches!(result, Err(Error::Panic(_))));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
-        let result = service.get_object(id).await;
+        let result = service.get_object(id, None).await;
         assert!(
             !matches!(result, Err(Error::AtCapacity)),
             "permit was not released after panic"
