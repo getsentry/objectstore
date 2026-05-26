@@ -527,7 +527,12 @@ impl RowData {
 
         for cell in cells {
             // NB: All cells are written with the same timestamp; last write is safe.
-            expire_at = micros_to_time(cell.timestamp_micros);
+
+            // Only derive expiration from GC-family cells — manual-family cells
+            // use server-assigned timestamps that don't represent expiration.
+            if cell.family_name == FAMILY_GC {
+                expire_at = micros_to_time(cell.timestamp_micros);
+            }
 
             match cell.qualifier.as_slice() {
                 COLUMN_REDIRECT => {
