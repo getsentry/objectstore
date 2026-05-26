@@ -140,11 +140,9 @@ impl ChangeManager {
 
     /// Records the change to the log and returns a guard in the `Assembling` state.
     ///
-    /// Behaves like [`Self::record`], except that the guard is created in the
-    /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
-    /// This has the effect that cleanup will only be performed after the deadline has passed.
+    /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state.
+    /// This has the effect of deferring cleanup, e.g. to let the user retry the assembly.
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let cleanup_after = change.cleanup_after.unwrap_or_else(SystemTime::now);
         let token = self.tracker.token();
 
         let id = ChangeId::new();
@@ -153,7 +151,7 @@ impl ChangeManager {
         let state = ChangeState {
             id,
             change,
-            phase: ChangePhase::Assembling { cleanup_after },
+            phase: ChangePhase::Assembling,
             manager: self.clone(),
             _token: token,
         };
@@ -314,10 +312,7 @@ pub enum ChangePhase {
     /// Multipart upload completion can fail, and we want the client to be able to retry it
     /// without the change cleanup process racing to delete the LT blob.
     /// Therefore, cleanup of changes in this phase is deferred.
-    Assembling {
-        /// Earliest time at which this entry becomes eligible for cleanup.
-        cleanup_after: SystemTime,
-    },
+    Assembling,
     /// LT upload has succeeded and the tombstone is being updated.
     Written,
     /// The tombstone update failed due to a conflict.
@@ -359,7 +354,7 @@ impl ChangeState {
             // For `Recovered`, we must first check the state of the tombstone.
             ChangePhase::Recovered => self.read_tombstone().await,
             ChangePhase::Recorded => self.change.old.clone(),
-            ChangePhase::Assembling { .. } => {
+            ChangePhase::Assembling => {
                 objectstore_log::error!(
                     change = ?self.change,
                     "Assembling change reached in-process cleanup, ignoring (this should not happen)"
@@ -434,7 +429,7 @@ impl ChangeState {
 impl Drop for ChangeState {
     fn drop(&mut self) {
         match self.phase {
-            ChangePhase::Completed | ChangePhase::Assembling { .. } => {}
+            ChangePhase::Completed | ChangePhase::Assembling => {}
             _ => {
                 objectstore_log::error!(
                     change = ?self.change,
@@ -469,7 +464,7 @@ impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
             && state.phase != ChangePhase::Completed
-            && !matches!(state.phase, ChangePhase::Assembling { .. })
+            && !matches!(state.phase, ChangePhase::Assembling)
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             handle.spawn(state.cleanup());
