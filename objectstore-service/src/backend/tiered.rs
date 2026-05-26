@@ -241,6 +241,11 @@ impl TieredStorage {
         self.inner.clone().record(change).await
     }
 
+    /// Records the change to the log in the `Assembling` phase, and returns a guard that cleans up on drop.
+    async fn record_assembling(&self, change: Change) -> Result<ChangeGuard> {
+        self.inner.clone().record_assembling(change).await
+    }
+
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
@@ -276,6 +281,7 @@ impl TieredStorage {
                 id: id.clone(),
                 new: None,
                 old: Some(target.clone()),
+                cleanup_after: None,
             })
             .await?;
 
@@ -317,6 +323,7 @@ impl TieredStorage {
                 id: id.clone(),
                 new: Some(new.clone()),
                 old: current.clone(),
+                cleanup_after: None,
             })
             .await?;
 
@@ -471,6 +478,7 @@ impl Backend for TieredStorage {
                     id: id.clone(),
                     new: None,
                     old: Some(tombstone.target.clone()),
+                    cleanup_after: None,
                 })
                 .await?;
             guard.advance(ChangePhase::Written);
@@ -684,10 +692,11 @@ impl MultipartUploadBackend for TieredStorage {
             key: tiered.revision,
         };
         let mut guard = self
-            .record_change(Change {
+            .record_assembling(Change {
                 id: id.clone(),
                 new: Some(physical.clone()),
                 old: current.clone(),
+                cleanup_after: None,
             })
             .await?;
 
@@ -1364,6 +1373,7 @@ mod tests {
             id: make_id("object-key"),
             new: Some(make_id("cleanup-target")),
             old: None,
+            cleanup_after: None,
         };
 
         // Build the guard inside a temporary runtime, then let the runtime drop
@@ -1387,6 +1397,7 @@ mod tests {
             id: make_id("object-key"),
             new: None,
             old: None,
+            cleanup_after: None,
         };
         let mut guard = storage.record_change(change).await.unwrap();
 
@@ -1727,6 +1738,99 @@ mod tests {
         let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload2);
+    }
+
+    // --- Multipart assembling guard ---
+
+    /// Completes the multipart upload on the inner backend, then returns an error
+    /// to simulate a lost response.
+    #[derive(Debug)]
+    struct CompleteMultipartThenFail;
+
+    #[async_trait::async_trait]
+    impl Hooks for CompleteMultipartThenFail {
+        async fn complete_multipart(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            upload_id: &UploadId,
+            parts: Vec<CompletedPart>,
+        ) -> Result<CompleteMultipartResponse> {
+            inner.complete_multipart(id, upload_id, parts).await?;
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated lost response",
+            )))
+        }
+    }
+
+    /// When `complete_multipart` succeeds on the inner backend but the response is
+    /// lost, the guard drops in `Assembling` phase. In-process cleanup must be
+    /// skipped (the blob must survive) and the changelog entry must persist for
+    /// a future recovery scan.
+    #[tokio::test]
+    async fn assembling_guard_skips_cleanup_and_preserves_log_entry() {
+        let lt_inner = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(InMemoryBackend::new("hv")),
+            Box::new(TestBackend::with_inner(
+                lt_inner.clone(),
+                CompleteMultipartThenFail,
+            )),
+            Box::new(log.clone()),
+        );
+
+        let id = make_id("mp-assembling");
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+
+        // complete_multipart fails (simulated lost response) — guard drops in Assembling.
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+
+        // Drain any background tasks.
+        storage.join().await;
+
+        // The blob must NOT have been cleaned up.
+        assert!(
+            !lt_inner.is_empty(),
+            "LT blob should survive Assembling guard drop"
+        );
+
+        // The changelog entry must persist for future recovery.
+        // scan() filters by cleanup_after (24h in the future), so the entry is hidden.
+        let entries = log.scan().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "entry should be filtered by scan() due to cleanup_after"
+        );
+        // But the entry is still in the log.
+        assert_eq!(log.len(), 1, "changelog entry must persist");
     }
 
     #[tokio::test]

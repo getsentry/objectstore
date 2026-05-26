@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -35,6 +35,10 @@ use crate::id::ObjectId;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum delay for exponential backoff retries in background cleanup tasks.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Amount of time for which a change is kept in the Assembling state before becoming eligible for
+/// cleanup.
+const ASSEMBLING_CLEANUP_DELAY: Duration = Duration::from_hours(24);
 
 /// Unique identifier for a change log entry.
 ///
@@ -76,6 +80,11 @@ pub struct Change {
     ///
     /// Needs cleanup on success (the CAS committed and the old blob is unreferenced).
     pub old: Option<ObjectId>,
+    /// Earliest time at which this entry becomes eligible for cleanup.
+    ///
+    /// [`ChangeLog::scan`] automatically filters out entries whose deadline has not yet been
+    /// reached.
+    pub cleanup_after: Option<SystemTime>,
 }
 
 /// Manager for multi-step storage changes, including backends and durable log.
@@ -127,6 +136,31 @@ impl ChangeManager {
             id,
             change,
             phase: ChangePhase::Recorded,
+            manager: self.clone(),
+            _token: token,
+        };
+
+        Ok(ChangeGuard { state: Some(state) })
+    }
+
+    /// Records the change to the log and returns a guard.
+    ///
+    /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state and
+    /// cleanup is only attempted after `ASSEMBLING_CLEANUP_DELAY`.
+    pub async fn record_assembling(self: Arc<Self>, mut change: Change) -> Result<ChangeGuard> {
+        change.cleanup_after = Some(SystemTime::now() + ASSEMBLING_CLEANUP_DELAY);
+
+        let token = self.tracker.token();
+
+        let id = ChangeId::new();
+        self.changelog.record(&id, &change).await?;
+
+        let state = ChangeState {
+            id,
+            change,
+            phase: ChangePhase::Assembling {
+                deadline: SystemTime::now() + ASSEMBLING_CLEANUP_DELAY,
+            },
             manager: self.clone(),
             _token: token,
         };
@@ -211,6 +245,18 @@ pub struct InMemoryChangeLog {
     entries: Arc<Mutex<HashMap<ChangeId, Change>>>,
 }
 
+impl InMemoryChangeLog {
+    /// Returns the total number of entries, ignoring `cleanup_after` filtering.
+    pub fn len(&self) -> usize {
+        self.entries.lock().expect("lock poisoned").len()
+    }
+
+    /// Returns `true` if the log contains no entries, ignoring `cleanup_after` filtering.
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().expect("lock poisoned").is_empty()
+    }
+}
+
 #[async_trait::async_trait]
 impl ChangeLog for InMemoryChangeLog {
     async fn record(&self, id: &ChangeId, change: &Change) -> Result<()> {
@@ -226,9 +272,14 @@ impl ChangeLog for InMemoryChangeLog {
     }
 
     async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
+        let now = SystemTime::now();
         let entries = self.entries.lock().expect("lock poisoned");
         let result = entries
             .iter()
+            .filter(|(_, change)| match change.cleanup_after {
+                None => true,
+                Some(deadline) => now >= deadline,
+            })
             .map(|(id, change)| (id.clone(), change.clone()))
             .collect();
         Ok(result)
@@ -265,6 +316,15 @@ pub enum ChangePhase {
     Recovered,
     /// The change is recorded in the log and LT upload has started.
     Recorded,
+    /// The LT blob originated from a multipart upload and is being assembled.
+    ///
+    /// Multipart upload completion can fail, and we want the client to be able to retry it
+    /// without the change cleanup process racing to delete the LT blob.
+    /// Therefore, cleanup of changes in this phase is deferred.
+    Assembling {
+        /// Earliest time at which this entry becomes eligible for cleanup.
+        deadline: SystemTime,
+    },
     /// LT upload has succeeded and the tombstone is being updated.
     Written,
     /// The tombstone update failed due to a conflict.
@@ -306,6 +366,13 @@ impl ChangeState {
             // For `Recovered`, we must first check the state of the tombstone.
             ChangePhase::Recovered => self.read_tombstone().await,
             ChangePhase::Recorded => self.change.old.clone(),
+            ChangePhase::Assembling { .. } => {
+                objectstore_log::error!(
+                    change = ?self.change,
+                    "Assembling change should not reach in-process cleanup"
+                );
+                return;
+            }
             // For `Written`, the CAS outcome is unknown — read HV to determine it.
             ChangePhase::Written => self.read_tombstone().await,
             ChangePhase::Lost => self.change.old.clone(),
@@ -373,12 +440,21 @@ impl ChangeState {
 
 impl Drop for ChangeState {
     fn drop(&mut self) {
-        if self.phase != ChangePhase::Completed {
-            objectstore_log::error!(
-                change = ?self.change,
-                phase = ?self.phase,
-                "Operation dropped without completing cleanup"
-            );
+        match self.phase {
+            ChangePhase::Completed => {}
+            ChangePhase::Assembling { .. } => {
+                objectstore_log::debug!(
+                    change = ?self.change,
+                    "Assembling change deferred to persistent changelog recovery"
+                );
+            }
+            _ => {
+                objectstore_log::error!(
+                    change = ?self.change,
+                    phase = ?self.phase,
+                    "Operation dropped without completing cleanup"
+                );
+            }
         }
     }
 }
@@ -406,12 +482,11 @@ impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
             && state.phase != ChangePhase::Completed
+            && !matches!(state.phase, ChangePhase::Assembling { .. })
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             handle.spawn(state.cleanup());
         }
-
-        // NB: Drop of `ChangeState` logs an error if cleanup is not scheduled.
     }
 }
 
@@ -440,6 +515,7 @@ mod tests {
             id: make_id("object-key"),
             new: Some(make_id("object-key/rev1")),
             old: None,
+            cleanup_after: None,
         };
 
         log.record(&id, &change).await.unwrap();
@@ -457,6 +533,7 @@ mod tests {
             id: make_id("object-key"),
             new: None,
             old: Some(make_id("object-key/rev1")),
+            cleanup_after: None,
         };
 
         log.record(&id, &change).await.unwrap();
@@ -495,6 +572,7 @@ mod tests {
                 id: make_id("crash-test"),
                 new: Some(make_id("crash-test/rev")),
                 old: None,
+                cleanup_after: None,
             }))
             .unwrap()
             // Runtime drops here while `guard` is still alive outside it.
@@ -507,5 +585,159 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let entries = rt.block_on(log.scan()).unwrap();
         assert_eq!(entries.len(), 1, "log entry must persist");
+    }
+
+    #[tokio::test]
+    async fn scan_filters_by_cleanup_after() {
+        let log = InMemoryChangeLog::default();
+
+        let ready_id = ChangeId::new();
+        log.record(
+            &ready_id,
+            &Change {
+                id: make_id("ready"),
+                new: Some(make_id("ready/rev")),
+                old: None,
+                cleanup_after: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let expired_id = ChangeId::new();
+        log.record(
+            &expired_id,
+            &Change {
+                id: make_id("expired"),
+                new: Some(make_id("expired/rev")),
+                old: None,
+                cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let deferred_id = ChangeId::new();
+        log.record(
+            &deferred_id,
+            &Change {
+                id: make_id("deferred"),
+                new: Some(make_id("deferred/rev")),
+                old: None,
+                cleanup_after: Some(SystemTime::now() + Duration::from_hours(24)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(log.len(), 3);
+
+        let entries = log.scan().await.unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let ids: Vec<_> = entries.iter().map(|(id, _)| id).collect();
+        assert!(ids.contains(&&ready_id));
+        assert!(ids.contains(&&expired_id));
+    }
+
+    /// After a multipart `complete` created an LT blob but the tombstone was never
+    /// committed, recovery (once the grace period expires) deletes the orphaned blob.
+    #[tokio::test]
+    async fn recovery_cleans_up_orphaned_assembling_blob() {
+        use crate::backend::common::Backend;
+        use crate::backend::in_memory::InMemoryBackend;
+
+        let hv = InMemoryBackend::new("hv");
+        let lt = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+
+        let logical = make_id("obj");
+        let physical = make_id("obj/rev1");
+
+        // Simulate a blob that was assembled in LT but never got a tombstone.
+        lt.put_object(
+            &physical,
+            &Default::default(),
+            crate::stream::single("data"),
+        )
+        .await
+        .unwrap();
+
+        // Insert a changelog entry with the grace period already expired.
+        let change_id = ChangeId::new();
+        let change = Change {
+            id: logical,
+            new: Some(physical.clone()),
+            old: None,
+            cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
+        };
+        log.record(&change_id, &change).await.unwrap();
+
+        let manager = ChangeManager::new(Box::new(hv), Box::new(lt.clone()), Box::new(log.clone()));
+        manager.recover().await.unwrap();
+
+        lt.get(&physical).expect_not_found();
+
+        let entries = log.scan().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "changelog entry not removed after recovery"
+        );
+    }
+
+    /// If a `complete_multipart` retry succeeded and committed the tombstone
+    /// before recovery runs, recovery must preserve the referenced blob.
+    #[tokio::test]
+    async fn recovery_preserves_assembling_blob_when_retry_committed() {
+        use crate::backend::common::{Backend, TieredWrite, Tombstone};
+        use crate::backend::in_memory::InMemoryBackend;
+        use objectstore_types::metadata::ExpirationPolicy;
+
+        let hv = InMemoryBackend::new("hv");
+        let lt = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+
+        let logical = make_id("obj");
+        let physical = make_id("obj/rev1");
+
+        // Blob exists in LT.
+        lt.put_object(
+            &physical,
+            &Default::default(),
+            crate::stream::single("data"),
+        )
+        .await
+        .unwrap();
+
+        // A retry committed the tombstone pointing to this blob.
+        let tombstone = Tombstone {
+            target: physical.clone(),
+            expiration_policy: ExpirationPolicy::Manual,
+        };
+        hv.compare_and_write(&logical, None, TieredWrite::Tombstone(tombstone))
+            .await
+            .unwrap();
+
+        // Insert an expired changelog entry.
+        let change_id = ChangeId::new();
+        let change = Change {
+            id: logical,
+            new: Some(physical.clone()),
+            old: None,
+            cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
+        };
+        log.record(&change_id, &change).await.unwrap();
+
+        let manager = ChangeManager::new(Box::new(hv), Box::new(lt.clone()), Box::new(log.clone()));
+        manager.recover().await.unwrap();
+
+        // Blob must still exist — the tombstone references it.
+        lt.get(&physical).expect_object();
+
+        let entries = log.scan().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "changelog entry not removed after recovery"
+        );
     }
 }
