@@ -110,13 +110,11 @@ async fn object_get(
     let mut response = (status, metadata_headers, Body::from_stream(stream)).into_response();
     let resp_headers = response.headers_mut();
     resp_headers.insert(http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    if content_range.total > 0 {
+    if !content_range.is_full() {
         resp_headers.insert(
             http::header::CONTENT_LENGTH,
             content_range.len().to_string().parse().unwrap(),
         );
-    }
-    if !content_range.is_full() {
         resp_headers.insert(
             http::header::CONTENT_RANGE,
             content_range.to_header_value().parse().unwrap(),

@@ -326,7 +326,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(ContentRange::parse)
-                .unwrap_or_else(|| ContentRange::full(response.content_length().unwrap_or(0)))
+                .ok_or_else(|| Error::Generic {
+                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
+                    cause: None,
+                })?
         } else {
             ContentRange::full(metadata.size.unwrap_or(0) as u64)
         };

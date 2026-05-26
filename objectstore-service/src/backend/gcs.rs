@@ -700,9 +700,10 @@ impl Backend for GcsBackend {
                 .get(header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(ContentRange::parse)
-                .unwrap_or_else(|| {
-                    ContentRange::full(payload_response.content_length().unwrap_or(0))
-                })
+                .ok_or_else(|| Error::Generic {
+                    context: "GCS: 206 response missing valid Content-Range header".to_owned(),
+                    cause: None,
+                })?
         } else {
             ContentRange::full(metadata.size.unwrap_or(0) as u64)
         };
