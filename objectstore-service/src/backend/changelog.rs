@@ -144,10 +144,7 @@ impl ChangeManager {
     /// `Assembling` state with [`Change::cleanup_after`] as its deadline.
     /// This has the effect that cleanup will only be performed after the deadline has passed.
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let cleanup_after = change
-            .cleanup_after
-            .expect("assembling Change must have a cleanup_after deadline");
-
+        let cleanup_after = change.cleanup_after.unwrap_or_else(|| SystemTime::now());
         let token = self.tracker.token();
 
         let id = ChangeId::new();
