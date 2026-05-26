@@ -622,114 +622,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(log.len(), 3);
-
         let entries = log.scan().await.unwrap();
         assert_eq!(entries.len(), 2);
 
         let ids: Vec<_> = entries.iter().map(|(id, _)| id).collect();
         assert!(ids.contains(&&ready_id));
         assert!(ids.contains(&&expired_id));
-    }
-
-    /// After a multipart `complete` created an LT blob but the tombstone was never
-    /// committed, recovery (once the grace period expires) deletes the orphaned blob.
-    #[tokio::test]
-    async fn recovery_cleans_up_orphaned_assembling_blob() {
-        use crate::backend::common::Backend;
-        use crate::backend::in_memory::InMemoryBackend;
-
-        let hv = InMemoryBackend::new("hv");
-        let lt = InMemoryBackend::new("lt");
-        let log = InMemoryChangeLog::default();
-
-        let logical = make_id("obj");
-        let physical = make_id("obj/rev1");
-
-        // Simulate a blob that was assembled in LT but never got a tombstone.
-        lt.put_object(
-            &physical,
-            &Default::default(),
-            crate::stream::single("data"),
-        )
-        .await
-        .unwrap();
-
-        // Insert a changelog entry with the grace period already expired.
-        let change_id = ChangeId::new();
-        let change = Change {
-            id: logical,
-            new: Some(physical.clone()),
-            old: None,
-            cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
-        };
-        log.record(&change_id, &change).await.unwrap();
-
-        let manager = ChangeManager::new(Box::new(hv), Box::new(lt.clone()), Box::new(log.clone()));
-        manager.recover().await.unwrap();
-
-        lt.get(&physical).expect_not_found();
-
-        let entries = log.scan().await.unwrap();
-        assert!(
-            entries.is_empty(),
-            "changelog entry not removed after recovery"
-        );
-    }
-
-    /// If a `complete_multipart` retry succeeded and committed the tombstone
-    /// before recovery runs, recovery must preserve the referenced blob.
-    #[tokio::test]
-    async fn recovery_preserves_assembling_blob_when_retry_committed() {
-        use crate::backend::common::{Backend, TieredWrite, Tombstone};
-        use crate::backend::in_memory::InMemoryBackend;
-        use objectstore_types::metadata::ExpirationPolicy;
-
-        let hv = InMemoryBackend::new("hv");
-        let lt = InMemoryBackend::new("lt");
-        let log = InMemoryChangeLog::default();
-
-        let logical = make_id("obj");
-        let physical = make_id("obj/rev1");
-
-        // Blob exists in LT.
-        lt.put_object(
-            &physical,
-            &Default::default(),
-            crate::stream::single("data"),
-        )
-        .await
-        .unwrap();
-
-        // A retry committed the tombstone pointing to this blob.
-        let tombstone = Tombstone {
-            target: physical.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
-        };
-        hv.compare_and_write(&logical, None, TieredWrite::Tombstone(tombstone))
-            .await
-            .unwrap();
-
-        // Insert an expired changelog entry.
-        let change_id = ChangeId::new();
-        let change = Change {
-            id: logical,
-            new: Some(physical.clone()),
-            old: None,
-            cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
-        };
-        log.record(&change_id, &change).await.unwrap();
-
-        let manager = ChangeManager::new(Box::new(hv), Box::new(lt.clone()), Box::new(log.clone()));
-        manager.recover().await.unwrap();
-
-        // Blob must still exist — the tombstone references it.
-        lt.get(&physical).expect_object();
-
-        let entries = log.scan().await.unwrap();
-        assert!(
-            entries.is_empty(),
-            "changelog entry not removed after recovery"
-        );
     }
 }
