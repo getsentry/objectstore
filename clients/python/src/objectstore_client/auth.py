@@ -79,7 +79,10 @@ class TokenGenerator:
         claims = {
             "res": {
                 "os:usecase": usecase,
-                **{k: str(v) for k, v in scope.dict().items()},
+                "scopes": [
+                    {"name": key, "value": str(value)}
+                    for key, value in scope.dict().items()
+                ],
             },
             "permissions": (
                 permissions if permissions is not None else self.permissions

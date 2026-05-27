@@ -26,8 +26,13 @@ struct JwtClaims {
 struct JwtRes {
     #[serde(rename = "os:usecase")]
     usecase: String,
-    #[serde(flatten)]
-    scopes: BTreeMap<String, String>,
+    scopes: Vec<JwtScope>,
+}
+
+#[derive(Serialize)]
+struct JwtScope {
+    name: String,
+    value: String,
 }
 
 /// Signs a static token for the given usecase and scopes.
@@ -44,7 +49,10 @@ fn sign_static_token(usecase: &str, scopes: &[(&str, &str)]) -> String {
             usecase: usecase.into(),
             scopes: scopes
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| JwtScope {
+                    name: k.to_string(),
+                    value: v.to_string(),
+                })
                 .collect(),
         },
     };
@@ -416,7 +424,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
-    assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
+    assert_eq!(&get1.payload().await.unwrap()[..], b"first object");
 
     // GET key-2 (automatic decompression)
     let get2 = gets
@@ -426,7 +434,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get2.metadata.compression, None);
     assert!(get2.metadata.time_created.is_some());
-    assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
+    assert_eq!(&get2.payload().await.unwrap()[..], b"second object");
 
     // DELETE key-3
     assert!(deletes.contains("key-3"), "missing delete for key-3");
