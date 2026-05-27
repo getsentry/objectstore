@@ -5,7 +5,7 @@ use std::time::SystemTime;
 /// Identifier for an in-progress multipart upload.
 pub type UploadId = String;
 /// 1-indexed position of a part within its multipart upload.
-pub type PartNumber = u32;
+pub type PartNumber = std::num::NonZeroU32;
 /// Opaque per-part identifier returned by the backend after a successful part upload.
 pub type ETag = String;
 

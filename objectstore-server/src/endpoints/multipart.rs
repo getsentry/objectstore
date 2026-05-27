@@ -14,11 +14,9 @@ use http::HeaderValue;
 use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::multipart::CompletedPart;
+use objectstore_service::multipart::{CompletedPart, PartNumber};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
-
-use objectstore_types::auth::Permission;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
@@ -53,7 +51,7 @@ pub fn router() -> Router<ServiceState> {
 #[derive(Debug, Deserialize)]
 struct UploadPartQuery {
     upload_id: String,
-    part_number: u32,
+    part_number: PartNumber,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +63,7 @@ struct UploadIdQuery {
 struct ListPartsQuery {
     upload_id: String,
     max_parts: Option<u32>,
-    part_number_marker: Option<u32>,
+    part_number_marker: Option<PartNumber>,
 }
 
 // --- Request/Response types ---
@@ -91,15 +89,15 @@ struct PartInfo {
 
 #[derive(Debug, Serialize)]
 struct ListPartsResponse {
-    parts: BTreeMap<u32, PartInfo>,
+    parts: BTreeMap<PartNumber, PartInfo>,
     is_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    next_part_number_marker: Option<u32>,
+    next_part_number_marker: Option<PartNumber>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompletePartRequest {
-    part_number: u32,
+    part_number: PartNumber,
     etag: String,
 }
 
@@ -122,13 +120,6 @@ struct CompleteErrorDetail {
 #[derive(Debug, Serialize)]
 struct CompleteErrorResponse {
     error: CompleteErrorDetail,
-}
-
-fn validate_part_number(part_number: u32) -> ApiResult<()> {
-    if part_number == 0 {
-        return Err(ApiError::Client("part_number must be >= 1".into()));
-    }
-    Ok(())
 }
 
 // --- Handlers ---
@@ -190,7 +181,6 @@ async fn upload_part(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
-    validate_part_number(params.part_number)?;
 
     let content_md5 = headers
         .get("content-md5")
@@ -262,10 +252,6 @@ async fn complete(
     Query(params): Query<UploadIdQuery>,
     Json(body): Json<CompleteRequest>,
 ) -> ApiResult<Response> {
-    for part in &body.parts {
-        validate_part_number(part.part_number)?;
-    }
-
     let key = id.key().to_string();
 
     let parts: Vec<CompletedPart> = body

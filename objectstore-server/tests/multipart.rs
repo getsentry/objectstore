@@ -562,8 +562,7 @@ async fn test_complete_zero_part_number() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     Ok(())
 }
 
