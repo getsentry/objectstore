@@ -49,6 +49,14 @@ objectstore\_client.metrics module
    :show-inheritance:
    :undoc-members:
 
+objectstore\_client.multipart module
+------------------------------------
+
+.. automodule:: objectstore_client.multipart
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 objectstore\_client.scope module
 --------------------------------
 
