@@ -349,23 +349,27 @@ def test_many_full_cycle(server_url: str) -> None:
     usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
     session = client.session(usecase, org=42, project=2001)
 
-    # Put first
-    put_results = list(
+    # Same-key put/get operations should execute sequentially even though
+    # the server handles operations concurrently within a single batch.
+    results = list(
         session.many(
-            [Put(b"many-data", key="many-k1", compression="none")],
+            [
+                Put(b"many-data", key="many-k1", compression="none"),
+                Get("many-k1"),
+            ],
             concurrency=1,
         )
     )
-    assert len(put_results) == 1
-    assert put_results[0].key == "many-k1"
-    assert put_results[0].response is None
+    assert len(results) == 2
+    put_result = results[0]
+    get_result = results[1]
 
-    # Get in a separate batch (server processes ops concurrently within a batch)
-    get_results = list(session.many([Get("many-k1")], concurrency=1))
-    assert len(get_results) == 1
-    assert get_results[0].key == "many-k1"
-    assert isinstance(get_results[0].response, GetResponse)
-    assert get_results[0].response.payload.read() == b"many-data"
+    assert put_result.key == "many-k1"
+    assert put_result.response is None
+
+    assert get_result.key == "many-k1"
+    assert isinstance(get_result.response, GetResponse)
+    assert get_result.response.payload.read() == b"many-data"
 
     # Delete in a subsequent batch
     delete_results = list(session.many([Delete("many-k1")], concurrency=1))

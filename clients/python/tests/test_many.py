@@ -416,6 +416,22 @@ def test_parse_missing_response_part() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_mock_batch_response(batch_response_parts: list[ResponsePart]) -> MagicMock:
+    from objectstore_client.multipart import RequestPart, encode_multipart
+
+    fake_parts = [
+        RequestPart(headers=p.headers, body=p.body) for p in batch_response_parts
+    ]
+    content_type, body_iter = encode_multipart(fake_parts)
+    body = b"".join(body_iter)
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.headers = {"Content-Type": content_type}
+    mock_response.stream.return_value = iter([body])
+    return mock_response
+
+
 def _make_mock_session(
     batch_response_parts: list[ResponsePart] | None = None,
 ) -> MagicMock:
@@ -428,21 +444,9 @@ def _make_mock_session(
     session._make_headers.return_value = {}
 
     if batch_response_parts is not None:
-        from objectstore_client.multipart import RequestPart, encode_multipart
-
-        # Build a fake multipart response body
-        fake_parts = [
-            RequestPart(headers=p.headers, body=p.body) for p in batch_response_parts
-        ]
-        content_type, body_iter = encode_multipart(fake_parts)
-        body = b"".join(body_iter)
-
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.headers = {"Content-Type": content_type}
-        # _send_batch uses preload_content=False and response.stream(chunk_size)
-        mock_response.stream.return_value = iter([body])
-        session._pool.request.return_value = mock_response
+        session._pool.request.return_value = _make_mock_batch_response(
+            batch_response_parts
+        )
 
     return session
 
@@ -515,6 +519,29 @@ def test_execute_many_preserves_order_sequential() -> None:
     assert results[0].key == "k3"
     assert results[1].key == "k1"
     assert results[2].key == "k2"
+
+
+def test_execute_many_sequential_splits_key_conflicts() -> None:
+    """concurrency=1 should not run same-key mutations and reads in one batch."""
+    put_response = _make_mock_batch_response(
+        [_make_response_part(0, "200 OK", "k1", kind="insert")]
+    )
+    get_response = _make_mock_batch_response(
+        [_make_response_part(0, "200 OK", "k1", kind="get", body=b"data")]
+    )
+    session = _make_mock_session()
+    session._pool.request.side_effect = [put_response, get_response]
+
+    results = list(
+        execute_many(
+            session,
+            [Put(b"data", key="k1", compression="none"), Get("k1")],
+            concurrency=1,
+        )
+    )
+
+    assert [result.key for result in results] == ["k1", "k1"]
+    assert session._pool.request.call_count == 2
 
 
 def test_execute_many_individual_put() -> None:

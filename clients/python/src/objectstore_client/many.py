@@ -218,6 +218,18 @@ class _IndividualWork:
 _WorkItem = _BatchWork | _IndividualWork
 
 
+def _operation_key(op: Operation, prepared: _PreparedPut | None) -> str | None:
+    if isinstance(op, (Get, Delete)):
+        return op.key
+    if prepared is not None:
+        return prepared.key
+    return op.key or None
+
+
+def _is_mutating(op: Operation) -> bool:
+    return isinstance(op, (Put, Delete))
+
+
 def _iter_batches(
     ops: Sequence[_ClassifiedOpWithSize],
 ) -> Iterator[list[_ClassifiedOp]]:
@@ -557,6 +569,7 @@ def _execute_many_gen(
     individual: list[_ClassifiedOp] = []
     sequential_work: list[_WorkItem] = []
     pending_batchable: list[_ClassifiedOpWithSize] = []
+    pending_batchable_keys: dict[str, bool] = {}
 
     def flush_pending_batchable() -> None:
         if not pending_batchable:
@@ -565,6 +578,23 @@ def _execute_many_gen(
             _BatchWork(chunk) for chunk in _iter_batches(pending_batchable)
         )
         pending_batchable.clear()
+        pending_batchable_keys.clear()
+
+    def add_batchable(batch_entry: _ClassifiedOpWithSize) -> None:
+        _, op, prepared, _ = batch_entry
+        key = _operation_key(op, prepared)
+        mutating = _is_mutating(op)
+        if key is not None and key in pending_batchable_keys:
+            pending_has_mutation = pending_batchable_keys[key]
+            if pending_has_mutation or mutating:
+                flush_pending_batchable()
+
+        batchable.append(batch_entry)
+        pending_batchable.append(batch_entry)
+        if key is not None:
+            pending_batchable_keys[key] = (
+                pending_batchable_keys.get(key, False) or mutating
+            )
 
     for idx, op in enumerate(operations):
         if isinstance(op, Put):
@@ -578,8 +608,7 @@ def _execute_many_gen(
                     sequential_work.append(_IndividualWork(entry))
                 else:
                     batch_entry: _ClassifiedOpWithSize = (idx, op, prepared, size)
-                    batchable.append(batch_entry)
-                    pending_batchable.append(batch_entry)
+                    add_batchable(batch_entry)
             else:
                 # IO[bytes] bodies are always sent individually to avoid eager reading.
                 flush_pending_batchable()
@@ -588,8 +617,7 @@ def _execute_many_gen(
                 sequential_work.append(_IndividualWork(entry))
         else:
             batch_entry = (idx, op, None, 0)
-            batchable.append(batch_entry)
-            pending_batchable.append(batch_entry)
+            add_batchable(batch_entry)
 
     flush_pending_batchable()
 
