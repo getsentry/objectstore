@@ -146,7 +146,7 @@ impl Error {
             Self::Panic(_) => Level::ERROR,
             Self::Dropped => Level::ERROR,
             Self::UnexpectedTombstone => Level::ERROR,
-            Self::NotImplemented => Level::WARN,
+            Self::NotImplemented => Level::ERROR,
             Self::Generic { .. } => Level::ERROR,
         }
     }
