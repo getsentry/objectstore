@@ -165,7 +165,7 @@ impl AuthAwareService {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> ApiResult<ListPartsResponse> {
-        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service
             .list_parts(id, upload_id, max_parts, part_number_marker)
