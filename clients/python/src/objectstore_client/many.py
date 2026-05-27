@@ -422,7 +422,7 @@ def _parse_batch_response(
 def _send_batch(
     session: Session,
     ops: Sequence[tuple[int, Operation, _PreparedPut | None]],
-) -> Iterator[tuple[int, ManyResponse]]:
+) -> list[tuple[int, ManyResponse]]:
     """Send a batch of operations as a single multipart request."""
     from objectstore_client.client import RequestError
 
@@ -450,13 +450,16 @@ def _send_batch(
                     response.status,
                     error_body,
                 )
-                yield from _batch_level_error(ops, error)
-                return
+                return _batch_level_error(ops, error)
 
             response_content_type = response.headers.get("Content-Type", "")
-            yield from _parse_batch_response(
-                iter_multipart_response(response_content_type, response.stream(65536)),
-                ops,
+            return list(
+                _parse_batch_response(
+                    iter_multipart_response(
+                        response_content_type, response.stream(65536)
+                    ),
+                    ops,
+                )
             )
         finally:
             response.drain_conn()
@@ -465,7 +468,7 @@ def _send_batch(
         raise
     except Exception as exc:
         error = RequestError(f"Batch request failed: {exc}", 0, str(exc))
-        yield from _batch_level_error(ops, error)
+        return _batch_level_error(ops, error)
 
 
 def _batch_level_error(
@@ -624,9 +627,6 @@ def _execute_many_gen(
     # Step 2: Partition batchable ops into batch chunks.
     batch_chunks = list(_iter_batches(batchable))
 
-    def run_batch(chunk: list[_ClassifiedOp]) -> list[tuple[int, ManyResponse]]:
-        return list(_send_batch(session, chunk))
-
     def run_individual(entry: _ClassifiedOp) -> list[tuple[int, ManyResponse]]:
         idx, op, prepared = entry
         return [_execute_individual(session, idx, op, prepared)]
@@ -645,7 +645,9 @@ def _execute_many_gen(
                     yield result
     else:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [executor.submit(run_batch, chunk) for chunk in batch_chunks]
+            futures = [
+                executor.submit(_send_batch, session, chunk) for chunk in batch_chunks
+            ]
             futures += [executor.submit(run_individual, entry) for entry in individual]
             for future in as_completed(futures):
                 for _, result in future.result():
