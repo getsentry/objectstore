@@ -45,7 +45,9 @@ def encode_multipart(parts: Iterable[RequestPart]) -> tuple[str, Iterator[bytes]
             yield f"--{boundary}\r\n".encode()
             yield b"content-disposition: form-data; name=part\r\n"
             for name, value in part.headers.items():
-                yield f"{name}: {value}\r\n".encode()
+                clean_name = name.replace("\r", "").replace("\n", "")
+                clean_value = value.replace("\r", "").replace("\n", "")
+                yield f"{clean_name}: {clean_value}\r\n".encode()
             yield b"\r\n"
             if isinstance(part.body, bytes):
                 yield part.body
