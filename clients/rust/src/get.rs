@@ -129,6 +129,9 @@ pub(crate) fn maybe_decompress(
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
             let mut decoder = ZstdDecoder::new(StreamReader::new(stream));
+            // Multipart uploads with compression, when each part is compressed individually,
+            // will consist of multiple concatenated zstd frames.
+            // This allows the client to handle automatic decompression for these objects transparently.
             decoder.multiple_members(true);
             ReaderStream::new(decoder).boxed()
         }
