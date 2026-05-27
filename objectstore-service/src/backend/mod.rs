@@ -75,7 +75,7 @@ async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backe
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
         StorageConfig::S3Compatible(c) => {
-            Box::new(s3_compatible::S3CompatibleBackend::without_token(c))
+            Box::new(s3_compatible::S3CompatibleBackend::without_token(c)?)
         }
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
