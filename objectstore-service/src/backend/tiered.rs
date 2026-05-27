@@ -112,7 +112,7 @@ use crate::backend::common::{
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::stream::{ClientStream, SizedPeek};
 
@@ -318,6 +318,15 @@ impl TieredStorage {
             .put_object(&new, metadata, stream)
             .await?;
         guard.advance(ChangePhase::Written);
+
+        if !guard.is_valid() {
+            // The log is no longer synchronized due to backend failures. Abort since writing now
+            // could lead to an orphan.
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "failed to keep write-ahead log synchronize",
+            )));
+        }
 
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let tombstone = Tombstone {
@@ -1280,10 +1289,6 @@ mod tests {
         assert!(lt_inner.is_empty(), "orphaned LT blob was not cleaned up");
 
         // The log entry must be gone once cleanup completes.
-        let entries = log.scan().await.unwrap();
-        assert!(
-            entries.is_empty(),
-            "changelog entry not removed after cleanup"
-        );
+        assert!(log.is_empty(), "changelog entry not removed after cleanup");
     }
 }
