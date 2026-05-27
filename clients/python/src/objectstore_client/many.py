@@ -437,36 +437,22 @@ def _execute_individual(
             return (original_idx, ManyResponse(key=op.key, response=None))
 
         elif isinstance(op, Put):
-            if prepared is not None:
-                # Already compressed: pass compression="none" to avoid re-compressing.
-                key = session.put(
-                    prepared.body,
-                    key=prepared.key,
-                    compression="none",
-                    content_type=op.content_type,
-                    metadata=op.metadata,
-                    expiration_policy=op.expiration_policy,
-                    origin=op.origin,
-                )
-            else:
-                # IO[bytes] body: let session.put() handle compression normally.
-                key = session.put(
-                    op.contents,
-                    key=op.key,
-                    compression=op.compression,
-                    content_type=op.content_type,
-                    metadata=op.metadata,
-                    expiration_policy=op.expiration_policy,
-                    origin=op.origin,
-                )
+            key = session.put(
+                op.contents,
+                key=op.key,
+                compression=op.compression,
+                content_type=op.content_type,
+                metadata=op.metadata,
+                expiration_policy=op.expiration_policy,
+                origin=op.origin,
+            )
             return (original_idx, ManyResponse(key=key, response=None))
 
     except RequestError as exc:
         if isinstance(op, (Get, Delete)):
             key = op.key
         else:
-            # op is Put: use prepared.key if available, else op.key (for IO[bytes] path)
-            key = (prepared.key if prepared is not None else op.key) or "<unknown>"
+            key = op.key or "<unknown>"
         return (original_idx, ManyResponse(key=key, response=exc))
 
 
