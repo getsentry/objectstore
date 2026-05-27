@@ -539,10 +539,11 @@ def _execute_many_gen(
         idx, op, prepared = entry
         return [_execute_individual(session, idx, op, prepared)]
 
-    # Step 3: Execute and yield results as they arrive.
+    # Step 3: Execute and yield results.
     if concurrency == 1:
         for chunk in batch_chunks:
-            for _, result in _send_batch(session, chunk):
+            batch_results = sorted(_send_batch(session, chunk), key=lambda r: r[0])
+            for _, result in batch_results:
                 yield result
         for entry in individual:
             for _, result in run_individual(entry):
