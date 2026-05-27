@@ -262,7 +262,6 @@ async fn complete(
     Query(params): Query<UploadIdQuery>,
     Json(body): Json<CompleteRequest>,
 ) -> ApiResult<Response> {
-    service.check_permission(Permission::ObjectWrite, id.context())?;
     for part in &body.parts {
         validate_part_number(part.part_number)?;
     }
