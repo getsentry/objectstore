@@ -482,6 +482,37 @@ def test_execute_many_mixed_batch_and_individual() -> None:
     assert results[1].key == "big-key"
 
 
+def test_execute_many_sequential_mixed_preserves_input_order() -> None:
+    """concurrency=1 should not move later batch work ahead of individual ops."""
+    large_body = b"x" * (MAX_BATCH_PART_SIZE + 1)
+    response_parts = [
+        _make_response_part(0, "200 OK", "after-large", kind="get", body=b"hi")
+    ]
+    session = _make_mock_session(response_parts)
+    batch_response = session._pool.request.return_value
+    calls: list[str] = []
+
+    def put_side_effect(*_args: object, **_kwargs: object) -> str:
+        calls.append("put")
+        return "big-key"
+
+    def request_side_effect(*_args: object, **_kwargs: object) -> object:
+        calls.append("batch")
+        return batch_response
+
+    session.put.side_effect = put_side_effect
+    session._pool.request.side_effect = request_side_effect
+
+    ops: list[Put | Get] = [
+        Put(large_body, key="big-key", compression="none"),
+        Get("after-large"),
+    ]
+    results = list(execute_many(session, ops, concurrency=1))
+
+    assert [result.key for result in results] == ["big-key", "after-large"]
+    assert calls == ["put", "batch"]
+
+
 def test_execute_many_io_put_goes_individual() -> None:
     """IO[bytes] puts should be routed individually without eager reading."""
     session = _make_mock_session()

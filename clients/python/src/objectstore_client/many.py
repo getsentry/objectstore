@@ -200,10 +200,24 @@ def _classify(
 
 # A classified op ready for dispatch: (original_index, operation, prepared_put_or_none)
 _ClassifiedOp = tuple[int, Operation, _PreparedPut | None]
+_ClassifiedOpWithSize = tuple[int, Operation, _PreparedPut | None, int]
+
+
+@dataclass(frozen=True)
+class _BatchWork:
+    ops: list[_ClassifiedOp]
+
+
+@dataclass(frozen=True)
+class _IndividualWork:
+    op: _ClassifiedOp
+
+
+_WorkItem = _BatchWork | _IndividualWork
 
 
 def _iter_batches(
-    ops: Sequence[tuple[int, Operation, _PreparedPut | None, int]],
+    ops: Sequence[_ClassifiedOpWithSize],
 ) -> Iterator[list[_ClassifiedOp]]:
     """Split batchable operations into batches respecting count and size limits.
 
@@ -520,23 +534,45 @@ def _execute_many_gen(
     default_expiration = session._usecase._expiration_policy
 
     # Step 1: Consume the iterable once, preparing and classifying as we go.
-    batchable: list[tuple[int, Operation, _PreparedPut | None, int]] = []
+    batchable: list[_ClassifiedOpWithSize] = []
     individual: list[_ClassifiedOp] = []
+    sequential_work: list[_WorkItem] = []
+    pending_batchable: list[_ClassifiedOpWithSize] = []
+
+    def flush_pending_batchable() -> None:
+        if not pending_batchable:
+            return
+        sequential_work.extend(
+            _BatchWork(chunk) for chunk in _iter_batches(pending_batchable)
+        )
+        pending_batchable.clear()
 
     for idx, op in enumerate(operations):
         if isinstance(op, Put):
             if isinstance(op.contents, bytes):
                 prepared = _prepare_put(op, default_compression, default_expiration)
                 kind, size = _classify(op, body_size=len(prepared.body))
+                entry: _ClassifiedOp = (idx, op, prepared)
                 if kind == "individual":
-                    individual.append((idx, op, prepared))
+                    flush_pending_batchable()
+                    individual.append(entry)
+                    sequential_work.append(_IndividualWork(entry))
                 else:
-                    batchable.append((idx, op, prepared, size))
+                    batch_entry: _ClassifiedOpWithSize = (idx, op, prepared, size)
+                    batchable.append(batch_entry)
+                    pending_batchable.append(batch_entry)
             else:
                 # IO[bytes] bodies are always sent individually to avoid eager reading.
-                individual.append((idx, op, None))
+                flush_pending_batchable()
+                entry = (idx, op, None)
+                individual.append(entry)
+                sequential_work.append(_IndividualWork(entry))
         else:
-            batchable.append((idx, op, None, 0))
+            batch_entry = (idx, op, None, 0)
+            batchable.append(batch_entry)
+            pending_batchable.append(batch_entry)
+
+    flush_pending_batchable()
 
     # Step 2: Partition batchable ops into batch chunks.
     batch_chunks = list(_iter_batches(batchable))
@@ -550,13 +586,16 @@ def _execute_many_gen(
 
     # Step 3: Execute and yield results.
     if concurrency == 1:
-        for chunk in batch_chunks:
-            batch_results = sorted(_send_batch(session, chunk), key=lambda r: r[0])
-            for _, result in batch_results:
-                yield result
-        for entry in individual:
-            for _, result in run_individual(entry):
-                yield result
+        for item in sequential_work:
+            if isinstance(item, _BatchWork):
+                batch_results = sorted(
+                    _send_batch(session, item.ops), key=lambda r: r[0]
+                )
+                for _, result in batch_results:
+                    yield result
+            else:
+                for _, result in run_individual(item.op):
+                    yield result
     else:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [executor.submit(run_batch, chunk) for chunk in batch_chunks]
