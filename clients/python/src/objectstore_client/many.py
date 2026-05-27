@@ -270,6 +270,16 @@ def _build_batch_parts(
             yield RequestPart(headers=headers, body=prepared.body)
 
 
+def _decompress_zstd(body: bytes) -> bytes:
+    """Decompress a zstd frame without requiring a content size in the header."""
+    dctx = zstandard.ZstdDecompressor()
+    reader = dctx.stream_reader(BytesIO(body), read_across_frames=True)
+    try:
+        return reader.read()
+    finally:
+        reader.close()
+
+
 def _parse_batch_response(
     response_parts: Iterable[ResponsePart],
     ops: Sequence[tuple[int, Operation, _PreparedPut | None]],
@@ -338,8 +348,7 @@ def _parse_batch_response(
 
             # Decompress if needed
             if metadata.compression == "zstd":
-                dctx = zstandard.ZstdDecompressor()
-                decompressed = dctx.decompress(part.body)
+                decompressed = _decompress_zstd(part.body)
                 payload = BytesIO(decompressed)
                 metadata.compression = None
 

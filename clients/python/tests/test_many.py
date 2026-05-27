@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
+import zstandard
 from objectstore_client.client import RequestError
 from objectstore_client.many import (
     HEADER_BATCH_OP_INDEX,
@@ -229,6 +230,31 @@ def test_parse_successful_get() -> None:
 
     assert isinstance(result.response, GetResponse)
     assert result.response.payload.read() == b"payload"
+
+
+def test_parse_successful_get_decompresses_streamed_zstd() -> None:
+    raw = b"payload" * 100
+    compressor = zstandard.ZstdCompressor()
+    compressed = compressor.stream_reader(io.BytesIO(raw)).read()
+
+    parts = [
+        _make_response_part(
+            0,
+            "200 OK",
+            "k1",
+            body=compressed,
+            extra_headers={"content-encoding": "zstd"},
+        )
+    ]
+    ops: _Ops = [(0, Get("k1"), None)]
+    results = list(_parse_batch_response(parts, ops))
+    _, result = results[0]
+
+    from objectstore_client.client import GetResponse
+
+    assert isinstance(result.response, GetResponse)
+    assert result.response.metadata.compression is None
+    assert result.response.payload.read() == raw
 
 
 def test_parse_get_not_found() -> None:
