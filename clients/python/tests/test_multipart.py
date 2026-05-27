@@ -1,5 +1,6 @@
 import io
 
+import pytest
 from objectstore_client.multipart import (
     RequestPart,
     encode_multipart,
@@ -77,6 +78,22 @@ def test_content_disposition_header_included() -> None:
     _, body_iter = encode_multipart(parts)
     body = b"".join(body_iter)
     assert b"content-disposition: form-data; name=part" in body
+
+
+def test_encode_rejects_multipart_header_name_control_chars() -> None:
+    parts = [RequestPart(headers={"x-good\r\nx-injected": "value"}, body=b"")]
+    _, body_iter = encode_multipart(parts)
+
+    with pytest.raises(ValueError, match="Invalid multipart header name"):
+        b"".join(body_iter)
+
+
+def test_encode_rejects_multipart_header_value_control_chars() -> None:
+    parts = [RequestPart(headers={"x-good": "value\r\nx-injected: yes"}, body=b"")]
+    _, body_iter = encode_multipart(parts)
+
+    with pytest.raises(ValueError, match="Invalid multipart header value"):
+        b"".join(body_iter)
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +262,6 @@ def test_iter_multipart_headers_parsed_correctly() -> None:
 
 def test_iter_multipart_raises_on_malformed_post_delimiter_bytes() -> None:
     """Bytes after the boundary delimiter that are neither \\r\\n nor -- raise."""
-    import pytest
-
     boundary = "bnd"
     body = (
         f"--{boundary}\r\n".encode()

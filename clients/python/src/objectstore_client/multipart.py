@@ -14,6 +14,7 @@ from typing import IO
 
 # 64kB matches urllib3's default chunk size
 _CHUNK_SIZE = 64 * 1024
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 @dataclass
@@ -32,6 +33,13 @@ class ResponsePart:
     body: bytes
 
 
+def _validate_part_header(name: str, value: str) -> None:
+    if not name or ":" in name or not name.isascii() or _CONTROL_CHAR_RE.search(name):
+        raise ValueError(f"Invalid multipart header name: {name!r}")
+    if _CONTROL_CHAR_RE.search(value):
+        raise ValueError(f"Invalid multipart header value for {name!r}")
+
+
 def encode_multipart(parts: Iterable[RequestPart]) -> tuple[str, Iterator[bytes]]:
     """Encode parts into a multipart/form-data body.
 
@@ -45,9 +53,8 @@ def encode_multipart(parts: Iterable[RequestPart]) -> tuple[str, Iterator[bytes]
             yield f"--{boundary}\r\n".encode()
             yield b"content-disposition: form-data; name=part\r\n"
             for name, value in part.headers.items():
-                clean_name = name.replace("\r", "").replace("\n", "")
-                clean_value = value.replace("\r", "").replace("\n", "")
-                yield f"{clean_name}: {clean_value}\r\n".encode()
+                _validate_part_header(name, value)
+                yield f"{name}: {value}\r\n".encode()
             yield b"\r\n"
             if isinstance(part.body, bytes):
                 yield part.body
