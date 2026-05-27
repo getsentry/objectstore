@@ -30,6 +30,19 @@ from objectstore_client.multipart import (
 if TYPE_CHECKING:
     from objectstore_client.client import GetResponse, RequestError, Session
 
+__all__ = [
+    "Put",
+    "Get",
+    "Delete",
+    "Operation",
+    "ManyResponse",
+    "execute_many",
+    "MAX_BATCH_OPS",
+    "MAX_BATCH_PART_SIZE",
+    "MAX_BATCH_BODY_SIZE",
+    "MAX_BATCH_CONCURRENCY",
+]
+
 # ---------------------------------------------------------------------------
 # Constants (matching Rust client)
 # ---------------------------------------------------------------------------

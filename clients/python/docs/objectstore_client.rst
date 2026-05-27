@@ -25,6 +25,14 @@ objectstore\_client.client module
    :show-inheritance:
    :undoc-members:
 
+objectstore\_client.many module
+-------------------------------
+
+.. automodule:: objectstore_client.many
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 objectstore\_client.metadata module
 -----------------------------------
 
