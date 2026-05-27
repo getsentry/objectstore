@@ -392,21 +392,25 @@ def _send_batch(
             preload_content=False,
         )
 
-        if response.status >= 400:
-            error_body = response.read().decode("utf-8", "replace")
-            error = RequestError(
-                f"Batch request failed with status {response.status}",
-                response.status,
-                error_body,
-            )
-            yield from _batch_level_error(ops, error)
-            return
+        try:
+            if response.status >= 400:
+                error_body = response.read().decode("utf-8", "replace")
+                error = RequestError(
+                    f"Batch request failed with status {response.status}",
+                    response.status,
+                    error_body,
+                )
+                yield from _batch_level_error(ops, error)
+                return
 
-        response_content_type = response.headers.get("Content-Type", "")
-        yield from _parse_batch_response(
-            iter_multipart_response(response_content_type, response.stream(65536)),
-            ops,
-        )
+            response_content_type = response.headers.get("Content-Type", "")
+            yield from _parse_batch_response(
+                iter_multipart_response(response_content_type, response.stream(65536)),
+                ops,
+            )
+        finally:
+            response.drain_conn()
+            response.release_conn()
     except RequestError:
         raise
     except Exception as exc:
