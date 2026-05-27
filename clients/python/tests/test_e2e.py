@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import urllib3
 import zstandard
-from objectstore_client import Client, Delete, Get, ManyResponse, Put, Usecase
+from objectstore_client import Client, Delete, Get, Put, Usecase
 from objectstore_client.auth import Permission, TokenGenerator
 from objectstore_client.client import GetResponse, RequestError
 from objectstore_client.metadata import TimeToLive
@@ -349,28 +349,23 @@ def test_many_full_cycle(server_url: str) -> None:
     usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
     session = client.session(usecase, org=42, project=2001)
 
-    # Put and get in the same batch
-    results = list(
+    # Put first
+    put_results = list(
         session.many(
-            [
-                Put(b"many-data", key="many-k1", compression="none"),
-                Get("many-k1"),
-            ],
+            [Put(b"many-data", key="many-k1", compression="none")],
             concurrency=1,
         )
     )
-    assert len(results) == 2
-    put_result = results[0]
-    get_result = results[1]
+    assert len(put_results) == 1
+    assert put_results[0].key == "many-k1"
+    assert put_results[0].response is None
 
-    assert isinstance(put_result, ManyResponse)
-    assert put_result.key == "many-k1"
-    assert put_result.response is None
-
-    assert isinstance(get_result, ManyResponse)
-    assert get_result.key == "many-k1"
-    assert isinstance(get_result.response, GetResponse)
-    assert get_result.response.payload.read() == b"many-data"
+    # Get in a separate batch (server processes ops concurrently within a batch)
+    get_results = list(session.many([Get("many-k1")], concurrency=1))
+    assert len(get_results) == 1
+    assert get_results[0].key == "many-k1"
+    assert isinstance(get_results[0].response, GetResponse)
+    assert get_results[0].response.payload.read() == b"many-data"
 
     # Delete in a subsequent batch
     delete_results = list(session.many([Delete("many-k1")], concurrency=1))
