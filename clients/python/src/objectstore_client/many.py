@@ -172,7 +172,7 @@ def _prepare_put(
         for k, v in op.metadata.items():
             headers[f"{HEADER_META_PREFIX}{k}"] = v
 
-    return _PreparedPut(key=op.key, body=body, headers=headers)
+    return _PreparedPut(key=op.key or None, body=body, headers=headers)
 
 
 # ---------------------------------------------------------------------------

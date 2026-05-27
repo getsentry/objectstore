@@ -16,6 +16,7 @@ from objectstore_client.many import (
     Delete,
     Get,
     Put,
+    _build_batch_parts,
     _classify,
     _iter_batches,
     _parse_batch_response,
@@ -99,6 +100,12 @@ def test_prepare_put_explicit_expiration_overrides_default() -> None:
     op = Put(contents=b"x", expiration_policy=explicit)
     prepared = _prepare_put(op, default_compression="none", default_expiration=default)
     assert "7 days" in prepared.headers["x-sn-expiration"]
+
+
+def test_prepare_put_normalizes_empty_key() -> None:
+    op = Put(contents=b"x", key="")
+    prepared = _prepare_put(op, default_compression="none", default_expiration=None)
+    assert prepared.key is None
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +198,19 @@ def test_iter_batches_size_hits_before_count() -> None:
     assert len(batches) > 1
     for batch in batches[:-1]:
         assert len(batch) == per_batch
+
+
+# ---------------------------------------------------------------------------
+# _build_batch_parts
+# ---------------------------------------------------------------------------
+
+
+def test_build_batch_parts_omits_empty_put_key() -> None:
+    op = Put(contents=b"x", key="")
+    prepared = _prepare_put(op, default_compression="none", default_expiration=None)
+    parts = list(_build_batch_parts([(0, op, prepared)]))
+
+    assert HEADER_BATCH_OP_KEY not in parts[0].headers
 
 
 # ---------------------------------------------------------------------------
