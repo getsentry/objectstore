@@ -3,6 +3,7 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -71,8 +72,8 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
-    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
-        Some(self)
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]

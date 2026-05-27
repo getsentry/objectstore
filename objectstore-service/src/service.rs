@@ -240,27 +240,15 @@ impl StorageService {
 
     // --- Multipart upload operations ---
 
-    fn ensure_inner_multipart(&self) -> Result<()> {
-        self.inner
-            .as_multipart_upload_backend()
-            .ok_or(Error::NotImplemented)?;
-        Ok(())
-    }
-
     /// Initiates a new multipart upload.
     pub async fn initiate_multipart(
         &self,
         id: ObjectId,
         metadata: Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        self.ensure_inner_multipart()?;
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
         self.spawn("initiate_multipart", async move {
-            inner
-                .as_multipart_upload_backend()
-                .unwrap()
-                .initiate_multipart(&id, &metadata)
-                .await
+            inner.initiate_multipart(&id, &metadata).await
         })
         .await
     }
@@ -282,12 +270,9 @@ impl StorageService {
         content_md5: Option<String>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        self.ensure_inner_multipart()?;
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
         self.spawn("upload_part", async move {
             inner
-                .as_multipart_upload_backend()
-                .unwrap()
                 .upload_part(
                     &id,
                     &upload_id,
@@ -309,12 +294,9 @@ impl StorageService {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        self.ensure_inner_multipart()?;
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
         self.spawn("list_parts", async move {
             inner
-                .as_multipart_upload_backend()
-                .unwrap()
                 .list_parts(&id, &upload_id, max_parts, part_number_marker)
                 .await
         })
@@ -327,14 +309,9 @@ impl StorageService {
         id: ObjectId,
         upload_id: UploadId,
     ) -> Result<AbortMultipartResponse> {
-        self.ensure_inner_multipart()?;
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
         self.spawn("abort_multipart", async move {
-            inner
-                .as_multipart_upload_backend()
-                .unwrap()
-                .abort_multipart(&id, &upload_id)
-                .await
+            inner.abort_multipart(&id, &upload_id).await
         })
         .await
     }
@@ -346,14 +323,9 @@ impl StorageService {
         upload_id: UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        self.ensure_inner_multipart()?;
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
         self.spawn("complete_multipart", async move {
-            inner
-                .as_multipart_upload_backend()
-                .unwrap()
-                .complete_multipart(&id, &upload_id, parts)
-                .await
+            inner.complete_multipart(&id, &upload_id, parts).await
         })
         .await
     }

@@ -1,12 +1,13 @@
 //! Shared trait definition and types for all backends.
 
 use std::fmt;
+use std::sync::Arc;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 
 use bytes::Bytes;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -63,13 +64,12 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// to wait for those tasks to complete.
     async fn join(&self) {}
 
-    /// Returns a reference to the [`MultipartUploadBackend`] implementation,
-    /// if this backend supports multipart uploads.
+    /// Casts this backend into an [`Arc<dyn MultipartUploadBackend>`] if supported.
     ///
-    /// The default returns `None`. Backends that implement
-    /// [`MultipartUploadBackend`] should override this to return `Some(self)`.
-    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
-        None
+    /// The default returns [`Error::NotImplemented`]. Backends that implement
+    /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Err(Error::NotImplemented)
     }
 }
 

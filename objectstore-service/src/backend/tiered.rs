@@ -365,8 +365,8 @@ impl Backend for TieredStorage {
         "tiered"
     }
 
-    fn as_multipart_upload_backend(&self) -> Option<&dyn MultipartUploadBackend> {
-        Some(self)
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
     }
 
     async fn put_object(
