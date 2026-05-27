@@ -529,6 +529,9 @@ def _execute_many_gen(
     # Step 2: Partition batchable ops into batch chunks.
     batch_chunks = list(_iter_batches(batchable))
 
+    def run_batch(chunk: list[_ClassifiedOp]) -> list[tuple[int, ManyResponse]]:
+        return list(_send_batch(session, chunk))
+
     def run_individual(entry: _ClassifiedOp) -> list[tuple[int, ManyResponse]]:
         idx, op, prepared = entry
         return [_execute_individual(session, idx, op, prepared)]
@@ -543,9 +546,7 @@ def _execute_many_gen(
                 yield result
     else:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = [
-                executor.submit(_send_batch, session, chunk) for chunk in batch_chunks
-            ]
+            futures = [executor.submit(run_batch, chunk) for chunk in batch_chunks]
             futures += [executor.submit(run_individual, entry) for entry in individual]
             for future in as_completed(futures):
                 for _, result in future.result():
