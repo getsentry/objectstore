@@ -91,6 +91,8 @@ class Get:
     """A get operation to enqueue in a batch."""
 
     key: str
+    decompress: bool = True
+    accept_encoding: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -361,7 +363,20 @@ def _parse_batch_response(
             payload = BytesIO(part.body)
 
             # Decompress if needed
-            if metadata.compression == "zstd":
+            encoding_accepted = (
+                op.accept_encoding is not None
+                and metadata.compression is not None
+                and (
+                    "*" in op.accept_encoding
+                    or metadata.compression in op.accept_encoding
+                )
+            )
+            if metadata.compression and op.decompress and not encoding_accepted:
+                if metadata.compression != "zstd":
+                    raise NotImplementedError(
+                        "Transparent decoding of anything but `zstd` is not "
+                        "implemented yet"
+                    )
                 decompressed = _decompress_zstd(part.body)
                 payload = BytesIO(decompressed)
                 metadata.compression = None
@@ -469,7 +484,11 @@ def _execute_individual(
 
     try:
         if isinstance(op, Get):
-            response = session.get(op.key)
+            response = session.get(
+                op.key,
+                decompress=op.decompress,
+                accept_encoding=op.accept_encoding,
+            )
             return (original_idx, ManyResponse(key=op.key, response=response))
 
         elif isinstance(op, Delete):

@@ -257,6 +257,56 @@ def test_parse_successful_get_decompresses_streamed_zstd() -> None:
     assert result.response.payload.read() == raw
 
 
+def test_parse_successful_get_can_skip_decompression() -> None:
+    raw = b"payload" * 100
+    compressor = zstandard.ZstdCompressor()
+    compressed = compressor.stream_reader(io.BytesIO(raw)).read()
+
+    parts = [
+        _make_response_part(
+            0,
+            "200 OK",
+            "k1",
+            body=compressed,
+            extra_headers={"content-encoding": "zstd"},
+        )
+    ]
+    ops: _Ops = [(0, Get("k1", decompress=False), None)]
+    results = list(_parse_batch_response(parts, ops))
+    _, result = results[0]
+
+    from objectstore_client.client import GetResponse
+
+    assert isinstance(result.response, GetResponse)
+    assert result.response.metadata.compression == "zstd"
+    assert result.response.payload.read() == compressed
+
+
+def test_parse_successful_get_honors_accept_encoding() -> None:
+    raw = b"payload" * 100
+    compressor = zstandard.ZstdCompressor()
+    compressed = compressor.stream_reader(io.BytesIO(raw)).read()
+
+    parts = [
+        _make_response_part(
+            0,
+            "200 OK",
+            "k1",
+            body=compressed,
+            extra_headers={"content-encoding": "zstd"},
+        )
+    ]
+    ops: _Ops = [(0, Get("k1", accept_encoding=["zstd"]), None)]
+    results = list(_parse_batch_response(parts, ops))
+    _, result = results[0]
+
+    from objectstore_client.client import GetResponse
+
+    assert isinstance(result.response, GetResponse)
+    assert result.response.metadata.compression == "zstd"
+    assert result.response.payload.read() == compressed
+
+
 def test_parse_get_not_found() -> None:
     parts = [_make_response_part(0, "404 Not Found", "k1")]
     ops: _Ops = [(0, Get("k1"), None)]
