@@ -1977,7 +1977,7 @@ mod tests {
     /// When it's time to clean up, nothing is deleted, as the `complete_multipart` eventually went
     /// through before the cleanup deadline.
     #[tokio::test]
-    async fn multipart_complete_can_be_retried_if_backend_errs_and_leaves_state_consistent() {
+    async fn multipart_complete_succeeds_on_retry_and_leaves_state_consistent() {
         let hv = InMemoryBackend::new("hv");
         let lt_inner = InMemoryBackend::new("lt");
         let log = InMemoryChangeLog::default();
@@ -2016,6 +2016,133 @@ mod tests {
             .unwrap();
 
         // The first `complete_multipart` call fails.
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag: etag.clone(),
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+        storage.join().await;
+
+        // The second `complete_multipart` call succeeds.
+        let result = storage
+            .complete_multipart(
+                &id,
+                &upload_id,
+                vec![CompletedPart {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await;
+        assert!(result.is_ok());
+        storage.join().await;
+
+        // Simulate the passage of time and run recovery.
+        log.expire_all();
+        let manager = ChangeManager::new(
+            Box::new(hv.clone()),
+            Box::new(lt_inner.clone()),
+            Box::new(log.clone()),
+        );
+        manager.recover().await.unwrap();
+
+        // The LT blob has not been cleaned up, as the write eventually went through.
+        lt_inner.get(&physical).expect_object();
+        // The tombstone still points to the blob.
+        let tombstone = hv.get(&id).expect_tombstone();
+        assert_eq!(tombstone.target, physical);
+        // The change has been removed from the log.
+        let remaining = log.scan().await.unwrap();
+        assert!(remaining.is_empty());
+    }
+
+    #[derive(Debug)]
+    struct FailOnFirstGetMetadataAttempt {
+        attempt: Mutex<u32>,
+    }
+
+    impl FailOnFirstGetMetadataAttempt {
+        fn new() -> Self {
+            Self {
+                attempt: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for FailOnFirstGetMetadataAttempt {
+        async fn get_metadata(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+        ) -> Result<MetadataResponse> {
+            let mut attempt = self.attempt.lock().await;
+            *attempt += 1;
+            if *attempt == 1 {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "simulated network error",
+                )));
+            } else {
+                inner.get_metadata(id).await
+            }
+        }
+    }
+
+    /// The first attempt to `complete_multipart` succeeds on the LT backend, but the subsequent
+    /// `get_metadata` call fails with a network error, causing the overall `complete_multipart`
+    /// to fail. The second call retries and succeeds (the LT object already exists from the first
+    /// attempt).
+    /// When it's time to clean up, nothing is deleted, as the `complete_multipart` eventually went
+    /// through before the cleanup deadline.
+    #[tokio::test]
+    async fn multipart_complete_succeeds_on_retry_if_get_metadata_errs_and_leaves_state_consistent()
+    {
+        let hv = InMemoryBackend::new("hv");
+        let lt_inner = InMemoryBackend::new("lt");
+        let log = InMemoryChangeLog::default();
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(TestBackend::with_inner(
+                lt_inner.clone(),
+                FailOnFirstGetMetadataAttempt::new(),
+            )),
+            Box::new(log.clone()),
+        );
+
+        let id = make_id("mp-retry-meta");
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let tiered_id: TieredUploadId = (&upload_id).try_into().unwrap();
+        let physical = ObjectId {
+            context: id.context.clone(),
+            key: tiered_id.revision,
+        };
+
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+        let etag = storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                payload.len() as u64,
+                None,
+                stream::single(payload),
+            )
+            .await
+            .unwrap();
+
+        // The first `complete_multipart` call fails (get_metadata network error), even though it
+        // internally creates the LT blob.
         let result = storage
             .complete_multipart(
                 &id,
