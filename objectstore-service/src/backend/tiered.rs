@@ -2010,7 +2010,7 @@ mod tests {
                 1,
                 payload.len() as u64,
                 None,
-                stream::single(payload),
+                stream::single(payload.clone()),
             )
             .await
             .unwrap();
@@ -2043,6 +2043,11 @@ mod tests {
         assert!(result.is_ok());
         storage.join().await;
 
+        // The object is there.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+
         // Simulate the passage of time and run recovery.
         log.expire_all();
         let manager = ChangeManager::new(
@@ -2060,6 +2065,11 @@ mod tests {
         // The change has been removed from the log.
         let remaining = log.scan().await.unwrap();
         assert!(remaining.is_empty());
+
+        // The object is still there after recovery.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
     }
 
     #[derive(Debug)]
@@ -2136,7 +2146,7 @@ mod tests {
                 1,
                 payload.len() as u64,
                 None,
-                stream::single(payload),
+                stream::single(payload.clone()),
             )
             .await
             .unwrap();
@@ -2170,6 +2180,11 @@ mod tests {
         assert!(result.is_ok());
         storage.join().await;
 
+        // The object is there.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
+
         // Simulate the passage of time and run recovery.
         log.expire_all();
         let manager = ChangeManager::new(
@@ -2187,5 +2202,10 @@ mod tests {
         // The change has been removed from the log.
         let remaining = log.scan().await.unwrap();
         assert!(remaining.is_empty());
+
+        // The object is there after recovery.
+        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let body = stream::read_to_vec(s).await.unwrap();
+        assert_eq!(body, payload);
     }
 }
