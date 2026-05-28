@@ -426,7 +426,7 @@ impl Drop for ChangeState {
             ChangePhase::Assembling => {
                 objectstore_log::warn!(
                     change = ?self.change,
-                    "Operation dropped in Assembling state, cleanup deferred to ChageLog recovery"
+                    "Operation dropped in Assembling state, cleanup deferred to ChangeLog recovery"
                 );
             }
             _ => {
