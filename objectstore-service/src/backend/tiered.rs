@@ -1977,7 +1977,7 @@ mod tests {
     /// When it's time to clean up, nothing is deleted, as the `complete_multipart` eventually went
     /// through before the cleanup deadline.
     #[tokio::test]
-    async fn doesnt_clean_up_blob_after_successful_multipart_complete_on_second_try() {
+    async fn multipart_complete_can_be_retried_and_leaves_state_consistent() {
         let hv = InMemoryBackend::new("hv");
         let lt_inner = InMemoryBackend::new("lt");
         let log = InMemoryChangeLog::default();
