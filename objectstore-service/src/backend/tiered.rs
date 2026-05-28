@@ -1835,7 +1835,9 @@ mod tests {
 
     // --- Multipart completion failure handling (consistency, retries, delayed cleanup) ---
 
-    /// Completes the multipart upload, but returns an io error to simulate a network error.
+    /// Assembles the blob via `complete_multipart`, but returns an error to simulate a network
+    /// failure on the response path. Also fails `get_metadata` so the tiered layer cannot
+    /// recover by detecting the already-assembled blob.
     #[derive(Debug)]
     struct CompleteMultipartButReturnError;
 
@@ -1854,12 +1856,24 @@ mod tests {
                 .unwrap();
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "simulated network error",
+                "simulated network error on complete_multipart",
+            )))
+        }
+
+        async fn get_metadata(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+        ) -> Result<MetadataResponse> {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated network error on get_metadata",
             )))
         }
     }
 
-    /// `complete_multipart` on the inner LT backend assembles the blob successfully, but somehow returns an error.
+    /// `complete_multipart` on the inner LT backend assembles the blob successfully, but both
+    /// `complete_multipart` and `get_metadata` return errors, so the tiered layer cannot finalize.
     /// After `MULTIPART_COMPLETE_CLEANUP_DELAY`, `ChangeLog` recovery deletes the orphaned blob.
     #[tokio::test]
     async fn cleans_up_orphan_after_failed_multipart_complete() {
