@@ -795,12 +795,12 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::changelog::{ChangeId, InMemoryChangeLog, NoopChangeLog};
+    use crate::backend::changelog::{InMemoryChangeLog, NoopChangeLog};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::error::Error;
     use crate::id::ObjectContext;
-    use crate::multipart::CompleteMultipartError;
+
     use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
