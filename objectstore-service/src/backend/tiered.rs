@@ -1977,7 +1977,7 @@ mod tests {
     /// When it's time to clean up, nothing is deleted, as the `complete_multipart` eventually went
     /// through before the cleanup deadline.
     #[tokio::test]
-    async fn multipart_complete_can_be_retried_and_leaves_state_consistent() {
+    async fn multipart_complete_can_be_retried_if_backend_errs_and_leaves_state_consistent() {
         let hv = InMemoryBackend::new("hv");
         let lt_inner = InMemoryBackend::new("lt");
         let log = InMemoryChangeLog::default();
