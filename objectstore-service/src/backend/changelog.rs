@@ -422,7 +422,13 @@ impl ChangeState {
 impl Drop for ChangeState {
     fn drop(&mut self) {
         match self.phase {
-            ChangePhase::Assembling | ChangePhase::Completed => {}
+            ChangePhase::Completed => {}
+            ChangePhase::Assembling => {
+                objectstore_log::warn!(
+                    change = ?self.change,
+                    "Operation dropped in Assembling state, cleanup deferred to ChageLog recovery"
+                );
+            }
             _ => {
                 objectstore_log::error!(
                     change = ?self.change,

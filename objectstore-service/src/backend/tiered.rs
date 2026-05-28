@@ -688,17 +688,21 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<CompleteMultipartResponse> {
         let tiered: TieredUploadId = upload_id.try_into()?;
 
-        // 1. Read current HV revision to establish the write precondition
-        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
-            TieredMetadata::Tombstone(t) => Some(t.target),
-            _ => None,
-        };
-
-        // 2. Complete the upload, creating the object at the given revision key.
         let physical = ObjectId {
             context: id.context.clone(),
             key: tiered.revision,
         };
+
+        // 1. Read current HV revision to establish the write precondition.
+        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
+            // Optimization: a previous attempt already finalized this revision and tombstone -- report success.
+            TieredMetadata::Tombstone(t) if t.target == physical => return Ok(None),
+            TieredMetadata::Tombstone(t) => Some(t.target),
+            _ => None,
+        };
+
+        // Register a guard with cleanup deferred to now + `MULTIPART_COMPLETE_CLEANUP_DELAY`,
+        // so that the user has the chance to retry finalizing the upload in this timeframe.
         let mut guard = self
             .record_assembling(Change {
                 id: id.clone(),
@@ -708,28 +712,63 @@ impl MultipartUploadBackend for TieredStorage {
             })
             .await?;
 
-        let error = self
+        // 2. Complete the upload, creating the object at the given revision key.
+        let maybe_complete_multipart_err = match self
             .inner
             .long_term
             .complete_multipart(&physical, &tiered.upload_id, parts)
-            .await?;
-
-        if error.is_some() {
-            return Ok(error);
-        }
-
-        guard.advance(ChangePhase::Written);
+            .await
+        {
+            // The request went through but we got an error in the response body.
+            // Transparently proxy the error to the user.
+            Ok(error) => {
+                if error.is_some() {
+                    return Ok(error);
+                }
+                None
+            }
+            // We got status 4xx/5xx, or a network error.
+            // Either way, `complete_multipart` might have been completed successfully,
+            // either now or in a previous attempt (in that case, that's a 404 and we indeed end up
+            // here).
+            // We cannot know if that's the case yet, so we continue to the next steps.
+            Err(err) => Some(err),
+        };
 
         // 3. Retrieve the metadata of the object, which was determined at initiation time, to
         //    get the expiration policy.
-        let metadata = self
-            .inner
-            .long_term
-            .get_metadata(&physical)
-            .await?
-            .ok_or_else(|| {
-                Error::generic("completed multipart object not found in long-term storage")
-            })?;
+        //
+        //    This also serves as an existence check to understand if the LT revision was actually
+        //    created successfully in this or a previous attempt, in which case we just need to
+        //    finalize the tombstone.
+        let metadata = self.inner.long_term.get_metadata(&physical).await;
+
+        let metadata = match (metadata, maybe_complete_multipart_err) {
+            // The LT revision already exists, so we can continue to finalize the tombstone.
+            (Ok(Some(metadata)), _) => metadata,
+            // The LT revision doesn't exist, cannot proceed.
+            (Ok(None), Some(err)) => return Err(err),
+            // The `complete_multipart` succeeded, creating the object, but the `get_metadata`
+            // immediately after failed to find the object. This should never happen.
+            (Ok(None), None) => {
+                objectstore_log::error!(
+                    id = ?id,
+                    upload_id = ?upload_id,
+                    physical = ?physical,
+                    "complete_multipart call succeeded on long_term backend, but subsequent get_metadata found no object"
+                );
+                return Err(Error::generic(
+                    "completed multipart object not found in long-term storage",
+                ));
+            }
+            // Failed to `get_metadata`, cannot proceed.
+            (Err(get_metadata_err), maybe_complete_multipart_err) => {
+                // Prefer the `complete_multipart_err`, as it's likely more informative.
+                // TODO(FS-358): convert this properly. Right now `ApiErrorResponse` will turn this into a 500,
+                // but we would actually want to transparently surface the original status (and message?) instead.
+                return Err(maybe_complete_multipart_err.unwrap_or(get_metadata_err));
+            }
+        };
 
         // 4. CAS commit: write tombstone only if HV state matches what we saw.
         let tombstone = Tombstone {
@@ -756,11 +795,12 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::changelog::{InMemoryChangeLog, NoopChangeLog};
+    use crate::backend::changelog::{ChangeId, InMemoryChangeLog, NoopChangeLog};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::error::Error;
     use crate::id::ObjectContext;
+    use crate::multipart::CompleteMultipartError;
     use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
@@ -1681,6 +1721,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipart_list_parts() {
+        let (storage, _hv, _lt, _) = make_tiered_storage();
+        let id = make_id("mp-list");
+
+        let upload_id = storage
+            .initiate_multipart(&id, &Default::default())
+            .await
+            .unwrap();
+
+        let part1 = vec![0xAAu8; 100];
+        let part2 = vec![0xBBu8; 200];
+        storage
+            .upload_part(
+                &id,
+                &upload_id,
+                1,
+                part1.len() as u64,
+                None,
+                stream::single(part1),
+            )
+            .await
+            .unwrap();
+        storage
+            .upload_part(
+                &id,
+                &upload_id,
+                2,
+                part2.len() as u64,
+                None,
+                stream::single(part2),
+            )
+            .await
+            .unwrap();
+
+        let resp = storage
+            .list_parts(&id, &upload_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(resp.parts.len(), 2);
+        assert_eq!(resp.parts[0].part_number, 1);
+        assert_eq!(resp.parts[0].size, 100);
+        assert_eq!(resp.parts[1].part_number, 2);
+        assert_eq!(resp.parts[1].size, 200);
+    }
+
+    #[tokio::test]
     async fn multipart_overwrites_existing_tombstone() {
         let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("mp-overwrite");
@@ -1747,14 +1833,14 @@ mod tests {
         assert_eq!(body, payload2);
     }
 
-    // --- Multipart assembling guard ---
+    // --- Multipart completion failure handling (consistency, retries, delayed cleanup) ---
 
-    /// Completes the multipart upload, then returns an error to simulate a lost response.
+    /// Completes the multipart upload, but returns an io error to simulate a network error.
     #[derive(Debug)]
-    struct CompleteMultipartThenFail;
+    struct CompleteMultipartButReturnError;
 
     #[async_trait::async_trait]
-    impl Hooks for CompleteMultipartThenFail {
+    impl Hooks for CompleteMultipartButReturnError {
         async fn complete_multipart(
             &self,
             inner: &InMemoryBackend,
@@ -1768,7 +1854,7 @@ mod tests {
                 .unwrap();
             Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "simulated lost response",
+                "simulated network error",
             )))
         }
     }
@@ -1784,7 +1870,7 @@ mod tests {
             Box::new(hv.clone()),
             Box::new(TestBackend::with_inner(
                 lt_inner.clone(),
-                CompleteMultipartThenFail,
+                CompleteMultipartButReturnError {},
             )),
             Box::new(log.clone()),
         );
@@ -1875,7 +1961,7 @@ mod tests {
             if *attempt == 1 {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "simulated lost response",
+                    "simulated network error",
                 )));
             } else {
                 return Ok(inner
@@ -1886,7 +1972,7 @@ mod tests {
         }
     }
 
-    /// The first call to `complete_multipart` fails, which generates a `Change` entry.
+    /// The first attempt to `complete_multipart` fails, which generates a `Change` entry.
     /// The second call succeeds.
     /// When it's time to clean up, nothing is deleted, as the `complete_multipart` eventually went
     /// through before the cleanup deadline.
@@ -1974,51 +2060,5 @@ mod tests {
         // The change has been removed from the log.
         let remaining = log.scan().await.unwrap();
         assert!(remaining.is_empty());
-    }
-
-    #[tokio::test]
-    async fn multipart_list_parts() {
-        let (storage, _hv, _lt, _) = make_tiered_storage();
-        let id = make_id("mp-list");
-
-        let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
-            .await
-            .unwrap();
-
-        let part1 = vec![0xAAu8; 100];
-        let part2 = vec![0xBBu8; 200];
-        storage
-            .upload_part(
-                &id,
-                &upload_id,
-                1,
-                part1.len() as u64,
-                None,
-                stream::single(part1),
-            )
-            .await
-            .unwrap();
-        storage
-            .upload_part(
-                &id,
-                &upload_id,
-                2,
-                part2.len() as u64,
-                None,
-                stream::single(part2),
-            )
-            .await
-            .unwrap();
-
-        let resp = storage
-            .list_parts(&id, &upload_id, None, None)
-            .await
-            .unwrap();
-        assert_eq!(resp.parts.len(), 2);
-        assert_eq!(resp.parts[0].part_number, 1);
-        assert_eq!(resp.parts[0].size, 100);
-        assert_eq!(resp.parts[1].part_number, 2);
-        assert_eq!(resp.parts[1].size, 200);
     }
 }
