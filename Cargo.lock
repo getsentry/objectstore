@@ -2566,6 +2566,7 @@ name = "objectstore-client"
 version = "0.1.9"
 dependencies = [
  "async-compression",
+ "base64",
  "bytes",
  "futures-util",
  "infer",
@@ -2702,6 +2703,7 @@ version = "0.1.9"
 dependencies = [
  "http 1.4.0",
  "humantime",
+ "humantime-serde",
  "insta",
  "mediatype",
  "serde",

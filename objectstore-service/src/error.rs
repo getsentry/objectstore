@@ -91,6 +91,10 @@ pub enum Error {
     /// The functionality is not implemented by this instance of the service.
     #[error("not implemented")]
     NotImplemented,
+
+    /// Invalid upload ID (e.g. path traversal attempt).
+    #[error(transparent)]
+    InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
 }
 
 impl Error {
@@ -147,6 +151,7 @@ impl Error {
             Self::Dropped => Level::ERROR,
             Self::UnexpectedTombstone => Level::ERROR,
             Self::NotImplemented => Level::ERROR,
+            Self::InvalidUploadId(_) => Level::DEBUG,
             Self::Generic { .. } => Level::ERROR,
         }
     }

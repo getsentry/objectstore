@@ -44,6 +44,20 @@ pub enum Error {
         /// The error message.
         message: String,
     },
+    /// Error when part number validation fails (must be >= 1).
+    #[error("invalid part number: {0}")]
+    InvalidPartNumber(u32),
+    /// Error when upload ID validation fails.
+    #[error(transparent)]
+    InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
+    /// Error returned when attempting to complete a multipart upload.
+    #[error("multipart complete failed ({code}): {message}")]
+    MultipartComplete {
+        /// The error code or kind.
+        code: String,
+        /// The error message.
+        message: String,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

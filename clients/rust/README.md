@@ -128,6 +128,89 @@ session.put("payload")
     .send().await?;
 ```
 
+### Multipart Upload API
+
+For large objects, use multipart uploads to upload parts concurrently with bounded
+parallelism.
+
+**Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
+The caller must pre-compress each part according to the compression set as part of the metadata
+when initiating the upload.
+
+```rust,ignore
+use futures_util::StreamExt as _;
+use futures_util::stream;
+use objectstore_client::Compression;
+
+let upload = session
+    .initiate_multipart_upload()
+    .key("my-large-object")
+    .compression(Compression::Zstd)
+    .send()
+    .await?;
+
+let parts: Vec<(Vec<u8>, u32)> = vec![
+    (zstd::encode_all(&part1_data[..], 0)?, 1),
+    (zstd::encode_all(&part2_data[..], 0)?, 2),
+];
+
+let results: Vec<_> = stream::iter(
+    parts
+        .into_iter()
+        .map(|(data, part_number)| upload.put(data, part_number, None)),
+)
+.buffer_unordered(8)
+.collect()
+.await;
+
+let mut done = Vec::new();
+let mut errors = Vec::new();
+for result in results {
+    match result {
+        Ok(part) => done.push(part),
+        Err(e) => errors.push(e),
+    }
+}
+
+if !errors.is_empty() {
+    // reupload failed parts...
+}
+
+let key = upload.complete(done).await?;
+// or
+upload.abort().await?;
+```
+
+You can also resume an in-progress multipart upload, e.g. after a process restart.
+
+```rust,ignore
+use futures_util::{StreamExt as _, TryStreamExt as _};
+use futures_util::stream;
+use objectstore_client::CompletePart;
+
+let upload = session.resume_multipart_upload("my-large-object", saved_upload_id)?;
+
+let existing = upload.list_parts().await?;
+let total_parts = 10;
+let uploaded: Vec<u32> = existing.iter().map(|p| p.part_number.get()).collect();
+let missing: Vec<u32> = (1..=total_parts)
+    .filter(|n| !uploaded.contains(n))
+    .collect();
+
+let mut done: Vec<_> = stream::iter(
+    missing
+        .into_iter()
+        .map(|part_number| upload.put(get_part_data(part_number), part_number, None)),
+)
+.buffer_unordered(8)
+.try_collect()
+.await?;
+
+done.extend(existing.into_iter().map(CompletePart::from));
+
+let key = upload.complete(done).await?;
+```
+
 ### Many API
 
 The Many API allows you to enqueue multiple requests that the client can execute using Objectstore's batch endpoint, minimizing network overhead.

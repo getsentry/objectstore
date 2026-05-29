@@ -3,48 +3,13 @@
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
-use serde::Deserialize;
+use objectstore_types::multipart::{
+    CompleteErrorResponse, CompleteSuccessResponse, InitiateResponse, ListPartsResponse,
+    PartNumber, UploadPartResponse,
+};
 
-#[derive(Debug, Deserialize)]
-struct InitiateResponse {
-    key: String,
-    upload_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UploadPartResponse {
-    etag: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct PartInfo {
-    etag: String,
-    last_modified: String,
-    size: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListPartsResponse {
-    parts: std::collections::BTreeMap<u32, PartInfo>,
-    is_truncated: bool,
-    next_part_number_marker: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteSuccessResponse {
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteErrorDetail {
-    code: String,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteErrorResponse {
-    error: CompleteErrorDetail,
+fn pn(n: u32) -> PartNumber {
+    PartNumber::new(n).unwrap()
 }
 
 async fn test_server() -> TestServer {
@@ -192,10 +157,10 @@ async fn test_multipart_full_flow() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 2);
-    assert!(list.parts.contains_key(&1));
-    assert!(list.parts.contains_key(&2));
-    assert_eq!(list.parts[&1].size, part1_data.len() as u64);
-    assert_eq!(list.parts[&2].size, part2_data.len() as u64);
+    assert_eq!(list.parts[0].part_number, pn(1));
+    assert_eq!(list.parts[1].part_number, pn(2));
+    assert_eq!(list.parts[0].size, part1_data.len() as u64);
+    assert_eq!(list.parts[1].size, part2_data.len() as u64);
     assert!(!list.is_truncated);
 
     // 5. Complete
@@ -433,8 +398,9 @@ async fn test_upload_part_overwrite() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 1);
-    assert_eq!(list.parts[&1].etag, second_etag.etag);
-    assert_eq!(list.parts[&1].size, 6);
+    assert_eq!(list.parts[0].part_number, pn(1));
+    assert_eq!(list.parts[0].etag, second_etag.etag);
+    assert_eq!(list.parts[0].size, 6);
 
     // 5. Complete with the overwritten part
     complete_and_assert(
