@@ -44,12 +44,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         stream: ClientStream,
     ) -> Result<PutResponse>;
 
-    /// Retrieves an object at the given path, returning its metadata, the
-    /// content range describing which bytes are in the stream, and the payload.
-    ///
-    /// When `range` is `Some`, backends that support partial reads should
-    /// return only the requested byte range. Backends that do not support
-    /// partial reads may ignore the range and return the full object.
+    /// Retrieves (part of) an object at the given path, returning its metadata, a description of
+    /// the part being returned, and the payload.
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse>;
 
     /// Retrieves only the metadata for an object, without the payload.
@@ -156,12 +152,10 @@ pub trait HighVolumeBackend: Backend {
         payload: Bytes,
     ) -> Result<Option<Tombstone>>;
 
-    /// Retrieves an object with explicit tombstone awareness.
+    /// Retrieves (part of) an object with explicit tombstone awareness.
     ///
     /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
-    ///
-    /// See [`Backend::get_object`] for the semantics of `range`.
     async fn get_tiered_object(&self, id: &ObjectId, range: Option<ByteRange>)
     -> Result<TieredGet>;
 
