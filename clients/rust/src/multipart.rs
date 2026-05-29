@@ -70,8 +70,7 @@ impl Session {
         Ok(MultipartUpload {
             session: self.clone(),
             key: key.into(),
-            upload_id: UploadId::new(upload_id.into())
-                .map_err(|e| crate::Error::InvalidArgument(e.to_string()))?,
+            upload_id: UploadId::new(upload_id.into())?,
         })
     }
 }
@@ -273,8 +272,8 @@ impl MultipartUpload {
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
-        let part_number = PartNumber::new(part_number)
-            .ok_or_else(|| crate::Error::InvalidArgument("part_number must be >= 1".into()))?;
+        let part_number =
+            PartNumber::new(part_number).ok_or(crate::Error::InvalidPartNumber(part_number))?;
 
         let mut builder = self
             .session
