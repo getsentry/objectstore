@@ -100,26 +100,27 @@ async fn object_get(
 
     let stream = state.meter_stream(stream, &context);
     let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
-    let is_partial = !content_range.is_full();
 
+    let is_partial = !content_range.is_full();
     let status = if is_partial {
         StatusCode::PARTIAL_CONTENT
     } else {
         StatusCode::OK
     };
-
     let mut response = (status, metadata_headers, Body::from_stream(stream)).into_response();
-    let resp_headers = response.headers_mut();
-    resp_headers.insert(
+
+    let headers = response.headers_mut();
+    headers.insert(
         http::header::ACCEPT_RANGES,
         http::header::HeaderValue::from_static("bytes"),
     );
     if is_partial {
-        resp_headers.insert(
+        // When `is_partial == false`, `CONTENT_LENGTH is already part of `metadata_headers`.
+        headers.insert(
             http::header::CONTENT_LENGTH,
-            content_range.len().to_string().parse().unwrap(),
+            content_range.len_to_header_value(),
         );
-        resp_headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
+        headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
     }
 
     Ok(response)

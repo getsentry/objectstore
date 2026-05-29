@@ -155,8 +155,12 @@ impl ContentRange {
     /// The returned value is always valid ASCII and can be inserted directly
     /// into an HTTP header map.
     pub fn to_header_value(&self) -> HeaderValue {
-        HeaderValue::from_str(&self.to_string())
-            .expect("ContentRange always produces a valid header value")
+        HeaderValue::from_str(&self.to_string()).expect("always a valid header value")
+    }
+
+    /// Formats the length of this range for a `Content-Length` response header.
+    pub fn len_to_header_value(&self) -> HeaderValue {
+        HeaderValue::from_str(&self.len().to_string()).expect("always a valid header value")
     }
 }
 
