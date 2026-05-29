@@ -443,17 +443,13 @@ impl Backend for TieredStorage {
             backend_type = backend_type,
         );
 
-        if let Some((ref metadata, _, _)) = result {
-            if let Some(size) = metadata.size {
-                objectstore_metrics::record!(
-                    "get.size" = size,
-                    usecase = id.usecase().to_owned(),
-                    backend_choice = backend_choice.as_str(),
-                    backend_type = backend_type,
-                );
-            } else {
-                objectstore_log::warn!(backend_type, "Missing object size");
-            }
+        if let Some((_, ref content_range, _)) = result {
+            objectstore_metrics::record!(
+                "get.size" = content_range.len(),
+                usecase = id.usecase().to_owned(),
+                backend_choice = backend_choice.as_str(),
+                backend_type = backend_type,
+            );
         }
 
         Ok(result)
