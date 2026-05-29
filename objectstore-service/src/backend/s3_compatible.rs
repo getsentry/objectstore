@@ -164,13 +164,13 @@ where
         &self,
         method: Method,
         id: &ObjectId,
-        extra_headers: Option<reqwest::header::HeaderMap>,
+        range: Option<ByteRange>,
     ) -> Result<Option<(Metadata, reqwest::Response)>> {
         let object_url = self.object_url(id);
 
         let mut builder = self.request(method, &object_url).await?;
-        if let Some(headers) = extra_headers {
-            builder = builder.headers(headers);
+        if let Some(r) = range {
+            builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
         let response = builder.send().await.map_err(|cause| Error::Reqwest {
             context: "S3: failed to send request".to_string(),
@@ -308,15 +308,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
-        let extra_headers = range.map(|r| {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::RANGE, r.to_header_value());
-            headers
-        });
-
-        let Some((metadata, response)) =
-            self.request_object(Method::GET, id, extra_headers).await?
-        else {
+        let Some((metadata, response)) = self.request_object(Method::GET, id, range).await? else {
             return Ok(None);
         };
 

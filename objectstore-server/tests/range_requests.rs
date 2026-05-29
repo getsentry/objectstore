@@ -240,20 +240,3 @@ async fn full_range_returns_200() -> Result<()> {
     assert_eq!(body, "Hello, Range Requests!");
     Ok(())
 }
-
-#[tokio::test]
-async fn case_insensitive_range_unit() -> Result<()> {
-    let (server, key) = setup().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(server.url(&format!("/v1/objects/test/org=1/{key}")))
-        .header("range", "Bytes=0-4")
-        .send()
-        .await?;
-
-    assert_eq!(resp.status(), reqwest::StatusCode::PARTIAL_CONTENT);
-    let body = resp.text().await?;
-    assert_eq!(body, "Hello");
-    Ok(())
-}

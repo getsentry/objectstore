@@ -26,8 +26,6 @@ impl ByteRange {
             ByteRange::From(s) => format!("bytes={s}-"),
             ByteRange::Last(n) => format!("bytes=-{n}"),
         };
-        // SAFETY: the format only contains ASCII digits, hyphens, and the
-        // literal prefix "bytes=", which are all valid header value bytes.
         HeaderValue::from_str(&s).expect("ByteRange always produces a valid header value")
     }
 
@@ -168,10 +166,8 @@ impl ContentRange {
     /// The returned value is always valid ASCII and can be inserted directly
     /// into an HTTP header map.
     pub fn to_header_value(&self) -> HeaderValue {
-        let s = format!("bytes {}-{}/{}", self.start, self.end, self.total);
-        // SAFETY: the format only contains ASCII digits, spaces, hyphens,
-        // and slashes, which are all valid header value bytes.
-        HeaderValue::from_str(&s).expect("ContentRange always produces a valid header value")
+        HeaderValue::from_str(&self.to_string())
+            .expect("ContentRange always produces a valid header value")
     }
 }
 
@@ -212,33 +208,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_from_to() {
+    fn parse_valid_ranges() {
         assert_eq!(
             ByteRange::try_from("bytes=0-499"),
             Ok(ByteRange::Inclusive(0, 499))
         );
-    }
-
-    #[test]
-    fn parse_from() {
         assert_eq!(ByteRange::try_from("bytes=500-"), Ok(ByteRange::From(500)));
-    }
-
-    #[test]
-    fn parse_suffix() {
         assert_eq!(ByteRange::try_from("bytes=-100"), Ok(ByteRange::Last(100)));
-    }
-
-    #[test]
-    fn parse_rejects_multi_range() {
-        assert_eq!(
-            ByteRange::try_from("bytes=0-10, 20-30"),
-            Err(RangeError::MultiRangeNotSupported)
-        );
-    }
-
-    #[test]
-    fn parse_case_insensitive() {
+        // Case insensitive
         assert_eq!(
             ByteRange::try_from("Bytes=0-499"),
             Ok(ByteRange::Inclusive(0, 499))
@@ -247,86 +224,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_returns_unknown_unit_for_non_bytes() {
-        assert_eq!(ByteRange::try_from("items=0-10"), Err(RangeError::UnknownUnit));
-    }
-
-    #[test]
-    fn parse_rejects_inverted_range() {
+    fn parse_invalid_ranges() {
+        assert_eq!(
+            ByteRange::try_from("bytes=0-10, 20-30"),
+            Err(RangeError::MultiRangeNotSupported)
+        );
+        assert_eq!(
+            ByteRange::try_from("items=0-10"),
+            Err(RangeError::UnknownUnit)
+        );
         assert_eq!(
             ByteRange::try_from("bytes=500-100"),
+            Err(RangeError::InvalidRange)
+        );
+        assert_eq!(
+            ByteRange::try_from("bytes=-0"),
             Err(RangeError::InvalidRange)
         );
     }
 
     #[test]
-    fn parse_rejects_zero_suffix() {
-        assert_eq!(ByteRange::try_from("bytes=-0"), Err(RangeError::InvalidRange));
-    }
-
-    #[test]
-    fn resolve_from_to() {
-        let range = ByteRange::Inclusive(0, 499).resolve(1000);
-        assert_eq!(
-            range,
-            Some(ContentRange {
-                start: 0,
-                end: 499,
-                total: 1000
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_from_to_clamped() {
-        let range = ByteRange::Inclusive(0, 9999).resolve(500);
-        assert_eq!(
-            range,
-            Some(ContentRange {
-                start: 0,
-                end: 499,
-                total: 500
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_from() {
-        let range = ByteRange::From(500).resolve(1000);
-        assert_eq!(
-            range,
-            Some(ContentRange {
-                start: 500,
-                end: 999,
-                total: 1000
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_suffix() {
-        let range = ByteRange::Last(100).resolve(1000);
-        assert_eq!(
-            range,
-            Some(ContentRange {
-                start: 900,
-                end: 999,
-                total: 1000
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_suffix_larger_than_total() {
-        let range = ByteRange::Last(2000).resolve(1000);
-        assert_eq!(
-            range,
-            Some(ContentRange {
-                start: 0,
-                end: 999,
-                total: 1000
-            })
-        );
+    fn resolve_satisfiable() {
+        let cr = |start, end, total| Some(ContentRange { start, end, total });
+        assert_eq!(ByteRange::Inclusive(0, 499).resolve(1000), cr(0, 499, 1000));
+        assert_eq!(ByteRange::Inclusive(0, 9999).resolve(500), cr(0, 499, 500));
+        assert_eq!(ByteRange::From(500).resolve(1000), cr(500, 999, 1000));
+        assert_eq!(ByteRange::Last(100).resolve(1000), cr(900, 999, 1000));
+        assert_eq!(ByteRange::Last(2000).resolve(1000), cr(0, 999, 1000));
     }
 
     #[test]
@@ -337,60 +261,54 @@ mod tests {
     }
 
     #[test]
-    fn content_range_full() {
-        let cr = ContentRange::full(1000);
-        assert_eq!(cr.start, 0);
-        assert_eq!(cr.end, 999);
-        assert_eq!(cr.total, 1000);
-        assert_eq!(cr.len(), 1000);
-        assert!(cr.is_full());
-        assert_eq!(cr.to_header_value(), "bytes 0-999/1000");
-    }
+    fn content_range_properties() {
+        let full = ContentRange::full(1000);
+        assert_eq!(
+            full,
+            ContentRange {
+                start: 0,
+                end: 999,
+                total: 1000
+            }
+        );
+        assert_eq!(full.len(), 1000);
+        assert!(full.is_full());
 
-    #[test]
-    fn content_range_partial_is_not_full() {
-        let cr = ContentRange {
+        let partial = ContentRange {
             start: 0,
             end: 499,
             total: 1000,
         };
-        assert!(!cr.is_full());
-        assert_eq!(cr.len(), 500);
+        assert_eq!(partial.len(), 500);
+        assert!(!partial.is_full());
+
+        let zero = ContentRange::full(0);
+        assert_eq!(zero.len(), 0);
+        assert!(zero.is_full());
     }
 
     #[test]
-    fn content_range_full_zero_bytes() {
-        let cr = ContentRange::full(0);
-        assert_eq!(cr.len(), 0);
-        assert!(cr.is_full());
-    }
-
-    #[test]
-    fn byte_range_to_header_value() {
+    fn header_value_roundtrips() {
         assert_eq!(
             ByteRange::Inclusive(0, 499).to_header_value(),
             "bytes=0-499"
         );
         assert_eq!(ByteRange::From(500).to_header_value(), "bytes=500-");
         assert_eq!(ByteRange::Last(100).to_header_value(), "bytes=-100");
-    }
 
-    #[test]
-    fn content_range_parse() {
-        assert_eq!(
-            ContentRange::parse("bytes 0-499/1234"),
-            Some(ContentRange {
-                start: 0,
-                end: 499,
-                total: 1234
-            })
-        );
+        let cr = ContentRange {
+            start: 0,
+            end: 499,
+            total: 1234,
+        };
+        assert_eq!(cr.to_header_value(), "bytes 0-499/1234");
+        assert_eq!(ContentRange::parse("bytes 0-499/1234"), Some(cr));
         assert_eq!(ContentRange::parse("bytes */1234"), None);
         assert_eq!(ContentRange::parse("invalid"), None);
     }
 
     #[test]
-    fn content_range_parse_unsatisfiable_total() {
+    fn parse_unsatisfiable_total() {
         assert_eq!(
             ContentRange::parse_unsatisfiable_total("bytes */1234"),
             Some(1234)
