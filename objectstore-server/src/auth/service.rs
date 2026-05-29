@@ -1,4 +1,8 @@
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
@@ -115,5 +119,80 @@ impl AuthAwareService {
     pub async fn delete_object(&self, id: ObjectId) -> ApiResult<DeleteResponse> {
         self.assert_authorized(Permission::ObjectDelete, id.context())?;
         Ok(self.service.delete_object(id).await?)
+    }
+
+    // --- Multipart upload operations ---
+
+    /// Auth-aware wrapper around [`StorageService::initiate_multipart`].
+    pub async fn initiate_multipart(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+    ) -> ApiResult<InitiateMultipartResponse> {
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.initiate_multipart(id, metadata).await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::upload_part`].
+    pub async fn upload_part(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<String>,
+        body: ClientStream,
+    ) -> ApiResult<UploadPartResponse> {
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .upload_part(
+                id,
+                upload_id,
+                part_number,
+                content_length,
+                content_md5,
+                body,
+            )
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::list_parts`].
+    pub async fn list_parts(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> ApiResult<ListPartsResponse> {
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .list_parts(id, upload_id, max_parts, part_number_marker)
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::abort_multipart`].
+    pub async fn abort_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+    ) -> ApiResult<AbortMultipartResponse> {
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.abort_multipart(id, upload_id).await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::complete_multipart`].
+    pub async fn complete_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> ApiResult<CompleteMultipartResponse> {
+        self.assert_authorized(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .complete_multipart(id, upload_id, parts)
+            .await?)
     }
 }

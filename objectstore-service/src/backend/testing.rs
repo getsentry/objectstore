@@ -35,6 +35,7 @@
 //! ```
 
 use std::fmt;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
@@ -267,6 +268,10 @@ impl<H: Hooks> TestBackend<H> {
 impl<H: Hooks> Backend for TestBackend<H> {
     fn name(&self) -> &'static str {
         self.hooks.name()
+    }
+
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
     }
 
     async fn put_object(
