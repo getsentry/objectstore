@@ -210,11 +210,7 @@ impl StorageService {
             .await
     }
 
-    /// Streams the contents of an object.
-    ///
-    /// When `range` is `Some`, backends that support partial reads return only
-    /// the requested byte range. The returned [`ContentRange`] always describes
-    /// which bytes are in the stream, whether partial or full.
+    /// Streams (part of) the contents of an object.
     pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("get", async move { inner.get_object(&id, range).await })
