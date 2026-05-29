@@ -5,8 +5,12 @@ use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
 use objectstore_types::multipart::{
     CompleteErrorResponse, CompleteSuccessResponse, InitiateResponse, ListPartsResponse,
-    UploadPartResponse,
+    PartNumber, UploadPartResponse,
 };
+
+fn pn(n: u32) -> PartNumber {
+    PartNumber::new(n).unwrap()
+}
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -153,8 +157,8 @@ async fn test_multipart_full_flow() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 2);
-    assert_eq!(list.parts[0].part_number, 1);
-    assert_eq!(list.parts[1].part_number, 2);
+    assert_eq!(list.parts[0].part_number, pn(1));
+    assert_eq!(list.parts[1].part_number, pn(2));
     assert_eq!(list.parts[0].size, part1_data.len() as u64);
     assert_eq!(list.parts[1].size, part2_data.len() as u64);
     assert!(!list.is_truncated);
@@ -394,7 +398,7 @@ async fn test_upload_part_overwrite() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let list: ListPartsResponse = response.json().await?;
     assert_eq!(list.parts.len(), 1);
-    assert_eq!(list.parts[0].part_number, 1);
+    assert_eq!(list.parts[0].part_number, pn(1));
     assert_eq!(list.parts[0].etag, second_etag.etag);
     assert_eq!(list.parts[0].size, 6);
 

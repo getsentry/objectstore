@@ -733,7 +733,7 @@ impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
     type Error = crate::error::Error;
 
     fn try_from(r: XmlInitiateMultipartUploadResponse) -> crate::error::Result<Self> {
-        UploadId::new(r.upload_id)
+        Ok(UploadId::new(r.upload_id)?)
     }
 }
 

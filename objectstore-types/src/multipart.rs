@@ -1,14 +1,74 @@
 //! Types for the multipart upload protocol.
 
+use std::fmt;
+use std::num::NonZeroU32;
+use std::ops::Deref;
+use std::path::{Component, Path};
 use std::time::SystemTime;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Identifier for a multipart upload session.
-pub type UploadId = String;
+/// 1-indexed position of a part within its multipart upload.
+pub type PartNumber = NonZeroU32;
 
 /// Opaque entity tag identifying a specific version of an uploaded part.
 pub type ETag = String;
+
+/// Identifier for an in-progress multipart upload.
+///
+/// Validated on construction: non-empty and free of path-traversal components
+/// (`..`, leading `/`, etc.), so it is always safe to use as a single path segment.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct UploadId(String);
+
+/// Error returned when an [`UploadId`] fails validation.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid upload_id: {0}")]
+pub struct InvalidUploadId(String);
+
+impl UploadId {
+    /// Creates a new `UploadId` after validating the input.
+    pub fn new(s: String) -> Result<Self, InvalidUploadId> {
+        if s.is_empty() {
+            return Err(InvalidUploadId("must not be empty".into()));
+        }
+        for component in Path::new(&s).components() {
+            if !matches!(component, Component::Normal(_)) {
+                return Err(InvalidUploadId(s));
+            }
+        }
+        Ok(Self(s))
+    }
+
+    /// Returns the upload ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for UploadId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for UploadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for UploadId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::new(s).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Response from initiating a multipart upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +90,7 @@ pub struct UploadPartResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartInfo {
     /// The part number.
-    pub part_number: u32,
+    pub part_number: PartNumber,
     /// Opaque identifier of the part.
     pub etag: ETag,
     /// When the part was last modified.
@@ -58,14 +118,14 @@ pub struct ListPartsResponse {
     pub is_truncated: bool,
     /// Marker for the next page of results, if truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_part_number_marker: Option<u32>,
+    pub next_part_number_marker: Option<PartNumber>,
 }
 
 /// A single part reference used in the complete request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletePart {
     /// The part number.
-    pub part_number: u32,
+    pub part_number: PartNumber,
     /// The etag returned when this part was uploaded.
     pub etag: ETag,
 }

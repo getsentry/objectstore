@@ -1,6 +1,11 @@
 use std::convert::Infallible;
 use std::time::{Duration, SystemTime};
 
+use crate::auth::AuthAwareService;
+use crate::endpoints::common::{ApiError, ApiResult};
+use crate::extractors::Xt;
+use crate::extractors::body::MeteredBody;
+use crate::state::ServiceState;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -14,18 +19,12 @@ use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
-use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
-    InitiateResponse, ListPartsResponse, PartInfo, UploadId, UploadPartResponse,
+    InitiateResponse, ListPartsResponse, PartInfo, UploadPartResponse,
 };
 use serde::Deserialize;
-use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult};
-use crate::extractors::Xt;
-use crate::extractors::body::MeteredBody;
-use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
     let initiate_no_key = routing::post(initiate_post);
@@ -69,12 +68,6 @@ struct ListPartsQuery {
     part_number_marker: Option<PartNumber>,
 }
 
-fn validate_part_number(part_number: u32) -> ApiResult<()> {
-    if part_number == 0 {
-        return Err(ApiError::Client("part_number must be >= 1".into()));
-    }
-    Ok(())
-}
 // --- Handlers ---
 
 async fn initiate_put(

@@ -580,7 +580,9 @@ impl TryInto<UploadId> for TieredUploadId {
     fn try_into(self) -> Result<UploadId, Self::Error> {
         let json =
             serde_json::to_vec(&self).map_err(|e| Error::serde("encoding multipart token", e))?;
-        UploadId::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+        Ok(UploadId::new(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json),
+        )?)
     }
 }
 

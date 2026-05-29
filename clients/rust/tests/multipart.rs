@@ -5,9 +5,13 @@ mod common;
 use common::{test_server, test_session};
 use futures_util::StreamExt as _;
 use futures_util::stream;
-use objectstore_client::{Client, CompletePart, Compression, Error, Usecase};
+use objectstore_client::{Client, CompletePart, Compression, Error, PartNumber, Usecase};
 
 use crate::common::test_token_generator;
+
+fn pn(n: u32) -> PartNumber {
+    PartNumber::new(n).unwrap()
+}
 
 #[tokio::test]
 async fn test_full_upload_uncompressed() {
@@ -30,7 +34,7 @@ async fn test_full_upload_uncompressed() {
     assert_eq!(upload.key(), "multipart-test-key");
     assert!(!upload.upload_id().is_empty());
 
-    let parts_data: Vec<(&[u8], u32)> = vec![(b"hello ", 1), (b"world!", 2)];
+    let parts_data: Vec<(&[u8], PartNumber)> = vec![(b"hello ", pn(1)), (b"world!", pn(2))];
 
     let results: Vec<_> = stream::iter(
         parts_data
@@ -83,9 +87,9 @@ async fn test_full_upload_compressed() {
     let part1_data = b"hello ";
     let part2_data = b"world!";
 
-    let parts_data: Vec<(Vec<u8>, u32)> = vec![
-        (zstd::encode_all(&part1_data[..], 0).unwrap(), 1),
-        (zstd::encode_all(&part2_data[..], 0).unwrap(), 2),
+    let parts_data: Vec<(Vec<u8>, PartNumber)> = vec![
+        (zstd::encode_all(&part1_data[..], 0).unwrap(), pn(1)),
+        (zstd::encode_all(&part2_data[..], 0).unwrap(), pn(2)),
     ];
 
     let results: Vec<_> = stream::iter(
@@ -144,7 +148,7 @@ async fn test_server_generated_key() {
 
     assert!(!upload.key().is_empty());
 
-    let part = upload.put(b"data".as_slice(), 1, None).await.unwrap();
+    let part = upload.put(b"data".as_slice(), pn(1), None).await.unwrap();
 
     let key = upload.complete([part]).await.unwrap();
 
@@ -167,19 +171,25 @@ async fn test_list_parts() {
         .await
         .unwrap();
 
-    upload.put(b"part-two".as_slice(), 2, None).await.unwrap();
-    upload.put(b"part-one".as_slice(), 1, None).await.unwrap();
+    upload
+        .put(b"part-two".as_slice(), pn(2), None)
+        .await
+        .unwrap();
+    upload
+        .put(b"part-one".as_slice(), pn(1), None)
+        .await
+        .unwrap();
 
     let parts = upload.list_parts().await.unwrap();
     assert_eq!(parts.len(), 2);
 
     let p1 = parts
         .iter()
-        .find(|p| p.part_number == 1)
+        .find(|p| p.part_number == pn(1))
         .expect("missing part 1");
     let p2 = parts
         .iter()
-        .find(|p| p.part_number == 2)
+        .find(|p| p.part_number == pn(2))
         .expect("missing part 2");
     assert_eq!(p1.size, 8);
     assert_eq!(p2.size, 8);
@@ -199,7 +209,10 @@ async fn test_abort() {
         .await
         .unwrap();
 
-    upload.put(b"some data".as_slice(), 1, None).await.unwrap();
+    upload
+        .put(b"some data".as_slice(), pn(1), None)
+        .await
+        .unwrap();
     upload.abort().await.unwrap();
 }
 
@@ -219,7 +232,10 @@ async fn test_metadata_preserved() {
         .await
         .unwrap();
 
-    let part = upload.put(b"payload".as_slice(), 1, None).await.unwrap();
+    let part = upload
+        .put(b"payload".as_slice(), pn(1), None)
+        .await
+        .unwrap();
 
     let key = upload.complete([part]).await.unwrap();
 
@@ -245,11 +261,14 @@ async fn test_complete_with_bad_etag() {
         .await
         .unwrap();
 
-    upload.put(b"real data".as_slice(), 1, None).await.unwrap();
+    upload
+        .put(b"real data".as_slice(), pn(1), None)
+        .await
+        .unwrap();
 
     let result = upload
         .complete(vec![CompletePart {
-            part_number: 1,
+            part_number: pn(1),
             etag: "bogus-etag".to_string(),
         }])
         .await;

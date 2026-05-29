@@ -19,6 +19,7 @@ use crate::{ClientStream, ObjectKey, Session};
 pub use objectstore_types::multipart::CompletePart;
 pub use objectstore_types::multipart::ETag;
 pub use objectstore_types::multipart::PartInfo;
+pub use objectstore_types::multipart::PartNumber;
 pub use objectstore_types::multipart::UploadId;
 
 #[derive(Deserialize)]
@@ -212,7 +213,7 @@ impl MultipartUpload {
     pub async fn put(
         &self,
         body: impl Into<Bytes>,
-        part_number: u32,
+        part_number: PartNumber,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
         let bytes = body.into();
@@ -230,7 +231,7 @@ impl MultipartUpload {
     pub async fn put_stream(
         &self,
         stream: ClientStream,
-        part_number: u32,
+        part_number: PartNumber,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
@@ -252,7 +253,7 @@ impl MultipartUpload {
     pub async fn put_read<R>(
         &self,
         reader: R,
-        part_number: u32,
+        part_number: PartNumber,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart>
@@ -267,7 +268,7 @@ impl MultipartUpload {
     async fn upload_part(
         &self,
         body: Body,
-        part_number: u32,
+        part_number: PartNumber,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
@@ -278,7 +279,7 @@ impl MultipartUpload {
                 Some("parts"),
                 Some(&self.key),
                 Some(vec![
-                    ("upload_id", self.upload_id.clone()),
+                    ("upload_id", self.upload_id.to_string()),
                     ("part_number", part_number.to_string()),
                 ]),
             )?
@@ -321,9 +322,9 @@ impl MultipartUpload {
     async fn list_parts_page(
         &self,
         max_parts: Option<u32>,
-        part_number_marker: Option<u32>,
+        part_number_marker: Option<PartNumber>,
     ) -> crate::Result<ListPartsResponse> {
-        let mut params = vec![("upload_id", self.upload_id.clone())];
+        let mut params: Vec<(&str, String)> = vec![("upload_id", self.upload_id.to_string())];
         if let Some(max) = max_parts {
             params.push(("max_parts", max.to_string()));
         }
@@ -348,7 +349,7 @@ impl MultipartUpload {
             reqwest::Method::DELETE,
             None,
             Some(&self.key),
-            Some(vec![("upload_id", self.upload_id)]),
+            Some(vec![("upload_id", self.upload_id.to_string())]),
         )?;
         builder.send().await?.error_for_status()?;
         Ok(())
@@ -368,7 +369,7 @@ impl MultipartUpload {
                 reqwest::Method::POST,
                 Some("complete"),
                 Some(&self.key),
-                Some(vec![("upload_id", self.upload_id)]),
+                Some(vec![("upload_id", self.upload_id.to_string())]),
             )?
             .json(&CompleteRequest { parts });
 
