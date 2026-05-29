@@ -93,6 +93,7 @@ impl ApiError {
 
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => {
