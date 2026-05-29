@@ -310,7 +310,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         let extra_headers = range.map(|r| {
             let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::RANGE, r.to_header_value().parse().unwrap());
+            headers.insert(reqwest::header::RANGE, r.to_header_value());
             headers
         });
 

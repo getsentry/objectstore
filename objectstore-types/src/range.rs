@@ -1,32 +1,78 @@
-//! HTTP Range request types for partial content retrieval.
-//!
-//! [`ByteRange`] represents a parsed single byte-range from a `Range` HTTP
-//! header. [`ContentRange`] describes which portion of an object is present in
-//! a response body, used to build `Content-Range` response headers and choose
-//! between 200 and 206 status codes.
+//! Types for HTTP range requests.
 
 use std::fmt;
 
-/// A single byte-range parsed from the `Range` HTTP request header.
-///
-/// Only the `bytes` range unit is supported, and only a single range specifier
-/// (multi-range requests are rejected at parse time).
+use http::header::HeaderValue;
+
+/// A byte range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteRange {
-    /// `bytes=N-M` — from byte offset N to byte offset M (both inclusive).
-    FromTo(u64, u64),
-    /// `bytes=N-` — from byte offset N to the end of the representation.
+    /// Bounded range with start and end, inclusive
+    Inclusive(u64, u64),
+    /// From offset X onwards
     From(u64),
-    /// `bytes=-N` — the last N bytes of the representation.
-    Suffix(u64),
+    /// Last X bytes
+    Last(u64),
 }
 
 impl ByteRange {
-    /// Parses a `Range` header value into a [`ByteRange`].
+    /// Formats this range as a `Range` request header value (e.g. `bytes=0-499`).
     ///
-    /// Only `bytes=` ranges with a single specifier are accepted. Multi-range
-    /// requests (containing commas) and non-`bytes` units are rejected.
-    pub fn parse(header: &str) -> Result<Self, RangeError> {
+    /// The returned value is always valid ASCII and can be inserted directly
+    /// into an HTTP header map.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let s = match self {
+            ByteRange::Inclusive(s, e) => format!("bytes={s}-{e}"),
+            ByteRange::From(s) => format!("bytes={s}-"),
+            ByteRange::Last(n) => format!("bytes=-{n}"),
+        };
+        // SAFETY: the format only contains ASCII digits, hyphens, and the
+        // literal prefix "bytes=", which are all valid header value bytes.
+        HeaderValue::from_str(&s).expect("ByteRange always produces a valid header value")
+    }
+
+    /// Resolves this range against a known total size, returning the concrete
+    /// byte offsets and total, or [`None`] if the range is unsatisfiable.
+    pub fn resolve(self, total: u64) -> Option<ContentRange> {
+        if total == 0 {
+            return None;
+        }
+
+        let (start, end) = match self {
+            ByteRange::Inclusive(s, e) => {
+                if s >= total {
+                    return None;
+                }
+                (s, e.min(total - 1))
+            }
+            ByteRange::From(s) => {
+                if s >= total {
+                    return None;
+                }
+                (s, total - 1)
+            }
+            ByteRange::Last(n) => {
+                let start = total.saturating_sub(n);
+                (start, total - 1)
+            }
+        };
+
+        Some(ContentRange { start, end, total })
+    }
+}
+
+/// Parses a `Range` request header string into a [`ByteRange`].
+///
+/// Only `bytes=` ranges with a single specifier are accepted. Multi-range
+/// requests (containing commas) and non-`bytes` units are rejected.
+///
+/// Converting a [`http::header::HeaderValue`] to `&str` via
+/// [`HeaderValue::to_str`] is the caller's responsibility, since that
+/// conversion can fail when the value contains non-visible-ASCII bytes.
+impl TryFrom<&str> for ByteRange {
+    type Error = RangeError;
+
+    fn try_from(header: &str) -> Result<Self, Self::Error> {
         let lower = header.to_ascii_lowercase();
         let spec = lower
             .strip_prefix("bytes=")
@@ -39,63 +85,25 @@ impl ByteRange {
         let (start_str, end_str) = spec.split_once('-').ok_or(RangeError::InvalidRange)?;
 
         if start_str.is_empty() {
-            // bytes=-N (suffix)
+            // bytes=-N (suffix / last N bytes)
             let n: u64 = end_str.parse().map_err(|_| RangeError::InvalidRange)?;
             if n == 0 {
                 return Err(RangeError::InvalidRange);
             }
-            Ok(ByteRange::Suffix(n))
+            Ok(ByteRange::Last(n))
         } else if end_str.is_empty() {
             // bytes=N- (from offset to end)
             let start: u64 = start_str.parse().map_err(|_| RangeError::InvalidRange)?;
             Ok(ByteRange::From(start))
         } else {
-            // bytes=N-M
+            // bytes=N-M (inclusive range)
             let start: u64 = start_str.parse().map_err(|_| RangeError::InvalidRange)?;
             let end: u64 = end_str.parse().map_err(|_| RangeError::InvalidRange)?;
             if start > end {
                 return Err(RangeError::InvalidRange);
             }
-            Ok(ByteRange::FromTo(start, end))
+            Ok(ByteRange::Inclusive(start, end))
         }
-    }
-
-    /// Formats this range as a `Range` header value (e.g. `bytes=0-499`).
-    pub fn to_header_value(&self) -> String {
-        match self {
-            ByteRange::FromTo(s, e) => format!("bytes={s}-{e}"),
-            ByteRange::From(s) => format!("bytes={s}-"),
-            ByteRange::Suffix(n) => format!("bytes=-{n}"),
-        }
-    }
-
-    /// Resolves this range against a known total size, returning the concrete
-    /// byte offsets and total, or `None` if the range is unsatisfiable.
-    pub fn resolve(self, total: u64) -> Option<ContentRange> {
-        if total == 0 {
-            return None;
-        }
-
-        let (start, end) = match self {
-            ByteRange::FromTo(s, e) => {
-                if s >= total {
-                    return None;
-                }
-                (s, e.min(total - 1))
-            }
-            ByteRange::From(s) => {
-                if s >= total {
-                    return None;
-                }
-                (s, total - 1)
-            }
-            ByteRange::Suffix(n) => {
-                let start = total.saturating_sub(n);
-                (start, total - 1)
-            }
-        };
-
-        Some(ContentRange { start, end, total })
     }
 }
 
@@ -156,8 +164,14 @@ impl ContentRange {
     }
 
     /// Formats the value for a `Content-Range` response header.
-    pub fn to_header_value(&self) -> String {
-        format!("bytes {}-{}/{}", self.start, self.end, self.total)
+    ///
+    /// The returned value is always valid ASCII and can be inserted directly
+    /// into an HTTP header map.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let s = format!("bytes {}-{}/{}", self.start, self.end, self.total);
+        // SAFETY: the format only contains ASCII digits, spaces, hyphens,
+        // and slashes, which are all valid header value bytes.
+        HeaderValue::from_str(&s).expect("ContentRange always produces a valid header value")
     }
 }
 
@@ -200,25 +214,25 @@ mod tests {
     #[test]
     fn parse_from_to() {
         assert_eq!(
-            ByteRange::parse("bytes=0-499"),
-            Ok(ByteRange::FromTo(0, 499))
+            ByteRange::try_from("bytes=0-499"),
+            Ok(ByteRange::Inclusive(0, 499))
         );
     }
 
     #[test]
     fn parse_from() {
-        assert_eq!(ByteRange::parse("bytes=500-"), Ok(ByteRange::From(500)));
+        assert_eq!(ByteRange::try_from("bytes=500-"), Ok(ByteRange::From(500)));
     }
 
     #[test]
     fn parse_suffix() {
-        assert_eq!(ByteRange::parse("bytes=-100"), Ok(ByteRange::Suffix(100)));
+        assert_eq!(ByteRange::try_from("bytes=-100"), Ok(ByteRange::Last(100)));
     }
 
     #[test]
     fn parse_rejects_multi_range() {
         assert_eq!(
-            ByteRange::parse("bytes=0-10, 20-30"),
+            ByteRange::try_from("bytes=0-10, 20-30"),
             Err(RangeError::MultiRangeNotSupported)
         );
     }
@@ -226,33 +240,33 @@ mod tests {
     #[test]
     fn parse_case_insensitive() {
         assert_eq!(
-            ByteRange::parse("Bytes=0-499"),
-            Ok(ByteRange::FromTo(0, 499))
+            ByteRange::try_from("Bytes=0-499"),
+            Ok(ByteRange::Inclusive(0, 499))
         );
-        assert_eq!(ByteRange::parse("BYTES=100-"), Ok(ByteRange::From(100)));
+        assert_eq!(ByteRange::try_from("BYTES=100-"), Ok(ByteRange::From(100)));
     }
 
     #[test]
     fn parse_returns_unknown_unit_for_non_bytes() {
-        assert_eq!(ByteRange::parse("items=0-10"), Err(RangeError::UnknownUnit));
+        assert_eq!(ByteRange::try_from("items=0-10"), Err(RangeError::UnknownUnit));
     }
 
     #[test]
     fn parse_rejects_inverted_range() {
         assert_eq!(
-            ByteRange::parse("bytes=500-100"),
+            ByteRange::try_from("bytes=500-100"),
             Err(RangeError::InvalidRange)
         );
     }
 
     #[test]
     fn parse_rejects_zero_suffix() {
-        assert_eq!(ByteRange::parse("bytes=-0"), Err(RangeError::InvalidRange));
+        assert_eq!(ByteRange::try_from("bytes=-0"), Err(RangeError::InvalidRange));
     }
 
     #[test]
     fn resolve_from_to() {
-        let range = ByteRange::FromTo(0, 499).resolve(1000);
+        let range = ByteRange::Inclusive(0, 499).resolve(1000);
         assert_eq!(
             range,
             Some(ContentRange {
@@ -265,7 +279,7 @@ mod tests {
 
     #[test]
     fn resolve_from_to_clamped() {
-        let range = ByteRange::FromTo(0, 9999).resolve(500);
+        let range = ByteRange::Inclusive(0, 9999).resolve(500);
         assert_eq!(
             range,
             Some(ContentRange {
@@ -291,7 +305,7 @@ mod tests {
 
     #[test]
     fn resolve_suffix() {
-        let range = ByteRange::Suffix(100).resolve(1000);
+        let range = ByteRange::Last(100).resolve(1000);
         assert_eq!(
             range,
             Some(ContentRange {
@@ -304,7 +318,7 @@ mod tests {
 
     #[test]
     fn resolve_suffix_larger_than_total() {
-        let range = ByteRange::Suffix(2000).resolve(1000);
+        let range = ByteRange::Last(2000).resolve(1000);
         assert_eq!(
             range,
             Some(ContentRange {
@@ -317,9 +331,9 @@ mod tests {
 
     #[test]
     fn resolve_unsatisfiable() {
-        assert_eq!(ByteRange::FromTo(1000, 2000).resolve(500), None);
+        assert_eq!(ByteRange::Inclusive(1000, 2000).resolve(500), None);
         assert_eq!(ByteRange::From(500).resolve(500), None);
-        assert_eq!(ByteRange::FromTo(0, 0).resolve(0), None);
+        assert_eq!(ByteRange::Inclusive(0, 0).resolve(0), None);
     }
 
     #[test]
@@ -353,9 +367,12 @@ mod tests {
 
     #[test]
     fn byte_range_to_header_value() {
-        assert_eq!(ByteRange::FromTo(0, 499).to_header_value(), "bytes=0-499");
+        assert_eq!(
+            ByteRange::Inclusive(0, 499).to_header_value(),
+            "bytes=0-499"
+        );
         assert_eq!(ByteRange::From(500).to_header_value(), "bytes=500-");
-        assert_eq!(ByteRange::Suffix(100).to_header_value(), "bytes=-100");
+        assert_eq!(ByteRange::Last(100).to_header_value(), "bytes=-100");
     }
 
     #[test]

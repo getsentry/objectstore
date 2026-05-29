@@ -72,7 +72,7 @@ async fn object_get(
             let header_str = value
                 .to_str()
                 .map_err(|_| ApiError::Client("invalid Range header".into()))?;
-            match ByteRange::parse(header_str) {
+            match ByteRange::try_from(header_str) {
                 Ok(range) => Some(range),
                 Err(RangeError::UnknownUnit | RangeError::MultiRangeNotSupported) => None,
                 Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
@@ -115,10 +115,7 @@ async fn object_get(
             http::header::CONTENT_LENGTH,
             content_range.len().to_string().parse().unwrap(),
         );
-        resp_headers.insert(
-            http::header::CONTENT_RANGE,
-            content_range.to_header_value().parse().unwrap(),
-        );
+        resp_headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
     }
 
     Ok(response)

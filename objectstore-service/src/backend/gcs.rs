@@ -666,13 +666,11 @@ impl Backend for GcsBackend {
         let mut download_url = object_url;
         download_url.query_pairs_mut().append_pair("alt", "media");
 
-        let range_header = range.map(|r| r.to_header_value());
-
         let payload_response = self
             .with_retry("get_payload", || async {
                 let mut req = self.request(Method::GET, download_url.clone()).await?;
-                if let Some(ref value) = range_header {
-                    req = req.header(header::RANGE, value);
+                if let Some(r) = range {
+                    req = req.header(header::RANGE, r.to_header_value());
                 }
                 let resp = req
                     .send()
