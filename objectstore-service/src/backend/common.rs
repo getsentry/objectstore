@@ -103,6 +103,12 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
 
     /// Finalizes the upload identified by `(id, upload_id)` with the given
     /// ordered list of parts.
+    ///
+    /// Note that this returns `Result<Option<CompleteMultipartError>>`.
+    /// It's therefore possible to get `Ok(Some(err))`, meaning that at the server level this will
+    /// translate to HTTP `200 OK` with an error contained in the response body.
+    /// We need to do it this way to mirror backends that also behave like this (namely S3 and
+    /// GCS).
     async fn complete_multipart(
         &self,
         id: &ObjectId,
