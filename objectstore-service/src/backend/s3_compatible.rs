@@ -201,7 +201,17 @@ where
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
-        metadata.size = response.content_length().map(|len| len as usize);
+        // For partial responses, Content-Length is the range body length, not the full object size.
+        // Use the Content-Range total instead.
+        metadata.size = if response.status() == StatusCode::PARTIAL_CONTENT {
+            headers
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(ContentRange::parse)
+                .map(|cr| cr.total as usize)
+        } else {
+            response.content_length().map(|len| len as usize)
+        };
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {

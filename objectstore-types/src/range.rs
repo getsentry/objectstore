@@ -39,6 +39,9 @@ impl TryFrom<&str> for ByteRange {
             Ok(ByteRange::From(start))
         } else if start.is_empty() {
             let last: u64 = end.parse().map_err(|_| RangeError::Invalid)?;
+            if last == 0 {
+                return Err(RangeError::Invalid);
+            }
             Ok(ByteRange::Last(last))
         } else {
             let start: u64 = start.parse().map_err(|_| RangeError::Invalid)?;
