@@ -3,41 +3,73 @@
 use std::fmt;
 
 use http::header::HeaderValue;
+use thiserror::Error;
 
-/// A byte range.
+/// Specifier for a single byte range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteRange {
     /// Bounded range with start and end, inclusive
-    Inclusive(u64, u64),
+    Bounded(u64, u64),
     /// From offset X onwards
     From(u64),
     /// Last X bytes
     Last(u64),
 }
 
+/// Parses a `Range` request header value into a [`ByteRange`].
+///
+/// Only `bytes=` ranges with a single specifier are accepted.
+/// Multiple ranges and non-`bytes` units are rejected.
+impl TryFrom<&str> for ByteRange {
+    type Error = RangeError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let lower = value.to_ascii_lowercase();
+        let Some(spec) = lower.strip_prefix("bytes=") else {
+            let unit = lower.split_once('=').map_or(&*lower, |(u, _)| u);
+            return Err(RangeError::InvalidUnit(unit.to_owned()));
+        };
+        if spec.contains(',') {
+            return Err(RangeError::MultiRange);
+        }
+
+        let (start, end) = spec.split_once('-').ok_or(RangeError::Invalid)?;
+        if end.is_empty() {
+            let start: u64 = start.parse().map_err(|_| RangeError::Invalid)?;
+            Ok(ByteRange::From(start))
+        } else if start.is_empty() {
+            let last: u64 = end.parse().map_err(|_| RangeError::Invalid)?;
+            Ok(ByteRange::Last(last))
+        } else {
+            let start: u64 = start.parse().map_err(|_| RangeError::Invalid)?;
+            let end: u64 = end.parse().map_err(|_| RangeError::Invalid)?;
+            if start > end {
+                return Err(RangeError::Invalid);
+            }
+            Ok(ByteRange::Bounded(start, end))
+        }
+    }
+}
+
 impl ByteRange {
     /// Formats this range as a `Range` request header value (e.g. `bytes=0-499`).
-    ///
-    /// The returned value is always valid ASCII and can be inserted directly
-    /// into an HTTP header map.
     pub fn to_header_value(&self) -> HeaderValue {
         let s = match self {
-            ByteRange::Inclusive(s, e) => format!("bytes={s}-{e}"),
-            ByteRange::From(s) => format!("bytes={s}-"),
+            ByteRange::Bounded(a, b) => format!("bytes={a}-{b}"),
+            ByteRange::From(n) => format!("bytes={n}-"),
             ByteRange::Last(n) => format!("bytes=-{n}"),
         };
-        HeaderValue::from_str(&s).expect("ByteRange always produces a valid header value")
+        HeaderValue::from_str(&s).expect("always a valid header value")
     }
 
-    /// Resolves this range against a known total size, returning the concrete
-    /// byte offsets and total, or [`None`] if the range is unsatisfiable.
+    /// Resolves this range against a known total size.
     pub fn resolve(self, total: u64) -> Option<ContentRange> {
         if total == 0 {
             return None;
         }
 
         let (start, end) = match self {
-            ByteRange::Inclusive(s, e) => {
+            ByteRange::Bounded(s, e) => {
                 if s >= total {
                     return None;
                 }
@@ -56,52 +88,6 @@ impl ByteRange {
         };
 
         Some(ContentRange { start, end, total })
-    }
-}
-
-/// Parses a `Range` request header string into a [`ByteRange`].
-///
-/// Only `bytes=` ranges with a single specifier are accepted. Multi-range
-/// requests (containing commas) and non-`bytes` units are rejected.
-///
-/// Converting a [`http::header::HeaderValue`] to `&str` via
-/// [`HeaderValue::to_str`] is the caller's responsibility, since that
-/// conversion can fail when the value contains non-visible-ASCII bytes.
-impl TryFrom<&str> for ByteRange {
-    type Error = RangeError;
-
-    fn try_from(header: &str) -> Result<Self, Self::Error> {
-        let lower = header.to_ascii_lowercase();
-        let spec = lower
-            .strip_prefix("bytes=")
-            .ok_or(RangeError::UnknownUnit)?;
-
-        if spec.contains(',') {
-            return Err(RangeError::MultiRangeNotSupported);
-        }
-
-        let (start_str, end_str) = spec.split_once('-').ok_or(RangeError::InvalidRange)?;
-
-        if start_str.is_empty() {
-            // bytes=-N (suffix / last N bytes)
-            let n: u64 = end_str.parse().map_err(|_| RangeError::InvalidRange)?;
-            if n == 0 {
-                return Err(RangeError::InvalidRange);
-            }
-            Ok(ByteRange::Last(n))
-        } else if end_str.is_empty() {
-            // bytes=N- (from offset to end)
-            let start: u64 = start_str.parse().map_err(|_| RangeError::InvalidRange)?;
-            Ok(ByteRange::From(start))
-        } else {
-            // bytes=N-M (inclusive range)
-            let start: u64 = start_str.parse().map_err(|_| RangeError::InvalidRange)?;
-            let end: u64 = end_str.parse().map_err(|_| RangeError::InvalidRange)?;
-            if start > end {
-                return Err(RangeError::InvalidRange);
-            }
-            Ok(ByteRange::Inclusive(start, end))
-        }
     }
 }
 
@@ -178,30 +164,18 @@ impl fmt::Display for ContentRange {
 }
 
 /// Errors that can occur when parsing a `Range` header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RangeError {
-    /// The header contained multiple range specifiers separated by commas.
-    MultiRangeNotSupported,
-    /// The header value could not be parsed as a valid byte range.
-    InvalidRange,
-    /// The range unit is not `bytes` (e.g. `items=0-10`). Per RFC 9110, unknown
-    /// units should be ignored and the request served as a normal full-body response.
-    UnknownUnit,
+    /// The value could not be parsed as a valid byte range.
+    #[error("invalid byte range")]
+    Invalid,
+    /// The value contained multiple range specifiers separated by commas.
+    #[error("expected single byte range, found multipart range")]
+    MultiRange,
+    /// The range unit is invalid
+    #[error("invalid range unit: {0}, expected: bytes")]
+    InvalidUnit(String),
 }
-
-impl fmt::Display for RangeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RangeError::MultiRangeNotSupported => {
-                write!(f, "multi-range requests are not supported")
-            }
-            RangeError::InvalidRange => write!(f, "invalid Range header"),
-            RangeError::UnknownUnit => write!(f, "unknown range unit"),
-        }
-    }
-}
-
-impl std::error::Error for RangeError {}
 
 #[cfg(test)]
 mod tests {
@@ -211,14 +185,14 @@ mod tests {
     fn parse_valid_ranges() {
         assert_eq!(
             ByteRange::try_from("bytes=0-499"),
-            Ok(ByteRange::Inclusive(0, 499))
+            Ok(ByteRange::Bounded(0, 499))
         );
         assert_eq!(ByteRange::try_from("bytes=500-"), Ok(ByteRange::From(500)));
         assert_eq!(ByteRange::try_from("bytes=-100"), Ok(ByteRange::Last(100)));
         // Case insensitive
         assert_eq!(
             ByteRange::try_from("Bytes=0-499"),
-            Ok(ByteRange::Inclusive(0, 499))
+            Ok(ByteRange::Bounded(0, 499))
         );
         assert_eq!(ByteRange::try_from("BYTES=100-"), Ok(ByteRange::From(100)));
     }
@@ -227,27 +201,24 @@ mod tests {
     fn parse_invalid_ranges() {
         assert_eq!(
             ByteRange::try_from("bytes=0-10, 20-30"),
-            Err(RangeError::MultiRangeNotSupported)
+            Err(RangeError::MultiRange)
         );
         assert_eq!(
             ByteRange::try_from("items=0-10"),
-            Err(RangeError::UnknownUnit)
+            Err(RangeError::InvalidUnit("items".into()))
         );
         assert_eq!(
             ByteRange::try_from("bytes=500-100"),
-            Err(RangeError::InvalidRange)
+            Err(RangeError::Invalid)
         );
-        assert_eq!(
-            ByteRange::try_from("bytes=-0"),
-            Err(RangeError::InvalidRange)
-        );
+        assert_eq!(ByteRange::try_from("bytes=-0"), Err(RangeError::Invalid));
     }
 
     #[test]
     fn resolve_satisfiable() {
         let cr = |start, end, total| Some(ContentRange { start, end, total });
-        assert_eq!(ByteRange::Inclusive(0, 499).resolve(1000), cr(0, 499, 1000));
-        assert_eq!(ByteRange::Inclusive(0, 9999).resolve(500), cr(0, 499, 500));
+        assert_eq!(ByteRange::Bounded(0, 499).resolve(1000), cr(0, 499, 1000));
+        assert_eq!(ByteRange::Bounded(0, 9999).resolve(500), cr(0, 499, 500));
         assert_eq!(ByteRange::From(500).resolve(1000), cr(500, 999, 1000));
         assert_eq!(ByteRange::Last(100).resolve(1000), cr(900, 999, 1000));
         assert_eq!(ByteRange::Last(2000).resolve(1000), cr(0, 999, 1000));
@@ -255,9 +226,9 @@ mod tests {
 
     #[test]
     fn resolve_unsatisfiable() {
-        assert_eq!(ByteRange::Inclusive(1000, 2000).resolve(500), None);
+        assert_eq!(ByteRange::Bounded(1000, 2000).resolve(500), None);
         assert_eq!(ByteRange::From(500).resolve(500), None);
-        assert_eq!(ByteRange::Inclusive(0, 0).resolve(0), None);
+        assert_eq!(ByteRange::Bounded(0, 0).resolve(0), None);
     }
 
     #[test]
@@ -289,10 +260,7 @@ mod tests {
 
     #[test]
     fn header_value_roundtrips() {
-        assert_eq!(
-            ByteRange::Inclusive(0, 499).to_header_value(),
-            "bytes=0-499"
-        );
+        assert_eq!(ByteRange::Bounded(0, 499).to_header_value(), "bytes=0-499");
         assert_eq!(ByteRange::From(500).to_header_value(), "bytes=500-");
         assert_eq!(ByteRange::Last(100).to_header_value(), "bytes=-100");
 
