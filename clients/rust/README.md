@@ -140,7 +140,7 @@ when initiating the upload.
 ```rust,ignore
 use futures_util::StreamExt as _;
 use futures_util::stream;
-use objectstore_client::{Compression, MultipartCompletePart};
+use objectstore_client::Compression;
 
 let upload = session
     .initiate_multipart_upload()
@@ -186,13 +186,13 @@ You can also resume an in-progress multipart upload, e.g. after a process restar
 ```rust,ignore
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use futures_util::stream;
-use objectstore_client::MultipartCompletePart;
+use objectstore_client::CompletePart;
 
-let upload = session.resume_multipart_upload("my-large-object", saved_upload_id);
+let upload = session.resume_multipart_upload("my-large-object", saved_upload_id)?;
 
 let existing = upload.list_parts().await?;
 let total_parts = 10;
-let uploaded: Vec<u32> = existing.iter().map(|p| p.part_number).collect();
+let uploaded: Vec<u32> = existing.iter().map(|p| p.part_number.get()).collect();
 let missing: Vec<u32> = (1..=total_parts)
     .filter(|n| !uploaded.contains(n))
     .collect();
@@ -206,7 +206,7 @@ let mut done: Vec<_> = stream::iter(
 .try_collect()
 .await?;
 
-done.extend(existing.into_iter().map(MultipartCompletePart::from));
+done.extend(existing.into_iter().map(CompletePart::from));
 
 let key = upload.complete(done).await?;
 ```

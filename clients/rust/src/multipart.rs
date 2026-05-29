@@ -65,13 +65,14 @@ impl Session {
     pub fn resume_multipart_upload(
         &self,
         key: impl Into<ObjectKey>,
-        upload_id: impl Into<UploadId>,
-    ) -> MultipartUpload {
-        MultipartUpload {
+        upload_id: impl Into<String>,
+    ) -> crate::Result<MultipartUpload> {
+        Ok(MultipartUpload {
             session: self.clone(),
             key: key.into(),
-            upload_id: upload_id.into(),
-        }
+            upload_id: UploadId::new(upload_id.into())
+                .map_err(|e| crate::Error::InvalidArgument(e.to_string()))?,
+        })
     }
 }
 
@@ -213,7 +214,7 @@ impl MultipartUpload {
     pub async fn put(
         &self,
         body: impl Into<Bytes>,
-        part_number: PartNumber,
+        part_number: u32,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
         let bytes = body.into();
@@ -231,7 +232,7 @@ impl MultipartUpload {
     pub async fn put_stream(
         &self,
         stream: ClientStream,
-        part_number: PartNumber,
+        part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
@@ -253,7 +254,7 @@ impl MultipartUpload {
     pub async fn put_read<R>(
         &self,
         reader: R,
-        part_number: PartNumber,
+        part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart>
@@ -268,10 +269,13 @@ impl MultipartUpload {
     async fn upload_part(
         &self,
         body: Body,
-        part_number: PartNumber,
+        part_number: u32,
         content_length: u64,
         content_md5: Option<&[u8; 16]>,
     ) -> crate::Result<CompletePart> {
+        let part_number = PartNumber::new(part_number)
+            .ok_or_else(|| crate::Error::InvalidArgument("part_number must be >= 1".into()))?;
+
         let mut builder = self
             .session
             .multipart_request(

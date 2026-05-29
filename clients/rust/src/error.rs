@@ -44,6 +44,9 @@ pub enum Error {
         /// The error message.
         message: String,
     },
+    /// Invalid argument passed to a client method.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
     /// Error returned when attempting to complete a multipart upload.
     #[error("multipart complete failed ({code}): {message}")]
     MultipartComplete {
