@@ -1597,7 +1597,7 @@ mod tests {
         );
 
         // get_object should follow the tombstone and return the payload.
-        let (got_meta, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (got_meta, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
         assert_eq!(got_meta.content_type, "application/octet-stream");
@@ -1682,7 +1682,7 @@ mod tests {
             .unwrap();
         assert!(error.is_none());
 
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
 
         let mut expected = Vec::new();
@@ -1722,7 +1722,7 @@ mod tests {
         hv.get(&id).expect_not_found();
 
         // The object should not be reachable.
-        assert!(storage.get_object(&id).await.unwrap().is_none());
+        assert!(storage.get_object(&id, None).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1833,7 +1833,7 @@ mod tests {
         lt.get(&new_lt_id).expect_object();
 
         // Assert the contents of the new revision.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload2);
     }
@@ -2063,7 +2063,7 @@ mod tests {
         storage.join().await;
 
         // The object is there.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -2086,7 +2086,7 @@ mod tests {
         assert!(remaining.is_empty());
 
         // The object is still there after recovery.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
     }
@@ -2200,7 +2200,7 @@ mod tests {
         storage.join().await;
 
         // The object is there.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -2223,7 +2223,7 @@ mod tests {
         assert!(remaining.is_empty());
 
         // The object is there after recovery.
-        let (_, s) = storage.get_object(&id).await.unwrap().unwrap();
+        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
     }
