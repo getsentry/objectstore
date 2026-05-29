@@ -729,9 +729,11 @@ struct XmlInitiateMultipartUploadResponse {
     upload_id: String,
 }
 
-impl From<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
-    fn from(r: XmlInitiateMultipartUploadResponse) -> Self {
-        r.upload_id
+impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
+    type Error = crate::error::Error;
+
+    fn try_from(r: XmlInitiateMultipartUploadResponse) -> crate::error::Result<Self> {
+        UploadId::new(r.upload_id)
     }
 }
 
@@ -868,7 +870,7 @@ impl MultipartUploadBackend for GcsBackend {
                 cause: Some(Box::new(e)),
             })?;
 
-        Ok(xml.into())
+        Ok(xml.try_into()?)
     }
 
     #[tracing::instrument(level = "trace", fields(?id, upload_id, part_number), skip_all)]

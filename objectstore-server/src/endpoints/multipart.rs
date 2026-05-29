@@ -14,7 +14,7 @@ use http::HeaderValue;
 use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::multipart::{CompletedPart, PartNumber};
+use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
 use objectstore_types::metadata::Metadata;
 use serde::{Deserialize, Serialize};
 
@@ -50,18 +50,18 @@ pub fn router() -> Router<ServiceState> {
 
 #[derive(Debug, Deserialize)]
 struct UploadPartQuery {
-    upload_id: String,
+    upload_id: UploadId,
     part_number: PartNumber,
 }
 
 #[derive(Debug, Deserialize)]
 struct UploadIdQuery {
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListPartsQuery {
-    upload_id: String,
+    upload_id: UploadId,
     max_parts: Option<u32>,
     part_number_marker: Option<PartNumber>,
 }
@@ -71,7 +71,7 @@ struct ListPartsQuery {
 #[derive(Debug, Serialize)]
 struct InitiateResponse {
     key: String,
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 #[derive(Debug, Serialize)]

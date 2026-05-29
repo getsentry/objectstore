@@ -228,7 +228,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let upload_id = uuid::Uuid::now_v7().to_string();
+        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
         let upload = MultipartUpload {
             metadata: metadata.clone(),
             parts: BTreeMap::new(),

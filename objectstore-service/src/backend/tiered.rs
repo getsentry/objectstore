@@ -571,7 +571,7 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TieredUploadId {
     revision: String,
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 impl TryInto<UploadId> for TieredUploadId {
@@ -580,7 +580,7 @@ impl TryInto<UploadId> for TieredUploadId {
     fn try_into(self) -> Result<UploadId, Self::Error> {
         let json =
             serde_json::to_vec(&self).map_err(|e| Error::serde("encoding multipart token", e))?;
-        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+        UploadId::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
     }
 }
 
@@ -1549,7 +1549,7 @@ mod tests {
     fn multipart_upload_id_roundtrip() {
         let id = TieredUploadId {
             revision: "my-key/01924a6f-7e28-7b9a-9c1d-abcdef123456".into(),
-            upload_id: "upstream-upload-id-abc".into(),
+            upload_id: UploadId::new("upstream-upload-id-abc".into()).unwrap(),
         };
         let encoded: UploadId = id.clone().try_into().unwrap();
         let decoded: TieredUploadId = (&encoded.clone()).try_into().unwrap();

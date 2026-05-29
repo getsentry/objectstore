@@ -1,7 +1,7 @@
 //! Local filesystem backend for development and testing.
 
 use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -164,22 +164,12 @@ impl Backend for LocalFsBackend {
     }
 }
 
-fn safe_join(base: &Path, segment: &str) -> Result<PathBuf> {
-    for component in Path::new(segment).components() {
-        if !matches!(component, Component::Normal(_)) {
-            return Err(Error::generic(format!("invalid path segment: {segment}")));
-        }
-    }
-    Ok(base.join(segment))
-}
-
 impl LocalFsBackend {
-    fn multipart_dir(&self, id: &ObjectId, upload_id: &UploadId) -> Result<PathBuf> {
-        let base = self
-            .path
+    fn multipart_dir(&self, id: &ObjectId, upload_id: &UploadId) -> PathBuf {
+        self.path
             .join("__multipart__")
-            .join(id.as_storage_path().to_string());
-        safe_join(&base, upload_id)
+            .join(id.as_storage_path().to_string())
+            .join(upload_id.as_str())
     }
 }
 
@@ -190,8 +180,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let upload_id = uuid::Uuid::now_v7().to_string();
-        let dir = self.multipart_dir(id, &upload_id)?;
+        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
+        let dir = self.multipart_dir(id, &upload_id);
         tokio::fs::create_dir_all(&dir).await?;
 
         let meta_path = dir.join("metadata.json");
@@ -213,7 +203,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         _content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        let dir = self.multipart_dir(id, upload_id)?;
+        let dir = self.multipart_dir(id, upload_id);
         if !tokio::fs::try_exists(&dir).await? {
             return Err(Error::generic("multipart upload not found"));
         }
@@ -269,7 +259,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        let dir = self.multipart_dir(id, upload_id)?;
+        let dir = self.multipart_dir(id, upload_id);
         if !tokio::fs::try_exists(&dir).await? {
             return Err(Error::generic("multipart upload not found"));
         }
@@ -334,7 +324,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         upload_id: &UploadId,
     ) -> Result<AbortMultipartResponse> {
-        let dir = self.multipart_dir(id, upload_id)?;
+        let dir = self.multipart_dir(id, upload_id);
         if tokio::fs::try_exists(&dir).await? {
             tokio::fs::remove_dir_all(dir).await?;
         }
@@ -347,7 +337,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        let dir = self.multipart_dir(id, upload_id)?;
+        let dir = self.multipart_dir(id, upload_id);
         if !tokio::fs::try_exists(&dir).await? {
             return Err(Error::generic("multipart upload not found"));
         }
