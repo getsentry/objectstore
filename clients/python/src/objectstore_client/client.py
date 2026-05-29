@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
@@ -281,6 +281,10 @@ class Session:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
 
+    def _make_batch_url(self) -> str:
+        relative_path = f"/v1/objects:batch/{self._usecase.name}/{self._scope}/"
+        return self._base_path.rstrip("/") + relative_path
+
     def put(
         self,
         contents: bytes | IO[bytes],
@@ -418,6 +422,40 @@ class Session:
             stream = dctx.stream_reader(stream, read_across_frames=True)
 
         return GetResponse(metadata, stream)
+
+    def many(
+        self,
+        operations: Iterable[Any],
+        concurrency: int = 3,
+    ) -> Iterator[Any]:
+        """Execute multiple get, put, and delete operations as optimized batch requests.
+
+        Operations are automatically batched when possible, with oversized puts (> 1 MB)
+        or streaming (IO[bytes]) puts routed to the individual endpoint.
+
+        Args:
+            operations: An iterable of :class:`Put`, :class:`Get`, or :class:`Delete`
+                instances. Generators are accepted and consumed exactly once.
+            concurrency: Maximum number of concurrent HTTP requests. Defaults to ``3``.
+                Set to ``1`` for sequential execution with no thread pool. Must be >= 1.
+
+        Returns:
+            An iterator of :class:`ManyResponse`. With ``concurrency=1`` results arrive
+            in input order. With ``concurrency > 1`` results arrive in completion order.
+
+        Raises:
+            ValueError: If ``concurrency`` is <= 0.
+
+        Example::
+
+            from objectstore_client import Put, Get, Delete
+
+            for result in session.many([Put(b"hello", key="k1"), Get("k2")]):
+                print(result.key, result.response)
+        """
+        from objectstore_client.many import execute_many
+
+        return execute_many(self, operations, concurrency=concurrency)
 
     def object_url(self, key: str) -> str:
         """

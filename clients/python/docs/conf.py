@@ -25,3 +25,5 @@ autodoc_default_options = {
     "undoc-members": True,
     "show-inheritance": True,
 }
+
+suppress_warnings = ["ref.python"]

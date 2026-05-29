@@ -6,6 +6,7 @@ from objectstore_client.client import (
     Session,
     Usecase,
 )
+from objectstore_client.many import Delete, Get, ManyResponse, Operation, Put
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -22,6 +23,11 @@ __all__ = [
     "Session",
     "GetResponse",
     "RequestError",
+    "Put",
+    "Get",
+    "Delete",
+    "ManyResponse",
+    "Operation",
     "Compression",
     "ExpirationPolicy",
     "Metadata",
