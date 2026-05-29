@@ -30,6 +30,10 @@ pub enum ApiError {
     /// Errors encountered when parsing or executing a batch request.
     #[error("batch error: {0}")]
     Batch(#[from] BatchError),
+
+    /// Internal server errors.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Result type for API operations.
@@ -92,9 +96,16 @@ impl ApiError {
             ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
                 StatusCode::RANGE_NOT_SATISFIABLE
             }
+            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => {
                 objectstore_log::error!(!!self, "error handling request");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+
+            ApiError::Internal(_) => {
+                objectstore_log::error!(!!self, "internal error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }

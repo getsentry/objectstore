@@ -41,7 +41,7 @@ impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
-            compression: Some(self.scope.usecase().compression()),
+            compression: self.scope.usecase().compression(),
             ..Default::default()
         };
 

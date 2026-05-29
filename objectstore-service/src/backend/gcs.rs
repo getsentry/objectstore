@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
@@ -600,6 +601,10 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
+    }
+
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn put_object(
         &self,
@@ -754,9 +759,11 @@ struct XmlInitiateMultipartUploadResponse {
     upload_id: String,
 }
 
-impl From<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
-    fn from(r: XmlInitiateMultipartUploadResponse) -> Self {
-        r.upload_id
+impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
+    type Error = crate::error::Error;
+
+    fn try_from(r: XmlInitiateMultipartUploadResponse) -> crate::error::Result<Self> {
+        Ok(UploadId::new(r.upload_id)?)
     }
 }
 
@@ -765,7 +772,7 @@ impl From<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
 struct XmlListPartsResponse {
     #[serde(default)]
     is_truncated: bool,
-    next_part_number_marker: Option<u32>,
+    next_part_number_marker: Option<PartNumber>,
     #[serde(default, rename = "Part")]
     parts: Vec<XmlPart>,
 }
@@ -783,7 +790,7 @@ impl From<XmlListPartsResponse> for ListPartsResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct XmlPart {
-    part_number: u32,
+    part_number: PartNumber,
     #[serde(rename = "ETag")]
     e_tag: String,
     #[serde(with = "humantime_serde")]
@@ -893,7 +900,7 @@ impl MultipartUploadBackend for GcsBackend {
                 cause: Some(Box::new(e)),
             })?;
 
-        Ok(xml.into())
+        Ok(xml.try_into()?)
     }
 
     #[tracing::instrument(level = "trace", fields(?id, upload_id, part_number), skip_all)]
@@ -1044,6 +1051,7 @@ impl MultipartUploadBackend for GcsBackend {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::num::NonZeroU32;
 
     use anyhow::Result;
     use objectstore_types::scope::{Scope, Scopes};
@@ -1387,7 +1395,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 data.len() as u64,
                 None,
                 stream::single(data.to_vec()),
@@ -1399,7 +1407,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -1441,7 +1449,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 part1.len() as u64,
                 None,
                 stream::single(part1.clone()),
@@ -1451,7 +1459,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                2,
+                NonZeroU32::new(2).unwrap(),
                 part2.len() as u64,
                 None,
                 stream::single(part2.clone()),
@@ -1461,7 +1469,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                3,
+                NonZeroU32::new(3).unwrap(),
                 part3.len() as u64,
                 None,
                 stream::single(part3.clone()),
@@ -1474,15 +1482,15 @@ mod tests {
                 &upload_id,
                 vec![
                     CompletedPart {
-                        part_number: 1,
+                        part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
                     CompletedPart {
-                        part_number: 2,
+                        part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
                     CompletedPart {
-                        part_number: 3,
+                        part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
                 ],
@@ -1521,7 +1529,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                2,
+                NonZeroU32::new(2).unwrap(),
                 part2.len() as u64,
                 None,
                 stream::single(part2.clone()),
@@ -1531,7 +1539,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                3,
+                NonZeroU32::new(3).unwrap(),
                 part3.len() as u64,
                 None,
                 stream::single(part3.clone()),
@@ -1541,7 +1549,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 part1.len() as u64,
                 None,
                 stream::single(part1.clone()),
@@ -1555,15 +1563,15 @@ mod tests {
                 &upload_id,
                 vec![
                     CompletedPart {
-                        part_number: 1,
+                        part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
                     CompletedPart {
-                        part_number: 2,
+                        part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
                     CompletedPart {
-                        part_number: 3,
+                        part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
                 ],
@@ -1592,26 +1600,40 @@ mod tests {
         let upload_id = backend.initiate_multipart(&id, &metadata).await?;
 
         let etag1 = backend
-            .upload_part(&id, &upload_id, 1, 3, None, stream::single(b"aaa".to_vec()))
+            .upload_part(
+                &id,
+                &upload_id,
+                NonZeroU32::new(1).unwrap(),
+                3,
+                None,
+                stream::single(b"aaa".to_vec()),
+            )
             .await?;
         let etag2 = backend
-            .upload_part(&id, &upload_id, 2, 3, None, stream::single(b"bbb".to_vec()))
+            .upload_part(
+                &id,
+                &upload_id,
+                NonZeroU32::new(2).unwrap(),
+                3,
+                None,
+                stream::single(b"bbb".to_vec()),
+            )
             .await?;
 
         // List all parts.
         let list = backend.list_parts(&id, &upload_id, None, None).await?;
         assert_eq!(list.parts.len(), 2);
-        assert_eq!(list.parts[0].part_number, 1);
+        assert_eq!(list.parts[0].part_number.get(), 1);
         assert_eq!(list.parts[0].etag, etag1);
         assert_eq!(list.parts[0].size, 3);
-        assert_eq!(list.parts[1].part_number, 2);
+        assert_eq!(list.parts[1].part_number.get(), 2);
         assert_eq!(list.parts[1].etag, etag2);
         assert_eq!(list.parts[1].size, 3);
 
         // List with max_parts=1 to test pagination.
         let page1 = backend.list_parts(&id, &upload_id, Some(1), None).await?;
         assert_eq!(page1.parts.len(), 1);
-        assert_eq!(page1.parts[0].part_number, 1);
+        assert_eq!(page1.parts[0].part_number.get(), 1);
         assert!(page1.is_truncated);
         assert!(page1.next_part_number_marker.is_some());
 
@@ -1619,7 +1641,7 @@ mod tests {
             .list_parts(&id, &upload_id, Some(1), page1.next_part_number_marker)
             .await?;
         assert_eq!(page2.parts.len(), 1);
-        assert_eq!(page2.parts[0].part_number, 2);
+        assert_eq!(page2.parts[0].part_number.get(), 2);
 
         // Clean up.
         backend.abort_multipart(&id, &upload_id).await?;
@@ -1639,7 +1661,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 5,
                 None,
                 stream::single(b"hello".to_vec()),
@@ -1667,7 +1689,7 @@ mod tests {
             .upload_part(
                 id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload),
@@ -1678,7 +1700,7 @@ mod tests {
                 id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )

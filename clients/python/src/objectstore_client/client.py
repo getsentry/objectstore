@@ -13,6 +13,7 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
 from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
+from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_META_PREFIX,
@@ -27,21 +28,13 @@ from objectstore_client.metrics import (
     NoOpMetricsBackend,
     measure_storage_operation,
 )
+from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 
 
 class GetResponse(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
-
-
-class RequestError(Exception):
-    """Exception raised if an API call to Objectstore fails."""
-
-    def __init__(self, message: str, status: int, response: str):
-        super().__init__(message)
-        self.status = status
-        self.response = response
 
 
 class Usecase:
@@ -281,6 +274,25 @@ class Session:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
 
+    def _make_multipart_url(
+        self,
+        action: str | None,
+        key: str | None,
+        query: str | None = None,
+    ) -> str:
+        if action == "parts":
+            resource = "objects:multipart:parts"
+        elif action == "complete":
+            resource = "objects:multipart:complete"
+        else:
+            resource = "objects:multipart"
+
+        relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
+        path = self._base_path.rstrip("/") + relative_path
+        if query:
+            return f"{path}?{query}"
+        return path
+
     def put(
         self,
         contents: bytes | IO[bytes],
@@ -445,12 +457,74 @@ class Session:
             )
             raise_for_status(response)
 
+    def initiate_multipart_upload(
+        self,
+        *,
+        key: str | None = None,
+        compression: Compression | Literal["none"] | None = None,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+    ) -> MultipartUpload:
+        """
+        Initiates a multipart upload.
 
-def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
-    if response.status >= 400:
-        res = (response.data or response.read() or b"").decode("utf-8", "replace")
-        raise RequestError(
-            f"Objectstore request failed with status {response.status}",
-            response.status,
-            res,
-        )
+        Returns a :class:`~objectstore_client.multipart.MultipartUpload` handle
+        that can be used to upload parts, list parts, complete, or abort.
+
+        **Important:** unlike :meth:`put`, the ``compression`` parameter only
+        records the compression algorithm in the object's metadata.
+        The caller is responsible for compressing each part in accordance with the
+        chosen algorithm before passing it to
+        :meth:`~objectstore_client.multipart.MultipartUpload.upload_part`.
+        """
+        if compression and compression not in ("none", "zstd"):
+            raise ValueError(f"Invalid compression: {compression}")
+
+        headers = self._make_headers()
+
+        compression = compression or self._usecase._compression
+        if compression and compression != "none":
+            headers["Content-Encoding"] = compression
+
+        if content_type:
+            headers["Content-Type"] = content_type
+
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
+        if expiration_policy:
+            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+
+        if origin:
+            headers[HEADER_ORIGIN] = origin
+
+        if metadata:
+            for k, v in metadata.items():
+                headers[f"{HEADER_META_PREFIX}{k}"] = v
+
+        if key == "":
+            key = None
+
+        with measure_storage_operation(
+            self._metrics_backend, "multipart.initiate", self._usecase.name
+        ):
+            response = self._pool.request(
+                "POST" if not key else "PUT",
+                self._make_multipart_url(None, key),
+                headers=headers,
+                preload_content=True,
+                decode_content=True,
+            )
+            raise_for_status(response)
+            res = response.json()
+            return MultipartUpload(self, res["key"], res["upload_id"])
+
+    def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
+        """
+        Reconstructs a multipart upload handle.
+
+        This does not make any network calls.
+        Use it to resume an upload after a process restart or to
+        continue an upload started elsewhere.
+        """
+        return MultipartUpload(self, key, upload_id)

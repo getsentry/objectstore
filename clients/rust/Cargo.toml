@@ -12,6 +12,7 @@ publish = true
 
 [dependencies]
 async-compression = { version = "0.4.27", features = ["tokio", "zstd"] }
+base64 = { version = "0.22.1", optional = true }
 percent-encoding = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -39,6 +40,13 @@ zstd = "0.13.3"
 
 [features]
 default = ["native-tls", "hickory-dns"]
+multipart = ["dep:base64"]
+
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 hickory-dns = ["reqwest/hickory-dns"]
+
+[[test]]
+name = "multipart"
+path = "tests/multipart.rs"
+required-features = ["multipart"]

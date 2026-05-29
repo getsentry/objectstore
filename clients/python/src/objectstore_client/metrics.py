@@ -83,6 +83,7 @@ class StorageMetricEmitter:
         # These may be set during or after the enclosed operation
         self.start: int | None = None
         self.elapsed: float | None = None
+        self.size: int | None = None
         self.uncompressed_size: int | None = None
         self.compressed_size: int | None = None
         self.compression: str = "unknown"
@@ -100,6 +101,13 @@ class StorageMetricEmitter:
             f"storage.{self.operation}.size", value, tags=tags, unit="byte"
         )
         self.uncompressed_size = value
+
+    def record_size(self, value: int) -> None:
+        tags = {"usecase": self.usecase}
+        self.backend.distribution(
+            f"storage.{self.operation}.size", value, tags=tags, unit="byte"
+        )
+        self.size = value
 
     def record_compressed_size(self, value: int, compression: str = "unknown") -> None:
         tags = {"usecase": self.usecase, "compression": compression}
@@ -124,14 +132,18 @@ class StorageMetricEmitter:
         if not self.elapsed or self.elapsed <= 0:
             return None
 
-        sizes = []
+        sizes: list[tuple[int, str | None]] = []
+        if self.size:
+            sizes.append((self.size, None))
         if self.uncompressed_size:
             sizes.append((self.uncompressed_size, "none"))
         if self.compressed_size:
             sizes.append((self.compressed_size, self.compression))
 
         for size, compression in sizes:
-            tags = {"usecase": self.usecase, "compression": compression}
+            tags: dict[str, str] = {"usecase": self.usecase}
+            if compression is not None:
+                tags["compression"] = compression
             self.backend.distribution(
                 f"storage.{self.operation}.throughput", size / self.elapsed, tags=tags
             )

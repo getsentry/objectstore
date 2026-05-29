@@ -366,6 +366,10 @@ impl Backend for TieredStorage {
         "tiered"
     }
 
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -572,7 +576,7 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TieredUploadId {
     revision: String,
-    upload_id: String,
+    upload_id: UploadId,
 }
 
 impl TryInto<UploadId> for TieredUploadId {
@@ -581,7 +585,9 @@ impl TryInto<UploadId> for TieredUploadId {
     fn try_into(self) -> Result<UploadId, Self::Error> {
         let json =
             serde_json::to_vec(&self).map_err(|e| Error::serde("encoding multipart token", e))?;
-        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+        Ok(UploadId::new(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json),
+        )?)
     }
 }
 
@@ -795,6 +801,8 @@ impl MultipartUploadBackend for TieredStorage {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use futures::lock::Mutex;
     use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::scope::{Scope, Scopes};
@@ -1548,7 +1556,7 @@ mod tests {
     fn multipart_upload_id_roundtrip() {
         let id = TieredUploadId {
             revision: "my-key/01924a6f-7e28-7b9a-9c1d-abcdef123456".into(),
-            upload_id: "upstream-upload-id-abc".into(),
+            upload_id: UploadId::new("upstream-upload-id-abc".into()).unwrap(),
         };
         let encoded: UploadId = id.clone().try_into().unwrap();
         let decoded: TieredUploadId = (&encoded.clone()).try_into().unwrap();
@@ -1572,7 +1580,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload.clone()),
@@ -1585,7 +1593,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -1629,7 +1637,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                3,
+                NonZeroU32::new(3).unwrap(),
                 part3.len() as u64,
                 None,
                 stream::single(part3.clone()),
@@ -1640,7 +1648,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                2,
+                NonZeroU32::new(2).unwrap(),
                 part2.len() as u64,
                 None,
                 stream::single(part2.clone()),
@@ -1651,7 +1659,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 part1.len() as u64,
                 None,
                 stream::single(part1.clone()),
@@ -1665,15 +1673,15 @@ mod tests {
                 &upload_id,
                 vec![
                     CompletedPart {
-                        part_number: 1,
+                        part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
                     CompletedPart {
-                        part_number: 2,
+                        part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
                     CompletedPart {
-                        part_number: 3,
+                        part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
                 ],
@@ -1708,7 +1716,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload),
@@ -1741,7 +1749,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 part1.len() as u64,
                 None,
                 stream::single(part1),
@@ -1752,7 +1760,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                2,
+                NonZeroU32::new(2).unwrap(),
                 part2.len() as u64,
                 None,
                 stream::single(part2),
@@ -1765,9 +1773,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.parts.len(), 2);
-        assert_eq!(resp.parts[0].part_number, 1);
+        assert_eq!(resp.parts[0].part_number.get(), 1);
         assert_eq!(resp.parts[0].size, 100);
-        assert_eq!(resp.parts[1].part_number, 2);
+        assert_eq!(resp.parts[1].part_number.get(), 2);
         assert_eq!(resp.parts[1].size, 200);
     }
 
@@ -1795,7 +1803,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload2.len() as u64,
                 None,
                 stream::single(payload2.clone()),
@@ -1813,7 +1821,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -1911,7 +1919,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload),
@@ -1924,7 +1932,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -2026,7 +2034,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload.clone()),
@@ -2040,7 +2048,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag: etag.clone(),
                 }],
             )
@@ -2054,7 +2062,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -2162,7 +2170,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 payload.len() as u64,
                 None,
                 stream::single(payload.clone()),
@@ -2177,7 +2185,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag: etag.clone(),
                 }],
             )
@@ -2191,7 +2199,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )

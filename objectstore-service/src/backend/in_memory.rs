@@ -106,6 +106,10 @@ impl super::common::Backend for InMemoryBackend {
         self.name
     }
 
+    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+        Ok(self)
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -232,7 +236,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let upload_id = uuid::Uuid::now_v7().to_string();
+        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
         let upload = MultipartUpload {
             metadata: metadata.clone(),
             parts: BTreeMap::new(),
@@ -463,6 +467,7 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::time::Duration;
 
     use objectstore_types::metadata::ExpirationPolicy;
@@ -499,7 +504,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 data.len() as u64,
                 None,
                 stream::single(data.to_vec()),
@@ -512,7 +517,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -548,7 +553,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 part1.len() as u64,
                 None,
                 stream::single(part1.clone()),
@@ -559,7 +564,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                2,
+                NonZeroU32::new(2).unwrap(),
                 part2.len() as u64,
                 None,
                 stream::single(part2.clone()),
@@ -570,7 +575,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                3,
+                NonZeroU32::new(3).unwrap(),
                 part3.len() as u64,
                 None,
                 stream::single(part3.clone()),
@@ -584,15 +589,15 @@ mod tests {
                 &upload_id,
                 vec![
                     CompletedPart {
-                        part_number: 1,
+                        part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
                     CompletedPart {
-                        part_number: 2,
+                        part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
                     CompletedPart {
-                        part_number: 3,
+                        part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
                 ],
@@ -615,11 +620,25 @@ mod tests {
         let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
 
         let etag1 = backend
-            .upload_part(&id, &upload_id, 1, 3, None, stream::single(b"aaa".to_vec()))
+            .upload_part(
+                &id,
+                &upload_id,
+                NonZeroU32::new(1).unwrap(),
+                3,
+                None,
+                stream::single(b"aaa".to_vec()),
+            )
             .await
             .unwrap();
         let etag2 = backend
-            .upload_part(&id, &upload_id, 2, 3, None, stream::single(b"bbb".to_vec()))
+            .upload_part(
+                &id,
+                &upload_id,
+                NonZeroU32::new(2).unwrap(),
+                3,
+                None,
+                stream::single(b"bbb".to_vec()),
+            )
             .await
             .unwrap();
 
@@ -628,10 +647,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.parts.len(), 2);
-        assert_eq!(list.parts[0].part_number, 1);
+        assert_eq!(list.parts[0].part_number.get(), 1);
         assert_eq!(list.parts[0].etag, etag1);
         assert_eq!(list.parts[0].size, 3);
-        assert_eq!(list.parts[1].part_number, 2);
+        assert_eq!(list.parts[1].part_number.get(), 2);
         assert_eq!(list.parts[1].etag, etag2);
         assert_eq!(list.parts[1].size, 3);
 
@@ -641,7 +660,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page1.parts.len(), 1);
-        assert_eq!(page1.parts[0].part_number, 1);
+        assert_eq!(page1.parts[0].part_number.get(), 1);
         assert!(page1.is_truncated);
         assert!(page1.next_part_number_marker.is_some());
 
@@ -650,7 +669,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page2.parts.len(), 1);
-        assert_eq!(page2.parts[0].part_number, 2);
+        assert_eq!(page2.parts[0].part_number.get(), 2);
 
         backend.abort_multipart(&id, &upload_id).await.unwrap();
     }
@@ -667,7 +686,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 5,
                 None,
                 stream::single(b"hello".to_vec()),
@@ -693,7 +712,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 5,
                 None,
                 stream::single(b"hello".to_vec()),
@@ -706,7 +725,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag: "wrong-etag".into(),
                 }],
             )
@@ -721,7 +740,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )
@@ -742,7 +761,7 @@ mod tests {
             .upload_part(
                 &id,
                 &upload_id,
-                1,
+                NonZeroU32::new(1).unwrap(),
                 5,
                 None,
                 stream::single(b"hello".to_vec()),
@@ -755,7 +774,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 99,
+                    part_number: NonZeroU32::new(99).unwrap(),
                     etag: "whatever".into(),
                 }],
             )
@@ -770,7 +789,7 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![CompletedPart {
-                    part_number: 1,
+                    part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
             )

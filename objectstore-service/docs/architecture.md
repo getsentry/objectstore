@@ -166,6 +166,14 @@ with [`Error::AtCapacity`](error::Error::AtCapacity).
 The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
 [`StorageService::with_concurrency_limit`].
 
+## Multipart Uploads
+
+When the configured backend supports it, [`StorageService`] exposes multipart
+upload operations (initiate, upload part, list parts, complete, abort). These
+delegate to the [`MultipartUploadBackend`](backend::common::MultipartUploadBackend)
+trait, accessed via [`Backend::as_multipart_upload_backend`](backend::common::Backend::as_multipart_upload_backend).
+Multipart operations share the same concurrency limiter as regular operations.
+
 ## Streaming Concurrency
 
 The [`streaming`](streaming) module provides [`StreamExecutor`](streaming::StreamExecutor)

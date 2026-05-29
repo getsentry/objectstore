@@ -1,12 +1,13 @@
 //! Contains a remote implementation using HTTP to interact with objectstore.
 
 use anyhow::Context;
-use futures::StreamExt;
+use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt};
 use objectstore_client::{Client, GetResponse, Session, Usecase};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::workload::Payload;
+use crate::workload::{MultipartConfig, Payload};
 
 /// A remote implementation using HTTP to interact with objectstore.
 #[derive(Debug)]
@@ -41,6 +42,60 @@ impl HttpRemote {
             .await
             .map(|r| r.key)
             .context("error writing payload")
+    }
+
+    pub(crate) async fn write_multipart(
+        &self,
+        usecase: &Usecase,
+        organization_id: u64,
+        payload: Payload,
+        config: &MultipartConfig,
+    ) -> anyhow::Result<String> {
+        let session = self.session(usecase, organization_id);
+        let total_len = payload.len;
+        let part_size = config.part_size;
+
+        let upload = session
+            .initiate_multipart_upload()
+            .compression(None)
+            .send()
+            .await
+            .context("error initiating multipart upload")?;
+
+        let num_parts = total_len.div_ceil(part_size) as u32;
+
+        // Lazily read chunks from the payload so that at most `concurrency`
+        // part buffers are in memory at any time (bounded by buffer_unordered).
+        let chunk_stream = futures::stream::unfold(
+            (payload, 1u32),
+            move |(mut payload, part_number)| async move {
+                if part_number > num_parts {
+                    return None;
+                }
+                let chunk_len = part_size.min(payload.len) as usize;
+                let mut buf = vec![0u8; chunk_len];
+                payload.read_exact(&mut buf).await.ok()?;
+                Some(((part_number, Bytes::from(buf)), (payload, part_number + 1)))
+            },
+        );
+
+        let mut parts: Vec<_> = chunk_stream
+            .map(|(part_number, chunk)| {
+                let upload = &upload;
+                async move { upload.put(chunk, part_number, None).await }
+            })
+            .buffer_unordered(config.concurrency)
+            .try_collect()
+            .await
+            .context("error uploading parts")?;
+
+        parts.sort_by_key(|p| p.part_number);
+
+        upload
+            .complete(parts)
+            .await
+            .map(|key| key.to_string())
+            .context("error completing multipart upload")
     }
 
     pub(crate) async fn read(

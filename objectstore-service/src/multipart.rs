@@ -2,12 +2,7 @@
 
 use std::time::SystemTime;
 
-/// Identifier for an in-progress multipart upload.
-pub type UploadId = String;
-/// 1-indexed position of a part within its multipart upload.
-pub type PartNumber = u32;
-/// Opaque per-part identifier returned by the backend after a successful part upload.
-pub type ETag = String;
+pub use objectstore_types::multipart::{ETag, InvalidUploadId, PartNumber, UploadId};
 
 /// Description of one part in the response to
 /// [`MultipartUploadBackend::list_parts`](crate::backend::common::MultipartUploadBackend::list_parts).

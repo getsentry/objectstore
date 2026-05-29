@@ -15,6 +15,10 @@ use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -237,6 +241,98 @@ impl StorageService {
     /// after the HTTP server has stopped accepting new requests.
     pub async fn join(&self) {
         self.inner.join().await;
+    }
+
+    // --- Multipart upload operations ---
+
+    /// Initiates a new multipart upload.
+    pub async fn initiate_multipart(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.spawn("initiate_multipart", async move {
+            inner.initiate_multipart(&id, &metadata).await
+        })
+        .await
+    }
+
+    /// Uploads a single part.
+    ///
+    /// Note that this requires a `content_length`.
+    /// This grants us the broadest and most seamless compatibility when it comes to backends.
+    /// For example, MinIO rejects `UploadPart` requests without a `Content-Length` on plain PUT
+    /// requests.
+    /// This can be worked around by using AWS SigV4 chunked streaming requests, which we could use
+    /// if one day we'll have a usecase where the client doesn't know the part length upfront.
+    pub async fn upload_part(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<String>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.spawn("upload_part", async move {
+            inner
+                .upload_part(
+                    &id,
+                    &upload_id,
+                    part_number,
+                    content_length,
+                    content_md5.as_deref(),
+                    body,
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Lists the parts uploaded so far.
+    pub async fn list_parts(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.spawn("list_parts", async move {
+            inner
+                .list_parts(&id, &upload_id, max_parts, part_number_marker)
+                .await
+        })
+        .await
+    }
+
+    /// Aborts a multipart upload.
+    pub async fn abort_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.spawn("abort_multipart", async move {
+            inner.abort_multipart(&id, &upload_id).await
+        })
+        .await
+    }
+
+    /// Finalizes a multipart upload.
+    pub async fn complete_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.spawn("complete_multipart", async move {
+            inner.complete_multipart(&id, &upload_id, parts).await
+        })
+        .await
     }
 }
 
