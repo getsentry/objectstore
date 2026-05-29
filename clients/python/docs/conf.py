@@ -25,3 +25,8 @@ autodoc_default_options = {
     "undoc-members": True,
     "show-inheritance": True,
 }
+
+# Re-exported symbols in __init__.py create duplicate Sphinx targets
+# (e.g. objectstore_client.Session vs objectstore_client.client.Session).
+# This is the most specific suppression Sphinx supports for that warning.
+suppress_warnings = ["ref.python"]

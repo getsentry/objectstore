@@ -2,10 +2,10 @@ from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.client import (
     Client,
     GetResponse,
-    RequestError,
     Session,
     Usecase,
 )
+from objectstore_client.errors import RequestError
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
