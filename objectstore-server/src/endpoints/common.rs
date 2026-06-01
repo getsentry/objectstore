@@ -5,6 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -117,4 +118,11 @@ impl IntoResponse for ApiError {
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()
     }
+}
+
+pub fn insert_accept_ranges(response: &mut Response) {
+    response.headers_mut().insert(
+        http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
 }

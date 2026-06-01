@@ -6,7 +6,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
@@ -14,16 +13,9 @@ use objectstore_types::range::{ByteRange, ContentRange, RangeError};
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult};
+use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
-
-fn insert_accept_ranges(response: &mut Response) {
-    response.headers_mut().insert(
-        http::header::ACCEPT_RANGES,
-        HeaderValue::from_static("bytes"),
-    );
-}
 
 pub fn router() -> Router<ServiceState> {
     let collection_routes = routing::post(objects_post);
