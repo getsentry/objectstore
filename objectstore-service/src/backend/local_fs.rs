@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
@@ -159,18 +159,18 @@ impl Backend for LocalFsBackend {
             None => ContentRange::full(payload_size),
         };
 
-        if content_range.is_full() {
+        let stream = if content_range.is_full() {
             let stream = ReaderStream::new(reader);
-            return Ok(Some((metadata, content_range, stream.boxed())));
-        }
-
-        use tokio::io::AsyncSeekExt;
-        reader
-            .seek(std::io::SeekFrom::Current(content_range.start as i64))
-            .await?;
-        let limited = reader.take(content_range.len());
-        let stream = ReaderStream::new(limited);
-        Ok(Some((metadata, content_range, stream.boxed())))
+            stream.boxed()
+        } else {
+            reader
+                .seek(std::io::SeekFrom::Current(content_range.start as i64))
+                .await?;
+            let limited = reader.take(content_range.len());
+            let stream = ReaderStream::new(limited);
+            stream.boxed()
+        };
+        Ok(Some((metadata, content_range, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
