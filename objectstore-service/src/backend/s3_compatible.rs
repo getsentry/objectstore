@@ -210,25 +210,28 @@ where
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
 
         let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
-            headers
+            let range = headers
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
                 .ok_or_else(|| Error::Generic {
                     context: "S3: 206 response missing valid Content-Range header".to_owned(),
                     cause: None,
-                })?
+                })?;
+            metadata.size = Some(range.total as usize);
+            range
         } else {
-            let total = match response.content_length() {
-                Some(len) => len,
+            match response.content_length() {
+                Some(len) => {
+                    metadata.size = Some(len as usize);
+                    ContentRange::full(len)
+                }
                 None => {
                     objectstore_log::warn!("S3: 200 response missing Content-Length header");
-                    0
+                    ContentRange::full(metadata.size.unwrap_or(0) as u64)
                 }
-            };
-            ContentRange::full(total)
+            }
         };
-        metadata.size = Some(content_range.total as usize);
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
