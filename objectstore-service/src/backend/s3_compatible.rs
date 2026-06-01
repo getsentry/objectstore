@@ -165,7 +165,7 @@ where
         method: Method,
         id: &ObjectId,
         range: Option<ByteRange>,
-    ) -> Result<Option<(Metadata, reqwest::Response)>> {
+    ) -> Result<Option<(Metadata, ContentRange, reqwest::Response)>> {
         let object_url = self.object_url(id);
 
         let mut builder = self.request(method, &object_url).await?;
@@ -208,16 +208,27 @@ where
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
-        metadata.size = if response.status() == StatusCode::PARTIAL_CONTENT {
+
+        let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
             headers
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
-                .map(|cr| cr.total as usize)
+                .ok_or_else(|| Error::Generic {
+                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
+                    cause: None,
+                })?
         } else {
-            response.content_length().map(|len| len as usize)
+            let total = match response.content_length() {
+                Some(len) => len,
+                None => {
+                    objectstore_log::warn!("S3: 200 response missing Content-Length header");
+                    0
+                }
+            };
+            ContentRange::full(total)
         };
-        objectstore_log::warn!("S3: failed to retrieve metadata.size");
+        metadata.size = Some(content_range.total as usize);
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
@@ -235,7 +246,7 @@ where
             }
         }
 
-        Ok(Some((metadata, response)))
+        Ok(Some((metadata, content_range, response)))
     }
 
     /// Issues a request to update the metadata for the given object.
@@ -324,22 +335,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
-        let Some((metadata, response)) = self.request_object(Method::GET, id, range).await? else {
+        let Some((metadata, content_range, response)) =
+            self.request_object(Method::GET, id, range).await?
+        else {
             return Ok(None);
-        };
-
-        let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
-            response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<ContentRange>().ok())
-                .ok_or_else(|| Error::Generic {
-                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
-                    cause: None,
-                })?
-        } else {
-            ContentRange::full(metadata.size.unwrap_or(0) as u64)
         };
 
         let stream = response.bytes_stream().map_err(io::Error::other);
@@ -350,7 +349,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
         let response = self.request_object(Method::HEAD, id, None).await?;
-        Ok(response.map(|(metadata, _)| metadata))
+        Ok(response.map(|(metadata, _, _)| metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
