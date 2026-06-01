@@ -183,13 +183,20 @@ where
         }
 
         if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-            let total = response
+            let raw = response
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(ContentRange::parse_unsatisfiable_total)
-                .unwrap_or(0);
-            return Err(Error::RangeNotSatisfiable { total });
+                .and_then(|v| v.to_str().ok());
+            let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
+            match total {
+                Some(total) => return Err(Error::RangeNotSatisfiable { total }),
+                None => {
+                    return Err(Error::Generic {
+                        context: format!("S3: 416 response with invalid Content-Range: {:?}", raw),
+                        cause: None,
+                    });
+                }
+            }
         }
 
         let response = response
