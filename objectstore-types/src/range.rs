@@ -133,6 +133,9 @@ impl FromStr for ContentRange {
             let (start_str, end_str) = range_part.split_once('-')?;
             let start: u64 = start_str.parse().ok()?;
             let end: u64 = end_str.parse().ok()?;
+            if start > end || end >= total {
+                return None;
+            }
             Some(Self { start, end, total })
         };
         parse().ok_or(RangeError::Invalid)
@@ -313,6 +316,10 @@ mod tests {
         assert_eq!("bytes 0-499/1234".parse::<ContentRange>(), Ok(cr));
         assert!("bytes */1234".parse::<ContentRange>().is_err());
         assert!("invalid".parse::<ContentRange>().is_err());
+        // Inverted bounds
+        assert!("bytes 499-0/1234".parse::<ContentRange>().is_err());
+        // End beyond total
+        assert!("bytes 0-1234/1234".parse::<ContentRange>().is_err());
         assert_eq!(
             ContentRange::unsatisfiable_total_to_header_value(1234),
             "bytes */1234"
