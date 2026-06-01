@@ -149,17 +149,6 @@ impl ContentRange {
         }
     }
 
-    /// Parses the total from an unsatisfiable `Content-Range` response header value.
-    ///
-    /// An unsatisfiable `Content-Range` header value is of the form `bytes */1234`, where `1234`
-    /// represents the total size of the object.
-    /// This is communicated back to the client, so that it can make requests that make sense for
-    /// that total.
-    pub fn parse_unsatisfiable_total(header: &str) -> Option<u64> {
-        let rest = header.strip_prefix("bytes */")?;
-        rest.parse().ok()
-    }
-
     /// Returns the number of bytes in this range.
     pub fn len(&self) -> u64 {
         if self.total == 0 {
@@ -189,6 +178,23 @@ impl ContentRange {
     /// Formats the length of this range for a `Content-Length` response header.
     pub fn len_to_header_value(&self) -> HeaderValue {
         HeaderValue::from_str(&self.len().to_string()).expect("always a valid header value")
+    }
+
+    /// Parses the total from an unsatisfiable `Content-Range` response header value.
+    ///
+    /// An unsatisfiable `Content-Range` header value is of the form `bytes */1234`, where `1234`
+    /// represents the total size of the object.
+    /// This is communicated back to the client, so that it can make requests that make sense for
+    /// that total.
+    pub fn parse_unsatisfiable_total(header: &str) -> Option<u64> {
+        let rest = header.strip_prefix("bytes */")?;
+        rest.parse().ok()
+    }
+
+    /// Formats `total` as the total size of the object in an unsatisfiable `Content-Range` response header.
+    pub fn unsatisfiable_total_to_header_value(total: u64) -> HeaderValue {
+        HeaderValue::from_str(format!("bytes */{total}").as_str())
+            .expect("always a valid header value")
     }
 }
 
@@ -307,5 +313,9 @@ mod tests {
         assert_eq!("bytes 0-499/1234".parse::<ContentRange>(), Ok(cr));
         assert!("bytes */1234".parse::<ContentRange>().is_err());
         assert!("invalid".parse::<ContentRange>().is_err());
+        assert_eq!(
+            ContentRange::unsatisfiable_total_to_header_value(1234),
+            "bytes */1234"
+        );
     }
 }

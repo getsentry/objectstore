@@ -74,6 +74,8 @@ async fn object_get(
                 .map_err(|_| ApiError::Client("invalid Range header".into()))?;
             match header_str.parse::<ByteRange>() {
                 Ok(range) => Some(range),
+                // If we don't know the unit or the client wants multiple ranges, fall back to
+                // returning the whole object.
                 Err(RangeError::InvalidUnit(_) | RangeError::MultiRange) => None,
                 Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
             }
@@ -85,7 +87,7 @@ async fn object_get(
     let result = service.get_object(id, byte_range).await;
 
     let (metadata, content_range, stream) = match result {
-        Ok(Some(tuple)) => tuple,
+        Ok(Some(result)) => result,
         Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
         Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
             return Ok((
