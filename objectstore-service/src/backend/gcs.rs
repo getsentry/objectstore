@@ -683,12 +683,20 @@ impl Backend for GcsBackend {
                     .map_err(|e| Error::reqwest("GCS: get payload", e))?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                    let total = resp
+                    let header = resp
                         .headers()
                         .get(header::CONTENT_RANGE)
-                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.to_str().ok().map(str::to_owned));
+                    let total = header
+                        .as_deref()
                         .and_then(ContentRange::parse_unsatisfiable_total)
-                        .unwrap_or(0);
+                        .unwrap_or_else(|| {
+                            objectstore_log::error!(
+                                value = header,
+                                "GCS: got 416 response with invalid Content-Range header",
+                            );
+                            0
+                        });
                     return Err(Error::RangeNotSatisfiable { total });
                 }
 
