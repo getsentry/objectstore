@@ -757,6 +757,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_object_range_bounded() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let payload = b"Hello, range requests!";
+        backend
+            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .await
+            .unwrap();
+
+        // Request bytes 7-11 → "range"
+        let (_, content_range, body) = backend
+            .get_object(&id, Some(ByteRange::Bounded(7, 11)))
+            .await
+            .unwrap()
+            .unwrap();
+        let data: BytesMut = body.try_collect().await.unwrap();
+
+        assert_eq!(data.as_ref(), b"range");
+        assert_eq!(content_range.start, 7);
+        assert_eq!(content_range.end, 11);
+        assert_eq!(content_range.total, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn get_object_range_from() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let payload = b"Hello, range requests!";
+        backend
+            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .await
+            .unwrap();
+
+        // Request bytes 7- → "range requests!"
+        let (_, content_range, body) = backend
+            .get_object(&id, Some(ByteRange::From(7)))
+            .await
+            .unwrap()
+            .unwrap();
+        let data: BytesMut = body.try_collect().await.unwrap();
+
+        assert_eq!(data.as_ref(), b"range requests!");
+        assert_eq!(content_range.start, 7);
+        assert_eq!(content_range.end, 21);
+        assert_eq!(content_range.total, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn get_object_range_last() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let payload = b"Hello, range requests!";
+        backend
+            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .await
+            .unwrap();
+
+        // Request last 9 bytes → "requests!"
+        let (_, content_range, body) = backend
+            .get_object(&id, Some(ByteRange::Last(9)))
+            .await
+            .unwrap()
+            .unwrap();
+        let data: BytesMut = body.try_collect().await.unwrap();
+
+        assert_eq!(data.as_ref(), b"requests!");
+        assert_eq!(content_range.start, 13);
+        assert_eq!(content_range.end, 21);
+        assert_eq!(content_range.total, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn get_object_range_unsatisfiable() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        backend
+            .put_object(&id, &metadata, stream::single(b"short".to_vec()))
+            .await
+            .unwrap();
+
+        match backend.get_object(&id, Some(ByteRange::From(100))).await {
+            Err(Error::RangeNotSatisfiable { total: 5 }) => {}
+            Err(other) => panic!("expected RangeNotSatisfiable, got: {other:?}"),
+            Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
+        }
+    }
+
+    #[tokio::test]
     async fn multipart_abort() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
