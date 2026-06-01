@@ -57,6 +57,24 @@ async fn no_range_returns_200_with_accept_ranges() -> Result<()> {
 }
 
 #[tokio::test]
+async fn head_returns_accept_ranges() -> Result<()> {
+    let (server, key) = setup().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .head(server.url(&format!("/v1/objects/test/org=1/{key}")))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers().get("accept-ranges").unwrap().to_str()?,
+        "bytes"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn range_prefix_returns_206() -> Result<()> {
     let (server, key) = setup().await;
     let client = reqwest::Client::new();
