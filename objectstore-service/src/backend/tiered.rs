@@ -445,7 +445,7 @@ impl Backend for TieredStorage {
 
         if let Some((_, ref content_range, _)) = result {
             objectstore_metrics::record!(
-                "get.size" = content_range.len(),
+                "get.size" = content_range.total,
                 usecase = id.usecase().to_owned(),
                 backend_choice = backend_choice.as_str(),
                 backend_type = backend_type,

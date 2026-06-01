@@ -123,7 +123,6 @@ async fn object_get(
 
     insert_accept_ranges(&mut response);
     if is_partial {
-        // When `is_partial == false`, `CONTENT_LENGTH` is already part of `metadata_headers`.
         let headers = response.headers_mut();
         headers.insert(
             http::header::CONTENT_LENGTH,
