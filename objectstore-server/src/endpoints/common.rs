@@ -120,6 +120,7 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Inserts `Accept-Ranges: bytes` into the response headers.
 pub fn insert_accept_ranges(response: &mut Response) {
     response.headers_mut().insert(
         http::header::ACCEPT_RANGES,

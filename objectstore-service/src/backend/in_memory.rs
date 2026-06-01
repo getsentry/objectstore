@@ -124,16 +124,30 @@ impl super::common::Backend for InMemoryBackend {
         Ok(())
     }
 
-    async fn get_object(&self, id: &ObjectId, _range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
             Some(StoreEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
+                let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
-                let content_range = ContentRange::full(bytes.len() as u64);
-                let stream = crate::stream::single(bytes);
-                Ok(Some((metadata, content_range, stream)))
+                let content_range = match range {
+                    Some(r) => r
+                        .resolve(total)
+                        .ok_or(Error::RangeNotSatisfiable { total })?,
+                    None => ContentRange::full(total),
+                };
+                let payload = if content_range.is_full() {
+                    bytes
+                } else {
+                    bytes.slice(content_range.start as usize..=content_range.end as usize)
+                };
+                Ok(Some((
+                    metadata,
+                    content_range,
+                    crate::stream::single(payload),
+                )))
             }
         }
     }
@@ -166,16 +180,27 @@ impl HighVolumeBackend for InMemoryBackend {
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
-        _range: Option<ByteRange>,
+        range: Option<ByteRange>,
     ) -> Result<TieredGet> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredGet::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredGet::Tombstone(tombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
+                let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
-                let content_range = ContentRange::full(bytes.len() as u64);
-                TieredGet::Object(metadata, content_range, crate::stream::single(bytes))
+                let content_range = match range {
+                    Some(r) => r
+                        .resolve(total)
+                        .ok_or(Error::RangeNotSatisfiable { total })?,
+                    None => ContentRange::full(total),
+                };
+                let payload = if content_range.is_full() {
+                    bytes
+                } else {
+                    bytes.slice(content_range.start as usize..=content_range.end as usize)
+                };
+                TieredGet::Object(metadata, content_range, crate::stream::single(payload))
             }
         })
     }
