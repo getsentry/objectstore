@@ -74,7 +74,14 @@ async fn object_get(
                 .map_err(|_| ApiError::Client("invalid Range header".into()))?;
             match header_str.parse::<ByteRange>() {
                 Ok(range) => Some(range),
+                // We are free to decide whether we want to fall back to the whole object or error.
+                // Per RFC 9110:
+                // > A server that supports range requests MAY ignore or reject a Range header
+                //   field that contains an invalid ranges-specifier [...]
+                //
                 // If the client wants multiple ranges, fall back to returning the whole object.
+                // We might support multiple ranges in the future, so log a warning to let us know
+                // clients are trying to do this.
                 Err(RangeError::MultiRange) => {
                     objectstore_log::warn!(
                         "received range request with multiple range specifiers, ignoring"
@@ -82,7 +89,8 @@ async fn object_get(
                     None
                 }
                 // The client requested an invalid unit or sent a malformed header.
-                // We could fall back, but better fail hard and let them know.
+                // We could fall back, but better fail hard and let them know they requested
+                // something we won't support.
                 Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
             }
         }
