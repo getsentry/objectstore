@@ -207,7 +207,7 @@ where
             headers
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
-                .and_then(ContentRange::parse)
+                .and_then(|s| s.parse::<ContentRange>().ok())
                 .map(|cr| cr.total as usize)
         } else {
             response.content_length().map(|len| len as usize)
@@ -327,7 +327,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
-                .and_then(ContentRange::parse)
+                .and_then(|s| s.parse::<ContentRange>().ok())
                 .ok_or_else(|| Error::Generic {
                     context: "S3: 206 response missing valid Content-Range header".to_owned(),
                     cause: None,

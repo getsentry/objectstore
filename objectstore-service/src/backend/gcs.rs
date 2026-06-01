@@ -702,7 +702,7 @@ impl Backend for GcsBackend {
                 .headers()
                 .get(header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
-                .and_then(ContentRange::parse)
+                .and_then(|s| s.parse::<ContentRange>().ok())
                 .ok_or_else(|| Error::Generic {
                     context: "GCS: 206 response missing valid Content-Range header".to_owned(),
                     cause: None,

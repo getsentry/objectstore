@@ -72,7 +72,7 @@ async fn object_get(
             let header_str = value
                 .to_str()
                 .map_err(|_| ApiError::Client("invalid Range header".into()))?;
-            match ByteRange::try_from(header_str) {
+            match header_str.parse::<ByteRange>() {
                 Ok(range) => Some(range),
                 Err(RangeError::InvalidUnit(_) | RangeError::MultiRange) => None,
                 Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
