@@ -133,7 +133,7 @@ impl super::common::Backend for InMemoryBackend {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
                 let content_range = match range {
-                    Some(r) => r
+                    Some(range) => range
                         .resolve(total)
                         .ok_or(Error::RangeNotSatisfiable { total })?,
                     None => ContentRange::full(total),
@@ -190,7 +190,7 @@ impl HighVolumeBackend for InMemoryBackend {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
                 let content_range = match range {
-                    Some(r) => r
+                    Some(range) => range
                         .resolve(total)
                         .ok_or(Error::RangeNotSatisfiable { total })?,
                     None => ContentRange::full(total),
