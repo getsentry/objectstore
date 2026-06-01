@@ -149,7 +149,7 @@ impl Backend for LocalFsBackend {
 
         let content_range = match range {
             Some(byte_range) => match byte_range.resolve(payload_size) {
-                Some(cr) => cr,
+                Some(content_range) => content_range,
                 None => {
                     return Err(Error::RangeNotSatisfiable {
                         total: payload_size,
