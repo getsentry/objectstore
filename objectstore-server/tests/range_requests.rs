@@ -132,7 +132,7 @@ async fn range_from_offset_returns_206() -> Result<()> {
 }
 
 #[tokio::test]
-async fn unknown_range_unit_returns_200_full_body() -> Result<()> {
+async fn unknown_range_unit_returns_400() -> Result<()> {
     let (server, key) = setup().await;
     let client = reqwest::Client::new();
 
@@ -142,9 +142,7 @@ async fn unknown_range_unit_returns_200_full_body() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let body = resp.text().await?;
-    assert_eq!(body, "Hello, Range Requests!");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     Ok(())
 }
 
