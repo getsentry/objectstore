@@ -444,9 +444,7 @@ impl Backend for TieredStorage {
         );
 
         if let Some((ref metadata, ref content_range, _)) = result {
-            let size = content_range
-                .map(|cr| cr.len() as usize)
-                .or(metadata.size);
+            let size = content_range.map(|cr| cr.len() as usize).or(metadata.size);
             if let Some(size) = size {
                 objectstore_metrics::record!(
                     "get.size" = size,

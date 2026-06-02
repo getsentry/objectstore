@@ -149,11 +149,12 @@ impl Backend for LocalFsBackend {
 
         let (content_range, stream) = match range {
             Some(byte_range) => {
-                let content_range = byte_range
-                    .resolve(payload_size)
-                    .ok_or(Error::RangeNotSatisfiable {
-                        total: payload_size,
-                    })?;
+                let content_range =
+                    byte_range
+                        .resolve(payload_size)
+                        .ok_or(Error::RangeNotSatisfiable {
+                            total: payload_size,
+                        })?;
                 reader
                     .seek(std::io::SeekFrom::Current(content_range.start as i64))
                     .await?;
