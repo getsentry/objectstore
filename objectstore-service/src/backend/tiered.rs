@@ -843,6 +843,7 @@ impl MultipartUploadBackend for TieredStorage {
                 usecase = id.usecase().to_owned(),
                 backend_choice = BackendChoice::LongTerm.as_str(),
                 backend_type = self.backend_type(&BackendChoice::LongTerm),
+                upload_type = "multipart",
             );
         }
 
