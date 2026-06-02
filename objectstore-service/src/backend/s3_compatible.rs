@@ -223,6 +223,8 @@ where
         } else {
             if let Some(len) = response.content_length() {
                 metadata.size = Some(len as usize);
+            } else {
+                objectstore_log::warn!("S3: 200 response missing Content-Length header");
             }
             None
         };
