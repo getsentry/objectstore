@@ -410,6 +410,7 @@ impl Backend for TieredStorage {
             usecase = id.usecase().to_owned(),
             backend_choice = backend_choice.as_str(),
             backend_type = backend_ty,
+            upload_type = "direct",
         );
 
         Ok(())
