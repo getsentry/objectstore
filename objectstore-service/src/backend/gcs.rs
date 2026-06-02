@@ -11,6 +11,7 @@ use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
@@ -659,7 +660,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
@@ -672,21 +673,62 @@ impl Backend for GcsBackend {
 
         let payload_response = self
             .with_retry("get_payload", || async {
-                self.request(Method::GET, download_url.clone())
-                    .await?
+                let mut req = self.request(Method::GET, download_url.clone()).await?;
+                if let Some(r) = range {
+                    req = req.header(header::RANGE, r.to_header_value());
+                }
+                let resp = req
                     .send()
                     .await
-                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| Error::reqwest("GCS: get payload", e))?;
+
+                if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                    let raw = resp
+                        .headers()
+                        .get(header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok());
+                    let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
+                    match total {
+                        Some(total) => return Err(Error::RangeNotSatisfiable { total }),
+                        None => {
+                            return Err(Error::Generic {
+                                context: format!(
+                                    "GCS: 416 response with invalid Content-Range: {:?}",
+                                    raw
+                                ),
+                                cause: None,
+                            });
+                        }
+                    }
+                }
+
+                resp.error_for_status()
                     .map_err(|e| Error::reqwest("GCS: get payload", e))
             })
             .await?;
+
+        let content_range = if payload_response.status() == StatusCode::PARTIAL_CONTENT {
+            Some(
+                payload_response
+                    .headers()
+                    .get(header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<ContentRange>().ok())
+                    .ok_or_else(|| Error::Generic {
+                        context: "GCS: 206 response missing valid Content-Range header".to_owned(),
+                        cause: None,
+                    })?,
+            )
+        } else {
+            None
+        };
 
         let stream = payload_response
             .bytes_stream()
             .map_err(io::Error::other)
             .boxed();
 
-        Ok(Some((metadata, stream)))
+        Ok(Some((metadata, content_range, stream)))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -1071,7 +1113,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
 
         let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -1089,7 +1131,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1128,7 +1170,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("world"))
             .await?;
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
 
         let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -1151,7 +1193,7 @@ mod tests {
 
         backend.delete_object(&id).await?;
 
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1174,7 +1216,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1197,7 +1239,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1274,7 +1316,7 @@ mod tests {
         );
 
         // Verify the payload is still intact after the bump.
-        let (_, stream) = backend.get_object(&id).await?.unwrap();
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
 
@@ -1334,7 +1376,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single(compressed.clone()))
             .await?;
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
 
         assert_eq!(meta.compression, Some(Compression::Zstd));
@@ -1384,7 +1426,7 @@ mod tests {
             .await?;
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -1469,7 +1511,7 @@ mod tests {
         assert!(result.is_none(), "expected no error on complete");
 
         // Object exists after complete
-        let (_meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         let mut expected = Vec::new();
         expected.extend_from_slice(&part1);
@@ -1550,7 +1592,7 @@ mod tests {
         assert!(result.is_none(), "expected no error on complete");
 
         // Verify reassembly order matches part numbers, not upload order.
-        let (_meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         let mut expected = Vec::new();
         expected.extend_from_slice(&part1);
@@ -1641,7 +1683,7 @@ mod tests {
         backend.abort_multipart(&id, &upload_id).await?;
 
         // Object should not exist after abort.
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none(), "object should not exist after abort");
 
         Ok(())
@@ -1693,7 +1735,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1710,7 +1752,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
-        let result = backend.get_object(&id).await?;
+        let result = backend.get_object(&id, None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -1734,7 +1776,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, compressed.clone()).await?;
 
-        let (meta, stream) = backend.get_object(&id).await?.unwrap();
+        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
 
         assert_eq!(meta.compression, Some(Compression::Zstd));

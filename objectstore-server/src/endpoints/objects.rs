@@ -9,10 +9,11 @@ use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::{ByteRange, ContentRange, RangeError};
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult};
+use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -64,15 +65,84 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let context = id.context().clone();
-    let Some((metadata, stream)) = service.get_object(id).await? else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+    let byte_range = match headers.get(http::header::RANGE) {
+        Some(value) => {
+            let header_str = value
+                .to_str()
+                .map_err(|_| ApiError::Client("invalid Range header".into()))?;
+            match header_str.parse::<ByteRange>() {
+                Ok(range) => Some(range),
+                // We are free to decide whether we want to fall back to the whole object or error.
+                // Per RFC 9110:
+                // > A server that supports range requests MAY ignore or reject a Range header
+                //   field that contains an invalid ranges-specifier [...]
+                //
+                // If the client wants multiple ranges, fall back to returning the whole object.
+                // We might support multiple ranges in the future, so log a warning to let us know
+                // clients are trying to do this.
+                Err(RangeError::MultiRange) => {
+                    objectstore_log::warn!(
+                        "received range request with multiple range specifiers, ignoring"
+                    );
+                    None
+                }
+                // The client requested an invalid unit or sent a malformed header.
+                // We could fall back, but better fail hard and let them know they requested
+                // something we won't support.
+                Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
+            }
+        }
+        None => None,
     };
-    let stream = state.meter_stream(stream, &context);
 
-    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
-    Ok((headers, Body::from_stream(stream)).into_response())
+    let context = id.context().clone();
+    let result = service.get_object(id, byte_range).await;
+
+    let (metadata, content_range, stream) = match result {
+        Ok(Some(result)) => result,
+        Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
+            let mut response = (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(
+                    http::header::CONTENT_RANGE,
+                    ContentRange::unsatisfiable_total_to_header_value(total),
+                )],
+            )
+                .into_response();
+            insert_accept_ranges(&mut response);
+            return Ok(response);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let stream = state.meter_stream(stream, &context);
+    let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+
+    let mut response = match content_range {
+        Some(ref content_range) => {
+            let mut resp = (
+                StatusCode::PARTIAL_CONTENT,
+                metadata_headers,
+                Body::from_stream(stream),
+            )
+                .into_response();
+            let headers = resp.headers_mut();
+            headers.insert(
+                http::header::CONTENT_LENGTH,
+                content_range.len_to_header_value(),
+            );
+            headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
+            resp
+        }
+        None => (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response(),
+    };
+
+    insert_accept_ranges(&mut response);
+
+    Ok(response)
 }
 
 async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
@@ -82,7 +152,9 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
     let headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
-    Ok((StatusCode::NO_CONTENT, headers).into_response())
+    let mut response = (StatusCode::NO_CONTENT, headers).into_response();
+    insert_accept_ranges(&mut response);
+    Ok(response)
 }
 
 async fn object_put(
