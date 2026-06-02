@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::range::ByteRange;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
@@ -132,16 +132,16 @@ impl super::common::Backend for InMemoryBackend {
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
-                let content_range = match range {
-                    Some(range) => range
-                        .resolve(total)
-                        .ok_or(Error::RangeNotSatisfiable { total })?,
-                    None => ContentRange::full(total),
-                };
-                let payload = if content_range.is_full() {
-                    bytes
-                } else {
-                    bytes.slice(content_range.start as usize..=content_range.end as usize)
+                let (content_range, payload) = match range {
+                    Some(range) => {
+                        let content_range = range
+                            .resolve(total)
+                            .ok_or(Error::RangeNotSatisfiable { total })?;
+                        let sliced =
+                            bytes.slice(content_range.start as usize..=content_range.end as usize);
+                        (Some(content_range), sliced)
+                    }
+                    None => (None, bytes),
                 };
                 Ok(Some((
                     metadata,
@@ -189,16 +189,16 @@ impl HighVolumeBackend for InMemoryBackend {
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
-                let content_range = match range {
-                    Some(range) => range
-                        .resolve(total)
-                        .ok_or(Error::RangeNotSatisfiable { total })?,
-                    None => ContentRange::full(total),
-                };
-                let payload = if content_range.is_full() {
-                    bytes
-                } else {
-                    bytes.slice(content_range.start as usize..=content_range.end as usize)
+                let (content_range, payload) = match range {
+                    Some(range) => {
+                        let content_range = range
+                            .resolve(total)
+                            .ok_or(Error::RangeNotSatisfiable { total })?;
+                        let sliced =
+                            bytes.slice(content_range.start as usize..=content_range.end as usize);
+                        (Some(content_range), sliced)
+                    }
+                    None => (None, bytes),
                 };
                 TieredGet::Object(metadata, content_range, crate::stream::single(payload))
             }

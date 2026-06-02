@@ -165,7 +165,7 @@ where
         method: Method,
         id: &ObjectId,
         range: Option<ByteRange>,
-    ) -> Result<Option<(Metadata, ContentRange, reqwest::Response)>> {
+    ) -> Result<Option<(Metadata, Option<ContentRange>, reqwest::Response)>> {
         let object_url = self.object_url(id);
 
         let mut builder = self.request(method, &object_url).await?;
@@ -219,18 +219,12 @@ where
                     cause: None,
                 })?;
             metadata.size = Some(range.total as usize);
-            range
+            Some(range)
         } else {
-            match response.content_length() {
-                Some(len) => {
-                    metadata.size = Some(len as usize);
-                    ContentRange::full(len)
-                }
-                None => {
-                    objectstore_log::warn!("S3: 200 response missing Content-Length header");
-                    ContentRange::full(metadata.size.unwrap_or(0) as u64)
-                }
+            if let Some(len) = response.content_length() {
+                metadata.size = Some(len as usize);
             }
+            None
         };
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts

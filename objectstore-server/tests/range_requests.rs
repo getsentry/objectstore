@@ -233,26 +233,3 @@ async fn range_on_nonexistent_object_returns_404() -> Result<()> {
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     Ok(())
 }
-
-#[tokio::test]
-async fn full_range_returns_200() -> Result<()> {
-    let (server, key) = setup().await;
-    let client = reqwest::Client::new();
-
-    // Request the full object as a range — should still get 200 since it's the full content.
-    let resp = client
-        .get(server.url(&format!("/v1/objects/test/org=1/{key}")))
-        .header("range", "bytes=0-21")
-        .send()
-        .await?;
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    assert!(
-        resp.headers().get("content-range").is_none(),
-        "full-object range should be 200 without Content-Range"
-    );
-
-    let body = resp.text().await?;
-    assert_eq!(body, "Hello, Range Requests!");
-    Ok(())
-}

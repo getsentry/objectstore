@@ -24,7 +24,7 @@ pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERS
 /// Backend response for put operations.
 pub type PutResponse = ();
 /// Backend response for get operations.
-pub type GetResponse = Option<(Metadata, ContentRange, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
 /// Backend response for metadata-only get operations.
 pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
@@ -212,7 +212,7 @@ pub struct Tombstone {
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
 pub enum TieredGet {
     /// A real object was found.
-    Object(Metadata, ContentRange, PayloadStream),
+    Object(Metadata, Option<ContentRange>, PayloadStream),
     /// A redirect tombstone was found; the real object lives in the long-term backend.
     Tombstone(Tombstone),
     /// No entry exists at this key.

@@ -38,7 +38,7 @@ use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
-use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::range::ByteRange;
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 
@@ -1015,8 +1015,7 @@ impl HighVolumeBackend for BigTableBackend {
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
                 metadata.size = Some(payload.len());
-                let content_range = ContentRange::full(payload.len() as u64);
-                TieredGet::Object(metadata, content_range, crate::stream::single(payload))
+                TieredGet::Object(metadata, None, crate::stream::single(payload))
             }
         })
     }

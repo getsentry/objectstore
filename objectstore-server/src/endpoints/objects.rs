@@ -121,23 +121,26 @@ async fn object_get(
     let stream = state.meter_stream(stream, &context);
     let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
-    let is_partial = !content_range.is_full();
-    let status = if is_partial {
-        StatusCode::PARTIAL_CONTENT
-    } else {
-        StatusCode::OK
+    let mut response = match content_range {
+        Some(ref content_range) => {
+            let mut resp = (
+                StatusCode::PARTIAL_CONTENT,
+                metadata_headers,
+                Body::from_stream(stream),
+            )
+                .into_response();
+            let headers = resp.headers_mut();
+            headers.insert(
+                http::header::CONTENT_LENGTH,
+                content_range.len_to_header_value(),
+            );
+            headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
+            resp
+        }
+        None => (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response(),
     };
-    let mut response = (status, metadata_headers, Body::from_stream(stream)).into_response();
 
     insert_accept_ranges(&mut response);
-    if is_partial {
-        let headers = response.headers_mut();
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            content_range.len_to_header_value(),
-        );
-        headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
-    }
 
     Ok(response)
 }

@@ -23,7 +23,7 @@ use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
 /// Service response for [`StorageService::get_object`].
-pub type GetResponse = Option<(Metadata, ContentRange, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
 /// Service response for [`StorageService::get_metadata`].
 pub type MetadataResponse = Option<Metadata>;
 /// Service response for [`StorageService::insert_object`].

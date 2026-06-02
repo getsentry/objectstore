@@ -708,17 +708,19 @@ impl Backend for GcsBackend {
             .await?;
 
         let content_range = if payload_response.status() == StatusCode::PARTIAL_CONTENT {
-            payload_response
-                .headers()
-                .get(header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<ContentRange>().ok())
-                .ok_or_else(|| Error::Generic {
-                    context: "GCS: 206 response missing valid Content-Range header".to_owned(),
-                    cause: None,
-                })?
+            Some(
+                payload_response
+                    .headers()
+                    .get(header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<ContentRange>().ok())
+                    .ok_or_else(|| Error::Generic {
+                        context: "GCS: 206 response missing valid Content-Range header".to_owned(),
+                        cause: None,
+                    })?,
+            )
         } else {
-            ContentRange::full(metadata.size.unwrap_or(0) as u64)
+            None
         };
 
         let stream = payload_response

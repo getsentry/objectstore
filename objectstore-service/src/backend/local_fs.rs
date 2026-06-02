@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
-use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::range::ByteRange;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -147,28 +147,20 @@ impl Backend for LocalFsBackend {
             .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
         metadata.size = Some(payload_size as usize);
 
-        let content_range = match range {
-            Some(byte_range) => match byte_range.resolve(payload_size) {
-                Some(content_range) => content_range,
-                None => {
-                    return Err(Error::RangeNotSatisfiable {
+        let (content_range, stream) = match range {
+            Some(byte_range) => {
+                let content_range = byte_range
+                    .resolve(payload_size)
+                    .ok_or(Error::RangeNotSatisfiable {
                         total: payload_size,
-                    });
-                }
-            },
-            None => ContentRange::full(payload_size),
-        };
-
-        let stream = if content_range.is_full() {
-            let stream = ReaderStream::new(reader);
-            stream.boxed()
-        } else {
-            reader
-                .seek(std::io::SeekFrom::Current(content_range.start as i64))
-                .await?;
-            let limited = reader.take(content_range.len());
-            let stream = ReaderStream::new(limited);
-            stream.boxed()
+                    })?;
+                reader
+                    .seek(std::io::SeekFrom::Current(content_range.start as i64))
+                    .await?;
+                let limited = reader.take(content_range.len());
+                (Some(content_range), ReaderStream::new(limited).boxed())
+            }
+            None => (None, ReaderStream::new(reader).boxed()),
         };
         Ok(Some((metadata, content_range, stream)))
     }
@@ -777,6 +769,7 @@ mod tests {
         let data: BytesMut = body.try_collect().await.unwrap();
 
         assert_eq!(data.as_ref(), b"range");
+        let content_range = content_range.unwrap();
         assert_eq!(content_range.start, 7);
         assert_eq!(content_range.end, 11);
         assert_eq!(content_range.total, payload.len() as u64);
@@ -803,6 +796,7 @@ mod tests {
         let data: BytesMut = body.try_collect().await.unwrap();
 
         assert_eq!(data.as_ref(), b"range requests!");
+        let content_range = content_range.unwrap();
         assert_eq!(content_range.start, 7);
         assert_eq!(content_range.end, 21);
         assert_eq!(content_range.total, payload.len() as u64);
@@ -829,6 +823,7 @@ mod tests {
         let data: BytesMut = body.try_collect().await.unwrap();
 
         assert_eq!(data.as_ref(), b"requests!");
+        let content_range = content_range.unwrap();
         assert_eq!(content_range.start, 13);
         assert_eq!(content_range.end, 21);
         assert_eq!(content_range.total, payload.len() as u64);

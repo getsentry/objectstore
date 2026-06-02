@@ -142,32 +142,11 @@ impl FromStr for ContentRange {
     }
 }
 
+#[allow(clippy::len_without_is_empty)] // A valid ContentRange is never empty.
 impl ContentRange {
-    /// Creates a [`ContentRange`] representing an entire object.
-    pub fn full(total: u64) -> Self {
-        Self {
-            start: 0,
-            end: total.saturating_sub(1),
-            total,
-        }
-    }
-
     /// Returns the number of bytes in this range.
     pub fn len(&self) -> u64 {
-        if self.total == 0 {
-            return 0;
-        }
         self.end - self.start + 1
-    }
-
-    /// Returns `true` if this range is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns `true` if this range covers the entire object.
-    pub fn is_full(&self) -> bool {
-        self.start == 0 && self.len() == self.total
     }
 
     /// Formats this range for a `Content-Range` response header.
@@ -262,18 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn content_range_methods() {
-        let full = ContentRange::full(1000);
-        assert_eq!(
-            full,
-            ContentRange {
-                start: 0,
-                end: 999,
-                total: 1000
-            }
-        );
+    fn content_range_len() {
+        let full = ContentRange {
+            start: 0,
+            end: 999,
+            total: 1000,
+        };
         assert_eq!(full.len(), 1000);
-        assert!(full.is_full());
 
         let partial = ContentRange {
             start: 0,
@@ -281,11 +255,6 @@ mod tests {
             total: 1000,
         };
         assert_eq!(partial.len(), 500);
-        assert!(!partial.is_full());
-
-        let zero = ContentRange::full(0);
-        assert_eq!(zero.len(), 0);
-        assert!(zero.is_full());
     }
 
     #[test]
