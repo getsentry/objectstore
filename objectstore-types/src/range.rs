@@ -142,7 +142,10 @@ impl FromStr for ContentRange {
     }
 }
 
-#[allow(clippy::len_without_is_empty)] // A valid ContentRange is never empty.
+#[expect(
+    clippy::len_without_is_empty,
+    reason = "A valid ContentRange is never empty"
+)]
 impl ContentRange {
     /// Returns the number of bytes in this range.
     pub fn len(&self) -> u64 {
