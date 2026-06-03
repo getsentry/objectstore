@@ -51,15 +51,18 @@ pub struct ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
-    /// Creates an error response from an error, using only its [`Display`] message.
-    ///
-    /// The source chain is intentionally excluded from the HTTP response — it is
-    /// recorded in our internal logs via tracing instead.
+    /// Creates an error response from an error, extracting the full cause chain.
     pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
-        Self {
-            detail: Some(error.to_string()),
-            causes: Vec::new(),
+        let detail = Some(error.to_string());
+
+        let mut causes = Vec::new();
+        let mut source = error.source();
+        while let Some(s) = source {
+            causes.push(s.to_string());
+            source = s.source();
         }
+
+        Self { detail, causes }
     }
 }
 
