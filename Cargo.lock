@@ -2139,6 +2139,9 @@ name = "mediatype"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "120fa187be19d9962f0926633453784691731018a2bf936ddb4e29101b79c4a7"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "memchr"
@@ -2571,6 +2574,7 @@ dependencies = [
  "futures-util",
  "infer",
  "jsonwebtoken",
+ "mediatype",
  "multer",
  "objectstore-test",
  "objectstore-types",

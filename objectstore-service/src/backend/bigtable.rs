@@ -1341,7 +1341,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             time_created: Some(SystemTime::now()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
@@ -1567,7 +1567,7 @@ mod tests {
         // object
         let id = make_id();
         let put_meta = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             custom: BTreeMap::from_iter([("k".into(), "v".into())]),
             ..Default::default()
         };

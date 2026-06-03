@@ -452,7 +452,7 @@ mod tests {
         });
 
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             time_created: Some(SystemTime::now()),
             time_expires: None,
@@ -492,7 +492,7 @@ mod tests {
         });
 
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             compression: Some(Compression::Zstd),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
@@ -549,7 +549,7 @@ mod tests {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
@@ -587,7 +587,7 @@ mod tests {
         let (meta, body) = backend.get_object(&id).await.unwrap().unwrap();
         let payload: BytesMut = body.try_collect().await.unwrap();
         assert_eq!(payload.as_ref(), data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
+        assert_eq!(meta.content_type.as_str(), "text/plain");
         assert_eq!(
             meta.expiration_policy,
             ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))

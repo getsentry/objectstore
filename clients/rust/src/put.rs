@@ -1,7 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
-use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use bytes::Bytes;
@@ -141,8 +141,8 @@ impl PutBuilder {
     ///
     /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
     /// `content_type` based on magic bytes.
-    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        self.metadata.content_type = content_type.into();
+    pub fn content_type(mut self, content_type: mediatype::MediaTypeBuf) -> Self {
+        self.metadata.content_type = content_type;
         self
     }
 

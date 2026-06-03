@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
@@ -119,8 +118,8 @@ impl InitiateMultipartBuilder {
     ///
     /// You can use the utility function [`crate::utils::guess_mime_type`] to attempt to guess a
     /// `content_type` based on magic bytes.
-    pub fn content_type(mut self, content_type: impl Into<Cow<'static, str>>) -> Self {
-        self.metadata.content_type = content_type.into();
+    pub fn content_type(mut self, content_type: mediatype::MediaTypeBuf) -> Self {
+        self.metadata.content_type = content_type;
         self
     }
 

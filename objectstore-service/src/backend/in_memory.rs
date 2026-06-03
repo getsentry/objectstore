@@ -482,7 +482,7 @@ mod tests {
         let backend = InMemoryBackend::new("test");
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
@@ -520,7 +520,7 @@ mod tests {
         let (meta, body) = backend.get_object(&id).await.unwrap().unwrap();
         let payload = stream::read_to_vec(body).await.unwrap();
         assert_eq!(payload, data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
+        assert_eq!(meta.content_type.as_str(), "text/plain");
         assert_eq!(
             meta.expiration_policy,
             ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))

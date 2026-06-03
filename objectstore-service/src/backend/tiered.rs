@@ -922,7 +922,7 @@ mod tests {
         let id = make_id("large");
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
         let metadata_in = Metadata {
-            content_type: "image/png".into(),
+            content_type: "image/png".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
             origin: Some("10.0.0.1".into()),
             ..Default::default()
@@ -945,7 +945,7 @@ mod tests {
 
         // LT object at revision key with correct metadata.
         let (lt_meta, _) = lt.get(&lt_id).expect_object();
-        assert_eq!(lt_meta.content_type, "image/png");
+        assert_eq!(lt_meta.content_type.as_str(), "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
 
         // get_object follows the tombstone and returns the correct payload.
@@ -955,7 +955,7 @@ mod tests {
 
         // get_metadata follows the tombstone and returns the correct content_type.
         let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
-        assert_eq!(metadata.content_type, "image/png");
+        assert_eq!(metadata.content_type.as_str(), "image/png");
     }
 
     // --- Put overwrites ---
@@ -1563,7 +1563,7 @@ mod tests {
         let (storage, hv, lt, _) = make_tiered_storage();
         let id = make_id("mp-single");
         let metadata = Metadata {
-            content_type: "application/octet-stream".into(),
+            content_type: "application/octet-stream".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
             ..Default::default()
         };
@@ -1603,7 +1603,7 @@ mod tests {
         let (got_meta, s) = storage.get_object(&id).await.unwrap().unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
-        assert_eq!(got_meta.content_type, "application/octet-stream");
+        assert_eq!(got_meta.content_type.as_str(), "application/octet-stream");
 
         // HV should have a tombstone, LT should have the object at the physical key.
         let tombstone = hv.get(&id).expect_tombstone();

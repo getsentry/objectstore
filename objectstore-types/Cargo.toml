@@ -13,7 +13,7 @@ publish = true
 http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
-mediatype = "0.21.0"
+mediatype = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

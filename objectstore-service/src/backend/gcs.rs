@@ -134,7 +134,7 @@ impl GcsObject {
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         let mut gcs_object = GcsObject {
-            content_type: metadata.content_type.clone(),
+            content_type: metadata.content_type.to_string().into(),
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
@@ -189,7 +189,11 @@ impl GcsObject {
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
-        let content_type = self.content_type;
+        let content_type: objectstore_types::metadata::MediaTypeBuf =
+            self.content_type.parse().map_err(|e| Error::Generic {
+                context: "GCS: invalid content type in object metadata".to_string(),
+                cause: Some(Box::new(e)),
+            })?;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self
             .size
@@ -631,9 +635,9 @@ impl Backend for GcsBackend {
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
-                    .mime_str(&metadata.content_type)
+                    .mime_str(metadata.content_type.as_str())
                     .map_err(|e| Error::Generic {
-                        context: format!("invalid mime type: {}", &metadata.content_type),
+                        context: format!("invalid mime type: {}", metadata.content_type),
                         cause: Some(Box::new(e)),
                     })?,
             );
@@ -845,7 +849,7 @@ impl MultipartUploadBackend for GcsBackend {
         let mut builder = self
             .request(Method::POST, url)
             .await?
-            .header(header::CONTENT_TYPE, metadata.content_type.as_ref())
+            .header(header::CONTENT_TYPE, metadata.content_type.as_str())
             .header(header::CONTENT_LENGTH, "0");
 
         let meta_headers = metadata_to_gcs_headers(metadata)?;
@@ -1057,7 +1061,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             origin: Some("203.0.113.42".into()),
@@ -1209,7 +1213,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             origin: Some("203.0.113.42".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
@@ -1246,7 +1250,7 @@ mod tests {
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
         };
@@ -1289,7 +1293,7 @@ mod tests {
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
         };
@@ -1325,7 +1329,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             compression: Some(Compression::Zstd),
             ..Default::default()
         };
@@ -1351,7 +1355,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(33)),
             origin: Some("203.0.113.42".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -1387,7 +1391,7 @@ mod tests {
         let (meta, stream) = backend.get_object(&id).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
+        assert_eq!(meta.content_type.as_str(), "text/plain");
         assert_eq!(
             meta.expiration_policy,
             ExpirationPolicy::TimeToLive(Duration::from_mins(33))
@@ -1727,7 +1731,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata {
-            content_type: "text/plain".into(),
+            content_type: "text/plain".parse().unwrap(),
             compression: Some(Compression::Zstd),
             ..Default::default()
         };

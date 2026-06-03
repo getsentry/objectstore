@@ -27,14 +27,15 @@
 //! The [`Metadata::from_headers`] and [`Metadata::to_headers`] methods accept
 //! a `prefix` parameter for this purpose.
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use http::header::{self, HeaderMap, HeaderName};
 use humantime::{format_duration, format_rfc3339_micros, parse_duration, parse_rfc3339};
+pub use mediatype::MediaTypeBuf;
 use serde::{Deserialize, Serialize};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
@@ -49,7 +50,8 @@ pub const HEADER_ORIGIN: &str = "x-sn-origin";
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
 /// The default content type for objects without a known content type.
-pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+pub static DEFAULT_CONTENT_TYPE: LazyLock<MediaTypeBuf> =
+    LazyLock::new(|| MediaTypeBuf::from(mediatype::media_type!(APPLICATION / OCTET_STREAM)));
 
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
@@ -245,7 +247,7 @@ pub struct Metadata {
     /// IANA media type of the object (header: `Content-Type`).
     ///
     /// Defaults to [`DEFAULT_CONTENT_TYPE`] (`application/octet-stream`).
-    pub content_type: Cow<'static, str>,
+    pub content_type: MediaTypeBuf,
 
     /// The compression algorithm used for this object (header: `Content-Encoding`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,9 +286,7 @@ impl Metadata {
             match *name {
                 // standard HTTP headers
                 header::CONTENT_TYPE => {
-                    let content_type = value.to_str()?;
-                    validate_content_type(content_type)?;
-                    metadata.content_type = content_type.to_owned().into();
+                    metadata.content_type = value.to_str()?.parse()?;
                 }
                 header::CONTENT_ENCODING => {
                     let compression = value.to_str()?;
@@ -351,7 +351,7 @@ impl Metadata {
         let mut headers = HeaderMap::new();
 
         // standard headers
-        headers.append(header::CONTENT_TYPE, content_type.parse()?);
+        headers.append(header::CONTENT_TYPE, content_type.as_str().parse()?);
         if let Some(compression) = compression {
             headers.append(header::CONTENT_ENCODING, compression.as_str().parse()?);
         }
@@ -386,20 +386,13 @@ impl Metadata {
     }
 }
 
-/// Validates that `content_type` is a valid [IANA Media
-/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
-fn validate_content_type(content_type: &str) -> Result<(), Error> {
-    mediatype::MediaType::parse(content_type)?;
-    Ok(())
-}
-
 impl Default for Metadata {
     fn default() -> Self {
         Self {
             expiration_policy: ExpirationPolicy::Manual,
             time_created: None,
             time_expires: None,
-            content_type: DEFAULT_CONTENT_TYPE.into(),
+            content_type: DEFAULT_CONTENT_TYPE.clone(),
             compression: None,
             origin: None,
             size: None,
@@ -420,7 +413,7 @@ mod tests {
 
         let metadata = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(metadata.origin.as_deref(), Some("203.0.113.42"));
-        assert_eq!(metadata.content_type, "text/plain");
+        assert_eq!(metadata.content_type.as_str(), "text/plain");
     }
 
     #[test]
@@ -469,7 +462,7 @@ mod tests {
         headers.insert("content-encoding", "zstd".parse().unwrap());
 
         let metadata = Metadata::from_headers(&headers, "").unwrap();
-        assert_eq!(metadata.content_type, "application/json");
+        assert_eq!(metadata.content_type.as_str(), "application/json");
         assert_eq!(metadata.compression, Some(Compression::Zstd));
     }
 
@@ -565,7 +558,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
-            content_type: "text/html".into(),
+            content_type: "text/html".parse().unwrap(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
             size: None,
@@ -598,7 +591,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
-            content_type: "image/png".into(),
+            content_type: "image/png".parse().unwrap(),
             compression: Some(Compression::Zstd),
             origin: Some("192.168.1.1".into()),
             size: None,
@@ -654,7 +647,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
-            content_type: "application/json".into(),
+            content_type: "application/json".parse().unwrap(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
             size: Some(1024),
@@ -681,7 +674,7 @@ mod tests {
     #[test]
     fn default_metadata() {
         let metadata = Metadata::default();
-        assert_eq!(metadata.content_type, DEFAULT_CONTENT_TYPE);
+        assert_eq!(metadata.content_type, *DEFAULT_CONTENT_TYPE);
         assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.compression.is_none());
         assert!(metadata.origin.is_none());

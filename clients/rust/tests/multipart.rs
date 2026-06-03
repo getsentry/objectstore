@@ -212,7 +212,7 @@ async fn test_metadata_preserved() {
         .initiate_multipart_upload()
         .key("metadata-key")
         .compression(None)
-        .content_type("text/plain")
+        .content_type("text/plain".parse().unwrap())
         .origin("203.0.113.42")
         .append_metadata("my-key".to_string(), "my-value".to_string())
         .send()
@@ -224,7 +224,7 @@ async fn test_metadata_preserved() {
     let key = upload.complete([part]).await.unwrap();
 
     let response = session.get(&key).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.content_type, "text/plain");
+    assert_eq!(response.metadata.content_type.as_str(), "text/plain");
     assert_eq!(response.metadata.origin.as_deref(), Some("203.0.113.42"));
     assert_eq!(
         response.metadata.custom.get("my-key").map(String::as_str),

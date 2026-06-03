@@ -255,7 +255,10 @@ mod tests {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op1.key.as_deref(), Some("test1"));
-        assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
+        assert_eq!(
+            insert_op1.metadata.content_type.as_str(),
+            "application/octet-stream"
+        );
         assert_eq!(insert_op1.metadata.origin, None);
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
@@ -263,7 +266,7 @@ mod tests {
             panic!("expected insert operation");
         };
         assert_eq!(insert_op2.key.as_deref(), Some("test2"));
-        assert_eq!(insert_op2.metadata.content_type, "text/plain");
+        assert_eq!(insert_op2.metadata.content_type.as_str(), "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
         assert_eq!(insert_op2.metadata.origin.as_deref(), Some("203.0.113.42"));
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
