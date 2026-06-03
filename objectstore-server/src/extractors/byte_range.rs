@@ -41,8 +41,8 @@ impl FromRequestParts<ServiceState> for OptionalByteRange {
                 Ok(Self(None))
             }
             // The client requested an invalid unit or sent a malformed header.
-            // We could fall back, but better fail hard and let them know they requested
-            // something we won't support.
+            // We could fall back, but better fail hard and let them know they send something
+            // invalid.
             Err(err) => Err(ApiError::Client(format!("invalid Range header: {err}"))),
         }
     }
