@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
-use objectstore_types::range::{ContentRange, RangeError};
+use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
@@ -67,7 +67,7 @@ async fn object_get(
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     OptionalByteRange(byte_range): OptionalByteRange,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> ApiResult<Response> {
     let context = id.context().clone();
     let result = service.get_object(id, byte_range).await;
