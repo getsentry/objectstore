@@ -9,11 +9,12 @@ use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
-use objectstore_types::range::{ByteRange, ContentRange, RangeError};
+use objectstore_types::range::{ContentRange, RangeError};
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
+use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -65,38 +66,9 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    OptionalByteRange(byte_range): OptionalByteRange,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let byte_range = match headers.get(http::header::RANGE) {
-        Some(value) => {
-            let header_str = value
-                .to_str()
-                .map_err(|_| ApiError::Client("invalid Range header".into()))?;
-            match header_str.parse::<ByteRange>() {
-                Ok(range) => Some(range),
-                // We are free to decide whether we want to fall back to the whole object or error.
-                // Per RFC 9110:
-                // > A server that supports range requests MAY ignore or reject a Range header
-                //   field that contains an invalid ranges-specifier [...]
-                //
-                // If the client wants multiple ranges, fall back to returning the whole object.
-                // We might support multiple ranges in the future, so log a warning to let us know
-                // clients are trying to do this.
-                Err(RangeError::MultiRange) => {
-                    objectstore_log::warn!(
-                        "received range request with multiple range specifiers, ignoring"
-                    );
-                    None
-                }
-                // The client requested an invalid unit or sent a malformed header.
-                // We could fall back, but better fail hard and let them know they requested
-                // something we won't support.
-                Err(e) => return Err(ApiError::Client(format!("invalid Range header: {e}"))),
-            }
-        }
-        None => None,
-    };
-
     let context = id.context().clone();
     let result = service.get_object(id, byte_range).await;
 
