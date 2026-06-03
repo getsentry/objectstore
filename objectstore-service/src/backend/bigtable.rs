@@ -458,7 +458,7 @@ fn object_mutations(
     };
 
     let metadata_bytes = serde_json::to_vec(metadata)
-        .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
+        .map_err(|e| Error::internal("failed to serialize metadata", e))?;
 
     Ok([
         // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -520,7 +520,7 @@ fn tombstone_mutations(tombstone: &Tombstone, now: SystemTime) -> Result<[v2::Mu
             column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
             timestamp_micros,
             value: serde_json::to_vec(&tombstone_meta)
-                .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?,
+                .map_err(|e| Error::internal("failed to serialize tombstone", e))?,
         })),
     ])
 }
@@ -593,8 +593,8 @@ impl RowData {
                 }
                 COLUMN_TOMBSTONE_META => {
                     tombstone_meta_opt =
-                        Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                            Error::serde("failed to deserialize tombstone meta", cause)
+                        Some(serde_json::from_slice(&cell.value).map_err(|e| {
+                            Error::internal("failed to deserialize tombstone meta", e)
                         })?);
                 }
                 COLUMN_METADATA => {
@@ -609,8 +609,8 @@ impl RowData {
                         });
                     } else {
                         metadata_opt =
-                            Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                                Error::serde("failed to deserialize metadata", cause)
+                            Some(serde_json::from_slice(&cell.value).map_err(|e| {
+                                Error::internal("failed to deserialize metadata", e)
                             })?);
                     }
                 }
@@ -675,9 +675,9 @@ fn parse_redirect_target(redirect_path: &[u8], tombstone_id: &ObjectId) -> Resul
         Ok(tombstone_id.clone())
     } else {
         let redirect_str = std::str::from_utf8(redirect_path)
-            .map_err(|_| Error::generic("invalid UTF-8 in redirect path"))?;
+            .map_err(|_| Error::internal_msg("invalid UTF-8 in redirect path"))?;
         ObjectId::from_storage_path(redirect_str)
-            .ok_or_else(|| Error::generic("corrupt redirect path"))
+            .ok_or_else(|| Error::internal_msg("corrupt redirect path"))
     }
 }
 
@@ -912,7 +912,7 @@ impl Backend for BigTableBackend {
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
         match self.get_tiered_object(id).await? {
             TieredGet::Object(metadata, payload) => Ok(Some((metadata, payload))),
-            TieredGet::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredGet::Tombstone(_) => Err(Error::internal_msg("unexpected tombstone")),
             TieredGet::NotFound => Ok(None),
         }
     }
@@ -921,7 +921,7 @@ impl Backend for BigTableBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         match self.get_tiered_metadata(id).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
-            TieredMetadata::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredMetadata::Tombstone(_) => Err(Error::internal_msg("unexpected tombstone")),
             TieredMetadata::NotFound => Ok(None),
         }
     }
@@ -984,7 +984,9 @@ impl HighVolumeBackend for BigTableBackend {
             }
         }
 
-        Err(Error::generic("BigTable: race loop in put_non_tombstone"))
+        Err(Error::internal_msg(
+            "BigTable: race loop in put_non_tombstone",
+        ))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -1079,7 +1081,7 @@ impl HighVolumeBackend for BigTableBackend {
             }
         }
 
-        Err(Error::generic(
+        Err(Error::internal_msg(
             "BigTable: race loop in delete_non_tombstone",
         ))
     }
@@ -1120,27 +1122,30 @@ impl HighVolumeBackend for BigTableBackend {
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| Error::Generic {
-        context: format!(
+    let deadline = from.checked_add(ttl).ok_or_else(|| {
+        Error::internal_msg(format!(
             "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
             humantime::format_rfc3339_seconds(from),
             ttl.as_secs()
-        ),
-        cause: None,
+        ))
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| Error::Generic {
-            context: format!(
-                "unable to get duration since UNIX_EPOCH for SystemTime {}",
-                humantime::format_rfc3339_seconds(deadline)
-            ),
-            cause: Some(Box::new(e)),
+        .map_err(|e| {
+            Error::internal(
+                format!(
+                    "unable to get duration since UNIX_EPOCH for SystemTime {}",
+                    humantime::format_rfc3339_seconds(deadline)
+                ),
+                e,
+            )
         })?
         .as_millis();
-    (millis * 1000).try_into().map_err(|e| Error::Generic {
-        context: format!("failed to convert {}ms to i64 microseconds", millis),
-        cause: Some(Box::new(e)),
+    (millis * 1000).try_into().map_err(|e| {
+        Error::internal(
+            format!("failed to convert {}ms to i64 microseconds", millis),
+            e,
+        )
     })
 }
 
@@ -1163,10 +1168,7 @@ where
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
                 objectstore_metrics::count!("bigtable.failures", action = context);
-                return Err(Error::Generic {
-                    context: format!("Bigtable: `{context}` failed"),
-                    cause: Some(Box::new(e)),
-                });
+                return Err(Error::internal(format!("Bigtable: `{context}` failed"), e));
             }
             Err(e) => {
                 retry_count += 1;
@@ -1742,14 +1744,14 @@ mod tests {
         }
 
         // Legacy reads must error rather than leak tombstone data.
-        assert!(matches!(
-            backend.get_object(&hv_id).await,
-            Err(Error::UnexpectedTombstone)
-        ));
-        assert!(matches!(
-            backend.get_metadata(&hv_id).await,
-            Err(Error::UnexpectedTombstone)
-        ));
+        let Err(err) = backend.get_object(&hv_id).await else {
+            panic!("expected error");
+        };
+        assert_eq!(err.description.as_deref(), Some("unexpected tombstone"));
+        let Err(err) = backend.get_metadata(&hv_id).await else {
+            panic!("expected error");
+        };
+        assert_eq!(err.description.as_deref(), Some("unexpected tombstone"));
 
         // Idempotent retry: retry with the same target succeeds
         let second = backend

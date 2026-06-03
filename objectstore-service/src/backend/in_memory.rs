@@ -126,7 +126,7 @@ impl super::common::Backend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
-            Some(StoreEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
+            Some(StoreEntry::Tombstone(_)) => Err(Error::internal_msg("unexpected tombstone")),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 metadata.size = Some(bytes.len());
                 let stream = crate::stream::single(bytes);
@@ -228,7 +228,8 @@ impl MultipartUploadBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
+        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())
+            .map_err(|e| Error::bad_request("invalid upload ID", e))?;
         let upload = MultipartUpload {
             metadata: metadata.clone(),
             parts: BTreeMap::new(),
@@ -256,7 +257,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         let mut store = self.multipart_store.lock().unwrap();
         let upload = store
             .get_mut(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+            .ok_or_else(|| Error::bad_request_msg("multipart upload not found"))?;
 
         upload.parts.insert(
             part_number,
@@ -280,7 +281,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         let store = self.multipart_store.lock().unwrap();
         let upload = store
             .get(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+            .ok_or_else(|| Error::bad_request_msg("multipart upload not found"))?;
 
         let iter = upload
             .parts
@@ -345,7 +346,7 @@ impl MultipartUploadBackend for InMemoryBackend {
             let store = self.multipart_store.lock().unwrap();
             let upload = store
                 .get(&key)
-                .ok_or_else(|| Error::generic("multipart upload not found"))?;
+                .ok_or_else(|| Error::bad_request_msg("multipart upload not found"))?;
 
             for completed in &parts {
                 match upload.parts.get(&completed.part_number) {

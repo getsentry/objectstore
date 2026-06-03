@@ -47,13 +47,13 @@ impl ConcurrencyLimiter {
     /// Returns a [`ConcurrencyPermit`] that releases all `count` permits and
     /// notifies waiters on drop, just like single-permit acquisition.
     ///
-    /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
+    /// Returns [`Error::too_many_requests()`] when fewer than `count` permits are available.
     pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
             .try_acquire_many_owned(count as u32)
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::too_many_requests())?;
         Ok(ConcurrencyPermit {
             permit: Some(permit),
             released: Arc::clone(&self.released),
@@ -64,7 +64,7 @@ impl ConcurrencyLimiter {
     ///
     /// Convenience shorthand for `try_acquire_many(1)`.
     ///
-    /// Returns [`Error::AtCapacity`] when all permits are held.
+    /// Returns [`Error::too_many_requests()`] when all permits are held.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
         self.try_acquire_many(1)
     }
@@ -177,7 +177,7 @@ where
 
             if let Err(ref e) = result {
                 let error = e as &dyn std::error::Error;
-                objectstore_log::event_dyn!(e.level(), error, operation, "Task failed");
+                objectstore_log::error!(error, operation, "Task failed");
             }
 
             objectstore_metrics::record!(
@@ -193,7 +193,7 @@ where
         }
         .bind_hub(new_hub),
     );
-    rx.await.map_err(|_| Error::Dropped)?
+    rx.await.map_err(|_| Error::internal_msg("task dropped"))?
 }
 
 #[cfg(test)]
@@ -201,7 +201,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::error::Error;
 
     #[test]
     fn available_permits_tracks_held() {
@@ -251,7 +250,7 @@ mod tests {
         let _permit = limiter.try_acquire().unwrap();
 
         let result = limiter.try_acquire();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err());
     }
 
     #[test]

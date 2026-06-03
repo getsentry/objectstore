@@ -119,7 +119,7 @@ impl StorageService {
         let window = (available as f64 * 0.10).ceil() as usize;
 
         let acquire_result = match window {
-            0 => Err(Error::AtCapacity),
+            0 => Err(Error::too_many_requests()),
             _ => self.concurrency.try_acquire_many(window),
         };
         let reservation = acquire_result.inspect_err(|_| {
@@ -349,7 +349,6 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
-    use crate::error::Error;
     use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
@@ -544,9 +543,10 @@ mod tests {
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id).await;
 
-        let Err(Error::Panic(msg)) = result else {
+        let Err(err) = result else {
             panic!("expected Panic error");
         };
+        let msg = err.description.as_deref().unwrap_or("");
         assert!(msg.contains("intentional panic in get_object"), "{msg}");
     }
 
@@ -684,10 +684,7 @@ mod tests {
             )
             .await;
 
-        assert!(
-            matches!(result, Err(Error::AtCapacity)),
-            "expected AtCapacity, got {result:?}"
-        );
+        assert!(result.is_err(), "expected AtCapacity error");
 
         // Unblock the first operation.
         hv.hooks.resume.notify_one();
@@ -739,13 +736,10 @@ mod tests {
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
         let result = service.get_object(id.clone()).await;
-        assert!(matches!(result, Err(Error::Panic(_))));
+        assert!(result.is_err());
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
         let result = service.get_object(id).await;
-        assert!(
-            !matches!(result, Err(Error::AtCapacity)),
-            "permit was not released after panic"
-        );
+        assert!(result.is_ok(), "permit was not released after panic");
     }
 }

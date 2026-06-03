@@ -120,16 +120,21 @@ impl<T> S3CompatibleBackend<T> {
 }
 
 /// Wraps [`Metadata::to_headers`] with GCS-specific concerns (tombstone + custom-time).
-fn metadata_to_gcs_headers(
-    metadata: &Metadata,
-    prefix: &str,
-) -> Result<HeaderMap, objectstore_types::metadata::Error> {
-    let mut headers = metadata.to_headers(prefix)?;
+fn metadata_to_gcs_headers(metadata: &Metadata, prefix: &str) -> Result<HeaderMap> {
+    let mut headers = metadata
+        .to_headers(prefix)
+        .map_err(|e| Error::internal("S3: failed to serialize metadata headers", e))?;
     // GCS custom-time for lifecycle expiration
     if let Some(expires_in) = metadata.expiration_policy.expires_in() {
         let expires_at =
             humantime::format_rfc3339_seconds(std::time::SystemTime::now() + expires_in);
-        headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
+        headers.append(
+            GCS_CUSTOM_TIME,
+            expires_at
+                .to_string()
+                .parse()
+                .map_err(|e| Error::internal("S3: invalid custom-time header value", e))?,
+        );
     }
     Ok(headers)
 }
@@ -146,9 +151,11 @@ where
                 provider
                     .get_token()
                     .await
-                    .map_err(|err| Error::Generic {
-                        context: "S3: failed to get authentication token".to_owned(),
-                        cause: Some(err.into()),
+                    .map_err(|err| {
+                        Error::internal(
+                            "S3: failed to get authentication token",
+                            std::io::Error::other(err),
+                        )
                     })?
                     .as_str(),
             );
@@ -171,10 +178,7 @@ where
             .await?
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send request".to_string(),
-                cause,
-            })?;
+            .map_err(|e| Error::internal("S3: failed to send request", e))?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -183,13 +187,11 @@ where
 
         let response = response
             .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to get object".to_string(),
-                cause,
-            })?;
+            .map_err(|e| Error::internal("S3: failed to get object", e))?;
 
         let headers = response.headers();
-        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)
+            .map_err(|e| Error::internal("S3: failed to parse metadata from headers", e))?;
         metadata.size = response.content_length().map(|len| len as usize);
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
@@ -225,14 +227,13 @@ where
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send TTI update request".to_string(),
-                cause,
-            })?
+            .map_err(|e| Error::internal("S3: failed to send TTI update request", e))?
             .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to update expiration time for object with TTI".to_string(),
-                cause,
+            .map_err(|e| {
+                Error::internal(
+                    "S3: failed to update expiration time for object with TTI",
+                    e,
+                )
             })?;
 
         Ok(())
@@ -282,12 +283,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .and_then(|response| response.error_for_status())
-            .map_err(|cause| match stream::unpack_client_error(&cause) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::Reqwest {
-                    context: "S3: failed to put object".to_string(),
-                    cause,
-                },
+            .map_err(|e| match stream::unpack_client_error(&e) {
+                Some(ce) => Error::client_stream(ce),
+                _ => Error::internal("S3: failed to put object", e),
             })?;
 
         Ok(())
@@ -320,20 +318,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send delete request".to_string(),
-                cause,
-            })?;
+            .map_err(|e| Error::internal("S3: failed to send delete request", e))?;
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
             response
                 .error_for_status()
-                .map_err(|cause| Error::Reqwest {
-                    context: "S3: failed to delete object".to_string(),
-                    cause,
-                })?;
+                .map_err(|e| Error::internal("S3: failed to delete object", e))?;
         }
 
         Ok(())

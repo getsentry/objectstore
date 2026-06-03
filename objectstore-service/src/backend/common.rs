@@ -69,7 +69,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The default returns [`Error::NotImplemented`]. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
-        Err(Error::NotImplemented)
+        Err(Error::not_implemented())
     }
 }
 

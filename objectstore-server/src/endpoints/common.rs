@@ -5,7 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::{Error as ServiceError, ErrorKind};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,7 +24,7 @@ pub enum ApiError {
     Auth(#[from] AuthError),
 
     /// Service errors, indicating that something went wrong when receiving or executing a request.
-    #[error("service error: {0}")]
+    #[error(transparent)]
     Service(#[from] ServiceError),
 
     /// Errors encountered when parsing or executing a batch request.
@@ -51,18 +51,15 @@ pub struct ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
-    /// Creates an error response from an error, extracting the full cause chain.
+    /// Creates an error response from an error, using only its [`Display`] message.
+    ///
+    /// The source chain is intentionally excluded from the HTTP response — it is
+    /// recorded in our internal logs via tracing instead.
     pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
-        let detail = Some(error.to_string());
-
-        let mut causes = Vec::new();
-        let mut source = error.source();
-        while let Some(s) = source {
-            causes.push(s.to_string());
-            source = s.source();
+        Self {
+            detail: Some(error.to_string()),
+            causes: Vec::new(),
         }
-
-        Self { detail, causes }
     }
 }
 
@@ -91,15 +88,19 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
-            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => {
-                objectstore_log::error!(!!self, "error handling request");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Service(e) => match e.kind() {
+                ErrorKind::ClientStream | ErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+                ErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+                ErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+                ErrorKind::Transient => {
+                    objectstore_log::warn!(!!self, "transient error handling request");
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                ErrorKind::Internal => {
+                    objectstore_log::error!(!!self, "internal error handling request");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
 
             ApiError::Internal(_) => {
                 objectstore_log::error!(!!self, "internal error");
