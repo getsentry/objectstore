@@ -208,4 +208,57 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], "test.latency:2|d|#route:/v1/test,method:GET");
     }
+
+    #[test]
+    fn timer_record_emits_success_true() {
+        let captured = with_capturing_test_client(|| {
+            let guard = crate::timer!("test.timer");
+            guard.record();
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].starts_with("test.timer:"));
+        assert!(captured[0].contains("|d|#success:true"));
+    }
+
+    #[test]
+    fn timer_drop_emits_success_false() {
+        let captured = with_capturing_test_client(|| {
+            let _guard = crate::timer!("test.timer");
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].starts_with("test.timer:"));
+        assert!(captured[0].contains("|d|#success:false"));
+    }
+
+    #[test]
+    fn timer_drop_with_success_emits_success_true() {
+        let captured = with_capturing_test_client(|| {
+            let _guard = crate::timer!("test.timer").success();
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].starts_with("test.timer:"));
+        assert!(captured[0].contains("|d|#success:true"));
+    }
+
+    #[test]
+    fn timer_with_tags() {
+        let captured = with_capturing_test_client(|| {
+            let guard = crate::timer!("test.timer", route = "/v1/test");
+            guard.record();
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].starts_with("test.timer:"));
+        assert!(captured[0].contains("route:/v1/test"));
+        assert!(captured[0].contains("success:true"));
+    }
+
+    #[test]
+    fn timer_drop_with_tags() {
+        let captured = with_capturing_test_client(|| {
+            let _guard = crate::timer!("test.timer", op = "put");
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("op:put"));
+        assert!(captured[0].contains("success:false"));
+    }
 }

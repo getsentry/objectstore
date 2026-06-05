@@ -2,7 +2,7 @@
 //!
 //! This crate provides three things:
 //!
-//! 1. [`count!`], [`gauge!`], and [`record!`] macros with rustfmt-friendly
+//! 1. [`count!`], [`gauge!`], [`record!`], and [`timer!`] macros with rustfmt-friendly
 //!    expression-based syntax.
 //! 2. [`MetricsConfig`] and [`init`] for wiring up a DogStatsD exporter.
 //! 3. [`with_capturing_test_client`] for asserting on emitted metrics in tests.
@@ -11,7 +11,7 @@
 //!
 //! ```rust
 //! use std::time::Duration;
-//! use objectstore_metrics::{count, gauge, record};
+//! use objectstore_metrics::{count, gauge, record, timer};
 //!
 //! let stored_size: u64 = 1024;
 //! let elapsed = Duration::from_secs(1);
@@ -79,6 +79,66 @@ impl_as_f64!(cast: u64, usize);
 impl AsF64 for std::time::Duration {
     fn as_f64(self) -> f64 {
         self.as_secs_f64()
+    }
+}
+
+/// A guard that measures elapsed time and records it as a distribution metric.
+///
+/// Created by the [`timer!`] macro. Records with `success:true` when
+/// [`record()`](TimerGuard::record) is called, or `success:false` when dropped
+/// without calling `record()`.
+/// Call [`success()`](TimerGuard::success) to override this behavior and record
+/// with `success:true` even on drop.
+#[must_use = "timer! returns a guard that records the metric on guard.record() or on drop, bind it to a variable"]
+pub struct TimerGuard {
+    start: std::time::Instant,
+    success_histogram: metrics::Histogram,
+    failure_histogram: metrics::Histogram,
+    record_failure_on_drop: bool,
+    recorded: bool,
+}
+
+impl TimerGuard {
+    #[doc(hidden)]
+    pub fn new(
+        success_histogram: metrics::Histogram,
+        failure_histogram: metrics::Histogram,
+    ) -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            success_histogram,
+            failure_histogram,
+            record_failure_on_drop: true,
+            recorded: false,
+        }
+    }
+
+    /// Changes the behavior of this guard to always record the metric
+    /// with `success:true`, even on drop.
+    pub fn success(mut self) -> Self {
+        self.record_failure_on_drop = false;
+        self
+    }
+
+    /// Consumes the guard, and records the elapsed time with `success:true`.
+    pub fn record(mut self) {
+        self.recorded = true;
+        self.success_histogram
+            .record(AsF64::as_f64(self.start.elapsed()));
+    }
+}
+
+impl Drop for TimerGuard {
+    fn drop(&mut self) {
+        if !self.recorded {
+            if self.record_failure_on_drop {
+                self.failure_histogram
+                    .record(AsF64::as_f64(self.start.elapsed()));
+            } else {
+                self.success_histogram
+                    .record(AsF64::as_f64(self.start.elapsed()));
+            }
+        }
     }
 }
 
@@ -342,4 +402,40 @@ macro_rules! record {
         )
         .record($crate::_macro_support::AsF64::as_f64($value));
     };
+}
+
+/// Starts a timer that records elapsed time in fractional seconds as a
+/// distribution metric.
+///
+/// Returns a [`TimerGuard`] that captures `Instant::now()` at creation.
+/// Call [`.record()`](TimerGuard::record) to record the metric with the
+/// tag `success:true`, or let it drop to record with `success:false`.
+///
+/// If you want to override this behavior and record the metric with
+/// `success:true` even on drop, call [`.success()`](TimerGuard::success)
+/// on the guard.
+///
+/// # Syntax
+///
+/// ```rust
+/// use objectstore_metrics::timer;
+///
+/// let guard = timer!("server.requests.duration");
+/// let guard = timer!("server.requests.duration", route = "/v1/test");
+/// // ... do work ...
+/// guard.record(); // records elapsed time with success:true
+/// ```
+///
+/// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
+#[macro_export]
+macro_rules! timer {
+    ($name:literal $(, $tag:ident = $tv:expr)* $(,)?) => {{
+        let success_histogram = $crate::_macro_support::metrics::histogram!(
+            $name $(, stringify!($tag) => $tv)*, "success" => "true"
+        );
+        let failure_histogram = $crate::_macro_support::metrics::histogram!(
+            $name $(, stringify!($tag) => $tv)*, "success" => "false"
+        );
+        $crate::TimerGuard::new(success_histogram, failure_histogram)
+    }};
 }
