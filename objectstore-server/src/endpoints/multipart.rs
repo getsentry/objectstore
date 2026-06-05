@@ -16,7 +16,6 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::HeaderValue;
 use http::header;
-use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
 use objectstore_types::metadata::Metadata;
@@ -95,7 +94,8 @@ async fn initiate_inner(
     id: ObjectId,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
+    let mut metadata = Metadata::from_headers(&headers, "")
+        .map_err(|e| ApiError::Client(format!("invalid metadata headers: {e}")))?;
     // TODO: Do this in `complete` instead, when we have a Service API to mutate metadata.
     metadata.time_created = Some(SystemTime::now());
 

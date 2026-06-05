@@ -302,11 +302,11 @@ pub fn single<E: Send + 'static>(
 pub(crate) async fn read_to_vec<S, E>(mut stream: S) -> crate::error::Result<Vec<u8>>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<crate::error::Error>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     let mut payload = Vec::new();
     while let Some(result) = stream.next().await {
-        let chunk = result.map_err(Into::into)?;
+        let chunk = result.map_err(|e| crate::error::Error::internal("stream read failed", e))?;
         payload.extend(&chunk);
     }
     Ok(payload)

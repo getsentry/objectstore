@@ -519,7 +519,7 @@ impl GcsBackend {
                     .await?
                     .send()
                     .await
-                    .map_err(|e| Error::internal("GCS: get metadata request", e))?;
+                    .map_err(|e| Error::from_reqwest("GCS: get metadata request", e))?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     return Ok(None);
@@ -527,7 +527,7 @@ impl GcsBackend {
 
                 let metadata: GcsObject = resp
                     .error_for_status()
-                    .map_err(|e| Error::internal("GCS: get metadata status", e))?
+                    .map_err(|e| Error::from_reqwest("GCS: get metadata status", e))?
                     .json()
                     .await
                     .map_err(|e| Error::internal("GCS: get metadata parse", e))?;
@@ -580,7 +580,7 @@ impl GcsBackend {
                 .send()
                 .await
                 .and_then(|r| r.error_for_status())
-                .map_err(|e| Error::internal("GCS: update custom time", e))?;
+                .map_err(|e| Error::from_reqwest("GCS: update custom time", e))?;
             Ok(())
         })
         .await
@@ -654,7 +654,7 @@ impl Backend for GcsBackend {
             .and_then(|r| r.error_for_status())
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::client_stream(ce),
-                _ => Error::internal("error uploading upload object", e),
+                _ => Error::from_reqwest("GCS: put object", e),
             })?;
 
         Ok(())
@@ -679,7 +679,7 @@ impl Backend for GcsBackend {
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
-                    .map_err(|e| Error::internal("GCS: get payload", e))
+                    .map_err(|e| Error::from_reqwest("GCS: get payload", e))
             })
             .await?;
 
@@ -709,7 +709,7 @@ impl Backend for GcsBackend {
                 .await?
                 .send()
                 .await
-                .map_err(|e| Error::internal("GCS: delete object", e))?;
+                .map_err(|e| Error::from_reqwest("GCS: delete object", e))?;
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
@@ -717,7 +717,7 @@ impl Backend for GcsBackend {
             }
 
             resp.error_for_status()
-                .map_err(|e| Error::internal("GCS: delete object", e))?;
+                .map_err(|e| Error::from_reqwest("GCS: delete object", e))?;
 
             Ok(())
         })
@@ -860,7 +860,7 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::internal("GCS: initiate multipart upload", e))?;
+            .map_err(|e| Error::from_reqwest("GCS: initiate multipart upload", e))?;
 
         let body = resp
             .bytes()
@@ -903,7 +903,7 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::internal("GCS: upload part", e))?;
+            .map_err(|e| Error::from_reqwest("GCS: upload part", e))?;
 
         let etag = resp
             .headers()
@@ -942,7 +942,7 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::internal("GCS: list parts", e))?;
+            .map_err(|e| Error::from_reqwest("GCS: list parts", e))?;
 
         let body = resp
             .bytes()
@@ -970,7 +970,7 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::internal("GCS: abort multipart upload", e))?;
+            .map_err(|e| Error::from_reqwest("GCS: abort multipart upload", e))?;
 
         Ok(())
     }
@@ -999,7 +999,7 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::internal("GCS: complete multipart upload", e))?;
+            .map_err(|e| Error::from_reqwest("GCS: complete multipart upload", e))?;
 
         let body = resp
             .bytes()

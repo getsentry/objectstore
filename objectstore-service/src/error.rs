@@ -107,6 +107,29 @@ impl Error {
             source: None,
         }
     }
+
+    pub(crate) fn from_reqwest(
+        description: impl Into<Cow<'static, str>>,
+        cause: reqwest::Error,
+    ) -> Self {
+        // NOTE: 404 (Not Found) and 409 (Conflict) don't map cleanly to any current ErrorKind.
+        // Consider adding ErrorKind::NotFound and ErrorKind::Conflict if backends need to
+        // distinguish these from generic internal errors.
+        let kind = match cause.status() {
+            Some(status) => match status.as_u16() {
+                400 => ErrorKind::BadRequest,
+                408 | 429 => ErrorKind::TooManyRequests,
+                500 | 502 | 503 | 504 => ErrorKind::Transient,
+                _ => ErrorKind::Internal,
+            },
+            None => ErrorKind::Transient,
+        };
+        Self {
+            kind,
+            description: Some(description.into()),
+            source: Some(Box::new(cause)),
+        }
+    }
 }
 
 impl From<ClientError> for Error {
@@ -114,30 +137,6 @@ impl From<ClientError> for Error {
         Self::client_stream(source)
     }
 }
-
-macro_rules! impl_from_internal {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            impl From<$ty> for Error {
-                fn from(source: $ty) -> Self {
-                    Self {
-                        kind: ErrorKind::Internal,
-                        description: None,
-                        source: Some(Box::new(source)),
-                    }
-                }
-            }
-        )+
-    };
-}
-
-impl_from_internal!(
-    std::io::Error,
-    serde_json::Error,
-    reqwest::Error,
-    gcp_auth::Error,
-    objectstore_types::metadata::Error,
-);
 
 /// Classification of a service error.
 #[derive(Debug, PartialEq, Eq)]

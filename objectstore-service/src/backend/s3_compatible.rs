@@ -178,7 +178,7 @@ where
             .await?
             .send()
             .await
-            .map_err(|e| Error::internal("S3: failed to send request", e))?;
+            .map_err(|e| Error::from_reqwest("S3: failed to send request", e))?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -187,7 +187,7 @@ where
 
         let response = response
             .error_for_status()
-            .map_err(|e| Error::internal("S3: failed to get object", e))?;
+            .map_err(|e| Error::from_reqwest("S3: failed to get object", e))?;
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)
@@ -227,10 +227,10 @@ where
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
-            .map_err(|e| Error::internal("S3: failed to send TTI update request", e))?
+            .map_err(|e| Error::from_reqwest("S3: failed to send TTI update request", e))?
             .error_for_status()
             .map_err(|e| {
-                Error::internal(
+                Error::from_reqwest(
                     "S3: failed to update expiration time for object with TTI",
                     e,
                 )
@@ -285,7 +285,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .and_then(|response| response.error_for_status())
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::client_stream(ce),
-                _ => Error::internal("S3: failed to put object", e),
+                _ => Error::from_reqwest("S3: failed to put object", e),
             })?;
 
         Ok(())
@@ -318,14 +318,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send()
             .await
-            .map_err(|e| Error::internal("S3: failed to send delete request", e))?;
+            .map_err(|e| Error::from_reqwest("S3: failed to send delete request", e))?;
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
             response
                 .error_for_status()
-                .map_err(|e| Error::internal("S3: failed to delete object", e))?;
+                .map_err(|e| Error::from_reqwest("S3: failed to delete object", e))?;
         }
 
         Ok(())
