@@ -134,23 +134,19 @@ impl TimerGuard {
 
     /// Consumes the guard, recording the elapsed time with `success:true`.
     pub fn record(mut self) {
-        self.recorded = true;
-        let mut labels = std::mem::take(&mut self.labels);
-        labels.push(metrics::Label::new("success", "true"));
-        Self::emit(self.name, self.module_path, labels, self.start);
+        self.emit("true");
     }
 
-    fn emit(
-        name: &'static str,
-        module_path: &'static str,
-        labels: Vec<metrics::Label>,
-        start: std::time::Instant,
-    ) {
-        let key = metrics::Key::from_parts(name, labels);
-        let metadata = metrics::Metadata::new(module_path, metrics::Level::INFO, Some(module_path));
+    fn emit(&mut self, success: &'static str) {
+        self.recorded = true;
+        let mut labels = std::mem::take(&mut self.labels);
+        labels.push(metrics::Label::new("success", success));
+        let key = metrics::Key::from_parts(self.name, labels);
+        let metadata =
+            metrics::Metadata::new(self.module_path, metrics::Level::INFO, Some(self.module_path));
         metrics::with_recorder(|rec| {
             rec.register_histogram(&key, &metadata)
-                .record(AsF64::as_f64(start.elapsed()));
+                .record(AsF64::as_f64(self.start.elapsed()));
         });
     }
 }
@@ -163,9 +159,7 @@ impl Drop for TimerGuard {
             } else {
                 "true"
             };
-            let mut labels = std::mem::take(&mut self.labels);
-            labels.push(metrics::Label::new("success", success));
-            Self::emit(self.name, self.module_path, labels, self.start);
+            self.emit(success);
         }
     }
 }
