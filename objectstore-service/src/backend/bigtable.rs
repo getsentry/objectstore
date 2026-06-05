@@ -447,7 +447,7 @@ fn delete_row_mutation() -> v2::Mutation {
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
 fn object_mutations(
-    metadata: &Metadata,
+    mut metadata: Metadata,
     payload: Vec<u8>,
     now: SystemTime,
 ) -> Result<[v2::Mutation; 3]> {
@@ -457,7 +457,10 @@ fn object_mutations(
         ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
     };
 
-    let metadata_bytes = serde_json::to_vec(metadata)
+    // Record the payload size in the metadata before persisting it.
+    metadata.size = Some(payload.len());
+
+    let metadata_bytes = serde_json::to_vec(&metadata)
         .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
 
     Ok([
@@ -796,7 +799,7 @@ impl BigTableBackend {
         payload: Vec<u8>,
         action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
-        let mutations = object_mutations(metadata, payload, SystemTime::now())?;
+        let mutations = object_mutations(metadata.clone(), payload, SystemTime::now())?;
         self.mutate(path, mutations, action).await
     }
 
@@ -949,7 +952,7 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata, payload.to_vec(), SystemTime::now())?;
+        let mutations = object_mutations(metadata.clone(), payload.to_vec(), SystemTime::now())?;
 
         for _ in 0..CAS_RETRY_COUNT {
             let write_succeeded = self
@@ -1007,7 +1010,10 @@ impl HighVolumeBackend for BigTableBackend {
             }),
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
-                metadata.size = Some(payload.len());
+                if metadata.size.is_none() {
+                    // If object size wasn't written into the metadata, re-compute it now
+                    metadata.size = Some(payload.len());
+                }
                 TieredGet::Object(metadata, crate::stream::single(payload))
             }
         })
@@ -1019,7 +1025,8 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
 
         // Read metadata and tombstone columns — skip the (potentially large) payload.
-        // NB: `metadata.size` will not be populated since the payload is not fetched.
+        // NB: `metadata.size` will only be populated if the size was added to the metadata before
+        // writing to Bigtable.
         let row_opt = self
             .read_row(&path, Some(metadata_filter()), "get_tiered_metadata")
             .await?;
@@ -1105,7 +1112,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         let mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
-            TieredWrite::Object(m, p) => object_mutations(&m, p.to_vec(), now)?.into(),
+            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec(), now)?.into(),
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
@@ -1249,7 +1256,7 @@ mod tests {
         now: SystemTime,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata, payload.to_vec(), now)?;
+        let mutations = object_mutations(metadata.clone(), payload.to_vec(), now)?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
