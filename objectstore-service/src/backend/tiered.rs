@@ -613,13 +613,14 @@ impl MultipartUploadBackend for TieredStorage {
             .initiate_multipart(&physical, metadata)
             .await?;
 
-        timer.record();
-
         let id = TieredUploadId {
             revision: physical.key,
             upload_id,
         };
-        id.try_into()
+        let id = id.try_into()?;
+
+        timer.record();
+        Ok(id)
     }
 
     async fn upload_part(
