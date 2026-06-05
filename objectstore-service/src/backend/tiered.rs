@@ -708,7 +708,8 @@ impl MultipartUploadBackend for TieredStorage {
             key: tiered.revision,
         };
 
-        self.inner
+        let () = self
+            .inner
             .long_term
             .abort_multipart(&physical, &tiered.upload_id)
             .await?;
