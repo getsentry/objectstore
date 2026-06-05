@@ -33,6 +33,8 @@ impl App {
         //  - Responses go from bottom to top
         let middleware = ServiceBuilder::new()
             .layer(axum::middleware::from_fn(m::emit_request_metrics))
+            .layer(NewSentryLayer::new_from_top())
+            .layer(SentryHttpLayer::new().enable_transaction())
             .layer(axum::middleware::from_fn_with_state(
                 state.request_counter.clone(),
                 m::limit_web_concurrency,
@@ -40,8 +42,6 @@ impl App {
             .layer(state.request_counter.layer())
             .layer(CatchPanicLayer::custom(m::handle_panic))
             .layer(m::set_server_header())
-            .layer(NewSentryLayer::new_from_top())
-            .layer(SentryHttpLayer::new().enable_transaction())
             .layer(
                 TraceLayer::new_for_http()
                     .make_span_with(m::make_http_span)
