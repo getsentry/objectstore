@@ -16,7 +16,49 @@ use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
+
+/// Errors produced by the concurrency and task-spawning infrastructure.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ConcurrencyError {
+    /// The service has reached its concurrency limit.
+    #[error("concurrency limit reached")]
+    AtCapacity,
+    /// A spawned service task panicked.
+    #[error("service task panicked: {0}")]
+    Panic(String),
+    /// A spawned service task was dropped before delivering its result.
+    #[error("task dropped")]
+    Dropped,
+}
+
+impl ConcurrencyError {
+    /// Creates a [`ConcurrencyError::Panic`] from a panic payload, extracting the message.
+    pub fn panic(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_owned()
+        };
+        Self::Panic(msg)
+    }
+}
+
+impl From<ConcurrencyError> for Error {
+    fn from(source: ConcurrencyError) -> Self {
+        let kind = match &source {
+            ConcurrencyError::AtCapacity => ErrorKind::TooManyRequests,
+            ConcurrencyError::Panic(_) | ConcurrencyError::Dropped => ErrorKind::Internal,
+        };
+        Self {
+            kind,
+            description: None,
+            source: Some(Box::new(source)),
+        }
+    }
+}
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -47,13 +89,13 @@ impl ConcurrencyLimiter {
     /// Returns a [`ConcurrencyPermit`] that releases all `count` permits and
     /// notifies waiters on drop, just like single-permit acquisition.
     ///
-    /// Returns [`Error::too_many_requests()`] when fewer than `count` permits are available.
-    pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit> {
+    /// Returns [`ConcurrencyError::AtCapacity`] when fewer than `count` permits are available.
+    pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit, ConcurrencyError> {
         let permit = self
             .semaphore
             .clone()
             .try_acquire_many_owned(count as u32)
-            .map_err(|_| Error::too_many_requests())?;
+            .map_err(|_| ConcurrencyError::AtCapacity)?;
         Ok(ConcurrencyPermit {
             permit: Some(permit),
             released: Arc::clone(&self.released),
@@ -64,8 +106,8 @@ impl ConcurrencyLimiter {
     ///
     /// Convenience shorthand for `try_acquire_many(1)`.
     ///
-    /// Returns [`Error::too_many_requests()`] when all permits are held.
-    pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
+    /// Returns [`ConcurrencyError::AtCapacity`] when all permits are held.
+    pub fn try_acquire(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
         self.try_acquire_many(1)
     }
 
@@ -173,7 +215,7 @@ where
             let result = std::panic::AssertUnwindSafe(f)
                 .catch_unwind()
                 .await
-                .unwrap_or_else(|payload| Err(Error::panic(payload)));
+                .unwrap_or_else(|payload| Err(ConcurrencyError::panic(payload).into()));
 
             if let Err(ref e) = result {
                 let error = e as &dyn std::error::Error;
@@ -193,7 +235,8 @@ where
         }
         .bind_hub(new_hub),
     );
-    rx.await.map_err(|_| Error::internal_msg("task dropped"))?
+    rx.await
+        .map_err(|_| Error::from(ConcurrencyError::Dropped))?
 }
 
 #[cfg(test)]
@@ -250,7 +293,7 @@ mod tests {
         let _permit = limiter.try_acquire().unwrap();
 
         let result = limiter.try_acquire();
-        assert!(result.is_err());
+        assert!(matches!(result, Err(ConcurrencyError::AtCapacity)));
     }
 
     #[test]

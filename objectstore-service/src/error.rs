@@ -3,7 +3,7 @@
 //! [`Error`] covers I/O, serialization, HTTP, metadata, authentication,
 //! and backend-specific failures. [`Result`] is the corresponding alias.
 
-use std::{any::Any, borrow::Cow, fmt::Display};
+use std::{borrow::Cow, fmt::Display};
 
 use crate::stream::ClientError;
 
@@ -19,6 +19,11 @@ impl Error {
     /// Returns the kind of this error.
     pub fn kind(&self) -> &ErrorKind {
         &self.kind
+    }
+
+    /// Attempts to downcast the source error to a concrete type.
+    pub fn downcast_ref<T: std::error::Error + 'static>(&self) -> Option<&T> {
+        self.source.as_ref()?.downcast_ref::<T>()
     }
 }
 
@@ -95,31 +100,12 @@ impl Error {
         }
     }
 
-    pub(crate) fn too_many_requests() -> Self {
-        Self {
-            kind: ErrorKind::TooManyRequests,
-            description: None,
-            source: None,
-        }
-    }
-
     pub(crate) fn not_implemented() -> Self {
         Self {
             kind: ErrorKind::NotImplemented,
             description: None,
             source: None,
         }
-    }
-
-    pub(crate) fn panic(payload: Box<dyn Any + Send>) -> Self {
-        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-            (*s).to_owned()
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_owned()
-        };
-        Self::internal_msg(msg)
     }
 }
 
@@ -154,7 +140,7 @@ impl_from_internal!(
 );
 
 /// Classification of a service error.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Error originating from a client-supplied input stream.
     ClientStream,

@@ -66,7 +66,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Casts this backend into an [`Arc<dyn MultipartUploadBackend>`] if supported.
     ///
-    /// The default returns [`Error::NotImplemented`]. Backends that implement
+    /// The default returns [`ErrorKind::NotImplemented`](crate::error::ErrorKind::NotImplemented). Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
         Err(Error::not_implemented())
