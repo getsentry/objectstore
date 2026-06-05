@@ -643,7 +643,7 @@ impl MultipartUploadBackend for TieredStorage {
             key: tiered.revision,
         };
 
-        let result = self
+        let etag = self
             .inner
             .long_term
             .upload_part(
@@ -654,7 +654,7 @@ impl MultipartUploadBackend for TieredStorage {
                 content_md5,
                 body,
             )
-            .await;
+            .await?;
 
         objectstore_metrics::record!(
             "multipart.upload_part.latency" = start.elapsed(),
@@ -665,7 +665,7 @@ impl MultipartUploadBackend for TieredStorage {
             usecase = id.usecase().to_owned(),
         );
 
-        result
+        Ok(etag)
     }
 
     async fn list_parts(
