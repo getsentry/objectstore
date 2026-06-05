@@ -89,28 +89,40 @@ impl AsF64 for std::time::Duration {
 /// without calling `record()`.
 /// Call [`success()`](TimerGuard::success) to override this behavior and record
 /// with `success:true` even on drop.
+///
+/// Tags can be added after creation via [`tag()`](TimerGuard::tag).
 #[must_use = "timer! returns a guard that records the metric on guard.record() or on drop, bind it to a variable"]
 pub struct TimerGuard {
     start: std::time::Instant,
-    success_histogram: metrics::Histogram,
-    failure_histogram: metrics::Histogram,
+    name: &'static str,
+    module_path: &'static str,
+    labels: Vec<metrics::Label>,
     record_failure_on_drop: bool,
     recorded: bool,
 }
 
 impl TimerGuard {
     #[doc(hidden)]
-    pub fn new(
-        success_histogram: metrics::Histogram,
-        failure_histogram: metrics::Histogram,
-    ) -> Self {
+    pub fn new(name: &'static str, module_path: &'static str, labels: Vec<metrics::Label>) -> Self {
         Self {
             start: std::time::Instant::now(),
-            success_histogram,
-            failure_histogram,
+            name,
+            module_path,
+            labels,
             record_failure_on_drop: true,
             recorded: false,
         }
+    }
+
+    /// Returns the time elapsed since the guard was created.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    /// Adds a tag to the metric.
+    pub fn tag(mut self, key: &'static str, value: impl Into<metrics::SharedString>) -> Self {
+        self.labels.push(metrics::Label::new(key, value));
+        self
     }
 
     /// Changes the behavior of this guard to always record the metric
@@ -120,24 +132,40 @@ impl TimerGuard {
         self
     }
 
-    /// Consumes the guard, and records the elapsed time with `success:true`.
+    /// Consumes the guard, recording the elapsed time with `success:true`.
     pub fn record(mut self) {
         self.recorded = true;
-        self.success_histogram
-            .record(AsF64::as_f64(self.start.elapsed()));
+        let mut labels = std::mem::take(&mut self.labels);
+        labels.push(metrics::Label::new("success", "true"));
+        Self::emit(self.name, self.module_path, labels, self.start);
+    }
+
+    fn emit(
+        name: &'static str,
+        module_path: &'static str,
+        labels: Vec<metrics::Label>,
+        start: std::time::Instant,
+    ) {
+        let key = metrics::Key::from_parts(name, labels);
+        let metadata = metrics::Metadata::new(module_path, metrics::Level::INFO, Some(module_path));
+        metrics::with_recorder(|rec| {
+            rec.register_histogram(&key, &metadata)
+                .record(AsF64::as_f64(start.elapsed()));
+        });
     }
 }
 
 impl Drop for TimerGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            if self.record_failure_on_drop {
-                self.failure_histogram
-                    .record(AsF64::as_f64(self.start.elapsed()));
+            let success = if self.record_failure_on_drop {
+                "false"
             } else {
-                self.success_histogram
-                    .record(AsF64::as_f64(self.start.elapsed()));
-            }
+                "true"
+            };
+            let mut labels = std::mem::take(&mut self.labels);
+            labels.push(metrics::Label::new("success", success));
+            Self::emit(self.name, self.module_path, labels, self.start);
         }
     }
 }
@@ -415,6 +443,10 @@ macro_rules! record {
 /// `success:true` even on drop, call [`.success()`](TimerGuard::success)
 /// on the guard.
 ///
+/// Tags can also be added after creation via [`.tag()`](TimerGuard::tag),
+/// which is useful when some tag values depend on the outcome of the
+/// timed operation.
+///
 /// # Syntax
 ///
 /// ```rust
@@ -426,16 +458,22 @@ macro_rules! record {
 /// guard.record(); // records elapsed time with success:true
 /// ```
 ///
+/// ```rust
+/// use objectstore_metrics::timer;
+///
+/// let guard = timer!("server.requests.duration", route = "/v1/test");
+/// // ... determine backend ...
+/// let guard = guard.tag("backend", "gcs");
+/// guard.record();
+/// ```
+///
 /// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
 #[macro_export]
 macro_rules! timer {
     ($name:literal $(, $tag:ident = $tv:expr)* $(,)?) => {{
-        let success_histogram = $crate::_macro_support::metrics::histogram!(
-            $name $(, stringify!($tag) => $tv)*, "success" => "true"
-        );
-        let failure_histogram = $crate::_macro_support::metrics::histogram!(
-            $name $(, stringify!($tag) => $tv)*, "success" => "false"
-        );
-        $crate::TimerGuard::new(success_histogram, failure_histogram)
+        let labels = vec![
+            $($crate::_macro_support::metrics::Label::new(stringify!($tag), $tv),)*
+        ];
+        $crate::TimerGuard::new($name, module_path!(), labels)
     }};
 }

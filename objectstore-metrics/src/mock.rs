@@ -261,4 +261,83 @@ mod tests {
         assert!(captured[0].contains("op:put"));
         assert!(captured[0].contains("success:false"));
     }
+
+    #[test]
+    fn timer_deferred_tag_on_record() {
+        let captured = with_capturing_test_client(|| {
+            let guard = crate::timer!("test.timer", usecase = "test");
+            guard.tag("backend", "gcs").record();
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("usecase:test"));
+        assert!(captured[0].contains("backend:gcs"));
+        assert!(captured[0].contains("success:true"));
+    }
+
+    #[test]
+    fn timer_deferred_tag_on_drop() {
+        let captured = with_capturing_test_client(|| {
+            let _guard = crate::timer!("test.timer", usecase = "test").tag("backend", "gcs");
+        });
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("usecase:test"));
+        assert!(captured[0].contains("backend:gcs"));
+        assert!(captured[0].contains("success:false"));
+    }
+
+    #[test]
+    fn timer_metadata_matches_record_macro() {
+        use std::sync::Mutex;
+
+        type Entries = Vec<(String, Option<String>)>;
+
+        struct MetadataRecorder(Arc<Mutex<Entries>>);
+
+        impl Recorder for MetadataRecorder {
+            fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
+                Counter::noop()
+            }
+            fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+                Gauge::noop()
+            }
+            fn register_histogram(&self, _: &Key, metadata: &Metadata<'_>) -> Histogram {
+                self.0.lock().unwrap().push((
+                    metadata.target().to_owned(),
+                    metadata.module_path().map(str::to_owned),
+                ));
+                Histogram::noop()
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let recorder = MetadataRecorder(Arc::clone(&captured));
+
+        metrics::with_local_recorder(&recorder, || {
+            // record! expands metrics::histogram! which sets module_path!() at the call site
+            crate::record!("from_record" = 1.0f64);
+            // timer! captures module_path!() in the macro and passes it to TimerGuard
+            crate::timer!("from_timer").record();
+        });
+
+        let entries = captured.lock().unwrap();
+        assert_eq!(
+            entries.len(),
+            2,
+            "expected one entry from record! and one from timer!"
+        );
+
+        let (record_target, record_module) = &entries[0];
+        let (timer_target, timer_module) = &entries[1];
+        assert_eq!(
+            record_target, timer_target,
+            "timer! target should match record! target"
+        );
+        assert_eq!(
+            record_module, timer_module,
+            "timer! module_path should match record! module_path"
+        );
+    }
 }
