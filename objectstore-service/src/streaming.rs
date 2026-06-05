@@ -16,7 +16,7 @@
 //!
 //! This means:
 //! - If the service is at capacity, [`StorageService::stream`](crate::service::StorageService::stream) fails immediately with
-//!   [`ConcurrencyError::AtCapacity`](crate::concurrency::ConcurrencyError::AtCapacity) before any operations are read.
+//!   [`ConcurrencyError::AtCapacity`](crate::ConcurrencyError::AtCapacity) before any operations are read.
 //! - During execution, operations call the storage backend directly without acquiring
 //!   additional per-operation permits.
 //!

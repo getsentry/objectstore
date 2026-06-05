@@ -156,8 +156,8 @@ impl StorageService {
     /// Spawns a future in a separate task and awaits its result.
     ///
     /// Returns [`ConcurrencyError::AtCapacity`] if the concurrency limit is
-    /// reached, or an [`ErrorKind::Internal`] error if the spawned task panics
-    /// or is dropped before sending its result.
+    /// reached, or a [`ConcurrencyError::Panic`] / [`ConcurrencyError::Dropped`]
+    /// error if the spawned task panics or is dropped before sending its result.
     ///
     /// Emits `service.task.start` (counter) after acquiring a permit and
     /// `service.task.duration` (distribution) when the task completes, tagged

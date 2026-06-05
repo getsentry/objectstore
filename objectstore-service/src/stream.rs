@@ -66,7 +66,7 @@ impl From<ClientError> for io::Error {
 /// Uses [`ClientError`] as the error type so that a dropped or interrupted
 /// client connection is distinguishable from a backend I/O failure. Backends
 /// that detect a [`ClientError`] (via [`unpack_client_error`]) can surface it
-/// as [`crate::error::Error::Client`], which the server maps to HTTP 400 rather
+/// as [`ErrorKind::ClientStream`](crate::error::ErrorKind::ClientStream), which the server maps to HTTP 400 rather
 /// than 500.
 ///
 /// Use [`single`] to construct a single-chunk `ClientStream` from an owned value.
@@ -81,7 +81,7 @@ pub type ClientStream = BoxStream<'static, Result<Bytes, ClientError>>;
 ///   value is a `ClientError`.
 ///
 /// Use this in `put_object` implementations to reclassify body-stream errors
-/// as [`crate::error::Error::Client`] instead of an opaque server error.
+/// as [`ErrorKind::ClientStream`](crate::error::ErrorKind::ClientStream) instead of an opaque server error.
 pub fn unpack_client_error<E>(err: &E) -> Option<ClientError>
 where
     E: Error + 'static,

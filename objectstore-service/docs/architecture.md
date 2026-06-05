@@ -161,7 +161,7 @@ A semaphore caps the total number of in-flight backend operations across all
 callers. A permit is acquired before each operation is spawned and held until
 the task completes — including on panic — so the limit counts *running*
 operations, not queued ones. When no permits are available, the operation fails
-with [`Error::AtCapacity`](error::Error::AtCapacity).
+with [`ConcurrencyError::AtCapacity`](concurrency::ConcurrencyError::AtCapacity).
 
 The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
 [`StorageService::with_concurrency_limit`].

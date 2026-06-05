@@ -12,5 +12,6 @@ pub mod service;
 pub mod stream;
 pub mod streaming;
 
+pub use concurrency::ConcurrencyError;
 pub use service::StorageService;
 pub use stream::{ClientStream, PayloadStream};
