@@ -136,13 +136,13 @@ pub enum ErrorKind {
     ClientStream,
     /// Transient failure that may succeed on retry.
     Transient,
-    /// Malformed or invalid client request.
+    /// Malformed or invalid input.
     BadRequest,
-    /// Functionality not implemented by this backend.
+    /// Functionality not implemented.
     NotImplemented,
-    /// Service is at capacity.
+    /// Cannot handle the request due to too much load.
     TooManyRequests,
-    /// Internal service or backend failure.
+    /// Internal service or storage backend failure.
     Internal,
 }
 
