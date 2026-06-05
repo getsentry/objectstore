@@ -653,7 +653,7 @@ impl Backend for GcsBackend {
             .await
             .and_then(|r| r.error_for_status())
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::client_stream(ce),
+                Some(ce) => ce.into(),
                 _ => Error::from_reqwest("GCS: put object", e),
             })?;
 

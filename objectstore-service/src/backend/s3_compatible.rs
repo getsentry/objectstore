@@ -284,7 +284,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await
             .and_then(|response| response.error_for_status())
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::client_stream(ce),
+                Some(ce) => ce.into(),
                 _ => Error::from_reqwest("S3: failed to put object", e),
             })?;
 

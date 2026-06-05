@@ -53,61 +53,48 @@ impl Display for Error {
     }
 }
 
+macro_rules! impl_converter {
+    ($kind:path, $fn_name:ident, $msg_fn_name:ident) => {
+        #[allow(dead_code)]
+        impl Error {
+            pub(crate) fn $fn_name(
+                description: impl Into<Cow<'static, str>>,
+                source: impl std::error::Error + Send + Sync + 'static,
+            ) -> Self {
+                Self {
+                    kind: $kind,
+                    description: Some(description.into()),
+                    source: Some(Box::new(source)),
+                }
+            }
+
+            pub(crate) fn $msg_fn_name(description: impl Into<Cow<'static, str>>) -> Self {
+                Self {
+                    kind: $kind,
+                    description: Some(description.into()),
+                    source: None,
+                }
+            }
+        }
+    };
+}
+
+impl_converter!(ErrorKind::ClientStream, client_stream, client_stream_msg);
+impl_converter!(ErrorKind::Transient, transient, transient_msg);
+impl_converter!(ErrorKind::BadRequest, bad_request, bad_request_msg);
+impl_converter!(
+    ErrorKind::NotImplemented,
+    not_implemented,
+    not_implemented_msg
+);
+impl_converter!(
+    ErrorKind::TooManyRequests,
+    too_many_requests,
+    too_many_requests_msg
+);
+impl_converter!(ErrorKind::Internal, internal, internal_msg);
+
 impl Error {
-    pub(crate) fn internal(
-        description: impl Into<Cow<'static, str>>,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            description: Some(description.into()),
-            source: Some(Box::new(source)),
-        }
-    }
-
-    pub(crate) fn internal_msg(description: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            description: Some(description.into()),
-            source: None,
-        }
-    }
-
-    pub(crate) fn bad_request(
-        description: impl Into<Cow<'static, str>>,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            kind: ErrorKind::BadRequest,
-            description: Some(description.into()),
-            source: Some(Box::new(source)),
-        }
-    }
-
-    pub(crate) fn bad_request_msg(description: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            kind: ErrorKind::BadRequest,
-            description: Some(description.into()),
-            source: None,
-        }
-    }
-
-    pub(crate) fn client_stream(source: ClientError) -> Self {
-        Self {
-            kind: ErrorKind::ClientStream,
-            description: None,
-            source: Some(Box::new(source)),
-        }
-    }
-
-    pub(crate) fn not_implemented() -> Self {
-        Self {
-            kind: ErrorKind::NotImplemented,
-            description: None,
-            source: None,
-        }
-    }
-
     pub(crate) fn from_reqwest(
         description: impl Into<Cow<'static, str>>,
         cause: reqwest::Error,
@@ -134,7 +121,11 @@ impl Error {
 
 impl From<ClientError> for Error {
     fn from(source: ClientError) -> Self {
-        Self::client_stream(source)
+        Self {
+            kind: ErrorKind::ClientStream,
+            source: Some(Box::new(source)),
+            description: None,
+        }
     }
 }
 

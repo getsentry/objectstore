@@ -113,7 +113,7 @@ impl Backend for LocalFsBackend {
         tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::client_stream(ce),
+                Some(ce) => ce.into(),
                 None => Error::internal("local-fs: copy stream failed", e),
             })?;
 
@@ -264,7 +264,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         let bytes_copied = tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::client_stream(ce),
+                Some(ce) => ce.into(),
                 None => Error::internal("local-fs: copy stream failed", e),
             })?;
 
