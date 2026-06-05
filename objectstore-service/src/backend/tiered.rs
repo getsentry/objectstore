@@ -375,7 +375,7 @@ impl Backend for TieredStorage {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        let timer = objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned(),);
+        let timer = objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned());
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
         }
@@ -455,7 +455,7 @@ impl Backend for TieredStorage {
     }
 
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned(),);
+        let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
 
         let hv_result = self.inner.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
@@ -477,7 +477,7 @@ impl Backend for TieredStorage {
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let timer =
-            objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned(),);
+            objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
 
         let mut backend_choice = BackendChoice::HighVolume;
 
