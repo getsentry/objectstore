@@ -142,8 +142,11 @@ impl TimerGuard {
         let mut labels = std::mem::take(&mut self.labels);
         labels.push(metrics::Label::new("success", success));
         let key = metrics::Key::from_parts(self.name, labels);
-        let metadata =
-            metrics::Metadata::new(self.module_path, metrics::Level::INFO, Some(self.module_path));
+        let metadata = metrics::Metadata::new(
+            self.module_path,
+            metrics::Level::INFO,
+            Some(self.module_path),
+        );
         metrics::with_recorder(|rec| {
             rec.register_histogram(&key, &metadata)
                 .record(AsF64::as_f64(self.start.elapsed()));
