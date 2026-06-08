@@ -636,7 +636,7 @@ impl Backend for GcsBackend {
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
         let metadata_json = serde_json::to_string(&gcs_metadata)
-            .map_err(|cause| Error::serde("failed to serialize metadata for GCS upload", cause))?;
+            .map_err(|cause| Error::serde("GCS: failed to serialize metadata", cause))?;
 
         let multipart = multipart::Form::new()
             .part(
