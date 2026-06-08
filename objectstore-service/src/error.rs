@@ -236,12 +236,6 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<objectstore_types::metadata::Error> for Error {
-    fn from(cause: objectstore_types::metadata::Error) -> Self {
-        Self::metadata("metadata de/serialization failed", cause)
-    }
-}
-
 /// Reqwest error with context and kind.
 #[derive(Debug, ThisError)]
 #[error("reqwest error: {context}")]

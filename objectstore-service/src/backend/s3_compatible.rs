@@ -257,7 +257,14 @@ where
                 format!("/{}/{}", self.bucket, id.as_storage_path()),
             )
             .header("x-goog-metadata-directive", "REPLACE")
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX).map_err(|cause| {
+                    Error::metadata(
+                        "S3: failed to serialize object metadata for TTI update",
+                        cause,
+                    )
+                })?,
+            )
             .send()
             .await
             .map_err(|cause| Error::reqwest("S3: failed to send TTI update request", cause))?
@@ -311,7 +318,11 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX).map_err(|cause| {
+                    Error::metadata("S3: failed to serialize object metadata for upload", cause)
+                })?,
+            )
             .body(Body::wrap_stream(stream))
             .send()
             .await

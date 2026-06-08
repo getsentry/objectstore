@@ -185,13 +185,28 @@ impl GcsObject {
             .metadata
             .remove(&GcsMetaKey::Expiration)
             .map(|s| s.parse())
-            .transpose()?
+            .transpose()
+            .map_err(|cause| {
+                Error::metadata(
+                    "GCS: failed to parse expiration policy from object metadata",
+                    cause,
+                )
+            })?
             .unwrap_or_default();
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
         let content_type = self.content_type;
-        let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
+        let compression = self
+            .content_encoding
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|cause| {
+                Error::metadata(
+                    "GCS: failed to parse compression from object metadata",
+                    cause,
+                )
+            })?;
         let size = self
             .size
             .map(|size| size.parse())
