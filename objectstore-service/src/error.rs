@@ -16,8 +16,8 @@ use crate::stream::{self, ClientStreamError};
 
 /// The category of a service error.
 ///
-/// Users should rely on the kind for classification, rather than matching on specific error
-/// variants.
+/// Users should rely on the kind for classification and handling, rather than matching on
+/// specific variants.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     /// Error originating from a client-supplied request body stream.
