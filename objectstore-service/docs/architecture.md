@@ -158,11 +158,7 @@ immediately so the caller can shed load or retry.
 # Error Classification
 
 The service error type exposes a coarse [`ErrorKind`](error::ErrorKind) so API
-layers can map failures without matching every backend-specific variant. Client
-input and client stream errors are separated from internal failures, capacity
-errors, and unsupported operations. Backend HTTP failures default to internal
-classification; transparent reqwest status classification is available for call
-sites that explicitly opt in.
+layers can map failures without matching every specific variant.
 
 ## Concurrency Limit
 
