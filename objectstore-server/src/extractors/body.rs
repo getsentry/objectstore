@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use axum::extract::{FromRequest, FromRequestParts, Path, Request};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::id::ObjectContext;
-use objectstore_service::stream::{ClientError, ClientStream};
+use objectstore_service::stream::{ClientStream, ClientStreamError};
 
 use super::id::ContextParams;
 use crate::state::ServiceState;
@@ -37,7 +37,10 @@ impl FromRequest<ServiceState> for MeteredBody {
             usecase: params.usecase,
             scopes: params.scopes,
         };
-        let stream = body.into_data_stream().map_err(ClientError::new).boxed();
+        let stream = body
+            .into_data_stream()
+            .map_err(ClientStreamError::new)
+            .boxed();
         let stream = state.meter_stream(stream, &context).boxed();
         Ok(Self(stream))
     }

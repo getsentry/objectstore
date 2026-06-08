@@ -30,9 +30,9 @@ pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 /// [`unpack_client_error`] to return a 4xx response rather than treating
 /// it as a 5xx backend failure.
 #[derive(Clone, Debug)]
-pub struct ClientError(Arc<dyn Error + Send + Sync + 'static>);
+pub struct ClientStreamError(Arc<dyn Error + Send + Sync + 'static>);
 
-impl ClientError {
+impl ClientStreamError {
     /// Creates a new [`ClientError`] wrapping `err`.
     pub fn new<E>(err: E) -> Self
     where
@@ -42,21 +42,21 @@ impl ClientError {
     }
 }
 
-impl fmt::Display for ClientError {
+impl fmt::Display for ClientStreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl Error for ClientError {
+impl Error for ClientStreamError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         self.0.source()
     }
 }
 
 /// Required by [`tokio_util::io::StreamReader`] in the local filesystem backend.
-impl From<ClientError> for io::Error {
-    fn from(err: ClientError) -> Self {
+impl From<ClientStreamError> for io::Error {
+    fn from(err: ClientStreamError) -> Self {
         io::Error::other(err)
     }
 }
@@ -70,7 +70,7 @@ impl From<ClientError> for io::Error {
 /// than 500.
 ///
 /// Use [`single`] to construct a single-chunk `ClientStream` from an owned value.
-pub type ClientStream = BoxStream<'static, Result<Bytes, ClientError>>;
+pub type ClientStream = BoxStream<'static, Result<Bytes, ClientStreamError>>;
 
 /// Walks the source chain of `err` looking for a [`ClientError`].
 ///
@@ -82,7 +82,7 @@ pub type ClientStream = BoxStream<'static, Result<Bytes, ClientError>>;
 ///
 /// Use this in `put_object` implementations to reclassify body-stream errors
 /// as [`crate::error::Error::Client`] instead of an opaque server error.
-pub fn unpack_client_error<E>(err: &E) -> Option<ClientError>
+pub fn unpack_client_error<E>(err: &E) -> Option<ClientStreamError>
 where
     E: Error + 'static,
 {
@@ -96,7 +96,7 @@ where
             None => s,
         };
 
-        if let Some(client_error) = target.downcast_ref::<ClientError>() {
+        if let Some(client_error) = target.downcast_ref::<ClientStreamError>() {
             return Some(client_error.clone());
         }
 
