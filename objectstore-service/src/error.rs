@@ -136,23 +136,6 @@ pub struct ReqwestError {
 }
 
 impl ReqwestError {
-    fn transparent(context: impl Into<String>, cause: reqwest::Error) -> Self {
-        let kind = classify_reqwest(&cause);
-        Self {
-            kind,
-            context: context.into(),
-            cause,
-        }
-    }
-
-    fn internal(context: impl Into<String>, cause: reqwest::Error) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            context: context.into(),
-            cause,
-        }
-    }
-
     /// Returns the service-level classification for this reqwest error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
@@ -180,22 +163,6 @@ pub struct SerdeError {
 }
 
 impl SerdeError {
-    fn internal(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            context: context.into(),
-            cause,
-        }
-    }
-
-    fn client(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self {
-            kind: ErrorKind::BadRequest,
-            context: context.into(),
-            cause,
-        }
-    }
-
     /// Returns the service-level category for this serde error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
@@ -218,22 +185,6 @@ pub struct MetadataError {
 }
 
 impl MetadataError {
-    fn internal(context: impl Into<String>, cause: objectstore_types::metadata::Error) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            context: context.into(),
-            cause,
-        }
-    }
-
-    fn client(context: impl Into<String>, cause: objectstore_types::metadata::Error) -> Self {
-        Self {
-            kind: ErrorKind::BadRequest,
-            context: context.into(),
-            cause,
-        }
-    }
-
     /// Returns the service-level classification for this metadata error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
@@ -264,7 +215,11 @@ impl Error {
             return Self::ClientStream(client_error);
         }
 
-        Self::Reqwest(ReqwestError::internal(context, cause))
+        Self::Reqwest(ReqwestError {
+            kind: ErrorKind::Internal,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates an [`Error`] from a reqwest error, preserving its backend status classification.
@@ -273,22 +228,39 @@ impl Error {
             return Self::ClientStream(client_error);
         }
 
-        Self::Reqwest(ReqwestError::transparent(context, cause))
+        let kind = classify_reqwest(&cause);
+        Self::Reqwest(ReqwestError {
+            kind,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates an [`Error::Serde`] from a serde error with context.
     pub fn serde(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self::Serde(SerdeError::internal(context, cause))
+        Self::Serde(SerdeError {
+            kind: ErrorKind::Internal,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates a client-classified [`Error::Serde`] from a serde error with context.
     pub fn serde_client(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self::Serde(SerdeError::client(context, cause))
+        Self::Serde(SerdeError {
+            kind: ErrorKind::BadRequest,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates an [`Error::Metadata`] from a metadata error with context.
     pub fn metadata(context: impl Into<String>, cause: objectstore_types::metadata::Error) -> Self {
-        Self::Metadata(MetadataError::internal(context, cause))
+        Self::Metadata(MetadataError {
+            kind: ErrorKind::Internal,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates a client-classified [`Error::Metadata`] from a metadata error with context.
@@ -296,7 +268,11 @@ impl Error {
         context: impl Into<String>,
         cause: objectstore_types::metadata::Error,
     ) -> Self {
-        Self::Metadata(MetadataError::client(context, cause))
+        Self::Metadata(MetadataError {
+            kind: ErrorKind::BadRequest,
+            context: context.into(),
+            cause,
+        })
     }
 
     /// Creates an [`Error::Generic`] with a context string and no cause.
