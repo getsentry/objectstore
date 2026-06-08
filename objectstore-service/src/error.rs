@@ -219,45 +219,10 @@ impl Error {
 
     /// Returns the appropriate log level for this error.
     pub fn level(&self) -> Level {
-        match self {
-            // Malformed client input at DEBUG level
-            Self::ClientStream(_) => Level::DEBUG,
-            Self::RangeNotSatisfiable { .. } => Level::DEBUG,
-            // Like rate limits, we treat capacity errors as warnings
-            Self::AtCapacity => Level::WARN,
-            // All other errors are service or backend failures
-            Self::Io(_) => Level::ERROR,
-            Self::Serde(error) => match error.kind() {
-                ErrorKind::BadRequest => Level::DEBUG,
-                ErrorKind::ClientStream
-                | ErrorKind::Transient
-                | ErrorKind::NotImplemented
-                | ErrorKind::TooManyRequests
-                | ErrorKind::Internal => Level::ERROR,
-            },
-            Self::Reqwest(error) => match error.kind() {
-                ErrorKind::BadRequest => Level::DEBUG,
-                ErrorKind::TooManyRequests => Level::WARN,
-                ErrorKind::ClientStream
-                | ErrorKind::Transient
-                | ErrorKind::NotImplemented
-                | ErrorKind::Internal => Level::ERROR,
-            },
-            Self::Metadata(error) => match error.kind() {
-                ErrorKind::BadRequest => Level::DEBUG,
-                ErrorKind::ClientStream
-                | ErrorKind::Transient
-                | ErrorKind::NotImplemented
-                | ErrorKind::TooManyRequests
-                | ErrorKind::Internal => Level::ERROR,
-            },
-            Self::GcpAuth(_) => Level::ERROR,
-            Self::Panic(_) => Level::ERROR,
-            Self::Dropped => Level::ERROR,
-            Self::UnexpectedTombstone => Level::ERROR,
-            Self::NotImplemented => Level::ERROR,
-            Self::InvalidUploadId(_) => Level::DEBUG,
-            Self::Generic { .. } => Level::ERROR,
+        match self.kind() {
+            ErrorKind::ClientStream | ErrorKind::BadRequest => Level::DEBUG,
+            ErrorKind::Transient | ErrorKind::TooManyRequests => Level::WARN,
+            ErrorKind::NotImplemented | ErrorKind::Internal => Level::ERROR,
         }
     }
 }
