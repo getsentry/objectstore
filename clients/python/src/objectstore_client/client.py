@@ -441,6 +441,29 @@ class Session:
         """
         return self._make_url(key, full=True)
 
+    def head(self, key: str) -> Metadata | None:
+        """
+        Checks whether an object exists and retrieves its metadata.
+
+        Returns the object's ``Metadata`` if it exists, ``None`` otherwise.
+
+        If the object has a TTI expiration policy, this is considered an access,
+        and therefore bumps its expiration.
+        """
+        headers = self._make_headers()
+        with measure_storage_operation(
+            self._metrics_backend, "head", self._usecase.name
+        ):
+            response = self._pool.request(
+                "HEAD",
+                self._make_url(key),
+                headers=headers,
+            )
+            if response.status == 404:
+                return None
+            raise_for_status(response)
+            return Metadata.from_headers(response.headers)
+
     def delete(self, key: str) -> None:
         """
         Deletes the blob with the given `key`.
