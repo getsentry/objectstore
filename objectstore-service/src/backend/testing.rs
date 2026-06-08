@@ -40,6 +40,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
+use objectstore_types::range::ByteRange;
+
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
@@ -82,8 +84,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Intercepts [`Backend::get_object`]. Default delegates to `inner`.
-    async fn get_object(&self, inner: &InMemoryBackend, id: &ObjectId) -> Result<GetResponse> {
-        inner.get_object(id).await
+    async fn get_object(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
+        inner.get_object(id, range).await
     }
 
     /// Intercepts [`Backend::get_metadata`]. Default delegates to `inner`.
@@ -123,8 +130,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Intercepts [`HighVolumeBackend::get_tiered_object`]. Default delegates to `inner`.
-    async fn get_tiered_object(&self, inner: &InMemoryBackend, id: &ObjectId) -> Result<TieredGet> {
-        inner.get_tiered_object(id).await
+    async fn get_tiered_object(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        range: Option<ByteRange>,
+    ) -> Result<TieredGet> {
+        inner.get_tiered_object(id, range).await
     }
 
     /// Intercepts [`HighVolumeBackend::get_tiered_metadata`]. Default delegates to `inner`.
@@ -285,8 +297,8 @@ impl<H: Hooks> Backend for TestBackend<H> {
             .await
     }
 
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        self.hooks.get_object(&self.inner, id).await
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+        self.hooks.get_object(&self.inner, id, range).await
     }
 
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
@@ -315,8 +327,12 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
             .await
     }
 
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet> {
-        self.hooks.get_tiered_object(&self.inner, id).await
+    async fn get_tiered_object(
+        &self,
+        id: &ObjectId,
+        range: Option<ByteRange>,
+    ) -> Result<TieredGet> {
+        self.hooks.get_tiered_object(&self.inner, id, range).await
     }
 
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {

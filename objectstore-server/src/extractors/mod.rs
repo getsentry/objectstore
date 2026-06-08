@@ -2,6 +2,7 @@
 
 pub mod batch;
 pub mod body;
+pub mod byte_range;
 pub mod downstream_service;
 mod id;
 mod service;

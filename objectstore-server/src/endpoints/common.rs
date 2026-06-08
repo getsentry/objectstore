@@ -5,6 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -93,6 +94,9 @@ impl ApiError {
 
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
+                StatusCode::RANGE_NOT_SATISFIABLE
+            }
             ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
@@ -114,4 +118,12 @@ impl IntoResponse for ApiError {
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()
     }
+}
+
+/// Inserts `Accept-Ranges: bytes` into the response headers.
+pub fn insert_accept_ranges(response: &mut Response) {
+    response.headers_mut().insert(
+        http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
 }
