@@ -4,7 +4,7 @@
 //! cover the two directions of data flow:
 //!
 //! - [`ClientStream`] — incoming data from a client PUT request body. Uses
-//!   [`ClientError`] as the error type so backends can distinguish a broken
+//!   [`ClientStreamError`] as the error type so backends can distinguish a broken
 //!   client connection from a backend I/O failure (400 vs 500).
 //! - [`PayloadStream`] — outgoing data returned from
 //!   [`Backend::get_object`](crate::backend::common::Backend::get_object).
@@ -33,7 +33,7 @@ pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 pub struct ClientStreamError(Arc<dyn Error + Send + Sync + 'static>);
 
 impl ClientStreamError {
-    /// Creates a new [`ClientError`] wrapping `err`.
+    /// Creates a new [`ClientStreamError`] wrapping `err`.
     pub fn new<E>(err: E) -> Self
     where
         E: Error + Send + Sync + 'static,
@@ -63,25 +63,25 @@ impl From<ClientStreamError> for io::Error {
 
 /// Incoming byte stream from a client PUT request body.
 ///
-/// Uses [`ClientError`] as the error type so that a dropped or interrupted
+/// Uses [`ClientStreamError`] as the error type so that a dropped or interrupted
 /// client connection is distinguishable from a backend I/O failure. Backends
-/// that detect a [`ClientError`] (via [`unpack_client_error`]) can surface it
-/// as [`crate::error::Error::Client`], which the server maps to HTTP 400 rather
-/// than 500.
+/// that detect a [`ClientStreamError`] (via [`unpack_client_error`]) can surface
+/// it as [`crate::error::Error::ClientStream`], which the server maps to HTTP
+/// 400 rather than 500.
 ///
 /// Use [`single`] to construct a single-chunk `ClientStream` from an owned value.
 pub type ClientStream = BoxStream<'static, Result<Bytes, ClientStreamError>>;
 
-/// Walks the source chain of `err` looking for a [`ClientError`].
+/// Walks the source chain of `err` looking for a [`ClientStreamError`].
 ///
 /// At each step, two locations are checked:
 ///
-/// - **Direct**: the error itself is a `ClientError`.
+/// - **Direct**: the error itself is a `ClientStreamError`.
 /// - **Packed in `io::Error`**: the error is an `io::Error` whose custom inner
-///   value is a `ClientError`.
+///   value is a `ClientStreamError`.
 ///
 /// Use this in `put_object` implementations to reclassify body-stream errors
-/// as [`crate::error::Error::Client`] instead of an opaque server error.
+/// as [`crate::error::Error::ClientStream`] instead of an opaque server error.
 pub fn unpack_client_error<E>(err: &E) -> Option<ClientStreamError>
 where
     E: Error + 'static,
