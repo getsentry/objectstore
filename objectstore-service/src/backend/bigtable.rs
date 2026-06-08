@@ -1021,7 +1021,7 @@ impl HighVolumeBackend for BigTableBackend {
                     // If object size wasn't written into the metadata, re-compute it now
                     metadata.size = Some(payload.len());
                 }
-                TieredGet::Object(metadata, crate::stream::single(payload))
+                TieredGet::Object(metadata, None, crate::stream::single(payload))
             }
         })
     }
