@@ -278,7 +278,7 @@ impl ReqwestError {
         }
     }
 
-    /// Returns the service-level classification for this reqwest error.
+    /// Returns the service-level category for this reqwest error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
@@ -322,7 +322,7 @@ pub struct MetadataError {
 }
 
 impl MetadataError {
-    /// Returns the service-level classification for this metadata error.
+    /// Returns the service-level category for this metadata error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
