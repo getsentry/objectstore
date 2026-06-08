@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.11
+
+### New Features ✨
+
+- (py-client) Add HEAD API by @lcian in [#488](https://github.com/getsentry/objectstore/pull/488)
+
+## 0.1.10
+
+### New Features ✨
+
+- (py-client) Add Multipart Upload API by @lcian in [#476](https://github.com/getsentry/objectstore/pull/476)
+- (rust-client) Add Multipart Upload API by @lcian in [#468](https://github.com/getsentry/objectstore/pull/468)
+
 ## 0.1.9
 
 ### New Features ✨

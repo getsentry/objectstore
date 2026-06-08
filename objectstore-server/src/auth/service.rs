@@ -7,6 +7,7 @@ use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, 
 use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::ByteRange;
 
 use crate::auth::{AuthContext, AuthError};
 use crate::endpoints::common::ApiResult;
@@ -110,9 +111,13 @@ impl AuthAwareService {
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
-    pub async fn get_object(&self, id: ObjectId) -> ApiResult<GetResponse> {
+    pub async fn get_object(
+        &self,
+        id: ObjectId,
+        range: Option<ByteRange>,
+    ) -> ApiResult<GetResponse> {
         self.assert_authorized(Permission::ObjectRead, id.context())?;
-        Ok(self.service.get_object(id).await?)
+        Ok(self.service.get_object(id, range).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].

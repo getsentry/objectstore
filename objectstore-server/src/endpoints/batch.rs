@@ -147,7 +147,7 @@ async fn convert_to_part(
     match result {
         Ok(OpResponse::Got {
             key,
-            response: Some((metadata, stream)),
+            response: Some((metadata, _content_range, stream)),
         }) => got_to_part(idx, key, metadata, stream, state, context)
             .await
             .unwrap_or_else(|e| create_error_part(idx, &e)),
