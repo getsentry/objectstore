@@ -145,11 +145,7 @@ impl Error {
             return Self::ClientStream(client_error);
         }
 
-        Self::Reqwest(ReqwestError {
-            kind: ErrorKind::Internal,
-            context: context.into(),
-            cause,
-        })
+        Self::Reqwest(ReqwestError::internal(context, cause))
     }
 
     /// Creates an [`Error`] from a reqwest error, classifying it according to its status code.
@@ -158,12 +154,7 @@ impl Error {
             return Self::ClientStream(client_error);
         }
 
-        let kind = classify_reqwest(&cause);
-        Self::Reqwest(ReqwestError {
-            kind,
-            context: context.into(),
-            cause,
-        })
+        Self::Reqwest(ReqwestError::transparent(context, cause))
     }
 
     /// Creates an [`Error::Serde`] from a serde error with context, classifying it as an internal
@@ -247,6 +238,39 @@ pub struct ReqwestError {
 }
 
 impl ReqwestError {
+    fn internal(context: impl Into<String>, cause: reqwest::Error) -> Self {
+        Self {
+            kind: ErrorKind::Internal,
+            context: context.into(),
+            cause,
+        }
+    }
+
+    fn transparent(context: impl Into<String>, cause: reqwest::Error) -> Self {
+        let kind = if let Some(status) = cause.status() {
+            match status {
+                StatusCode::TOO_MANY_REQUESTS => ErrorKind::TooManyRequests,
+                StatusCode::REQUEST_TIMEOUT
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT => ErrorKind::Transient,
+                status if status.is_client_error() => ErrorKind::BadRequest,
+                _ => ErrorKind::Internal,
+            }
+        } else if cause.is_timeout() || cause.is_connect() || cause.is_request() {
+            ErrorKind::Transient
+        } else {
+            ErrorKind::Internal
+        };
+
+        Self {
+            kind,
+            context: context.into(),
+            cause,
+        }
+    }
+
     /// Returns the service-level classification for this reqwest error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
@@ -255,11 +279,6 @@ impl ReqwestError {
     /// Returns the underlying reqwest error.
     pub fn cause(&self) -> &reqwest::Error {
         &self.cause
-    }
-
-    /// Returns whether the underlying reqwest failure is worth retrying.
-    pub fn is_retryable(&self) -> bool {
-        is_retryable_reqwest(&self.cause)
     }
 }
 
@@ -305,43 +324,6 @@ impl MetadataError {
     pub fn cause(&self) -> &objectstore_types::metadata::Error {
         &self.cause
     }
-}
-
-fn classify_reqwest(cause: &reqwest::Error) -> ErrorKind {
-    if let Some(status) = cause.status() {
-        return match status {
-            StatusCode::TOO_MANY_REQUESTS => ErrorKind::TooManyRequests,
-            StatusCode::REQUEST_TIMEOUT
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT => ErrorKind::Transient,
-            status if status.is_client_error() => ErrorKind::BadRequest,
-            _ => ErrorKind::Internal,
-        };
-    }
-
-    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
-        ErrorKind::Transient
-    } else {
-        ErrorKind::Internal
-    }
-}
-
-fn is_retryable_reqwest(cause: &reqwest::Error) -> bool {
-    if let Some(status) = cause.status() {
-        return matches!(
-            status,
-            StatusCode::TOO_MANY_REQUESTS
-                | StatusCode::REQUEST_TIMEOUT
-                | StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-        );
-    }
-
-    cause.is_timeout() || cause.is_connect() || cause.is_request()
 }
 
 /// Result type for service operations.

@@ -378,7 +378,28 @@ fn insert_gcs_meta_header(
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
 fn is_retryable(error: &Error) -> bool {
-    matches!(error, Error::Reqwest(error) if error.is_retryable())
+    let Error::Reqwest(error) = error else {
+        return false;
+    };
+    let cause = error.cause();
+
+    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
+        return true;
+    }
+
+    let Some(status) = cause.status() else {
+        return false;
+    };
+
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 /// GCS JSON API backend for long-term storage of large objects.
