@@ -7,6 +7,7 @@
 #![allow(missing_docs)]
 
 use std::any::Any;
+use std::borrow::Cow;
 
 use objectstore_log::Level;
 use reqwest::StatusCode;
@@ -140,7 +141,7 @@ impl Error {
 
     /// Creates an [`Error`] from a reqwest error with context, classifying it as an internal
     /// error.
-    pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
+    pub fn reqwest(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         if let Some(client_error) = stream::unpack_client_error(&cause) {
             return Self::ClientStream(client_error);
         }
@@ -149,7 +150,10 @@ impl Error {
     }
 
     /// Creates an [`Error`] from a reqwest error, classifying it according to its status code.
-    pub fn reqwest_transparent(context: impl Into<String>, cause: reqwest::Error) -> Self {
+    pub fn reqwest_transparent(
+        context: impl Into<Cow<'static, str>>,
+        cause: reqwest::Error,
+    ) -> Self {
         if let Some(client_error) = stream::unpack_client_error(&cause) {
             return Self::ClientStream(client_error);
         }
@@ -159,7 +163,7 @@ impl Error {
 
     /// Creates an [`Error::Serde`] from a serde error with context, classifying it as an internal
     /// error.
-    pub fn serde(context: impl Into<String>, cause: serde_json::Error) -> Self {
+    pub fn serde(context: impl Into<Cow<'static, str>>, cause: serde_json::Error) -> Self {
         Self::Serde(SerdeError {
             kind: ErrorKind::Internal,
             context: context.into(),
@@ -169,7 +173,7 @@ impl Error {
 
     /// Creates an [`Error::Serde`] from a serde error with context, classifying it as a client
     /// error.
-    pub fn serde_client(context: impl Into<String>, cause: serde_json::Error) -> Self {
+    pub fn serde_client(context: impl Into<Cow<'static, str>>, cause: serde_json::Error) -> Self {
         Self::Serde(SerdeError {
             kind: ErrorKind::BadRequest,
             context: context.into(),
@@ -179,7 +183,10 @@ impl Error {
 
     /// Creates an [`Error::Metadata`] from a metadata error with context, classifying it as an
     /// internal error.
-    pub fn metadata(context: impl Into<String>, cause: objectstore_types::metadata::Error) -> Self {
+    pub fn metadata(
+        context: impl Into<Cow<'static, str>>,
+        cause: objectstore_types::metadata::Error,
+    ) -> Self {
         Self::Metadata(MetadataError {
             kind: ErrorKind::Internal,
             context: context.into(),
@@ -190,7 +197,7 @@ impl Error {
     /// Creates an [`Error::Metadata`] from a metadata error with context, classifying it as a
     /// client error.
     pub fn metadata_client(
-        context: impl Into<String>,
+        context: impl Into<Cow<'static, str>>,
         cause: objectstore_types::metadata::Error,
     ) -> Self {
         Self::Metadata(MetadataError {
@@ -232,13 +239,13 @@ impl From<std::io::Error> for Error {
 #[error("reqwest error: {context}")]
 pub struct ReqwestError {
     kind: ErrorKind,
-    context: String,
+    context: Cow<'static, str>,
     #[source]
     cause: reqwest::Error,
 }
 
 impl ReqwestError {
-    fn internal(context: impl Into<String>, cause: reqwest::Error) -> Self {
+    fn internal(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         Self {
             kind: ErrorKind::Internal,
             context: context.into(),
@@ -246,7 +253,7 @@ impl ReqwestError {
         }
     }
 
-    fn transparent(context: impl Into<String>, cause: reqwest::Error) -> Self {
+    fn transparent(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         let kind = if let Some(status) = cause.status() {
             match status {
                 StatusCode::TOO_MANY_REQUESTS => ErrorKind::TooManyRequests,
@@ -287,7 +294,7 @@ impl ReqwestError {
 #[error("serde error: {context}")]
 pub struct SerdeError {
     kind: ErrorKind,
-    context: String,
+    context: Cow<'static, str>,
     #[source]
     cause: serde_json::Error,
 }
@@ -309,7 +316,7 @@ impl SerdeError {
 #[error("metadata error: {context}")]
 pub struct MetadataError {
     kind: ErrorKind,
-    context: String,
+    context: Cow<'static, str>,
     #[source]
     cause: objectstore_types::metadata::Error,
 }
