@@ -99,7 +99,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use bytes::Bytes;
@@ -375,14 +375,14 @@ impl Backend for TieredStorage {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned());
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
         }
 
         let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
         objectstore_metrics::record!(
-            "put.first_chunk.latency" = start.elapsed(),
+            "put.first_chunk.latency" = timer.elapsed(),
             usecase = id.usecase().to_owned(),
             complete = if peeked.is_exhausted() { "yes" } else { "no" },
         );
@@ -399,12 +399,10 @@ impl Backend for TieredStorage {
         };
 
         let backend_ty = self.backend_type(&backend_choice);
-        objectstore_metrics::record!(
-            "put.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice.as_str(),
-            backend_type = backend_ty,
-        );
+        timer
+            .tag("backend_choice", backend_choice.as_str())
+            .tag("backend_type", backend_ty)
+            .record();
         objectstore_metrics::record!(
             "put.size" = stored_size,
             usecase = id.usecase().to_owned(),
@@ -417,7 +415,10 @@ impl Backend for TieredStorage {
     }
 
     async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "get.latency.pre-response",
+            usecase = id.usecase().to_owned(),
+        );
 
         let hv_result = self.inner.high_volume.get_tiered_object(id).await?;
         let (result, backend_choice) = match hv_result {
@@ -432,12 +433,10 @@ impl Backend for TieredStorage {
         };
 
         let backend_type = self.backend_type(&backend_choice);
-        objectstore_metrics::record!(
-            "get.latency.pre-response" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice.as_str(),
-            backend_type = backend_type,
-        );
+        timer
+            .tag("backend_choice", backend_choice.as_str())
+            .tag("backend_type", backend_type)
+            .record();
 
         if let Some((ref metadata, _)) = result {
             if let Some(size) = metadata.size {
@@ -456,7 +455,7 @@ impl Backend for TieredStorage {
     }
 
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
 
         let hv_result = self.inner.high_volume.get_tiered_metadata(id).await?;
         let (result, backend_choice) = match hv_result {
@@ -468,18 +467,17 @@ impl Backend for TieredStorage {
             ),
         };
 
-        objectstore_metrics::record!(
-            "head.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice.as_str(),
-            backend_type = self.backend_type(&backend_choice),
-        );
+        timer
+            .tag("backend_choice", backend_choice.as_str())
+            .tag("backend_type", self.backend_type(&backend_choice))
+            .record();
 
         Ok(result)
     }
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        let start = Instant::now();
+        let timer =
+            objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
 
         let mut backend_choice = BackendChoice::HighVolume;
 
@@ -507,12 +505,10 @@ impl Backend for TieredStorage {
             guard.advance(ChangePhase::compare_and_write(deleted));
         }
 
-        objectstore_metrics::record!(
-            "delete.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-            backend_choice = backend_choice.as_str(),
-            backend_type = self.backend_type(&backend_choice),
-        );
+        timer
+            .tag("backend_choice", backend_choice.as_str())
+            .tag("backend_type", self.backend_type(&backend_choice))
+            .record();
 
         Ok(())
     }
@@ -605,7 +601,10 @@ impl MultipartUploadBackend for TieredStorage {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "multipart.initiate.latency",
+            usecase = id.usecase().to_owned(),
+        );
         let physical = new_long_term_revision(id);
 
         let upload_id = self
@@ -614,16 +613,14 @@ impl MultipartUploadBackend for TieredStorage {
             .initiate_multipart(&physical, metadata)
             .await?;
 
-        objectstore_metrics::record!(
-            "multipart.initiate.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-        );
-
         let id = TieredUploadId {
             revision: physical.key,
             upload_id,
         };
-        id.try_into()
+        let id = id.try_into()?;
+
+        timer.record();
+        Ok(id)
     }
 
     async fn upload_part(
@@ -635,7 +632,10 @@ impl MultipartUploadBackend for TieredStorage {
         content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "multipart.upload_part.latency",
+            usecase = id.usecase().to_owned(),
+        );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
         let physical = ObjectId {
@@ -656,10 +656,7 @@ impl MultipartUploadBackend for TieredStorage {
             )
             .await?;
 
-        objectstore_metrics::record!(
-            "multipart.upload_part.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-        );
+        timer.record();
         objectstore_metrics::record!(
             "multipart.upload_part.size" = content_length,
             usecase = id.usecase().to_owned(),
@@ -675,7 +672,10 @@ impl MultipartUploadBackend for TieredStorage {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "multipart.list_parts.latency",
+            usecase = id.usecase().to_owned(),
+        );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
         let physical = ObjectId {
@@ -683,18 +683,14 @@ impl MultipartUploadBackend for TieredStorage {
             key: tiered.revision,
         };
 
-        let result = self
+        let response = self
             .inner
             .long_term
             .list_parts(&physical, &tiered.upload_id, max_parts, part_number_marker)
-            .await;
+            .await?;
 
-        objectstore_metrics::record!(
-            "multipart.list_parts.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-        );
-
-        result
+        timer.record();
+        Ok(response)
     }
 
     async fn abort_multipart(
@@ -702,7 +698,10 @@ impl MultipartUploadBackend for TieredStorage {
         id: &ObjectId,
         upload_id: &UploadId,
     ) -> Result<AbortMultipartResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "multipart.abort.latency",
+            usecase = id.usecase().to_owned(),
+        );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
         let physical = ObjectId {
@@ -710,18 +709,14 @@ impl MultipartUploadBackend for TieredStorage {
             key: tiered.revision,
         };
 
-        let result = self
+        let () = self
             .inner
             .long_term
             .abort_multipart(&physical, &tiered.upload_id)
-            .await;
+            .await?;
 
-        objectstore_metrics::record!(
-            "multipart.abort.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-        );
-
-        result
+        timer.record();
+        Ok(())
     }
 
     async fn complete_multipart(
@@ -730,7 +725,10 @@ impl MultipartUploadBackend for TieredStorage {
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        let start = Instant::now();
+        let timer = objectstore_metrics::timer!(
+            "multipart.complete.latency",
+            usecase = id.usecase().to_owned(),
+        );
         let part_count = parts.len();
         let tiered: TieredUploadId = upload_id.try_into()?;
 
@@ -742,7 +740,10 @@ impl MultipartUploadBackend for TieredStorage {
         // 1. Read current HV revision to establish the write precondition.
         let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
             // Optimization: a previous attempt already finalized this revision and tombstone -- report success.
-            TieredMetadata::Tombstone(t) if t.target == physical => return Ok(None),
+            TieredMetadata::Tombstone(t) if t.target == physical => {
+                timer.record();
+                return Ok(None);
+            }
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
@@ -830,10 +831,7 @@ impl MultipartUploadBackend for TieredStorage {
         // Update guard and let it schedule cleanup in the background.
         guard.advance(ChangePhase::compare_and_write(written));
 
-        objectstore_metrics::record!(
-            "multipart.complete.latency" = start.elapsed(),
-            usecase = id.usecase().to_owned(),
-        );
+        timer.record();
         objectstore_metrics::record!(
             "multipart.complete.part_count" = part_count as u64,
             usecase = id.usecase().to_owned(),

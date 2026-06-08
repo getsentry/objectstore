@@ -2,7 +2,7 @@
 //!
 //! This crate provides three things:
 //!
-//! 1. [`count!`], [`gauge!`], and [`record!`] macros with rustfmt-friendly
+//! 1. [`count!`], [`gauge!`], [`record!`], and [`timer!`] macros with rustfmt-friendly
 //!    expression-based syntax.
 //! 2. [`MetricsConfig`] and [`init`] for wiring up a DogStatsD exporter.
 //! 3. [`with_capturing_test_client`] for asserting on emitted metrics in tests.
@@ -11,7 +11,7 @@
 //!
 //! ```rust
 //! use std::time::Duration;
-//! use objectstore_metrics::{count, gauge, record};
+//! use objectstore_metrics::{count, gauge, record, timer};
 //!
 //! let stored_size: u64 = 1024;
 //! let elapsed = Duration::from_secs(1);
@@ -79,6 +79,91 @@ impl_as_f64!(cast: u64, usize);
 impl AsF64 for std::time::Duration {
     fn as_f64(self) -> f64 {
         self.as_secs_f64()
+    }
+}
+
+/// A guard that measures elapsed time and records it as a distribution metric.
+///
+/// Created by the [`timer!`] macro. Records with `success:true` when
+/// [`record()`](TimerGuard::record) is called, or `success:false` when dropped
+/// without calling `record()`.
+/// Call [`success()`](TimerGuard::success) to override this behavior and record
+/// with `success:true` even on drop.
+///
+/// Tags can be added after creation via [`tag()`](TimerGuard::tag).
+#[must_use = "timer! returns a guard that records the metric on guard.record() or on drop, bind it to a variable"]
+pub struct TimerGuard {
+    start: std::time::Instant,
+    name: &'static str,
+    module_path: &'static str,
+    labels: Vec<metrics::Label>,
+    record_failure_on_drop: bool,
+    recorded: bool,
+}
+
+impl TimerGuard {
+    #[doc(hidden)]
+    pub fn new(name: &'static str, module_path: &'static str, labels: Vec<metrics::Label>) -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            name,
+            module_path,
+            labels,
+            record_failure_on_drop: true,
+            recorded: false,
+        }
+    }
+
+    /// Returns the time elapsed since the guard was created.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    /// Adds a tag to the metric.
+    pub fn tag(mut self, key: &'static str, value: impl Into<metrics::SharedString>) -> Self {
+        self.labels.push(metrics::Label::new(key, value));
+        self
+    }
+
+    /// Changes the behavior of this guard to always record the metric
+    /// with `success:true`, even on drop.
+    pub fn success(mut self) -> Self {
+        self.record_failure_on_drop = false;
+        self
+    }
+
+    /// Consumes the guard, recording the elapsed time with `success:true`.
+    pub fn record(mut self) {
+        self.emit("true");
+    }
+
+    fn emit(&mut self, success: &'static str) {
+        self.recorded = true;
+        let mut labels = std::mem::take(&mut self.labels);
+        labels.push(metrics::Label::new("success", success));
+        let key = metrics::Key::from_parts(self.name, labels);
+        let metadata = metrics::Metadata::new(
+            self.module_path,
+            metrics::Level::INFO,
+            Some(self.module_path),
+        );
+        metrics::with_recorder(|rec| {
+            rec.register_histogram(&key, &metadata)
+                .record(AsF64::as_f64(self.start.elapsed()));
+        });
+    }
+}
+
+impl Drop for TimerGuard {
+    fn drop(&mut self) {
+        if !self.recorded {
+            let success = if self.record_failure_on_drop {
+                "false"
+            } else {
+                "true"
+            };
+            self.emit(success);
+        }
     }
 }
 
@@ -342,4 +427,50 @@ macro_rules! record {
         )
         .record($crate::_macro_support::AsF64::as_f64($value));
     };
+}
+
+/// Starts a timer that records elapsed time in fractional seconds as a
+/// distribution metric.
+///
+/// Returns a [`TimerGuard`] that captures `Instant::now()` at creation.
+/// Call [`.record()`](TimerGuard::record) to record the metric with the
+/// tag `success:true`, or let it drop to record with `success:false`.
+///
+/// If you want to override this behavior and record the metric with
+/// `success:true` even on drop, call [`.success()`](TimerGuard::success)
+/// on the guard.
+///
+/// Tags can also be added after creation via [`.tag()`](TimerGuard::tag),
+/// which is useful when some tag values depend on the outcome of the
+/// timed operation.
+///
+/// # Syntax
+///
+/// ```rust
+/// use objectstore_metrics::timer;
+///
+/// let guard = timer!("server.requests.duration");
+/// let guard = timer!("server.requests.duration", route = "/v1/test");
+/// // ... do work ...
+/// guard.record(); // records elapsed time with success:true
+/// ```
+///
+/// ```rust
+/// use objectstore_metrics::timer;
+///
+/// let guard = timer!("server.requests.duration", route = "/v1/test");
+/// // ... determine backend ...
+/// let guard = guard.tag("backend", "gcs");
+/// guard.record();
+/// ```
+///
+/// Tag keys are identifiers; tag values must implement `Into<SharedString>`.
+#[macro_export]
+macro_rules! timer {
+    ($name:literal $(, $tag:ident = $tv:expr)* $(,)?) => {{
+        let labels = vec![
+            $($crate::_macro_support::metrics::Label::new(stringify!($tag), $tv),)*
+        ];
+        $crate::TimerGuard::new($name, module_path!(), labels)
+    }};
 }
