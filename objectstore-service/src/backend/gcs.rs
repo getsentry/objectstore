@@ -390,7 +390,7 @@ fn is_retryable(error: &Error) -> bool {
     let Some(status) = cause.status() else {
         return false;
     };
-
+    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
         status,
         StatusCode::REQUEST_TIMEOUT
