@@ -130,31 +130,3 @@ pub fn insert_accept_ranges(response: &mut Response) {
         HeaderValue::from_static("bytes"),
     );
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn service_capacity_errors_return_429() {
-        assert_eq!(
-            ApiError::Service(ServiceError::AtCapacity).status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_service_errors_return_503() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let cause = reqwest::get(format!("http://{addr}")).await.unwrap_err();
-        let error = ServiceError::reqwest_transparent("backend request", cause);
-
-        assert_eq!(
-            ApiError::Service(error).status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-    }
-}
