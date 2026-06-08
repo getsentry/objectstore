@@ -139,7 +139,7 @@ impl Error {
         Self::Panic(msg)
     }
 
-    /// Creates an [`Error`] from a reqwest error with context, classifying it as an internal
+    /// Creates an [`Error`] from a reqwest error with context, categorizing it as an internal
     /// error.
     pub fn reqwest(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         if let Some(client_error) = stream::unpack_client_error(&cause) {
@@ -149,7 +149,7 @@ impl Error {
         Self::Reqwest(ReqwestError::internal(context, cause))
     }
 
-    /// Creates an [`Error`] from a reqwest error, classifying it according to its status code.
+    /// Creates an [`Error`] from a reqwest error, categorizing it according to its status code.
     pub fn reqwest_transparent(
         context: impl Into<Cow<'static, str>>,
         cause: reqwest::Error,
@@ -161,7 +161,7 @@ impl Error {
         Self::Reqwest(ReqwestError::transparent(context, cause))
     }
 
-    /// Creates an [`Error::Serde`] from a serde error with context, classifying it as an internal
+    /// Creates an [`Error::Serde`] from a serde error with context, categorizing it as an internal
     /// error.
     pub fn serde(context: impl Into<Cow<'static, str>>, cause: serde_json::Error) -> Self {
         Self::Serde(SerdeError {
@@ -171,7 +171,7 @@ impl Error {
         })
     }
 
-    /// Creates an [`Error::Serde`] from a serde error with context, classifying it as a client
+    /// Creates an [`Error::Serde`] from a serde error with context, categorizing it as a client
     /// error.
     pub fn serde_client(context: impl Into<Cow<'static, str>>, cause: serde_json::Error) -> Self {
         Self::Serde(SerdeError {
@@ -181,7 +181,7 @@ impl Error {
         })
     }
 
-    /// Creates an [`Error::Metadata`] from a metadata error with context, classifying it as an
+    /// Creates an [`Error::Metadata`] from a metadata error with context, categorizing it as an
     /// internal error.
     pub fn metadata(
         context: impl Into<Cow<'static, str>>,
@@ -194,7 +194,7 @@ impl Error {
         })
     }
 
-    /// Creates an [`Error::Metadata`] from a metadata error with context, classifying it as a
+    /// Creates an [`Error::Metadata`] from a metadata error with context, categorizing it as a
     /// client error.
     pub fn metadata_client(
         context: impl Into<Cow<'static, str>>,
