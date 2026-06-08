@@ -95,7 +95,9 @@ async fn initiate_inner(
     id: ObjectId,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
+    let mut metadata = Metadata::from_headers(&headers, "").map_err(|cause| {
+        ServiceError::metadata_client("invalid multipart object metadata headers", cause)
+    })?;
     // TODO: Do this in `complete` instead, when we have a Service API to mutate metadata.
     metadata.time_created = Some(SystemTime::now());
 

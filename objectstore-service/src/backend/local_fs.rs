@@ -22,7 +22,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`LocalFsBackend`].
 ///
@@ -97,19 +97,12 @@ impl Backend for LocalFsBackend {
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
-        tokio::io::copy(&mut reader, &mut writer)
-            .await
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => e.into(),
-            })?;
+        tokio::io::copy(&mut reader, &mut writer).await?;
 
         writer.flush().await?;
         let file = writer.into_inner();
@@ -137,11 +130,8 @@ impl Backend for LocalFsBackend {
         let mut metadata_line = String::new();
         reader.read_line(&mut metadata_line).await?;
         let file_len = reader.get_ref().metadata().await?.len();
-        let mut metadata: Metadata =
-            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
-                context: "failed to deserialize metadata".to_string(),
-                cause,
-            })?;
+        let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())
+            .map_err(|cause| Error::serde("failed to deserialize metadata", cause))?;
         let payload_size = file_len
             .checked_sub(metadata_line.len() as u64)
             .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
@@ -201,10 +191,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         tokio::fs::create_dir_all(&dir).await?;
 
         let meta_path = dir.join("metadata.json");
-        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize multipart metadata".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|cause| Error::serde("failed to serialize multipart metadata", cause))?;
         tokio::fs::write(meta_path, metadata_json).await?;
 
         Ok(upload_id)
@@ -231,10 +219,8 @@ impl MultipartUploadBackend for LocalFsBackend {
             "uploaded_at": SystemTime::now(),
             "size": content_length,
         });
-        let header_line = serde_json::to_string(&header).map_err(|cause| Error::Serde {
-            context: "failed to serialize part header".to_string(),
-            cause,
-        })?;
+        let header_line = serde_json::to_string(&header)
+            .map_err(|cause| Error::serde("failed to serialize part header", cause))?;
 
         let part_path = dir.join(format!("{part_number}.part"));
         let file = OpenOptions::new()
@@ -249,12 +235,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         writer.write_all(header_line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
-        let _bytes_copied = tokio::io::copy(&mut reader, &mut writer)
-            .await
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => e.into(),
-            })?;
+        let _bytes_copied = tokio::io::copy(&mut reader, &mut writer).await?;
 
         // TODO: validate bytes_copied against content_length and return a BadRequest-style
         // error. Needs a service-layer error variant that maps to HTTP 400 without abusing
@@ -301,11 +282,8 @@ impl MultipartUploadBackend for LocalFsBackend {
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
             reader.read_line(&mut header_line).await?;
-            let header: serde_json::Value =
-                serde_json::from_str(header_line.trim_end()).map_err(|cause| Error::Serde {
-                    context: "failed to deserialize part header".to_string(),
-                    cause,
-                })?;
+            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
+                .map_err(|cause| Error::serde("failed to deserialize part header", cause))?;
 
             parts.push(Part {
                 part_number: pn,
@@ -361,11 +339,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         // Read metadata
         let meta_path = dir.join("metadata.json");
         let meta_bytes = tokio::fs::read(&meta_path).await?;
-        let metadata: Metadata =
-            serde_json::from_slice(&meta_bytes).map_err(|cause| Error::Serde {
-                context: "failed to deserialize multipart metadata".to_string(),
-                cause,
-            })?;
+        let metadata: Metadata = serde_json::from_slice(&meta_bytes)
+            .map_err(|cause| Error::serde("failed to deserialize multipart metadata", cause))?;
 
         // TODO: validate that parts are in ascending part_number order and reject with
         // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
@@ -384,11 +359,8 @@ impl MultipartUploadBackend for LocalFsBackend {
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
             reader.read_line(&mut header_line).await?;
-            let header: serde_json::Value =
-                serde_json::from_str(header_line.trim_end()).map_err(|cause| Error::Serde {
-                    context: "failed to deserialize part header".to_string(),
-                    cause,
-                })?;
+            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
+                .map_err(|cause| Error::serde("failed to deserialize part header", cause))?;
 
             let stored_etag = header["etag"].as_str().unwrap_or("");
             if stored_etag != completed.etag {
@@ -413,10 +385,8 @@ impl MultipartUploadBackend for LocalFsBackend {
             .await?;
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(&metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(&metadata)
+            .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 

@@ -233,3 +233,26 @@ async fn range_on_nonexistent_object_returns_404() -> Result<()> {
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     Ok(())
 }
+
+#[tokio::test]
+async fn invalid_metadata_request_headers_return_400() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(server.url("/v1/objects/test/org=1/invalid-metadata"))
+        .header("x-sn-expiration", "garbage")
+        .body("payload")
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    Ok(())
+}

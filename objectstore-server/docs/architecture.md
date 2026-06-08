@@ -76,6 +76,20 @@ A request flows through several layers before reaching the storage service:
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back.
 
+### Service Error Mapping
+
+Endpoint handlers map [`objectstore_service::error::Error`] to HTTP status
+codes via its coarse error kind:
+
+- Client stream and bad request errors return HTTP 400.
+- Service or upstream capacity errors return HTTP 429.
+- Transient service errors return HTTP 503.
+- Unsupported operations return HTTP 501.
+- Internal errors return HTTP 500.
+
+Unsatisfiable byte ranges are a special case: `GET` returns HTTP 416 and
+preserves the required `Content-Range: bytes */{total}` header.
+
 ## Authentication & Authorization
 
 Objectstore uses **JWT tokens with EdDSA signatures** (Ed25519) for

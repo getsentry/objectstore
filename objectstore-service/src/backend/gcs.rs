@@ -27,7 +27,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
 ///
@@ -363,25 +363,7 @@ fn insert_gcs_meta_header(
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
 fn is_retryable(error: &Error) -> bool {
-    let Error::Reqwest { cause, .. } = error else {
-        return false;
-    };
-    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
-        return true;
-    }
-    let Some(status) = cause.status() else {
-        return false;
-    };
-    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
+    matches!(error, Error::Reqwest(error) if error.is_retryable())
 }
 
 /// GCS JSON API backend for long-term storage of large objects.
@@ -617,10 +599,8 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
-        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata for GCS upload".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(&gcs_metadata)
+            .map_err(|cause| Error::serde("failed to serialize metadata for GCS upload", cause))?;
 
         let multipart = multipart::Form::new()
             .part(
@@ -651,10 +631,7 @@ impl Backend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::reqwest("GCS: upload object", e),
-            })?;
+            .map_err(|e| Error::reqwest("GCS: upload object", e))?;
 
         Ok(())
     }

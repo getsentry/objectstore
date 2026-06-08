@@ -45,7 +45,8 @@ async fn objects_post(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
+    let mut metadata = Metadata::from_headers(&headers, "")
+        .map_err(|cause| ServiceError::metadata_client("invalid object metadata headers", cause))?;
     metadata.time_created = Some(SystemTime::now());
 
     state
@@ -91,7 +92,9 @@ async fn object_get(
     };
 
     let stream = state.meter_stream(stream, &context);
-    let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let metadata_headers = metadata
+        .to_headers("")
+        .map_err(|cause| ServiceError::metadata("failed to serialize object metadata", cause))?;
 
     let mut response = match content_range {
         Some(ref content_range) => {
@@ -122,7 +125,9 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let headers = metadata
+        .to_headers("")
+        .map_err(|cause| ServiceError::metadata("failed to serialize object metadata", cause))?;
 
     let mut response = (StatusCode::NO_CONTENT, headers).into_response();
     insert_accept_ranges(&mut response);
@@ -136,7 +141,8 @@ async fn object_put(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
+    let mut metadata = Metadata::from_headers(&headers, "")
+        .map_err(|cause| ServiceError::metadata_client("invalid object metadata headers", cause))?;
     metadata.time_created = Some(SystemTime::now());
 
     let ObjectId { context, key } = id;

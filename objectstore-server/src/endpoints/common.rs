@@ -6,7 +6,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
-use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -92,18 +92,21 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
-            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
                 StatusCode::RANGE_NOT_SATISFIABLE
             }
-            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => {
-                objectstore_log::error!(!!self, "error handling request");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Service(error) => match error.kind() {
+                ServiceErrorKind::ClientStream | ServiceErrorKind::BadRequest => {
+                    StatusCode::BAD_REQUEST
+                }
+                ServiceErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::Transient => StatusCode::SERVICE_UNAVAILABLE,
+                ServiceErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+                ServiceErrorKind::Internal => {
+                    objectstore_log::error!(!!self, "error handling request");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
 
             ApiError::Internal(_) => {
                 objectstore_log::error!(!!self, "internal error");
@@ -126,4 +129,32 @@ pub fn insert_accept_ranges(response: &mut Response) {
         http::header::ACCEPT_RANGES,
         HeaderValue::from_static("bytes"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_capacity_errors_return_429() {
+        assert_eq!(
+            ApiError::Service(ServiceError::AtCapacity).status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_service_errors_return_503() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let cause = reqwest::get(format!("http://{addr}")).await.unwrap_err();
+        let error = ServiceError::reqwest_transparent("backend request", cause);
+
+        assert_eq!(
+            ApiError::Service(error).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }
