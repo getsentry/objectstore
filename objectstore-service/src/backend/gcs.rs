@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
@@ -601,7 +600,7 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 

@@ -14,14 +14,12 @@
 //! [`StorageService`]: crate::service::StorageService
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
-use std::sync::Arc;
-
 use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
 };
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -54,40 +52,16 @@ fn count(usecase: &str) {
 
 /// A [`Backend`] decorator that counts each operation performed for COGS. Also implements
 /// [`MultipartUploadBackend`]. See the [module documentation](self) for how it should be used.
-///
-/// [`CountingBackend`]'s implementation clashes with how the [`MultipartUploadBackend`] trait is
-/// connected to the [`Backend`] trait. The workaround is to give `CountingBackend` (up to) two
-/// `Arc`s that point to the inner backend:
-/// - `inner: Arc<dyn Backend>`
-/// - `inner_multipart: Option<Arc<dyn MultipartUploadBackend>>` if `inner` supports it
-///
-/// [`CountingBackend`]'s implementation clashes with how the [`MultipartUploadBackend`] trait is
-/// connected to the [`Backend`] trait: [`CountingBackend::as_multipart_upload_backend`] can't apply
-/// the cast to `self.inner` which remains an `Arc<dyn Backend>`. There are two workarounds:
-/// - (Rejected) Every multipart method must call `self.inner.clone().as_multipart_upload_backend()?`
-///   which clones every time
-/// - (Chosen) `CountingBackend` must call `self.inner.clone().as_multipart_upload_backend().ok()`
-///   and hang onto it
 #[derive(Debug)]
 pub struct CountingBackend {
-    inner: Arc<dyn Backend>,
-    inner_multipart: Option<Arc<dyn MultipartUploadBackend>>,
+    inner: Box<dyn Backend>,
 }
 
 impl CountingBackend {
     /// Creates a [`CountingBackend`] that wraps `inner` and increments `objectstore.cogs.usage`
     /// before delegating operations to it.
     pub fn new(inner: Box<dyn Backend>) -> Self {
-        let inner: Arc<dyn Backend> = Arc::from(inner);
-        let inner_multipart = Arc::clone(&inner).as_multipart_upload_backend().ok();
-        Self {
-            inner,
-            inner_multipart,
-        }
-    }
-
-    fn as_multipart(&self) -> Result<&Arc<dyn MultipartUploadBackend>> {
-        self.inner_multipart.as_ref().ok_or(Error::NotImplemented)
+        Self { inner }
     }
 }
 
@@ -126,14 +100,9 @@ impl Backend for CountingBackend {
         self.inner.join().await;
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
-        // We already called `as_multipart_upload_backend()` on construction. If `inner` supports
-        // it, `self.inner_multipart` will be non-`None`.
-        if self.inner_multipart.is_none() {
-            Err(Error::NotImplemented)
-        } else {
-            Ok(self)
-        }
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
+        self.inner.as_multipart_upload_backend()?;
+        Ok(self)
     }
 }
 
@@ -145,7 +114,10 @@ impl MultipartUploadBackend for CountingBackend {
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
         count(&id.context.usecase);
-        self.as_multipart()?.initiate_multipart(id, metadata).await
+        self.inner
+            .as_multipart_upload_backend()?
+            .initiate_multipart(id, metadata)
+            .await
     }
 
     async fn upload_part(
@@ -158,7 +130,8 @@ impl MultipartUploadBackend for CountingBackend {
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
         count(&id.context.usecase);
-        self.as_multipart()?
+        self.inner
+            .as_multipart_upload_backend()?
             .upload_part(
                 id,
                 upload_id,
@@ -178,7 +151,8 @@ impl MultipartUploadBackend for CountingBackend {
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
         count(&id.context.usecase);
-        self.as_multipart()?
+        self.inner
+            .as_multipart_upload_backend()?
             .list_parts(id, upload_id, max_parts, part_number_marker)
             .await
     }
@@ -189,7 +163,10 @@ impl MultipartUploadBackend for CountingBackend {
         upload_id: &UploadId,
     ) -> Result<AbortMultipartResponse> {
         count(&id.context.usecase);
-        self.as_multipart()?.abort_multipart(id, upload_id).await
+        self.inner
+            .as_multipart_upload_backend()?
+            .abort_multipart(id, upload_id)
+            .await
     }
 
     async fn complete_multipart(
@@ -199,7 +176,8 @@ impl MultipartUploadBackend for CountingBackend {
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
         count(&id.context.usecase);
-        self.as_multipart()?
+        self.inner
+            .as_multipart_upload_backend()?
             .complete_multipart(id, upload_id, parts)
             .await
     }
@@ -207,6 +185,8 @@ impl MultipartUploadBackend for CountingBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
