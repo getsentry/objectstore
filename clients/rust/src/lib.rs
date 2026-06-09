@@ -12,6 +12,7 @@ mod key;
 mod many;
 #[cfg(feature = "multipart")]
 mod multipart;
+mod presigned;
 mod put;
 pub mod utils;
 
@@ -27,4 +28,5 @@ pub use key::*;
 pub use many::*;
 #[cfg(feature = "multipart")]
 pub use multipart::*;
+pub use presigned::*;
 pub use put::*;

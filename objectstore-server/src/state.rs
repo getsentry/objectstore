@@ -13,7 +13,7 @@ use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
 
-use crate::auth::PublicKeyDirectory;
+use crate::auth::{PresignedKeyDirectory, PublicKeyDirectory};
 use crate::config::Config;
 use crate::rate_limits::{MeteredPayloadStream, RateLimiter};
 use crate::web::RequestCounter;
@@ -41,6 +41,8 @@ pub struct Services {
     /// The `kid` header field from incoming authorization tokens should correspond to a public key
     /// in this directory that can be used to verify the token.
     pub key_directory: PublicKeyDirectory,
+    /// Directory for HMAC keys used by presigned object URLs.
+    pub presigned_key_directory: PresignedKeyDirectory,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
     /// In-flight HTTP request counter with the configured limit.
@@ -64,6 +66,7 @@ impl Services {
         service.start();
 
         let key_directory = PublicKeyDirectory::try_from(&config.auth)?;
+        let presigned_key_directory = PresignedKeyDirectory::try_from(&config.auth.presigned)?;
         if config.auth.enforce && key_directory.keys.is_empty() {
             anyhow::bail!(
                 "Auth enforcement is enabled but no keys are configured. Either disable auth enforcement (dev/test environments) or configure a public key."
@@ -79,6 +82,7 @@ impl Services {
             config,
             service,
             key_directory,
+            presigned_key_directory,
             rate_limiter,
             request_counter,
         }))

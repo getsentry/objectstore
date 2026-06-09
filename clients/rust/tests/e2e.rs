@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
+use std::time::Duration;
 
 use common::{TEST_EDDSA_PRIVKEY, test_server, test_token_generator};
 use futures_util::StreamExt as _;
@@ -77,6 +78,41 @@ async fn stores_uncompressed() {
 
     let received = response.payload().await.unwrap();
     assert_eq!(received, "oh hai!");
+}
+
+#[tokio::test]
+async fn presigned_url_allows_unauthenticated_get_and_head() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let stored_id = session
+        .put("presigned body")
+        .compression(None)
+        .send()
+        .await
+        .unwrap()
+        .key;
+    let presigned_url = session
+        .get(&stored_id)
+        .presigned_url()
+        .duration(Duration::from_secs(30))
+        .send()
+        .await
+        .unwrap();
+
+    let raw_client = reqwest::Client::new();
+    let response = raw_client.get(presigned_url.clone()).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), "presigned body");
+
+    let response = raw_client.head(presigned_url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

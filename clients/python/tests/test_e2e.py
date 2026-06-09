@@ -27,6 +27,8 @@ TEST_EDDSA_PRIVKEY_PATH: str = (
 TEST_EDDSA_PUBKEY_PATH: str = (
     os.path.dirname(os.path.realpath(__file__)) + "/ed25519.public.pem"
 )
+TEST_PRESIGNED_KID: str = "presigned-test"
+TEST_PRESIGNED_SECRET: str = "presigned-secret-for-tests"
 
 
 class UnrewindableStream(BytesIO):
@@ -112,6 +114,10 @@ class Server:
             "OS__LOG__LEVEL": "trace",
             "OS__AUTH__ENFORCE": "true",
             "OS__AUTH__KEYS": env_key_map,
+            "OS__AUTH__PRESIGNED__SIGNING_KEY_ID": TEST_PRESIGNED_KID,
+            "OS__AUTH__PRESIGNED__KEYS": (
+                f'{{{TEST_PRESIGNED_KID}={{secrets=["{TEST_PRESIGNED_SECRET}"]}}}}'
+            ),
         }
 
         self._process = subprocess.Popen([str(server_bin), "run"], env=env)
@@ -191,6 +197,28 @@ def test_head(server_url: str) -> None:
     session.delete(object_key)
 
     assert session.head(object_key) is None
+
+
+def test_presigned_url_get_and_head(server_url: str) -> None:
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.get(),
+    )
+    test_usecase = Usecase("test-usecase")
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(b"presigned data", compression="none")
+    presigned_url = session.presigned_url(
+        object_key, operation="GET", expiry_seconds=30
+    )
+
+    pool = urllib3.PoolManager()
+    response = pool.request("GET", presigned_url)
+    assert response.status == 200
+    assert response.data == b"presigned data"
+
+    response = pool.request("HEAD", presigned_url)
+    assert response.status == 204
 
 
 def test_full_cycle_with_origin(server_url: str) -> None:

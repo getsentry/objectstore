@@ -33,6 +33,7 @@ url = "2.5.7"
 futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

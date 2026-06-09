@@ -16,6 +16,7 @@ All object operations live under the `/v1/` prefix:
 | `HEAD`   | `/v1/objects/{usecase}/{scopes}/{key}`    | Retrieve metadata only       |
 | `PUT`    | `/v1/objects/{usecase}/{scopes}/{key}`    | Insert or overwrite with key |
 | `DELETE` | `/v1/objects/{usecase}/{scopes}/{key}`    | Delete object                |
+| `POST`   | `/v1/objects:presign/{usecase}/{scopes}/{key}` | Mint a presigned GET URL signature |
 | `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
 
 ### Multipart Upload Endpoints
@@ -60,7 +61,9 @@ A request flows through several layers before reaching the storage service:
    [`ObjectContext`](objectstore_service::id::ObjectContext). The auth token is
    read from the `X-Os-Auth` header (preferred) or the standard
    `Authorization` header (fallback), then validated and decoded into an
-   [`AuthContext`](auth::AuthContext).
+   [`AuthContext`](auth::AuthContext). For object `GET` and `HEAD` requests
+   without an auth header, the extractor can instead verify an
+   `X-Os-Signature` query parameter as a presigned read signature.
    The optional `x-downstream-service` header is extracted for killswitch
    matching.
 3. **Admission control**: [killswitches](killswitches) and
@@ -109,6 +112,28 @@ the token's scopes and permissions cover the requested
 [`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
 Scope values in the token can use wildcards to grant broad access.
 
+### Presigned Object Reads
+
+Clients with normal JWT auth can mint short-lived read signatures with:
+
+`POST /v1/objects:presign/{usecase}/{scopes}/{key}?operation=GET&expires_at=<epoch_seconds>`
+
+Minting always requires a valid `X-Os-Auth` or `Authorization` JWT, even when
+`auth.enforce` is false. The caller must have `object.read` for the requested
+context, and the requested `expires_at` must be in the future and no later than
+the caller JWT's own `exp`.
+
+The response contains `signature`, `expires_at`, and `operation: "GET"`. The
+signature is an HS256 JWT with a `kid` header and exact resource claims for the
+usecase, ordered scopes, and object key. It is passed to normal object reads as
+`X-Os-Signature`:
+
+`GET /v1/objects/{usecase}/{scopes}/{key}?X-Os-Signature=<jwt>`
+
+`HEAD` accepts the same GET signature. Header auth takes precedence if an auth
+header is present. Presigned signatures do not authorize writes, deletes, batch,
+multipart, or mint requests.
+
 ## Configuration
 
 Configuration uses [figment](https://docs.rs/figment) for layered merging with
@@ -123,7 +148,7 @@ this precedence (highest wins):
 Key configuration sections:
 - `storage` — backend type and connection parameters; use `type: tiered` for
   two-tier routing with `high_volume` and `long_term` sub-backends
-- `auth` — key directory and enforcement toggle
+- `auth` — key directory, enforcement toggle, and optional `presigned` HMAC keys
 - `rate_limits` — throughput and bandwidth limits
 - `http` — HTTP layer parameters (concurrency limit)
 - `service` — storage service parameters (backend concurrency limit)

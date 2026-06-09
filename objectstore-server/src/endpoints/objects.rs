@@ -1,20 +1,23 @@
 use std::time::SystemTime;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
+use jsonwebtoken::get_current_timestamp;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ContentRange;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::extractors::byte_range::OptionalByteRange;
+use crate::extractors::service::StrictAuthContext;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -29,6 +32,10 @@ pub fn router() -> Router<ServiceState> {
     Router::new()
         .route("/objects/{usecase}/{scopes}", collection_routes.clone())
         .route("/objects/{usecase}/{scopes}/", collection_routes)
+        .route(
+            "/objects:presign/{usecase}/{scopes}/{*key}",
+            routing::post(object_presign),
+        )
         .route("/objects/{usecase}/{scopes}/{*key}", object_routes)
 }
 
@@ -36,6 +43,50 @@ pub fn router() -> Router<ServiceState> {
 #[derive(Debug, Serialize)]
 pub struct InsertObjectResponse {
     pub key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PresignQuery {
+    operation: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PresignResponse {
+    signature: String,
+    expires_at: u64,
+    operation: String,
+}
+
+async fn object_presign(
+    StrictAuthContext(auth): StrictAuthContext,
+    State(state): State<ServiceState>,
+    Xt(id): Xt<ObjectId>,
+    Query(query): Query<PresignQuery>,
+) -> ApiResult<Response> {
+    if query.operation != "GET" {
+        return Err(ApiError::Client("operation must be GET".into()));
+    }
+
+    let now = get_current_timestamp();
+    if query.expires_at <= now {
+        return Err(ApiError::Client("expires_at must be in the future".into()));
+    }
+    if query.expires_at > auth.expires_at {
+        return Err(crate::auth::AuthError::NotPermitted.into());
+    }
+
+    auth.assert_authorized(Permission::ObjectRead, id.context())?;
+
+    let signature = state
+        .presigned_key_directory
+        .sign_get(&id, query.expires_at)?;
+    Ok(Json(PresignResponse {
+        signature,
+        expires_at: query.expires_at,
+        operation: "GET".into(),
+    })
+    .into_response())
 }
 
 async fn objects_post(
@@ -63,9 +114,9 @@ async fn objects_post(
 }
 
 async fn object_get(
+    Xt(id): Xt<ObjectId>,
     service: AuthAwareService,
     State(state): State<ServiceState>,
-    Xt(id): Xt<ObjectId>,
     OptionalByteRange(byte_range): OptionalByteRange,
     _headers: HeaderMap,
 ) -> ApiResult<Response> {
@@ -117,7 +168,7 @@ async fn object_get(
     Ok(response)
 }
 
-async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
+async fn object_head(Xt(id): Xt<ObjectId>, service: AuthAwareService) -> ApiResult<Response> {
     let Some(metadata) = service.get_metadata(id).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };

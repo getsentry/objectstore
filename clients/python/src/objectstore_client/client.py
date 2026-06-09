@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import sentry_sdk
 import urllib3
@@ -274,6 +275,12 @@ class Session:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
 
+    def _make_presign_url(self, key: str, operation: str, expires_at: int) -> str:
+        relative_path = f"/v1/objects:presign/{self._usecase.name}/{self._scope}/{key}"
+        path = self._base_path.rstrip("/") + relative_path
+        query = urlencode({"operation": operation, "expires_at": expires_at})
+        return f"{path}?{query}"
+
     def _make_multipart_url(
         self,
         action: str | None,
@@ -440,6 +447,31 @@ class Session:
         in particular in relation to `Accept-Encoding`.
         """
         return self._make_url(key, full=True)
+
+    def presigned_url(
+        self,
+        key: str,
+        operation: Literal["GET"] = "GET",
+        *,
+        expiry_seconds: int = 60,
+    ) -> str:
+        """
+        Mints a presigned URL to the object with the given ``key``.
+        """
+        if operation != "GET":
+            raise ValueError(f"Invalid presigned operation: {operation}")
+
+        expires_at = int(time.time()) + expiry_seconds
+        response = self._pool.request(
+            "POST",
+            self._make_presign_url(key, operation, expires_at),
+            headers=self._make_headers(),
+            preload_content=True,
+            decode_content=True,
+        )
+        raise_for_status(response)
+        signature = response.json()["signature"]
+        return f"{self.object_url(key)}?{urlencode({'X-Os-Signature': signature})}"
 
     def head(self, key: str) -> Metadata | None:
         """

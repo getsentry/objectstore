@@ -332,6 +332,30 @@ pub struct AuthZVerificationKey {
     pub max_permissions: HashSet<Permission>,
 }
 
+/// HMAC key material used for presigned object URLs.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PresignedHmacKey {
+    /// Inline secret versions for this key, ordered newest to oldest.
+    #[serde(default)]
+    pub secrets: Vec<SecretBox<ConfigSecret>>,
+
+    /// Files containing secret versions for this key, ordered newest to oldest.
+    #[serde(default)]
+    pub secret_files: Vec<PathBuf>,
+}
+
+/// Configuration for presigned object access.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct PresignedAuth {
+    /// Key ID used to mint new presigned URL signatures.
+    #[serde(default)]
+    pub signing_key_id: Option<String>,
+
+    /// HMAC keys used to mint and verify presigned URL signatures.
+    #[serde(default)]
+    pub keys: BTreeMap<String, PresignedHmacKey>,
+}
+
 /// Configuration for content-based authorization.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZ {
@@ -351,6 +375,10 @@ pub struct AuthZ {
     /// select the appropriate key.
     #[serde(default)]
     pub keys: BTreeMap<String, AuthZVerificationKey>,
+
+    /// Presigned URL signing and verification configuration.
+    #[serde(default)]
+    pub presigned: PresignedAuth,
 }
 
 fn default_enforce() -> bool {
@@ -362,6 +390,7 @@ impl Default for AuthZ {
         Self {
             enforce: true,
             keys: BTreeMap::new(),
+            presigned: PresignedAuth::default(),
         }
     }
 }
@@ -901,6 +930,66 @@ mod tests {
             let kid2 = config.auth.keys.get("kid2").unwrap();
             assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_presigned_auth_with_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__AUTH__PRESIGNED__SIGNING_KEY_ID", "presign1");
+            jail.set_env(
+                "OS__AUTH__PRESIGNED__KEYS",
+                r#"{presign1={secrets=["secret-v2","secret-v1"],secret_files=["/run/secrets/presign"]}}"#,
+            );
+
+            let config = Config::load(None).unwrap();
+
+            assert_eq!(
+                config.auth.presigned.signing_key_id.as_deref(),
+                Some("presign1")
+            );
+            let key = config.auth.presigned.keys.get("presign1").unwrap();
+            assert_eq!(key.secrets[0].expose_secret().as_str(), "secret-v2");
+            assert_eq!(key.secrets[1].expose_secret().as_str(), "secret-v1");
+            assert_eq!(key.secret_files[0], Path::new("/run/secrets/presign"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configure_presigned_auth_with_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                auth:
+                    presigned:
+                        signing_key_id: presign1
+                        keys:
+                            presign1:
+                                secrets:
+                                    - secret-v2
+                                    - secret-v1
+                                secret_files:
+                                    - /run/secrets/presign
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            assert_eq!(
+                config.auth.presigned.signing_key_id.as_deref(),
+                Some("presign1")
+            );
+            let key = config.auth.presigned.keys.get("presign1").unwrap();
+            assert_eq!(key.secrets[0].expose_secret().as_str(), "secret-v2");
+            assert_eq!(key.secrets[1].expose_secret().as_str(), "secret-v1");
+            assert_eq!(key.secret_files[0], Path::new("/run/secrets/presign"));
 
             Ok(())
         });

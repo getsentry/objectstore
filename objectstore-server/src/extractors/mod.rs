@@ -5,7 +5,7 @@ pub mod body;
 pub mod byte_range;
 pub mod downstream_service;
 mod id;
-mod service;
+pub(crate) mod service;
 
 /// An extractor for a remote type.
 ///

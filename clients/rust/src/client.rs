@@ -529,6 +529,33 @@ impl Session {
         self.prepare_builder(builder)
     }
 
+    pub(crate) fn presign_request(
+        &self,
+        object_key: &str,
+        operation: &str,
+        expires_at: u64,
+    ) -> crate::Result<RequestBuilder> {
+        let mut url = self.client.service_url.clone();
+
+        // `path_segments_mut` can only error if the url is cannot-be-a-base,
+        // and we check that in `ClientBuilder::new`, therefore this will never panic.
+        let mut segments = url.path_segments_mut().unwrap();
+        segments
+            .push("v1")
+            .push("objects:presign")
+            .push(&self.scope.usecase.name)
+            .push(&self.scope.scopes.as_api_path().to_string())
+            .extend(object_key.split("/"));
+        drop(segments);
+
+        url.query_pairs_mut()
+            .append_pair("operation", operation)
+            .append_pair("expires_at", &expires_at.to_string());
+
+        let builder = self.client.reqwest.post(url);
+        self.prepare_builder(builder)
+    }
+
     #[cfg(feature = "multipart")]
     pub(crate) fn multipart_request(
         &self,

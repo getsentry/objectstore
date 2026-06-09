@@ -106,7 +106,7 @@ impl AuthAwareService {
 
     /// Auth-aware wrapper around [`StorageService::get_metadata`].
     pub async fn get_metadata(&self, id: ObjectId) -> ApiResult<MetadataResponse> {
-        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        self.assert_authorized_id(Permission::ObjectRead, &id)?;
         Ok(self.service.get_metadata(id).await?)
     }
 
@@ -116,7 +116,7 @@ impl AuthAwareService {
         id: ObjectId,
         range: Option<ByteRange>,
     ) -> ApiResult<GetResponse> {
-        self.assert_authorized(Permission::ObjectRead, id.context())?;
+        self.assert_authorized_id(Permission::ObjectRead, &id)?;
         Ok(self.service.get_object(id, range).await?)
     }
 
@@ -199,5 +199,20 @@ impl AuthAwareService {
             .service
             .complete_multipart(id, upload_id, parts)
             .await?)
+    }
+}
+
+impl AuthAwareService {
+    fn assert_authorized_id(&self, perm: Permission, id: &ObjectId) -> ApiResult<()> {
+        let auth_result = match &self.context {
+            Some(auth) => auth.assert_authorized_id(perm, id),
+            None => Ok(()),
+        }
+        .inspect_err(|err| err.log(Some(perm), Some(id.usecase()), self.enforce));
+
+        match self.enforce {
+            true => Ok(auth_result?),
+            false => Ok(()),
+        }
     }
 }

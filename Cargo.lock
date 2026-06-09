@@ -2576,6 +2576,7 @@ dependencies = [
  "objectstore-types",
  "percent-encoding",
  "reqwest 0.13.4",
+ "secrecy",
  "sentry-core",
  "serde",
  "tempfile",

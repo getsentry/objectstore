@@ -55,6 +55,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 
         populate_sentry_context(id.context());
         sentry::configure_scope(|s| s.set_extra("key", id.key().into()));
+        parts.extensions.insert(id.clone());
 
         let service = DownstreamService::from_request_parts(parts, state)
             .await
@@ -231,7 +232,7 @@ mod tests {
     use objectstore_service::backend::in_memory::InMemoryBackend;
     use tower::ServiceExt;
 
-    use crate::auth::PublicKeyDirectory;
+    use crate::auth::{PresignedKeyDirectory, PublicKeyDirectory};
     use crate::config::Config;
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
@@ -241,12 +242,15 @@ mod tests {
     async fn test_state(config: Config) -> ServiceState {
         let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")));
         let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
+        let presigned_key_directory =
+            PresignedKeyDirectory::try_from(&config.auth.presigned).unwrap();
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
         Arc::new(Services {
             config,
             service,
             key_directory,
+            presigned_key_directory,
             rate_limiter,
             request_counter: RequestCounter::new(0),
         })

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
-use objectstore_service::id::ObjectContext;
+use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::auth::Permission;
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,7 @@ struct JwtRes {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtClaims {
+    exp: u64,
     res: JwtRes,
     permissions: HashSet<Permission>,
 }
@@ -32,13 +33,25 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
     validation
 }
 
-/// `AuthContext` encapsulates the verified content of things like authorization tokens.
+/// Verified authorization details for a request.
 ///
-/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
-/// perform certain operations on a given resource.
+/// JWT auth grants scoped permissions. Presigned auth grants one permission on one exact object.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
-pub struct AuthContext {
+pub enum AuthContext {
+    /// A normal scoped JWT authorization token.
+    Jwt(JwtAuthContext),
+    /// A presigned exact-object authorization token.
+    Presigned(PresignedAuthContext),
+}
+
+/// Verified content of a normal scoped authorization JWT.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub struct JwtAuthContext {
+    /// The epoch timestamp when this request's authorization expires.
+    pub expires_at: u64,
+
     /// The objectstore usecase that this request may act on.
     ///
     /// See also: [`ObjectContext::usecase`].
@@ -53,8 +66,22 @@ pub struct AuthContext {
     pub permissions: HashSet<Permission>,
 }
 
-impl AuthContext {
-    /// Construct an `AuthContext` from an encoded JWT.
+/// Verified content of a presigned exact-object authorization token.
+#[derive(Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PresignedAuthContext {
+    /// The epoch timestamp when this request's authorization expires.
+    pub expires_at: u64,
+
+    /// The permission granted by this presigned token.
+    pub permission: Permission,
+
+    /// The exact object this presigned token grants access to.
+    pub object: ObjectId,
+}
+
+impl JwtAuthContext {
+    /// Construct a `JwtAuthContext` from an encoded JWT.
     ///
     /// Objectstore JWTs _must_ contain:
     /// - the `kid` header indicating which key was used to sign the token
@@ -69,7 +96,7 @@ impl AuthContext {
     pub fn from_encoded_jwt(
         encoded_token: Option<&str>,
         key_directory: &PublicKeyDirectory,
-    ) -> Result<AuthContext, AuthError> {
+    ) -> Result<Self, AuthError> {
         let encoded_token =
             encoded_token.ok_or(AuthError::BadRequest("No authorization token provided"))?;
 
@@ -118,7 +145,7 @@ impl AuthContext {
         let usecase = verified_claims.claims.res.usecase;
         let scope = verified_claims.claims.res.scope;
 
-        // Taking the intersection here ensures the `AuthContext` does not have any permissions
+        // Taking the intersection here ensures the `JwtAuthContext` does not have any permissions
         // that `key_config.max_permissions` doesn't have, even if the token tried to grant them.
         let permissions = verified_claims
             .claims
@@ -127,7 +154,8 @@ impl AuthContext {
             .cloned()
             .collect();
 
-        Ok(AuthContext {
+        Ok(Self {
+            expires_at: verified_claims.claims.exp,
             usecase,
             scopes: scope,
             permissions,
@@ -163,6 +191,64 @@ impl AuthContext {
     }
 }
 
+impl PresignedAuthContext {
+    /// Construct a presigned context granting read access to one exact object.
+    pub fn object_read(object: ObjectId, expires_at: u64) -> Self {
+        Self {
+            expires_at,
+            permission: Permission::ObjectRead,
+            object,
+        }
+    }
+
+    /// Ensures that this presigned token authorizes the requested permission on this exact object.
+    pub fn assert_authorized_id(&self, perm: Permission, id: &ObjectId) -> Result<(), AuthError> {
+        if self.permission == perm && self.object == *id {
+            Ok(())
+        } else {
+            Err(AuthError::NotPermitted)
+        }
+    }
+}
+
+impl AuthContext {
+    /// Construct an `AuthContext` from an encoded JWT.
+    pub fn from_encoded_jwt(
+        encoded_token: Option<&str>,
+        key_directory: &PublicKeyDirectory,
+    ) -> Result<AuthContext, AuthError> {
+        Ok(Self::Jwt(JwtAuthContext::from_encoded_jwt(
+            encoded_token,
+            key_directory,
+        )?))
+    }
+
+    /// Construct an `AuthContext` from a verified presigned object read signature.
+    pub fn from_presigned_object_read(id: ObjectId, expires_at: u64) -> Self {
+        Self::Presigned(PresignedAuthContext::object_read(id, expires_at))
+    }
+
+    /// Ensures that an operation requiring `perm` and applying to `context` is authorized.
+    pub fn assert_authorized(
+        &self,
+        perm: Permission,
+        context: &ObjectContext,
+    ) -> Result<(), AuthError> {
+        match self {
+            Self::Jwt(auth) => auth.assert_authorized(perm, context),
+            Self::Presigned(_) => Err(AuthError::NotPermitted),
+        }
+    }
+
+    /// Ensures that an operation requiring `perm` and applying to an exact object is authorized.
+    pub fn assert_authorized_id(&self, perm: Permission, id: &ObjectId) -> Result<(), AuthError> {
+        match self {
+            Self::Jwt(auth) => auth.assert_authorized(perm, id.context()),
+            Self::Presigned(auth) => auth.assert_authorized_id(perm, id),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +261,6 @@ mod tests {
 
     #[derive(Serialize, Deserialize)]
     struct TestJwtClaims {
-        exp: u64,
         #[serde(flatten)]
         claims: JwtClaims,
     }
@@ -205,10 +290,9 @@ mod tests {
         header.kid = Some(TEST_EDDSA_KID.into());
         header.typ = Some("JWT".into());
 
-        let claims = TestJwtClaims {
-            exp: exp.unwrap_or_else(|| get_current_timestamp() + 300),
-            claims: claims.clone(),
-        };
+        let mut claims = claims.clone();
+        claims.exp = exp.unwrap_or_else(|| get_current_timestamp() + 300);
+        let claims = TestJwtClaims { claims };
 
         let key = EncodingKey::from_ed_pem(signing_secret.as_bytes()).unwrap();
         encode(&header, &claims, &key).unwrap()
@@ -226,13 +310,19 @@ mod tests {
                 "org": org,
                 "project": proj,
             },
+            "exp": 0,
             "permissions": permissions,
         }))
         .unwrap()
     }
 
-    fn sample_auth_context(org: &str, proj: &str, permissions: HashSet<Permission>) -> AuthContext {
-        AuthContext {
+    fn sample_auth_context(
+        org: &str,
+        proj: &str,
+        permissions: HashSet<Permission>,
+    ) -> JwtAuthContext {
+        JwtAuthContext {
+            expires_at: jsonwebtoken::get_current_timestamp() + 300,
             usecase: "attachments".into(),
             permissions,
             scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
@@ -248,11 +338,14 @@ mod tests {
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
         let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+            JwtAuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
 
         // Ensure the key is correctly verified and deserialized
         let expected = sample_auth_context("123", "456", max_permission());
-        assert_eq!(auth_context, expected);
+        assert_eq!(auth_context.usecase, expected.usecase);
+        assert_eq!(auth_context.scopes, expected.scopes);
+        assert_eq!(auth_context.permissions, expected.permissions);
+        assert!(auth_context.expires_at >= jsonwebtoken::get_current_timestamp() + 299);
 
         Ok(())
     }
@@ -267,11 +360,13 @@ mod tests {
         let ro_permission = HashSet::from([Permission::ObjectRead]);
         let test_config = test_key_config(ro_permission.clone());
         let auth_context =
-            AuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
+            JwtAuthContext::from_encoded_jwt(Some(encoded_token.as_str()), &test_config)?;
 
         // Ensure the key is correctly verified and that the permissions are restricted
         let expected = sample_auth_context("123", "456", ro_permission);
-        assert_eq!(auth_context, expected);
+        assert_eq!(auth_context.usecase, expected.usecase);
+        assert_eq!(auth_context.scopes, expected.scopes);
+        assert_eq!(auth_context.permissions, expected.permissions);
 
         Ok(())
     }
