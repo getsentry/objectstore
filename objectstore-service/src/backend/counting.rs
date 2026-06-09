@@ -35,6 +35,7 @@ fn usecase_to_appfeature(usecase: &str) -> &'static str {
     // TODO: Flesh out this mapping
     match usecase {
         "attachments" => "attachments",
+        "preprod" => "preprod",
         _ => {
             objectstore_log::warn!(?usecase, "COGS: Can't convert usecase to app_feature");
             "shared"
