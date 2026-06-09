@@ -114,7 +114,7 @@ class Server:
             "OS__LOG__LEVEL": "trace",
             "OS__AUTH__ENFORCE": "true",
             "OS__AUTH__KEYS": env_key_map,
-            "OS__AUTH__PRESIGNED__SIGNING_KEY_ID": TEST_PRESIGNED_KID,
+            "OS__AUTH__PRESIGNED__ACTIVE_KEY_ID": TEST_PRESIGNED_KID,
             "OS__AUTH__PRESIGNED__KEYS": (
                 f'{{{TEST_PRESIGNED_KID}={{secrets=["{TEST_PRESIGNED_SECRET}"]}}}}'
             ),

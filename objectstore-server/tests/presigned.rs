@@ -36,7 +36,7 @@ async fn presigned_server() -> TestServer {
         auth: config::AuthZ {
             enforce: true,
             presigned: config::PresignedAuth {
-                signing_key_id: Some(PRESIGNED_KID.into()),
+                active_key_id: Some(PRESIGNED_KID.into()),
                 keys: BTreeMap::from([(
                     PRESIGNED_KID.into(),
                     config::PresignedHmacKey {

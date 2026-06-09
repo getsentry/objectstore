@@ -123,14 +123,14 @@ impl TryFrom<&PresignedHmacKey> for PresignedKeyConfig {
 /// Directory of HMAC keys used for presigned URL signatures.
 #[derive(Debug)]
 pub struct PresignedKeyDirectory {
-    signing_key_id: Option<String>,
+    active_key_id: Option<String>,
     keys: BTreeMap<String, PresignedKeyConfig>,
 }
 
 impl PresignedKeyDirectory {
     /// Signs a presigned GET token for an object.
     pub fn sign_get(&self, id: &ObjectId, expires_at: u64) -> Result<String, AuthError> {
-        let key_id = self.signing_key_id.as_deref().ok_or_else(|| {
+        let key_id = self.active_key_id.as_deref().ok_or_else(|| {
             AuthError::InternalError("No presigned signing key configured".into())
         })?;
         let key = self.keys.get(key_id).ok_or_else(|| {
@@ -215,7 +215,7 @@ impl TryFrom<&PresignedAuth> for PresignedKeyDirectory {
 
     fn try_from(presigned_config: &PresignedAuth) -> Result<Self, Self::Error> {
         Ok(Self {
-            signing_key_id: presigned_config.signing_key_id.clone(),
+            active_key_id: presigned_config.active_key_id.clone(),
             keys: presigned_config
                 .keys
                 .iter()
@@ -249,7 +249,7 @@ mod tests {
 
     fn config_with_secrets(kid: &str, secrets: Vec<&str>) -> PresignedKeyDirectory {
         let config = PresignedAuth {
-            signing_key_id: Some(kid.to_owned()),
+            active_key_id: Some(kid.to_owned()),
             keys: BTreeMap::from([(
                 kid.to_owned(),
                 PresignedHmacKey {
@@ -404,7 +404,7 @@ mod tests {
         std::io::Write::write_all(&mut file, SECRET.as_bytes()).unwrap();
 
         let config = PresignedAuth {
-            signing_key_id: Some(KID.to_owned()),
+            active_key_id: Some(KID.to_owned()),
             keys: BTreeMap::from([(
                 KID.to_owned(),
                 PresignedHmacKey {

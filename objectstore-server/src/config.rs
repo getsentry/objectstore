@@ -348,10 +348,17 @@ pub struct PresignedHmacKey {
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct PresignedAuth {
     /// Key ID used to mint new presigned URL signatures.
+    ///
+    /// Verification still accepts any key ID present in [`Self::keys`], based on
+    /// the `kid` JWT header. This field only selects which configured key signs
+    /// newly minted signatures.
     #[serde(default)]
-    pub signing_key_id: Option<String>,
+    pub active_key_id: Option<String>,
 
-    /// HMAC keys used to mint and verify presigned URL signatures.
+    /// HMAC keys available for presigned URL signatures.
+    ///
+    /// The active key signs new signatures. All configured keys can verify
+    /// existing signatures whose JWT header references their key ID.
     #[serde(default)]
     pub keys: BTreeMap<String, PresignedHmacKey>,
 }
@@ -938,7 +945,7 @@ mod tests {
     #[test]
     fn configure_presigned_auth_with_env() {
         figment::Jail::expect_with(|jail| {
-            jail.set_env("OS__AUTH__PRESIGNED__SIGNING_KEY_ID", "presign1");
+            jail.set_env("OS__AUTH__PRESIGNED__ACTIVE_KEY_ID", "presign1");
             jail.set_env(
                 "OS__AUTH__PRESIGNED__KEYS",
                 r#"{presign1={secrets=["secret-v2","secret-v1"],secret_files=["/run/secrets/presign"]}}"#,
@@ -947,7 +954,7 @@ mod tests {
             let config = Config::load(None).unwrap();
 
             assert_eq!(
-                config.auth.presigned.signing_key_id.as_deref(),
+                config.auth.presigned.active_key_id.as_deref(),
                 Some("presign1")
             );
             let key = config.auth.presigned.keys.get("presign1").unwrap();
@@ -967,7 +974,7 @@ mod tests {
                 br#"
                 auth:
                     presigned:
-                        signing_key_id: presign1
+                        active_key_id: presign1
                         keys:
                             presign1:
                                 secrets:
@@ -983,7 +990,7 @@ mod tests {
             let config = Config::load(Some(tempfile.path())).unwrap();
 
             assert_eq!(
-                config.auth.presigned.signing_key_id.as_deref(),
+                config.auth.presigned.active_key_id.as_deref(),
                 Some("presign1")
             );
             let key = config.auth.presigned.keys.get("presign1").unwrap();
