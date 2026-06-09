@@ -1,5 +1,5 @@
 //! Defines [`CountingBackend`], a decorator for the [`Backend`] trait that emits Cost of Goods Sold
-//! (COGS) compute usage metrics to the `objectstore.cogs.usage` counter.
+//! (COGS) compute usage metrics to the `cogs.usage` counter.
 //!
 //! [`CountingBackend`] is meant to wrap the outer-most [`Backend`] implementation owned by
 //! [`StorageService`] so that every tracked backend operation, whether a single-object operation
@@ -43,13 +43,13 @@ fn usecase_to_appfeature(usecase: &str) -> &'static str {
     }
 }
 
-/// Increments `objectstore.cogs.usage` by one operation for the given `usecase`.
+/// Increments `cogs.usage` by one operation for the given `usecase`.
 ///
 /// Under the hood, `usecase` is converted to the appropriate `app_feature` value expected in our
 /// COGS pipeline.
 fn count(usecase: &str) {
     objectstore_metrics::count!(
-        "objectstore.cogs.usage" += 1,
+        "cogs.usage" += 1,
         app_feature = usecase_to_appfeature(usecase),
     );
 }
@@ -68,7 +68,7 @@ pub struct CountingBackend {
 }
 
 impl CountingBackend {
-    /// Creates a [`CountingBackend`] that wraps `inner` and increments `objectstore.cogs.usage`
+    /// Creates a [`CountingBackend`] that wraps `inner` and increments `cogs.usage`
     /// before delegating operations to it.
     pub fn new(inner: Box<dyn Backend>) -> Self {
         let inner: Arc<dyn Backend> = Arc::from(inner);
@@ -244,7 +244,7 @@ mod tests {
 
         let cogs = captured
             .iter()
-            .filter(|m| m.starts_with("objectstore.cogs.usage"))
+            .filter(|m| m.starts_with("cogs.usage"))
             .count();
         assert_eq!(
             cogs, 4,
@@ -253,8 +253,8 @@ mod tests {
         assert!(
             captured
                 .iter()
-                .all(|m| !m.starts_with("objectstore.cogs.usage")
-                    || m == "objectstore.cogs.usage:+1|c|#app_feature:attachments"),
+                .all(|m| !m.starts_with("cogs.usage")
+                    || m == "cogs.usage:+1|c|#app_feature:attachments"),
             "captured: {captured:?}"
         );
     }
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(
             captured
                 .iter()
-                .filter(|m| m.starts_with("objectstore.cogs.usage"))
+                .filter(|m| m.starts_with("cogs.usage"))
                 .count(),
             1,
             "captured: {captured:?}"
@@ -294,7 +294,7 @@ mod tests {
         assert!(
             captured
                 .iter()
-                .any(|m| m == "objectstore.cogs.usage:+1|c|#app_feature:shared"),
+                .any(|m| m == "cogs.usage:+1|c|#app_feature:shared"),
             "captured: {captured:?}"
         );
     }
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(
             captured
                 .iter()
-                .filter(|m| m == &"objectstore.cogs.usage:+1|c|#app_feature:attachments")
+                .filter(|m| m == &"cogs.usage:+1|c|#app_feature:attachments")
                 .count(),
             5,
             "expected one count per multipart operation, captured: {captured:?}"
