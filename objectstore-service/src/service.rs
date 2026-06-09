@@ -12,6 +12,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 
 use crate::backend::common::Backend;
+use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
@@ -78,9 +79,14 @@ pub struct StorageService {
 
 impl StorageService {
     /// Creates a new `StorageService` wrapping the given backend.
+    ///
+    /// The backend is wrapped in a [`CountingBackend`] which increments a COGS usage counter for
+    /// each operation run. Single-object operations served directly by `StorageService` are covered
+    /// as we batched operations served by [`StreamExecutor`]. See
+    /// [`backend::counting`](crate::backend::counting) for details.
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
-            inner: Arc::from(backend),
+            inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
