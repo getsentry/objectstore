@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod bigtable;
 pub mod changelog;
 pub mod common;
+pub mod counting;
 pub mod gcs;
 pub mod in_memory;
 pub mod local_fs;

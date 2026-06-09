@@ -3,7 +3,6 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -73,7 +72,7 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 

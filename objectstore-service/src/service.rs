@@ -12,6 +12,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 
 use crate::backend::common::Backend;
+use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
@@ -78,9 +79,14 @@ pub struct StorageService {
 
 impl StorageService {
     /// Creates a new `StorageService` wrapping the given backend.
+    ///
+    /// The backend is wrapped in a [`CountingBackend`] which increments a COGS usage counter for
+    /// each operation run. Single-object operations served directly by `StorageService` are covered
+    /// as we batched operations served by [`StreamExecutor`]. See
+    /// [`backend::counting`](crate::backend::counting) for details.
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
-            inner: Arc::from(backend),
+            inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
@@ -247,9 +253,13 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("initiate_multipart", async move {
-            inner.initiate_multipart(&id, &metadata).await
+            inner
+                .as_multipart_upload_backend()?
+                .initiate_multipart(&id, &metadata)
+                .await
         })
         .await
     }
@@ -271,9 +281,11 @@ impl StorageService {
         content_md5: Option<String>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("upload_part", async move {
             inner
+                .as_multipart_upload_backend()?
                 .upload_part(
                     &id,
                     &upload_id,
@@ -295,9 +307,11 @@ impl StorageService {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("list_parts", async move {
             inner
+                .as_multipart_upload_backend()?
                 .list_parts(&id, &upload_id, max_parts, part_number_marker)
                 .await
         })
@@ -310,9 +324,13 @@ impl StorageService {
         id: ObjectId,
         upload_id: UploadId,
     ) -> Result<AbortMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("abort_multipart", async move {
-            inner.abort_multipart(&id, &upload_id).await
+            inner
+                .as_multipart_upload_backend()?
+                .abort_multipart(&id, &upload_id)
+                .await
         })
         .await
     }
@@ -324,9 +342,13 @@ impl StorageService {
         upload_id: UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("complete_multipart", async move {
-            inner.complete_multipart(&id, &upload_id, parts).await
+            inner
+                .as_multipart_upload_backend()?
+                .complete_multipart(&id, &upload_id, parts)
+                .await
         })
         .await
     }
