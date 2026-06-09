@@ -366,7 +366,7 @@ impl Backend for TieredStorage {
         "tiered"
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 

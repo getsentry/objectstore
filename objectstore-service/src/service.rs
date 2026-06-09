@@ -247,9 +247,13 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("initiate_multipart", async move {
-            inner.initiate_multipart(&id, &metadata).await
+            inner
+                .as_multipart_upload_backend()?
+                .initiate_multipart(&id, &metadata)
+                .await
         })
         .await
     }
@@ -271,9 +275,11 @@ impl StorageService {
         content_md5: Option<String>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("upload_part", async move {
             inner
+                .as_multipart_upload_backend()?
                 .upload_part(
                     &id,
                     &upload_id,
@@ -295,9 +301,11 @@ impl StorageService {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("list_parts", async move {
             inner
+                .as_multipart_upload_backend()?
                 .list_parts(&id, &upload_id, max_parts, part_number_marker)
                 .await
         })
@@ -310,9 +318,13 @@ impl StorageService {
         id: ObjectId,
         upload_id: UploadId,
     ) -> Result<AbortMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("abort_multipart", async move {
-            inner.abort_multipart(&id, &upload_id).await
+            inner
+                .as_multipart_upload_backend()?
+                .abort_multipart(&id, &upload_id)
+                .await
         })
         .await
     }
@@ -324,9 +336,13 @@ impl StorageService {
         upload_id: UploadId,
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
-        let inner = self.inner.clone().as_multipart_upload_backend()?;
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
         self.spawn("complete_multipart", async move {
-            inner.complete_multipart(&id, &upload_id, parts).await
+            inner
+                .as_multipart_upload_backend()?
+                .complete_multipart(&id, &upload_id, parts)
+                .await
         })
         .await
     }
