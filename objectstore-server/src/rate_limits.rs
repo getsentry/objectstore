@@ -230,9 +230,14 @@ impl RateLimiter {
             return true;
         };
 
-        objectstore_metrics::count!("server.request.rate_limited", reason = rejection.as_str());
+        objectstore_metrics::count!(
+            "server.request.rate_limited",
+            reason = rejection.as_str(),
+            usecase = context.usecase.clone()
+        );
         objectstore_log::warn!(
             reason = rejection.as_str(),
+            usecase = &context.usecase,
             "Request rejected: rate limit exceeded"
         );
         false
