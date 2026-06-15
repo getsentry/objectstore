@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 tokio = { version = "1.45.0", default-features = false, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
 url = "2.5.7"
+zstd-safe = "7.2.4"
 
 [dev-dependencies]
 futures-util = { workspace = true }

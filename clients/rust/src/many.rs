@@ -40,7 +40,7 @@ const DEFAULT_INDIVIDUAL_CONCURRENCY: usize = 5;
 /// Can be overridden via [`ManyBuilder::max_batch_concurrency`].
 const DEFAULT_BATCH_CONCURRENCY: usize = 3;
 
-/// Maximum total body size (pre-compression) to include in a single batch request.
+/// Maximum estimated total body size to include in a single batch request.
 const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// A builder that can be used to enqueue multiple operations.
@@ -263,6 +263,7 @@ impl OperationContext {
 }
 
 /// The result of classifying a single operation for batch processing.
+#[derive(Debug)]
 enum Classified {
     /// The operation can be included in a batch request, with its estimated body size in bytes.
     Batchable(BatchOperation, u64),
@@ -567,14 +568,22 @@ async fn classify(op: BatchOperation) -> Classified {
                 PutBody::Stream(_) => None,
             };
 
+            let classified_size = match (metadata.compression, size) {
+                (Some(Compression::Zstd), Some(size)) => {
+                    usize::try_from(size).ok().map(zstd_safe::compress_bound)
+                }
+                (None, Some(size)) => usize::try_from(size).ok(),
+                (_, None) => None,
+            };
+
             let op = BatchOperation::Insert {
                 key,
                 metadata,
                 body,
             };
 
-            match size {
-                Some(s) if s <= MAX_BATCH_PART_SIZE as u64 => Classified::Batchable(op, s),
+            match classified_size {
+                Some(s) if s <= MAX_BATCH_PART_SIZE as usize => Classified::Batchable(op, s as u64),
                 _ => Classified::Individual(op),
             }
         }
@@ -802,6 +811,42 @@ mod tests {
 
     fn batches(ops: Vec<(BatchOperation, u64)>) -> Vec<Vec<BatchOperation>> {
         iter_batches(ops).collect()
+    }
+
+    fn put_with_zstd(size: usize) -> BatchOperation {
+        BatchOperation::Insert {
+            key: Some("k".to_owned()),
+            metadata: Metadata {
+                compression: Some(Compression::Zstd),
+                ..Default::default()
+            },
+            body: PutBody::Buffer(vec![0; size].into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn zstd_put_at_limit_is_batchable() {
+        const SIZE: usize = 1_044_496;
+        assert_eq!(
+            zstd_safe::compress_bound(SIZE),
+            MAX_BATCH_PART_SIZE as usize
+        );
+
+        core::assert_matches!(
+            classify(put_with_zstd(SIZE)).await,
+            Classified::Batchable(_, size) if size == zstd_safe::compress_bound(SIZE) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn zstd_put_above_limit_is_individual() {
+        const SIZE: usize = 1_044_497;
+        assert!(zstd_safe::compress_bound(SIZE) > MAX_BATCH_PART_SIZE as usize);
+
+        core::assert_matches!(
+            classify(put_with_zstd(SIZE)).await,
+            Classified::Individual(_)
+        );
     }
 
     #[test]
