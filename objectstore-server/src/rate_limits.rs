@@ -217,7 +217,7 @@ impl RateLimiter {
     /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection, emits a
     /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked before
     /// throughput so that rejected requests are never counted toward admitted traffic.
-    pub fn check(&self, context: &ObjectContext) -> bool {
+    pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> bool {
         // Bandwidth is checked first because it is a pure read (no token consumption).
         // Throughput increments the EWMA accumulator only on success, so checking it
         // second ensures rejected requests are never counted toward admitted traffic.
@@ -238,6 +238,8 @@ impl RateLimiter {
         objectstore_log::warn!(
             reason = rejection.as_str(),
             usecase = &context.usecase,
+            scopes = %context.scopes.as_api_path(),
+            key,
             "Request rejected: rate limit exceeded"
         );
         false
@@ -898,7 +900,7 @@ mod tests {
             .store(1, std::sync::atomic::Ordering::Relaxed);
 
         let context = make_context();
-        assert!(!limiter.check(&context));
+        assert!(!limiter.check(&context, None));
 
         // The throughput accumulator must still be 0.
         assert_eq!(
