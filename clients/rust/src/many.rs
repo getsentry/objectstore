@@ -568,7 +568,7 @@ async fn classify(op: BatchOperation) -> Classified {
                 PutBody::Stream(_) => None,
             };
 
-            let classified_size = match (metadata.compression, size) {
+            let size = match (metadata.compression, size) {
                 (Some(Compression::Zstd), Some(size)) => {
                     usize::try_from(size).ok().map(zstd_safe::compress_bound)
                 }
@@ -582,7 +582,7 @@ async fn classify(op: BatchOperation) -> Classified {
                 body,
             };
 
-            match classified_size {
+            match size {
                 Some(s) if s <= MAX_BATCH_PART_SIZE as usize => Classified::Batchable(op, s as u64),
                 _ => Classified::Individual(op),
             }
