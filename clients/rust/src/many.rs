@@ -40,7 +40,7 @@ const DEFAULT_INDIVIDUAL_CONCURRENCY: usize = 5;
 /// Can be overridden via [`ManyBuilder::max_batch_concurrency`].
 const DEFAULT_BATCH_CONCURRENCY: usize = 3;
 
-/// Maximum estimated total body size to include in a single batch request.
+/// Maximum total body (post-compression, estimated) size to include in a single batch request.
 const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// A builder that can be used to enqueue multiple operations.
@@ -826,25 +826,24 @@ mod tests {
 
     #[tokio::test]
     async fn zstd_put_at_limit_is_batchable() {
-        const SIZE: usize = 1_044_496;
-        assert_eq!(
-            zstd_safe::compress_bound(SIZE),
-            MAX_BATCH_PART_SIZE as usize
-        );
+        let size = 1_044_496;
+        let post_compression = zstd_safe::compress_bound(size);
+        assert!(post_compression == MAX_BATCH_PART_SIZE as usize);
 
         core::assert_matches!(
-            classify(put_with_zstd(SIZE)).await,
-            Classified::Batchable(_, size) if size == zstd_safe::compress_bound(SIZE) as u64
+            classify(put_with_zstd(size)).await,
+            Classified::Batchable(_, s) if s == post_compression as u64
         );
     }
 
     #[tokio::test]
     async fn zstd_put_above_limit_is_individual() {
-        const SIZE: usize = 1_044_497;
-        assert!(zstd_safe::compress_bound(SIZE) > MAX_BATCH_PART_SIZE as usize);
+        let size = 1_044_497;
+        let post_compression = zstd_safe::compress_bound(size);
+        assert!(post_compression > MAX_BATCH_PART_SIZE as usize);
 
         core::assert_matches!(
-            classify(put_with_zstd(SIZE)).await,
+            classify(put_with_zstd(size)).await,
             Classified::Individual(_)
         );
     }
