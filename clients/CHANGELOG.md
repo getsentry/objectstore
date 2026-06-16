@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+### Bug Fixes 🐛
+
+- (rust-client) Classify zstd batch inserts by worst-case post-compression size by @lcian in [#500](https://github.com/getsentry/objectstore/pull/500)
+
 ## 0.1.11
 
 ### New Features ✨
