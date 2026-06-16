@@ -68,7 +68,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(id.context()) {
+        if !state.rate_limiter.check(id.context(), Some(id.key())) {
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -141,7 +141,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(&context) {
+        if !state.rate_limiter.check(&context, None) {
             return Err(ObjectRejection::RateLimited);
         }
 
