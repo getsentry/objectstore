@@ -44,6 +44,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower = { version = "0.5.2" }
 tower-http = { version = "0.6.6", default-features = false, features = [
