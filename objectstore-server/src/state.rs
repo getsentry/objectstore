@@ -57,6 +57,7 @@ impl Services {
     /// use in the web server.
     pub async fn spawn(config: Config) -> Result<ServiceState> {
         tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
+        tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
         let backend = backend::from_config(config.storage.clone()).await?;
         let service =
@@ -105,6 +106,43 @@ impl Services {
     /// Used for cases where the payload size is known upfront (e.g. batch INSERT).
     pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
         self.rate_limiter.record_bandwidth(context, bytes);
+    }
+}
+
+/// Periodically captures and reports jemalloc stats.
+async fn track_allocator_metrics(interval: Duration) {
+    // INVARIANT: MIB resolution only fails if jemalloc is not the active allocator,
+    // which would be a misconfigured build. Panic early to surface the problem.
+    let epoch = tikv_jemalloc_ctl::epoch::mib().expect("jemalloc epoch MIB");
+    let allocated = tikv_jemalloc_ctl::stats::allocated::mib().expect("jemalloc allocated MIB");
+    let active = tikv_jemalloc_ctl::stats::active::mib().expect("jemalloc active MIB");
+    let resident = tikv_jemalloc_ctl::stats::resident::mib().expect("jemalloc resident MIB");
+    let mapped = tikv_jemalloc_ctl::stats::mapped::mib().expect("jemalloc mapped MIB");
+
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+
+        let Ok(_) = epoch.advance() else {
+            continue;
+        };
+
+        if let Ok(allocated_bytes) = allocated.read() {
+            // Bytes currently allocated by the application.
+            objectstore_metrics::gauge!("jemalloc.allocated" = allocated_bytes);
+        }
+        if let Ok(active_bytes) = active.read() {
+            // Bytes in active jemalloc pages (≥ allocated).
+            objectstore_metrics::gauge!("jemalloc.active" = active_bytes);
+        }
+        if let Ok(resident_bytes) = resident.read() {
+            // Bytes in resident pages mapped from the OS (≥ active).
+            objectstore_metrics::gauge!("jemalloc.resident" = resident_bytes);
+        }
+        if let Ok(mapped_bytes) = mapped.read() {
+            // Bytes in chunks mapped from the OS (≥ resident).
+            objectstore_metrics::gauge!("jemalloc.mapped" = mapped_bytes);
+        }
     }
 }
 
