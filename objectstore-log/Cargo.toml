@@ -17,7 +17,7 @@ sentry = ["init", "dep:sentry"]
 
 [dependencies]
 anyhow = { workspace = true }
-console = { version = "0.16.1", optional = true }
+console = { workspace = true, optional = true }
 sentry = { workspace = true, features = ["tracing"], optional = true }
 serde = { workspace = true }
 tracing = { workspace = true }
