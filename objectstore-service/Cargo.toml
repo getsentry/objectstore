@@ -23,20 +23,24 @@ humantime-serde = { workspace = true }
 objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
-quick-xml = { workspace = true }
+quick-xml = { workspace = true, features = ["serialize"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = [
+    "charset",
+    "http2",
     "hickory-dns",
-    "stream",
-    "multipart",
     "json",
+    "multipart",
+    "native-tls-no-alpn",
+    "stream",
+    "system-proxy",
 ] }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["io", "rt"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }

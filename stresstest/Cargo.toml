@@ -13,7 +13,7 @@ publish = false
 anyhow = { workspace = true }
 argh = { workspace = true }
 bytes = { workspace = true }
-bytesize = { workspace = true }
+bytesize = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 humantime-serde = { workspace = true }
 indicatif = { workspace = true }
@@ -25,5 +25,5 @@ serde_yaml = { workspace = true }
 sketches-ddsketch = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
 yansi = { workspace = true }

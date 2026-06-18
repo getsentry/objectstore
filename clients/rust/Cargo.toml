@@ -11,7 +11,7 @@ rust-version = "1.89"
 publish = true
 
 [dependencies]
-async-compression = { workspace = true }
+async-compression = { workspace = true, features = ["tokio", "zstd"] }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -22,7 +22,7 @@ objectstore-types = { workspace = true }
 percent-encoding = { workspace = true }
 # Pinned below workspace version for MSRV compatibility
 reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart"] }
-sentry-core = { workspace = true }
+sentry-core = { workspace = true, features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 # See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211

@@ -14,10 +14,10 @@ publish = false
 anyhow = { workspace = true }
 argh = { workspace = true }
 async-stream = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
 bytes = { workspace = true }
-elegant-departure = { workspace = true }
-figment = { workspace = true }
+elegant-departure = { workspace = true, features = ["tokio"] }
+figment = { workspace = true, features = ["env", "test", "yaml"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 globset = { workspace = true }
@@ -33,9 +33,9 @@ objectstore-types = { workspace = true }
 papaya = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-no-alpn"] }
 rustls = { workspace = true }
-secrecy = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
 sentry = { workspace = true, features = [
     "tower-axum-matched-path",
     "tracing",
@@ -45,7 +45,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true, features = ["stats"] }
 tokio = { workspace = true, features = [
     "fs",
     "macros",
@@ -56,10 +56,15 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 tower = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = [
+    "catch-panic",
+    "metrics",
+    "set-header",
+    "trace",
+] }
 
 [dev-dependencies]
-nix = { workspace = true }
+nix = { workspace = true, features = ["signal"] }
 objectstore-test = { workspace = true }
 stresstest = { workspace = true }
 tempfile = { workspace = true }

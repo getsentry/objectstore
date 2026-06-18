@@ -21,4 +21,4 @@ console = { workspace = true, optional = true }
 sentry = { workspace = true, features = ["tracing"], optional = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"], optional = true }
