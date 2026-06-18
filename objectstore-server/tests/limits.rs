@@ -589,7 +589,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                         manual: ManualPolicyConfig { allowed: false },
                         ttl: DurationPolicyConfig {
                             allowed: true,
-                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                            max: Some(Duration::from_hours(90 * 24)),
                         },
                         tti: DurationPolicyConfig {
                             allowed: false,
@@ -609,7 +609,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                         },
                         tti: DurationPolicyConfig {
                             allowed: true,
-                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                            max: Some(Duration::from_hours(90 * 24)),
                         },
                     },
                 },

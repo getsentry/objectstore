@@ -983,7 +983,7 @@ mod tests {
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB, over threshold
         let metadata_in = Metadata {
             content_type: "image/png".into(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             origin: Some("10.0.0.1".into()),
             ..Default::default()
         };
@@ -1624,7 +1624,7 @@ mod tests {
         let id = make_id("mp-single");
         let metadata = Metadata {
             content_type: "application/octet-stream".into(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ..Default::default()
         };
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB

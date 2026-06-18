@@ -33,7 +33,7 @@ pub struct Stresstest {
 
 impl Stresstest {
     /// Default runtime for the stresstest.
-    pub const DEFAULT_DURATION: Duration = Duration::from_secs(60);
+    pub const DEFAULT_DURATION: Duration = Duration::from_mins(1);
 
     /// Default TTL for all objects created during the stresstest.
     pub const DEFAULT_TTL: Duration = Duration::from_hours(1);

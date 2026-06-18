@@ -468,7 +468,7 @@ mod tests {
 
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_created: Some(SystemTime::now()),
             time_expires: None,
             compression: Some(Compression::Zstd),
@@ -565,7 +565,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
             ..Default::default()
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(meta.content_type, "text/plain".to_string());
         assert_eq!(
             meta.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(meta.origin, Some("203.0.113.42".into()));
         assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());

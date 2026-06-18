@@ -78,7 +78,7 @@ const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 /// Permission scopes required for accessing GCS.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read_write"];
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// How many times to retry failed operations.
 const REQUEST_RETRY_COUNT: usize = 2;
 
@@ -1285,7 +1285,7 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
@@ -1299,7 +1299,7 @@ mod tests {
         // Manually set custom_time to just inside the bump window.
         // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
         let object_url = backend.object_url(&id)?;
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
         backend.update_custom_time(object_url, old_deadline).await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
@@ -1328,7 +1328,7 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
