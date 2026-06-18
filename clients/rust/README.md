@@ -130,6 +130,13 @@ session.put("payload")
 
 ### Multipart Upload API
 
+> **Feature flag required:** Enable the `multipart` Cargo feature to use this API.
+> It is not included in the default feature set.
+>
+> ```toml
+> objectstore-client = { version = "...", features = ["multipart"] }
+> ```
+
 For large objects, use multipart uploads to upload parts concurrently with bounded
 parallelism.
 

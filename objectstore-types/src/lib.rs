@@ -22,6 +22,12 @@
 //! into hierarchical namespaces and double as the authorization boundary checked
 //! against JWT claims.
 //!
+//! ## Multipart
+//!
+//! The [`multipart`] module defines the request and response types for the
+//! multipart upload protocol, which splits large objects into independently
+//! uploaded parts that are assembled server-side on completion.
+//!
 //! ## Auth
 //!
 //! The [`auth`] module defines [`Permission`](auth::Permission), the set of
