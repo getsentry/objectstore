@@ -63,7 +63,7 @@ const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 /// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
 const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
 /// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {

@@ -136,7 +136,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// reconnection, resulting in increased latency for those requests.
 const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// Permission scopes required for accessing the BigTable data API.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"];
 
@@ -1441,7 +1441,7 @@ mod tests {
     async fn test_tti_bump() -> Result<()> {
         let backend = create_test_backend().await?;
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
@@ -1449,7 +1449,7 @@ mod tests {
 
         // Pass a backdated `now` so the written expiry is inside the bump window:
         // expire_at = past_now + tti = now - TTI_DEBOUNCE - 60s (stale but not yet expired).
-        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_secs(60);
+        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_mins(1);
 
         // Sub-sequence 1: get_object triggers bump (loaded=true path).
         let id1 = make_id();
@@ -1494,7 +1494,7 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
@@ -1734,7 +1734,7 @@ mod tests {
 
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
+        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy,
@@ -1971,7 +1971,7 @@ mod tests {
         // A future cell timestamp (now + TTL) is required so `expires_before` does not
         // immediately filter the row.
         let id = make_id();
-        let ttl = Duration::from_secs(2 * 24 * 3600);
+        let ttl = Duration::from_hours(2 * 24);
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
@@ -1992,11 +1992,11 @@ mod tests {
         let id = make_id();
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let tti = Duration::from_secs(2 * 24 * 3600); // must exceed TTI_DEBOUNCE (1 day)
+        let tti = Duration::from_hours(2 * 24); // must exceed TTI_DEBOUNCE (1 day)
 
         // Place time_expires just inside the bump window: past `now + tti - TTI_DEBOUNCE`
         // but still in the future so `expires_before(now)` does not filter the row.
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
         write_legacy_tombstone(
             &backend,
             &id,
@@ -2113,7 +2113,7 @@ mod tests {
         let new_lt_id = ObjectId::random(id.context().clone());
         let new_tombstone = Tombstone {
             target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
         };
         let committed = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))

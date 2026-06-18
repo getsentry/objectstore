@@ -518,7 +518,7 @@ mod tests {
         let metadata = Metadata::from_headers(&headers, prefix).unwrap();
         assert_eq!(
             metadata.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(metadata.custom.get("my-key").unwrap(), "my-value");
     }
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn to_headers_all_fields() {
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(1)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
             content_type: "text/html".into(),
@@ -595,7 +595,7 @@ mod tests {
     fn full_roundtrip_all_fields() {
         let prefix = "x-test-";
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(2)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
             content_type: "image/png".into(),
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn serde_roundtrip_all_fields() {
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
             content_type: "application/json".into(),
@@ -696,7 +696,7 @@ mod tests {
         let cases = [
             ExpirationPolicy::Manual,
             ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
         ];
 
         for policy in cases {
@@ -719,8 +719,8 @@ mod tests {
         assert!(ExpirationPolicy::Manual.is_manual());
         assert!(!ExpirationPolicy::Manual.is_timeout());
 
-        let ttl = ExpirationPolicy::TimeToLive(Duration::from_secs(60));
-        assert_eq!(ttl.expires_in(), Some(Duration::from_secs(60)));
+        let ttl = ExpirationPolicy::TimeToLive(Duration::from_mins(1));
+        assert_eq!(ttl.expires_in(), Some(Duration::from_mins(1)));
         assert!(ttl.is_timeout());
         assert!(!ttl.is_manual());
 

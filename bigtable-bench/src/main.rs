@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
             ]),
         };
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ..Metadata::default()
         };
 

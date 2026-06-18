@@ -214,14 +214,14 @@ mod tests {
     #[test]
     fn unconfigured_usecase_allows_ttl() {
         let usecases = UseCases::default();
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
         usecases.validate("anything", &metadata).unwrap();
     }
 
     #[test]
     fn unconfigured_usecase_allows_tti() {
         let usecases = UseCases::default();
-        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
         usecases.validate("anything", &metadata).unwrap();
     }
 
@@ -268,7 +268,7 @@ mod tests {
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
         let err = usecases.validate("test", &metadata).unwrap_err();
         assert!(matches!(err, UseCaseError::PolicyNotAllowed { .. }));
     }
@@ -279,13 +279,13 @@ mod tests {
             expiration: ExpirationConfig {
                 ttl: DurationPolicyConfig {
                     allowed: true,
-                    max: Some(Duration::from_secs(7200)),
+                    max: Some(Duration::from_hours(2)),
                 },
                 ..ExpirationConfig::default()
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
         usecases.validate("test", &metadata).unwrap();
     }
 
@@ -295,13 +295,13 @@ mod tests {
             expiration: ExpirationConfig {
                 ttl: DurationPolicyConfig {
                     allowed: true,
-                    max: Some(Duration::from_secs(3600)),
+                    max: Some(Duration::from_hours(1)),
                 },
                 ..ExpirationConfig::default()
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
         usecases.validate("test", &metadata).unwrap();
     }
 
@@ -311,13 +311,13 @@ mod tests {
             expiration: ExpirationConfig {
                 ttl: DurationPolicyConfig {
                     allowed: true,
-                    max: Some(Duration::from_secs(3600)),
+                    max: Some(Duration::from_hours(1)),
                 },
                 ..ExpirationConfig::default()
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(7200)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(2)));
         let err = usecases.validate("test", &metadata).unwrap_err();
         assert!(matches!(err, UseCaseError::DurationExceeded { .. }));
     }
@@ -336,7 +336,7 @@ mod tests {
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
         let err = usecases.validate("test", &metadata).unwrap_err();
         assert!(matches!(err, UseCaseError::PolicyNotAllowed { .. }));
     }
@@ -347,13 +347,13 @@ mod tests {
             expiration: ExpirationConfig {
                 tti: DurationPolicyConfig {
                     allowed: true,
-                    max: Some(Duration::from_secs(7200)),
+                    max: Some(Duration::from_hours(2)),
                 },
                 ..ExpirationConfig::default()
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
         usecases.validate("test", &metadata).unwrap();
     }
 
@@ -363,13 +363,13 @@ mod tests {
             expiration: ExpirationConfig {
                 tti: DurationPolicyConfig {
                     allowed: true,
-                    max: Some(Duration::from_secs(3600)),
+                    max: Some(Duration::from_hours(1)),
                 },
                 ..ExpirationConfig::default()
             },
         });
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(2)));
         let err = usecases.validate("test", &metadata).unwrap_err();
         assert!(matches!(err, UseCaseError::DurationExceeded { .. }));
     }
@@ -391,7 +391,7 @@ mod tests {
         let metadata = make_metadata(ExpirationPolicy::Manual);
         usecases.validate("test", &metadata).unwrap();
 
-        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)));
+        let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
         usecases.validate("test", &metadata).unwrap();
     }
 }
