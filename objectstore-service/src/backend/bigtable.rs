@@ -1019,6 +1019,7 @@ impl HighVolumeBackend for BigTableBackend {
                 let mut metadata = metadata;
                 let payload = Bytes::from(payload);
                 if metadata.size.is_none() {
+                    // If object size wasn't written into the metadata, re-compute it now
                     metadata.size = Some(payload.len());
                 }
 
@@ -1238,10 +1239,7 @@ fn apply_range(payload: Bytes, range: Option<ByteRange>) -> Result<(Option<Conte
         .resolve(total)
         .ok_or(Error::RangeNotSatisfiable { total })?;
 
-    let start = content_range.start as usize;
-    let end = content_range.end as usize + 1;
-    let sliced = payload.slice(start..end);
-
+    let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
     Ok((Some(content_range), sliced))
 }
 
