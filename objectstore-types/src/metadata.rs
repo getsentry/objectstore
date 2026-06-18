@@ -724,8 +724,8 @@ mod tests {
         assert!(ttl.is_timeout());
         assert!(!ttl.is_manual());
 
-        let tti = ExpirationPolicy::TimeToIdle(Duration::from_secs(120));
-        assert_eq!(tti.expires_in(), Some(Duration::from_secs(120)));
+        let tti = ExpirationPolicy::TimeToIdle(Duration::from_mins(2));
+        assert_eq!(tti.expires_in(), Some(Duration::from_mins(2)));
         assert!(tti.is_timeout());
         assert!(!tti.is_manual());
     }
