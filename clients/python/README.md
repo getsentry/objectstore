@@ -118,7 +118,7 @@ chunks = [b"part1", b"part2", b"part3", b"part4"]
 
 def upload_part(part_number: int, data: bytes):
     compressed = compressor.compress(data)
-    return upload.upload_part(
+    return upload.put_part(
         compressed, part_number=part_number, content_length=len(compressed)
     )
 

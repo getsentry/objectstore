@@ -22,12 +22,14 @@ All object operations live under the `/v1/` prefix:
 
 | Method    | Path                                                         | Description                          |
 |-----------|--------------------------------------------------------------|--------------------------------------|
-| `POST`    | `/v1/objects:multipart:initiate/{usecase}/{scopes}/`         | Initiate upload (server-generated key) |
-| `PUT`     | `/v1/objects:multipart:initiate/{usecase}/{scopes}/{key}`    | Initiate upload (user-provided key)  |
+| `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
+| `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
 | `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | Upload a part (`uploadId`, `partNumber` query params) |
 | `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | List uploaded parts (`uploadId` query param) |
 | `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{key}`    | Complete upload (`uploadId` query param) |
 | `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{key}`             | Abort upload (`uploadId` query param) |
+
+The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
 
 The complete endpoint returns `200 OK` immediately, with a streaming body that
 will contain the error (if any) as JSON. Whitespace is sent in the streaming body
