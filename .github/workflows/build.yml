@@ -194,5 +194,5 @@ jobs:
           docker load --input /tmp/objectstore-amd64.tar
           docker run --rm amd64 version > /tmp/release-name
 
-          gsutil -m cp /tmp/release-name \
+          gcloud storage cp --no-clobber /tmp/release-name \
             "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/$GITHUB_SHA/"
