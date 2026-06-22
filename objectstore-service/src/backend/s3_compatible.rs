@@ -14,7 +14,7 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`S3CompatibleBackend`].
 ///
@@ -172,10 +172,10 @@ where
         if let Some(r) = range {
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
-        let response = builder.send().await.map_err(|cause| Error::Reqwest {
-            context: "S3: failed to send request".to_string(),
-            cause,
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|cause| Error::reqwest("S3: failed to send request", cause))?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -201,13 +201,11 @@ where
 
         let response = response
             .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to get object".to_string(),
-                cause,
-            })?;
+            .map_err(|cause| Error::reqwest("S3: failed to get object", cause))?;
 
         let headers = response.headers();
-        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)
+            .map_err(|cause| Error::metadata("S3: failed to parse object metadata", cause))?;
 
         let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
             let range = headers
@@ -259,17 +257,23 @@ where
                 format!("/{}/{}", self.bucket, id.as_storage_path()),
             )
             .header("x-goog-metadata-directive", "REPLACE")
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX).map_err(|cause| {
+                    Error::metadata(
+                        "S3: failed to serialize object metadata for TTI update",
+                        cause,
+                    )
+                })?,
+            )
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send TTI update request".to_string(),
-                cause,
-            })?
+            .map_err(|cause| Error::reqwest("S3: failed to send TTI update request", cause))?
             .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to update expiration time for object with TTI".to_string(),
-                cause,
+            .map_err(|cause| {
+                Error::reqwest(
+                    "S3: failed to update expiration time for object with TTI",
+                    cause,
+                )
             })?;
 
         Ok(())
@@ -314,18 +318,16 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX).map_err(|cause| {
+                    Error::metadata("S3: failed to serialize object metadata for upload", cause)
+                })?,
+            )
             .body(Body::wrap_stream(stream))
             .send()
             .await
             .and_then(|response| response.error_for_status())
-            .map_err(|cause| match stream::unpack_client_error(&cause) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::Reqwest {
-                    context: "S3: failed to put object".to_string(),
-                    cause,
-                },
-            })?;
+            .map_err(|cause| Error::reqwest("S3: failed to put object", cause))?;
 
         Ok(())
     }
@@ -359,20 +361,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send delete request".to_string(),
-                cause,
-            })?;
+            .map_err(|cause| Error::reqwest("S3: failed to send delete request", cause))?;
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
             response
                 .error_for_status()
-                .map_err(|cause| Error::Reqwest {
-                    context: "S3: failed to delete object".to_string(),
-                    cause,
-                })?;
+                .map_err(|cause| Error::reqwest("S3: failed to delete object", cause))?;
         }
 
         Ok(())

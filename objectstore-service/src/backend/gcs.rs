@@ -26,7 +26,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
 ///
@@ -184,13 +184,28 @@ impl GcsObject {
             .metadata
             .remove(&GcsMetaKey::Expiration)
             .map(|s| s.parse())
-            .transpose()?
+            .transpose()
+            .map_err(|cause| {
+                Error::metadata(
+                    "GCS: failed to parse expiration policy from object metadata",
+                    cause,
+                )
+            })?
             .unwrap_or_default();
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
         let content_type = self.content_type;
-        let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
+        let compression = self
+            .content_encoding
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|cause| {
+                Error::metadata(
+                    "GCS: failed to parse compression from object metadata",
+                    cause,
+                )
+            })?;
         let size = self
             .size
             .map(|size| size.parse())
@@ -362,12 +377,15 @@ fn insert_gcs_meta_header(
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
 fn is_retryable(error: &Error) -> bool {
-    let Error::Reqwest { cause, .. } = error else {
+    let Error::Reqwest(error) = error else {
         return false;
     };
+    let cause = error.cause();
+
     if cause.is_timeout() || cause.is_connect() || cause.is_request() {
         return true;
     }
+
     let Some(status) = cause.status() else {
         return false;
     };
@@ -616,10 +634,8 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
-        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata for GCS upload".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(&gcs_metadata)
+            .map_err(|cause| Error::serde("GCS: failed to serialize metadata", cause))?;
 
         let multipart = multipart::Form::new()
             .part(
@@ -650,10 +666,7 @@ impl Backend for GcsBackend {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::reqwest("GCS: upload object", e),
-            })?;
+            .map_err(|e| Error::reqwest("GCS: upload object", e))?;
 
         Ok(())
     }

@@ -175,6 +175,11 @@ The service applies backpressure to protect backends from overload. Rather than
 queueing work when capacity is exhausted, the service rejects operations
 immediately so the caller can shed load or retry.
 
+# Error Classification
+
+The service error type exposes a coarse [`ErrorKind`](error::ErrorKind) so API
+layers can map failures without matching every specific variant.
+
 ## Concurrency Limit
 
 A semaphore caps the total number of in-flight backend operations across all
