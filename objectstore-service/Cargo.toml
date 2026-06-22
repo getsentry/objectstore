@@ -12,32 +12,27 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-base64 = "0.22"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
-chrono = "0.4"
+base64 = { workspace = true }
+bigtable_rs = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
 futures-util = { workspace = true }
-gcp_auth = "0.12.3"
+gcp_auth = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
-quick-xml = { version = "0.38.4", features = ["serialize"] }
+quick-xml = { workspace = true, features = ["serialize"] }
 regex = { workspace = true }
-reqwest = { workspace = true, features = [
-    "hickory-dns",
-    "stream",
-    "multipart",
-    "json",
-] }
+reqwest = { workspace = true, features = ["charset", "http2", "hickory-dns", "json", "multipart", "native-tls-no-alpn", "stream", "system-proxy"] }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
-tonic = { version = "0.14.5", default-features = false }
+tokio-util = { workspace = true, features = ["io", "rt"] }
+tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
@@ -45,4 +40,4 @@ uuid = { workspace = true, features = ["v7"] }
 futures = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-zstd = "0.13"
+zstd = { workspace = true }

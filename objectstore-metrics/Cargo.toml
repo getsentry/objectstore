@@ -10,8 +10,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-metrics = "0.24.3"
-metrics-exporter-dogstatsd = "0.9.6"
+metrics = { workspace = true }
+metrics-exporter-dogstatsd = { workspace = true }
 objectstore-log = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
