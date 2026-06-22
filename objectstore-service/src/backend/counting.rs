@@ -30,28 +30,12 @@ use crate::multipart::{
 };
 use crate::stream::ClientStream;
 
-/// Converts an objectstore `usecase` into the `app_feature` value used by our COGS pipelines.
-fn usecase_to_appfeature(usecase: &str) -> &'static str {
-    // TODO: Flesh out this mapping
-    match usecase {
-        "attachments" => "attachments",
-        "preprod" => "preprod",
-        _ => {
-            objectstore_log::warn!(?usecase, "COGS: Can't convert usecase to app_feature");
-            "shared"
-        }
-    }
-}
-
 /// Increments `cogs.usage` by one operation for the given `usecase`.
 ///
-/// Under the hood, `usecase` is converted to the appropriate `app_feature` value expected in our
-/// COGS pipeline.
+/// Under the hood, the `usecase` is used as the `app_feature`. This allows to identify distinct
+/// products and map them in the for the COGs pipeline.
 fn count(usecase: &str) {
-    objectstore_metrics::count!(
-        "cogs.usage" += 1,
-        app_feature = usecase_to_appfeature(usecase),
-    );
+    objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_owned());
 }
 
 /// A [`Backend`] decorator that counts each operation performed for COGS. Also implements
