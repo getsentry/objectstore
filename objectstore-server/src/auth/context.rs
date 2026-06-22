@@ -243,7 +243,7 @@ mod tests {
     fn test_from_encoded_jwt_basic() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, &TEST_EDDSA_PRIVKEY, None);
+        let encoded_token = sign_token(&claims, TEST_EDDSA_PRIVKEY, None);
 
         // Create test config with max permissions
         let test_config = test_key_config(max_permission());
@@ -261,7 +261,7 @@ mod tests {
     fn test_from_encoded_jwt_max_permissions_limit() -> Result<(), AuthError> {
         // Create a token with max permissions
         let claims = sample_claims("123", "456", "attachments", max_permission());
-        let encoded_token = sign_token(&claims, &TEST_EDDSA_PRIVKEY, None);
+        let encoded_token = sign_token(&claims, TEST_EDDSA_PRIVKEY, None);
 
         // Assign read-only permissions to the signing key in config
         let ro_permission = HashSet::from([Permission::ObjectRead]);
@@ -316,7 +316,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let claims = sample_claims("123", "456", "attachments", max_permission());
         let encoded_token = sign_token(
             &claims,
-            &TEST_EDDSA_PRIVKEY,
+            TEST_EDDSA_PRIVKEY,
             Some(jsonwebtoken::get_current_timestamp() - 100),
         );
 
