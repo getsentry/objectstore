@@ -78,8 +78,8 @@ serde_yaml = "0.9.34-deprecated"
 sketches-ddsketch = "0.3.1"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tikv-jemalloc-ctl = "0.7.0"
 tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "override_allocator_on_supported_platforms"] }
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tokio = "1.52.3"
 tokio-util = "0.7.18"
 tonic = { version = "0.14.6", default-features = false }

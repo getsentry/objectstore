@@ -36,32 +36,15 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-no-alpn"] }
 rustls = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
-sentry = { workspace = true, features = [
-    "tower-axum-matched-path",
-    "tracing",
-    "logs",
-] }
+sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "logs"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true, features = ["stats"] }
-tokio = { workspace = true, features = [
-    "fs",
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "signal",
-    "sync",
-    "time",
-] }
+tikv-jemalloc-ctl = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
-tower-http = { workspace = true, features = [
-    "catch-panic",
-    "metrics",
-    "set-header",
-    "trace",
-] }
+tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }

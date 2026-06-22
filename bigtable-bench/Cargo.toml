@@ -14,7 +14,6 @@ anyhow = { workspace = true }
 argh = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-futures-util = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
