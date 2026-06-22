@@ -266,11 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_usecase_falls_back_to_shared() {
+    fn new_usecase_is_app_feature() {
         let captured = capture(async {
             let backend = CountingBackend::new(Box::new(InMemoryBackend::new("in-memory")));
             backend
-                .get_object(&object_id("unmapped"), None)
+                .get_object(&object_id("new_usecase"), None)
                 .await
                 .unwrap();
         });
@@ -278,7 +278,7 @@ mod tests {
         assert!(
             captured
                 .iter()
-                .any(|m| m == "cogs.usage:+1|c|#app_feature:shared"),
+                .any(|m| m == "cogs.usage:+1|c|#app_feature:new_usecase"),
             "captured: {captured:?}"
         );
     }
