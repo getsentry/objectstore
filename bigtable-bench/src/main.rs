@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use argh::FromArgs;
 use bytesize::ByteSize;
+use rand::RngExt;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move {
                 let _permit = permit;
 
-                let mut rng = SmallRng::from_os_rng();
+                let mut rng: SmallRng = rand::make_rng();
                 let object_size = (size_dist.sample(&mut rng) as u64).min(MAX_OBJECT_SIZE) as usize;
                 let mut buf = vec![0u8; object_size];
                 rng.fill(&mut buf[..]);

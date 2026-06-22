@@ -16,7 +16,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
-rand = { workspace = true, features = ["small_rng"] }
+rand = { workspace = true }
 rand_distr = { workspace = true }
 rustls = { workspace = true }
 sketches-ddsketch = { workspace = true }

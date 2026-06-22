@@ -7,7 +7,7 @@ use std::{fmt, io, task};
 
 use objectstore_client::Usecase;
 use rand::rngs::SmallRng;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Distribution, LogNormal, Zipf};
 use serde::Deserialize;
