@@ -12,7 +12,6 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
-use objectstore_types::metadata::format_content_disposition;
 use percent_encoding::NON_ALPHANUMERIC;
 
 use crate::auth::AuthAwareService;
@@ -195,24 +194,15 @@ async fn convert_to_part(
                 })
             });
             match metadata_headers {
-                Ok(mut headers) => {
-                    if let Some(Ok(val)) = metadata
-                        .filename
-                        .as_deref()
-                        .map(|f| format_content_disposition(f).parse())
-                    {
-                        headers.insert(http::header::CONTENT_DISPOSITION, val);
-                    }
-                    create_success_part(
-                        idx,
-                        &key,
-                        "head",
-                        StatusCode::NO_CONTENT,
-                        None,
-                        Bytes::new(),
-                        Some(headers),
-                    )
-                }
+                Ok(headers) => create_success_part(
+                    idx,
+                    &key,
+                    "head",
+                    StatusCode::NO_CONTENT,
+                    None,
+                    Bytes::new(),
+                    Some(headers),
+                ),
                 Err(e) => create_error_part(idx, &e),
             }
         }
