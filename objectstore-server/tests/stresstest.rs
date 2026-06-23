@@ -44,7 +44,7 @@ async fn test_basic() {
         .expect("Failed to spawn subprocess");
 
     // Give the server time to start, or else stresstest might fail to connect.
-    std::thread::sleep(Duration::from_secs(1));
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let remote = HttpRemote::new(&format!("http://{addr}"));
     let workload = Workload::builder("test")
