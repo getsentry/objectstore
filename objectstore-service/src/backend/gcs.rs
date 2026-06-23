@@ -9,7 +9,9 @@ use std::{fmt, io};
 use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
-use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::{
+    ExpirationPolicy, Metadata, format_content_disposition, parse_content_disposition,
+};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
 use reqwest::{
@@ -143,10 +145,7 @@ impl GcsObject {
             content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
-            content_disposition: metadata
-                .filename
-                .as_ref()
-                .map(|f| format!("attachment; filename=\"{}\"", f.replace('\"', "\\\""))),
+            content_disposition: metadata.filename.as_deref().map(format_content_disposition),
             custom_time: None,
             time_created: metadata.time_created,
             metadata: BTreeMap::new(),
@@ -199,7 +198,10 @@ impl GcsObject {
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
-        let filename = self.content_disposition.and_then(parse_content_disposition);
+        let filename = self
+            .content_disposition
+            .as_deref()
+            .and_then(parse_content_disposition);
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
@@ -347,16 +349,14 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     }
 
     if let Some(filename) = &metadata.filename {
-        let value = format!(
-            "attachment; filename=\"{}\"",
-            filename.replace('\"', "\\\"")
-        );
         headers.insert(
             header::CONTENT_DISPOSITION,
-            value.parse().map_err(|e| Error::Generic {
-                context: "GCS: invalid content-disposition header value".into(),
-                cause: Some(Box::new(e)),
-            })?,
+            format_content_disposition(filename)
+                .parse()
+                .map_err(|e| Error::Generic {
+                    context: "GCS: invalid content-disposition header value".into(),
+                    cause: Some(Box::new(e)),
+                })?,
         );
     }
 
@@ -384,17 +384,6 @@ fn insert_gcs_meta_header(
         })?,
     );
     Ok(())
-}
-
-/// Extracts the filename from a `Content-Disposition` header value.
-///
-/// Parses `attachment; filename="<name>"` and returns the unescaped filename.
-fn parse_content_disposition(value: String) -> Option<String> {
-    let value = value.strip_prefix("attachment;")?;
-    let value = value.trim();
-    let value = value.strip_prefix("filename=\"")?;
-    let value = value.strip_suffix('"')?;
-    Some(value.replace("\\\"", "\""))
 }
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.

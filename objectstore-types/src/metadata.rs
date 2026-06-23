@@ -404,6 +404,24 @@ impl Metadata {
     }
 }
 
+/// Formats a `Content-Disposition: attachment` header value for the given filename.
+///
+/// Escapes `\` and `"` in the filename per RFC 6266 quoted-string rules.
+pub fn format_content_disposition(filename: &str) -> String {
+    let escaped = filename.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("attachment; filename=\"{escaped}\"")
+}
+
+/// Extracts the filename from a `Content-Disposition: attachment` header value.
+///
+/// Inverse of [`format_content_disposition`].
+pub fn parse_content_disposition(value: &str) -> Option<String> {
+    let value = value.strip_prefix("attachment;")?.trim();
+    let value = value.strip_prefix("filename=\"")?;
+    let value = value.strip_suffix('"')?;
+    Some(value.replace("\\\"", "\"").replace("\\\\", "\\"))
+}
+
 /// Validates that `content_type` is a valid [IANA Media
 /// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
 fn validate_content_type(content_type: &str) -> Result<(), Error> {
@@ -525,6 +543,29 @@ mod tests {
         let headers = metadata.to_headers("").unwrap();
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.filename, metadata.filename);
+    }
+
+    #[test]
+    fn content_disposition_roundtrip() {
+        for name in [
+            "report.pdf",
+            "file with spaces.txt",
+            "has\"quote.txt",
+            "has\\backslash.txt",
+            "tricky\\\"combo.txt",
+        ] {
+            let formatted = format_content_disposition(name);
+            let parsed = parse_content_disposition(&formatted).unwrap();
+            assert_eq!(parsed, name, "roundtrip failed for: {name}");
+        }
+    }
+
+    #[test]
+    fn content_disposition_escapes_injection_attempt() {
+        let malicious = "evil\\\"; filename*=UTF-8''pwned";
+        let formatted = format_content_disposition(malicious);
+        let parsed = parse_content_disposition(&formatted).unwrap();
+        assert_eq!(parsed, malicious);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{Metadata, format_content_disposition};
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
@@ -132,14 +132,14 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 }
 
 fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    if let Some(filename) = &metadata.filename {
-        let escaped = filename.replace('\"', "\\\"");
-        let value = format!("attachment; filename=\"{escaped}\"");
-        if let Ok(val) = value.parse() {
-            response
-                .headers_mut()
-                .insert(http::header::CONTENT_DISPOSITION, val);
-        }
+    if let Some(Ok(val)) = metadata
+        .filename
+        .as_deref()
+        .map(|f| format_content_disposition(f).parse())
+    {
+        response
+            .headers_mut()
+            .insert(http::header::CONTENT_DISPOSITION, val);
     }
 }
 
