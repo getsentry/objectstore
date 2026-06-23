@@ -1,9 +1,16 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::bail;
 use bytesize::ByteSize;
 use serde::Deserialize;
 use stresstest::workload::{self, WorkloadMode};
+
+#[derive(Debug, Deserialize)]
+pub struct Auth {
+    pub kid: String,
+    pub key_path: PathBuf,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -16,6 +23,9 @@ pub struct Config {
 
     #[serde(default)]
     pub cleanup: bool,
+
+    #[serde(default)]
+    pub auth: Option<Auth>,
 }
 
 #[derive(Debug, Deserialize)]
