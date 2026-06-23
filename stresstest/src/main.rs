@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use argh::FromArgs;
+use objectstore_client::{SecretKey, TokenGenerator};
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
@@ -46,7 +47,19 @@ async fn main() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
-    let remote = HttpRemote::new(&config.remote);
+    let token = if let Some(auth) = &config.auth {
+        let key = std::fs::read_to_string(&auth.key_path)
+            .with_context(|| format!("failed to read private key from {:?}", auth.key_path))?;
+        let generator = TokenGenerator::new(SecretKey {
+            kid: auth.kid.clone(),
+            secret_key: key,
+        })?;
+        Some(generator)
+    } else {
+        None
+    };
+
+    let remote = HttpRemote::new(&config.remote, token);
     let mut stresstest = Stresstest::new(remote)
         .duration(config.duration)
         .cleanup(config.cleanup);
