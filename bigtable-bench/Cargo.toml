@@ -20,7 +20,9 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 rustls = { workspace = true }
 sketches-ddsketch = { workspace = true }
-tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "signal"] }
 tokio-util = { workspace = true }
 yansi = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true }
