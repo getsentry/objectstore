@@ -57,10 +57,7 @@ pub fn make_http_span(request: &Request) -> tracing::Span {
         client_addr = tracing::field::Empty,
     );
 
-    if let Some(ConnectInfo(addr)) = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-    {
+    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
         span.record("client_addr", tracing::field::display(addr.ip()));
     }
 

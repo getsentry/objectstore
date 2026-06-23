@@ -273,14 +273,14 @@ async fn fails_with_insufficient_auth_token_perms() {
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let put_result = session.put("initial body").send().await;
-    println!("{:?}", put_result);
+    println!("{put_result:?}");
     match put_result {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
 
     let delete_result = session.delete("some-key").send().await;
-    println!("{:?}", delete_result);
+    println!("{delete_result:?}");
     match delete_result {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
@@ -343,7 +343,7 @@ async fn batch_operations() {
         .iter()
         .map(|r| match r {
             OperationResult::Put(key, Ok(_)) => key.clone(),
-            other => panic!("Expected Put result, got: {:?}", other),
+            other => panic!("Expected Put result, got: {other:?}"),
         })
         .collect();
     keys.sort();
@@ -383,7 +383,7 @@ async fn batch_operations() {
             OperationResult::Put(key, Ok(_)) => {
                 puts.insert(key);
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
     }
 
@@ -447,7 +447,7 @@ async fn batch_insert_without_key() {
 
     let server_key = match &results[0] {
         OperationResult::Put(key, Ok(_)) => key.clone(),
-        other => panic!("Expected Put result, got: {:?}", other),
+        other => panic!("Expected Put result, got: {other:?}"),
     };
 
     // The server should have assigned a non-empty key
@@ -505,7 +505,7 @@ async fn batch_partial_failures() {
             OperationResult::Delete(key, inner) => {
                 deletes.insert(key, inner);
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
     }
 
@@ -519,14 +519,14 @@ async fn batch_partial_failures() {
     let put_result = puts.remove("write-key").expect("missing put result");
     match put_result {
         Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
-        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+        other => panic!("Expected OperationFailure(403), got: {other:?}"),
     }
 
     // DELETE should fail with 403 (no delete permission)
     let delete_result = deletes.remove("delete-key").expect("missing delete result");
     match delete_result {
         Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
-        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+        other => panic!("Expected OperationFailure(403), got: {other:?}"),
     }
 
     // GETs after the failures should still succeed
@@ -591,7 +591,7 @@ async fn batch_put_files() {
         .iter()
         .map(|r| match r {
             OperationResult::Put(key, Ok(_)) => key.clone(),
-            other => panic!("Expected successful Put result, got: {:?}", other),
+            other => panic!("Expected successful Put result, got: {other:?}"),
         })
         .collect();
     keys.sort();
@@ -746,7 +746,7 @@ async fn batch_head_operations() {
             OperationResult::Head(key, inner) => {
                 heads.insert(key, inner);
             }
-            other => panic!("Expected Head result, got: {:?}", other),
+            other => panic!("Expected Head result, got: {other:?}"),
         }
     }
 

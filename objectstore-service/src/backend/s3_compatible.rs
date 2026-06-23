@@ -7,7 +7,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
@@ -128,8 +128,7 @@ fn metadata_to_gcs_headers(
     let mut headers = metadata.to_headers(prefix)?;
     // GCS custom-time for lifecycle expiration
     if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at =
-            humantime::format_rfc3339_seconds(std::time::SystemTime::now() + expires_in);
+        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -165,7 +164,7 @@ where
         method: Method,
         id: &ObjectId,
         range: Option<ByteRange>,
-    ) -> Result<Option<(Metadata, Option<ContentRange>, reqwest::Response)>> {
+    ) -> Result<Option<(Metadata, Option<ContentRange>, Response)>> {
         let object_url = self.object_url(id);
 
         let mut builder = self.request(method, &object_url).await?;
@@ -192,7 +191,7 @@ where
                 Some(total) => return Err(Error::RangeNotSatisfiable { total }),
                 None => {
                     return Err(Error::Generic {
-                        context: format!("S3: 416 response with invalid Content-Range: {:?}", raw),
+                        context: format!("S3: 416 response with invalid Content-Range: {raw:?}"),
                         cause: None,
                     });
                 }
@@ -318,7 +317,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .and_then(|response| response.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|cause| match stream::unpack_client_error(&cause) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::Reqwest {

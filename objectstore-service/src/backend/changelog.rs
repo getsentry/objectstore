@@ -301,7 +301,7 @@ impl ChangeLog for NoopChangeLog {
 }
 
 /// Phase of a multi-step storage change.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ChangePhase {
     /// The change was recovered from changelog and the phase is unknown.
     Recovered,

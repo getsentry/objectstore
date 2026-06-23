@@ -352,9 +352,7 @@ mod tests {
     }
 
     // Wraps a plain `Vec<Operation>` as an indexed `Ok`-stream for `execute`.
-    fn indexed_ok(
-        ops: Vec<Operation>,
-    ) -> impl futures_util::Stream<Item = (usize, Result<Operation, Error>)> {
+    fn indexed_ok(ops: Vec<Operation>) -> impl Stream<Item = (usize, Result<Operation, Error>)> {
         futures_util::stream::iter(ops.into_iter().enumerate().map(|(i, op)| (i, Ok(op))))
     }
 
@@ -578,8 +576,7 @@ mod tests {
         for (_, result) in &outcomes {
             assert!(
                 matches!(result, Ok(OpResponse::Inserted { .. })),
-                "unexpected result: {:?}",
-                result
+                "unexpected result: {result:?}",
             );
         }
     }

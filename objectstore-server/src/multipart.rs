@@ -55,7 +55,7 @@ where
     T: Into<Part> + Send,
 {
     fn into_multipart_response(self, boundary: u128) -> Response {
-        let boundary_str = format!("os-boundary-{:032x}", boundary);
+        let boundary_str = format!("os-boundary-{boundary:032x}");
         let boundary = {
             let mut bytes = BytesMut::with_capacity(boundary_str.len() + 4);
             bytes.put(&b"--"[..]);
@@ -72,23 +72,22 @@ where
                 .expect("valid header value, as we just defined it as \"os-boundary-X\" where X are hex digits"),
         );
 
-        let body: BoxStream<Result<bytes::Bytes, std::convert::Infallible>> =
-            async_stream::try_stream! {
-                let items = self;
-                futures::pin_mut!(items);
-                while let Some(item) = items.next().await {
-                    yield boundary.clone();
-                    let part = item.into();
-                    yield serialize_headers(part.headers);
-                    yield serialize_body(part.body);
-                }
-
-                let mut closing = BytesMut::with_capacity(boundary.len());
-                closing.put(boundary.slice(..boundary.len() - 2)); // don't take trailing \r\n
-                closing.put(&b"--"[..]);
-                yield closing.freeze();
+        let body: BoxStream<Result<Bytes, std::convert::Infallible>> = async_stream::try_stream! {
+            let items = self;
+            futures::pin_mut!(items);
+            while let Some(item) = items.next().await {
+                yield boundary.clone();
+                let part = item.into();
+                yield serialize_headers(part.headers);
+                yield serialize_body(part.body);
             }
-            .boxed();
+
+            let mut closing = BytesMut::with_capacity(boundary.len());
+            closing.put(boundary.slice(..boundary.len() - 2)); // don't take trailing \r\n
+            closing.put(&b"--"[..]);
+            yield closing.freeze();
+        }
+        .boxed();
 
         (headers, Body::from_stream(body)).into_response()
     }
@@ -143,8 +142,8 @@ mod tests {
         let boundary: u128 = 0xdeadbeef;
         let response = futures::stream::iter(parts).into_multipart_response(boundary);
 
-        let boundary = format!("os-boundary-{:032x}", boundary);
-        let content_type_str = format!("multipart/form-data; boundary=\"{}\"", boundary);
+        let boundary = format!("os-boundary-{boundary:032x}");
+        let content_type_str = format!("multipart/form-data; boundary=\"{boundary}\"");
         assert_eq!(
             response
                 .headers()

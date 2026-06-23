@@ -444,9 +444,7 @@ impl OperationResults {
     ///
     /// Returns an error containing an iterator of all individual errors for the operations
     /// that failed, if any.
-    pub async fn error_for_failures(
-        mut self,
-    ) -> crate::Result<(), impl Iterator<Item = crate::Error>> {
+    pub async fn error_for_failures(mut self) -> crate::Result<(), impl Iterator<Item = Error>> {
         let mut errs = Vec::new();
         while let Some(res) = self.next().await {
             match res {
@@ -492,7 +490,7 @@ async fn send_batch(
     let num_operations = operations.len();
 
     let mut form = reqwest::multipart::Form::new();
-    for op in operations.into_iter() {
+    for op in operations {
         let part = op.into_part().await?;
         form = form.part("part", part);
     }

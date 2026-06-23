@@ -10,9 +10,9 @@ use crate::config::{AuthZ, AuthZVerificationKey};
 async fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
     let key_content = tokio::fs::read_to_string(filename)
         .await
-        .with_context(|| format!("reading key from {:?}", filename))?;
+        .with_context(|| format!("reading key from {filename:?}"))?;
     DecodingKey::from_ed_pem(key_content.as_bytes())
-        .with_context(|| format!("parsing key from {:?}", filename))
+        .with_context(|| format!("parsing key from {filename:?}"))
 }
 
 /// Configures the EdDSA public key(s) and permissions used to verify tokens from a single `kid`.
