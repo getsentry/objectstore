@@ -24,12 +24,12 @@ impl IntoResponse for ObjectRejection {
         match self {
             ObjectRejection::Path(rejection) => rejection.into_response(),
             ObjectRejection::Killswitched => (
-                axum::http::StatusCode::FORBIDDEN,
+                http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
             )
                 .into_response(),
             ObjectRejection::RateLimited => (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                http::StatusCode::TOO_MANY_REQUESTS,
                 "Object access is rate limited",
             )
                 .into_response(),
@@ -104,7 +104,7 @@ where
         .split(';')
         .map(|s| {
             let (key, value) = s
-                .split_once("=")
+                .split_once('=')
                 .ok_or_else(|| de::Error::custom("scope must be 'key=value'"))?;
 
             Scope::create(key, value).map_err(de::Error::custom)
@@ -276,7 +276,7 @@ mod tests {
             .with_state(state)
     }
 
-    async fn response_body(response: axum::http::Response<Body>) -> String {
+    async fn response_body(response: http::Response<Body>) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

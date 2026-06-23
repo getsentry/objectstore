@@ -469,7 +469,7 @@ impl Entry {
     pub fn expect_not_found(&self) {
         match self {
             Entry::NotFound => (),
-            _ => panic!("expected not found entry, got {:?}", self),
+            _ => panic!("expected not found entry, got {self:?}"),
         }
     }
 
@@ -477,7 +477,7 @@ impl Entry {
     pub fn expect_object(&self) -> (Metadata, Bytes) {
         match self {
             Entry::Object(metadata, bytes) => (metadata.clone(), bytes.clone()),
-            _ => panic!("expected object entry, got {:?}", self),
+            _ => panic!("expected object entry, got {self:?}"),
         }
     }
 
@@ -485,7 +485,7 @@ impl Entry {
     pub fn expect_tombstone(&self) -> Tombstone {
         match self {
             Entry::Tombstone(tombstone) => tombstone.clone(),
-            _ => panic!("expected tombstone entry, got {:?}", self),
+            _ => panic!("expected tombstone entry, got {self:?}"),
         }
     }
 }

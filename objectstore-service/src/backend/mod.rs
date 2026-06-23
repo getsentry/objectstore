@@ -100,7 +100,7 @@ pub enum HighVolumeStorageConfig {
 /// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
 async fn hv_from_config(
     config: HighVolumeStorageConfig,
-) -> anyhow::Result<Box<dyn common::HighVolumeBackend>> {
+) -> Result<Box<dyn common::HighVolumeBackend>> {
     Ok(match config {
         HighVolumeStorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
     })
@@ -124,7 +124,7 @@ pub enum MultipartUploadStorageConfig {
 /// Constructs a type-erased [`common::MultipartUploadBackend`] from the given config.
 async fn lt_from_config(
     config: MultipartUploadStorageConfig,
-) -> anyhow::Result<Box<dyn common::MultipartUploadBackend>> {
+) -> Result<Box<dyn common::MultipartUploadBackend>> {
     Ok(match config {
         MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
         MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),

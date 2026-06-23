@@ -58,7 +58,7 @@ const ENV_PREFIX: &str = "OS__";
 /// Newtype around `String` that may protect against accidental
 /// logging of secrets in our configuration struct. Use with
 /// [`secrecy::SecretBox`].
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigSecret(String);
 
 impl ConfigSecret {

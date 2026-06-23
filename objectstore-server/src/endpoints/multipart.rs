@@ -123,7 +123,7 @@ async fn upload_part(
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     let content_length = headers
-        .get(axum::http::header::CONTENT_LENGTH)
+        .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;

@@ -161,7 +161,7 @@ impl Usecase {
         Self {
             name: name.into(),
             compression: Some(Compression::Zstd),
-            expiration_policy: Default::default(),
+            expiration_policy: ExpirationPolicy::default(),
         }
     }
 
@@ -430,7 +430,7 @@ impl Session {
             .push("objects")
             .push(&self.scope.usecase.name)
             .push(&self.scope.scopes.as_api_path().to_string())
-            .extend(object_key.split("/"));
+            .extend(object_key.split('/'));
         drop(segments);
 
         url
@@ -486,7 +486,7 @@ impl Session {
             .push(&self.scope.usecase.name)
             .push(&self.scope.scopes.as_api_path().to_string());
         if let Some(object_key) = object_key.filter(|key| !key.is_empty()) {
-            segments.extend(object_key.split("/"));
+            segments.extend(object_key.split('/'));
         }
         drop(segments);
         if let Some(query_pairs) = query_pairs {

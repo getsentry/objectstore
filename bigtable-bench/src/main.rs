@@ -305,6 +305,6 @@ fn format_throughput(bytes_per_sec: f64) -> String {
     } else if bytes_per_sec >= 1e3 {
         format!("{:.2} kB/s", bytes_per_sec / 1e3)
     } else {
-        format!("{:.0} B/s", bytes_per_sec)
+        format!("{bytes_per_sec:.0} B/s")
     }
 }

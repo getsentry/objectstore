@@ -12,7 +12,9 @@ use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
+use reqwest::{
+    Body, IntoUrl, Method, RequestBuilder, Response, StatusCode, Url, header, multipart,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
@@ -209,8 +211,7 @@ impl GcsObject {
             } else {
                 return Err(Error::Generic {
                     context: format!(
-                        "GCS: unexpected built-in metadata key in object metadata: {}",
-                        key
+                        "GCS: unexpected built-in metadata key in object metadata: {key}"
                     ),
                     cause: None,
                 });
@@ -274,7 +275,7 @@ impl fmt::Display for GcsMetaKey {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for GcsMetaKey {
+impl<'de> Deserialize<'de> for GcsMetaKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -284,7 +285,7 @@ impl<'de> serde::Deserialize<'de> for GcsMetaKey {
     }
 }
 
-impl serde::Serialize for GcsMetaKey {
+impl Serialize for GcsMetaKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -577,7 +578,7 @@ impl GcsBackend {
                 .json(&CustomTimeRequest { custom_time })
                 .send()
                 .await
-                .and_then(|r| r.error_for_status())
+                .and_then(Response::error_for_status)
                 .map_err(|e| Error::reqwest("GCS: update custom time", e))?;
             Ok(())
         })
@@ -649,7 +650,7 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::reqwest("GCS: upload object", e),
@@ -692,8 +693,7 @@ impl Backend for GcsBackend {
                         None => {
                             return Err(Error::Generic {
                                 context: format!(
-                                    "GCS: 416 response with invalid Content-Range: {:?}",
-                                    raw
+                                    "GCS: 416 response with invalid Content-Range: {raw:?}"
                                 ),
                                 cause: None,
                             });
@@ -771,9 +771,9 @@ struct XmlInitiateMultipartUploadResponse {
 }
 
 impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
-    type Error = crate::error::Error;
+    type Error = Error;
 
-    fn try_from(r: XmlInitiateMultipartUploadResponse) -> crate::error::Result<Self> {
+    fn try_from(r: XmlInitiateMultipartUploadResponse) -> Result<Self> {
         Ok(UploadId::new(r.upload_id)?)
     }
 }
@@ -897,7 +897,7 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = builder
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| Error::reqwest("GCS: initiate multipart upload", e))?;
 
         let body = resp
@@ -943,7 +943,7 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = builder
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| Error::reqwest("GCS: upload part", e))?;
 
         let etag = resp
@@ -982,7 +982,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| Error::reqwest("GCS: list parts", e))?;
 
         let body = resp
@@ -1013,7 +1013,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
 
         Ok(())
@@ -1043,7 +1043,7 @@ impl MultipartUploadBackend for GcsBackend {
             .body(xml)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(Response::error_for_status)
             .map_err(|e| Error::reqwest("GCS: complete multipart upload", e))?;
 
         let body = resp

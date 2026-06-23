@@ -590,7 +590,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
@@ -662,15 +662,15 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
@@ -897,7 +897,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: "wrong-etag".into(),
                 }],
@@ -912,7 +912,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
@@ -946,7 +946,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(99).unwrap(),
                     etag: "whatever".into(),
                 }],
@@ -961,7 +961,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],

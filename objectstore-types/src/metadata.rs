@@ -70,18 +70,18 @@ pub enum Error {
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
 }
-impl From<http::header::InvalidHeaderValue> for Error {
-    fn from(err: http::header::InvalidHeaderValue) -> Self {
+impl From<header::InvalidHeaderValue> for Error {
+    fn from(err: header::InvalidHeaderValue) -> Self {
         Self::Header(Some(err.into()))
     }
 }
-impl From<http::header::InvalidHeaderName> for Error {
-    fn from(err: http::header::InvalidHeaderName) -> Self {
+impl From<header::InvalidHeaderName> for Error {
+    fn from(err: header::InvalidHeaderName) -> Self {
         Self::Header(Some(err.into()))
     }
 }
-impl From<http::header::ToStrError> for Error {
-    fn from(_err: http::header::ToStrError) -> Self {
+impl From<header::ToStrError> for Error {
+    fn from(_err: header::ToStrError) -> Self {
         // the error happens when converting a header value back to a `str`
         Self::Header(None)
     }

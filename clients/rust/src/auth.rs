@@ -125,7 +125,7 @@ impl TokenGenerator {
 
     /// Set the permissions that will be granted to tokens signed by this generator.
     pub fn permissions(mut self, permissions: &[Permission]) -> Self {
-        self.permissions = HashSet::from_iter(permissions.iter().cloned());
+        self.permissions = HashSet::from_iter(permissions.iter().copied());
         self
     }
 

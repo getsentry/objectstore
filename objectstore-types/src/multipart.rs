@@ -72,7 +72,7 @@ impl fmt::Display for UploadId {
 }
 
 impl<'de> Deserialize<'de> for UploadId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {

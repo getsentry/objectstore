@@ -196,7 +196,7 @@ pub trait HighVolumeBackend: Backend {
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tombstone {
     /// The [`ObjectId`] of the object in the long-term backend.
     ///

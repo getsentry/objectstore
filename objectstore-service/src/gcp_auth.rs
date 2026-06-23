@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl gcp_auth::TokenProvider for MockTokenProvider {
+    impl TokenProvider for MockTokenProvider {
         async fn token(&self, _scopes: &[&str]) -> Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
             let mut responses = self.responses.lock().expect("lock poisoned");
             responses

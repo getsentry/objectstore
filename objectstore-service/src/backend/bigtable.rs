@@ -1156,7 +1156,7 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
         })?
         .as_millis();
     (millis * 1000).try_into().map_err(|e| Error::Generic {
-        context: format!("failed to convert {}ms to i64 microseconds", millis),
+        context: format!("failed to convert {millis}ms to i64 microseconds"),
         cause: Some(Box::new(e)),
     })
 }

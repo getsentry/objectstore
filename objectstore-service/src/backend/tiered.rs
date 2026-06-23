@@ -959,7 +959,7 @@ mod tests {
         let payload = b"small payload".to_vec();
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
             .await
             .unwrap();
 
@@ -985,7 +985,7 @@ mod tests {
             content_type: "image/png".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             origin: Some("10.0.0.1".into()),
-            ..Default::default()
+            ..Metadata::default()
         };
 
         storage
@@ -1028,7 +1028,7 @@ mod tests {
         // First: insert a large object → creates tombstone in hv, payload in lt at lt_id
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Default::default(), stream::single(large_payload))
+            .put_object(&id, &Metadata::default(), stream::single(large_payload))
             .await
             .unwrap();
 
@@ -1038,7 +1038,7 @@ mod tests {
         // The CAS-swap puts the small object inline in HV and schedules background cleanup.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         storage
-            .put_object(&id, &Default::default(), stream::single(small_payload))
+            .put_object(&id, &Metadata::default(), stream::single(small_payload))
             .await
             .unwrap();
 
@@ -1059,14 +1059,14 @@ mod tests {
 
         let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Default::default(), stream::single(payload1))
+            .put_object(&id, &Metadata::default(), stream::single(payload1))
             .await
             .unwrap();
         let lt_id_1 = hv.get(&id).expect_tombstone().target;
 
         let payload2 = vec![0xBBu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Default::default(), stream::single(payload2.clone()))
+            .put_object(&id, &Metadata::default(), stream::single(payload2.clone()))
             .await
             .unwrap();
         let lt_id_2 = hv.get(&id).expect_tombstone().target;
@@ -1095,7 +1095,7 @@ mod tests {
         let id = make_id("delete-small");
 
         storage
-            .put_object(&id, &Default::default(), stream::single("tiny"))
+            .put_object(&id, &Metadata::default(), stream::single("tiny"))
             .await
             .unwrap();
 
@@ -1112,7 +1112,7 @@ mod tests {
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Metadata::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -1158,7 +1158,7 @@ mod tests {
         let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Metadata::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -1211,7 +1211,7 @@ mod tests {
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Metadata::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -1251,7 +1251,7 @@ mod tests {
         // Writing a small object over a tombstone should succeed even when CAS
         // conflicts — the other writer's write is accepted.
         storage
-            .put_object(&id, &Default::default(), stream::single("tiny"))
+            .put_object(&id, &Metadata::default(), stream::single("tiny"))
             .await
             .unwrap();
     }
@@ -1295,7 +1295,7 @@ mod tests {
         let id = make_id("orphan-test");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
         let result = storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Metadata::default(), stream::single(payload))
             .await;
 
         assert!(result.is_err());
@@ -1316,7 +1316,7 @@ mod tests {
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
         storage
-            .put_object(&id, &Default::default(), stream::single(payload))
+            .put_object(&id, &Metadata::default(), stream::single(payload))
             .await
             .unwrap();
 
@@ -1352,7 +1352,7 @@ mod tests {
         let payload = vec![0xABu8; 100];
 
         // Write the object under the LT id and a tombstone pointing to it from HV.
-        lt.put_object(&lt_id, &Default::default(), stream::single(payload.clone()))
+        lt.put_object(&lt_id, &Metadata::default(), stream::single(payload.clone()))
             .await
             .unwrap();
         let tombstone = Tombstone {
@@ -1387,12 +1387,12 @@ mod tests {
         let chunk_size = 512 * 1024; // 512 KiB per chunk
         let chunk_count = 4; // 4 × 512 KiB = 2 MiB total
         let stream: ClientStream = futures_util::stream::iter(
-            (0..chunk_count).map(move |i| Ok(bytes::Bytes::from(vec![i as u8; chunk_size]))),
+            (0..chunk_count).map(move |i| Ok(Bytes::from(vec![i as u8; chunk_size]))),
         )
         .boxed();
 
         storage
-            .put_object(&id, &Default::default(), stream)
+            .put_object(&id, &Metadata::default(), stream)
             .await
             .unwrap();
 
@@ -1426,7 +1426,7 @@ mod tests {
         // First put: establishes tombstone
         let payload = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
             .await
             .unwrap();
         let tombstone1 = hv.get(&id).expect_tombstone().target;
@@ -1438,7 +1438,7 @@ mod tests {
             Box::new(log.clone()),
         );
         broken_storage
-            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
             .await
             .unwrap_err(); // must fail
         let tombstone2 = hv.get(&id).expect_tombstone().target;
@@ -1458,14 +1458,14 @@ mod tests {
         // Create a fresh large object
         let id = make_id("obj2");
         storage
-            .put_object(&id, &Default::default(), stream::single(payload.clone()))
+            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
             .await
             .unwrap();
         let tombstone3 = hv.get(&id).expect_tombstone().target;
 
         // Overwrite it with a small object and check again for cleanup
         broken_storage
-            .put_object(&id, &Default::default(), stream::single(&b"small"[..]))
+            .put_object(&id, &Metadata::default(), stream::single(&b"small"[..]))
             .await
             .unwrap_err(); // must fail
         hv.get(&id).expect_object();
@@ -1625,7 +1625,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "application/octet-stream".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            ..Default::default()
+            ..Metadata::default()
         };
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB
 
@@ -1680,7 +1680,7 @@ mod tests {
         let id = make_id("multipart");
 
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -1761,7 +1761,7 @@ mod tests {
         let id = make_id("mp-abort");
 
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -1794,7 +1794,7 @@ mod tests {
         let id = make_id("mp-list");
 
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -1842,14 +1842,14 @@ mod tests {
         // Put a large object via the normal path.
         let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Default::default(), stream::single(payload1))
+            .put_object(&id, &Metadata::default(), stream::single(payload1))
             .await
             .unwrap();
         let old_lt_id = hv.get(&id).expect_tombstone().target;
 
         // Overwrite via multipart.
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -1959,7 +1959,7 @@ mod tests {
 
         let id = make_id("mp-orphan");
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -2074,7 +2074,7 @@ mod tests {
 
         let id = make_id("mp-retry");
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 
@@ -2210,7 +2210,7 @@ mod tests {
 
         let id = make_id("mp-retry-meta");
         let upload_id = storage
-            .initiate_multipart(&id, &Default::default())
+            .initiate_multipart(&id, &Metadata::default())
             .await
             .unwrap();
 

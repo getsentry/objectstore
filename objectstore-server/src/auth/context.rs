@@ -124,7 +124,7 @@ impl AuthContext {
             .claims
             .permissions
             .intersection(&key_config.max_permissions)
-            .cloned()
+            .copied()
             .collect();
 
         Ok(AuthContext {
