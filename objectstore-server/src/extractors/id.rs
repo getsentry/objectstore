@@ -221,7 +221,7 @@ mod tests {
     // --- Extractor integration tests ---
 
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use axum::Router;
     use axum::body::Body;
@@ -377,7 +377,7 @@ mod tests {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: Default::default(),
+                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -406,7 +406,7 @@ mod tests {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: Default::default(),
+                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -437,7 +437,7 @@ mod tests {
                 usecase: None,
                 scopes: BTreeMap::new(),
                 service: Some("test-*".into()),
-                service_matcher: Default::default(),
+                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };

@@ -395,7 +395,7 @@ mod tests {
             .insert_object(
                 make_context(),
                 None,
-                Default::default(),
+                Metadata::default(),
                 stream::single("auto-keyed"),
             )
             .await
@@ -412,7 +412,7 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("testing".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single("oh hai!"),
             )
             .await
@@ -438,7 +438,7 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("testing".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single("oh hai!"),
             )
             .await
@@ -480,7 +480,7 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("delete-cleanup-test".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single(payload),
             )
             .await

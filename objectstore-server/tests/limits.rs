@@ -4,6 +4,7 @@
 //! maximum object sizes, rate limiting, and killswitches.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -70,7 +71,7 @@ async fn test_killswitches() -> Result<()> {
             usecase: Some("blocked".to_string()),
             scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
             service: Some("test-*".to_string()),
-            service_matcher: Default::default(),
+            service_matcher: OnceLock::new(),
         }]),
         auth: AuthZ {
             enforce: false,

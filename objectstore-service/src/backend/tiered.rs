@@ -1352,9 +1352,13 @@ mod tests {
         let payload = vec![0xABu8; 100];
 
         // Write the object under the LT id and a tombstone pointing to it from HV.
-        lt.put_object(&lt_id, &Metadata::default(), stream::single(payload.clone()))
-            .await
-            .unwrap();
+        lt.put_object(
+            &lt_id,
+            &Metadata::default(),
+            stream::single(payload.clone()),
+        )
+        .await
+        .unwrap();
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,

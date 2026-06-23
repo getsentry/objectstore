@@ -139,7 +139,7 @@ impl WorkloadBuilder {
             start_time: None,
             totals: Totals::default(),
 
-            existing_files: Default::default(),
+            existing_files: Vec::new(),
         }
     }
 }
