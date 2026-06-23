@@ -127,6 +127,10 @@ struct GcsObject {
     )]
     pub time_created: Option<SystemTime>,
 
+    /// Content-Disposition of the object data, used to store [`Metadata::filename`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_disposition: Option<String>,
+
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
@@ -139,6 +143,10 @@ impl GcsObject {
             content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
+            content_disposition: metadata
+                .filename
+                .as_ref()
+                .map(|f| format!("attachment; filename=\"{}\"", f.replace('\"', "\\\""))),
             custom_time: None,
             time_created: metadata.time_created,
             metadata: BTreeMap::new(),
@@ -191,6 +199,8 @@ impl GcsObject {
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
 
+        let filename = self.content_disposition.and_then(parse_content_disposition);
+
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
         let size = self
@@ -223,6 +233,7 @@ impl GcsObject {
             expiration_policy,
             compression,
             origin,
+            filename,
             size,
             custom,
             time_created,
@@ -335,6 +346,20 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
         insert_gcs_meta_header(&mut headers, &GcsMetaKey::Origin, origin)?;
     }
 
+    if let Some(filename) = &metadata.filename {
+        let value = format!(
+            "attachment; filename=\"{}\"",
+            filename.replace('\"', "\\\"")
+        );
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            value.parse().map_err(|e| Error::Generic {
+                context: "GCS: invalid content-disposition header value".into(),
+                cause: Some(Box::new(e)),
+            })?,
+        );
+    }
+
     for (key, value) in &metadata.custom {
         insert_gcs_meta_header(&mut headers, &GcsMetaKey::Custom(key.clone()), value)?;
     }
@@ -359,6 +384,17 @@ fn insert_gcs_meta_header(
         })?,
     );
     Ok(())
+}
+
+/// Extracts the filename from a `Content-Disposition` header value.
+///
+/// Parses `attachment; filename="<name>"` and returns the unescaped filename.
+fn parse_content_disposition(value: String) -> Option<String> {
+    let value = value.strip_prefix("attachment;")?;
+    let value = value.trim();
+    let value = value.strip_prefix("filename=\"")?;
+    let value = value.strip_suffix('"')?;
+    Some(value.replace("\\\"", "\""))
 }
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
@@ -1102,6 +1138,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             origin: Some("203.0.113.42".into()),
+            filename: Some("hello.txt".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             time_created: Some(SystemTime::now()),
             time_expires: None,
@@ -1119,6 +1156,7 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.origin, metadata.origin);
+        assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
         assert!(metadata.time_created.is_some());
 

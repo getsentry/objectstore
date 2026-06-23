@@ -112,6 +112,7 @@ async fn object_get(
         None => (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response(),
     };
 
+    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
 
     Ok(response)
@@ -125,8 +126,21 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
     let headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
     let mut response = (StatusCode::NO_CONTENT, headers).into_response();
+    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
     Ok(response)
+}
+
+fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
+    if let Some(filename) = &metadata.filename {
+        let escaped = filename.replace('\"', "\\\"");
+        let value = format!("attachment; filename=\"{escaped}\"");
+        if let Ok(val) = value.parse() {
+            response
+                .headers_mut()
+                .insert(http::header::CONTENT_DISPOSITION, val);
+        }
+    }
 }
 
 async fn object_put(

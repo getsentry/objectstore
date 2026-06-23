@@ -194,15 +194,24 @@ async fn convert_to_part(
                 })
             });
             match metadata_headers {
-                Ok(headers) => create_success_part(
-                    idx,
-                    &key,
-                    "head",
-                    StatusCode::NO_CONTENT,
-                    None,
-                    Bytes::new(),
-                    Some(headers),
-                ),
+                Ok(mut headers) => {
+                    if let Some(filename) = &metadata.filename {
+                        let escaped = filename.replace('\"', "\\\"");
+                        let value = format!("attachment; filename=\"{escaped}\"");
+                        if let Ok(val) = value.parse() {
+                            headers.insert(http::header::CONTENT_DISPOSITION, val);
+                        }
+                    }
+                    create_success_part(
+                        idx,
+                        &key,
+                        "head",
+                        StatusCode::NO_CONTENT,
+                        None,
+                        Bytes::new(),
+                        Some(headers),
+                    )
+                }
                 Err(e) => create_error_part(idx, &e),
             }
         }
