@@ -40,11 +40,13 @@ sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tikv-jemallocator = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }

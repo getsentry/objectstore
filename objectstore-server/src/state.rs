@@ -57,6 +57,7 @@ impl Services {
     /// use in the web server.
     pub async fn spawn(config: Config) -> Result<ServiceState> {
         tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
+        #[cfg(target_os = "linux")]
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
         let backend = backend::from_config(config.storage.clone()).await?;
@@ -110,6 +111,7 @@ impl Services {
 }
 
 /// Periodically captures and reports jemalloc stats.
+#[cfg(target_os = "linux")]
 async fn track_allocator_metrics(interval: Duration) {
     // INVARIANT: MIB resolution only fails if jemalloc is not the active allocator,
     // which would be a misconfigured build. Panic early to surface the problem.
