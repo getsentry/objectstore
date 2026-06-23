@@ -2045,15 +2045,15 @@ mod tests {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
             if *attempt == 1 {
-                return Err(Error::Io(std::io::Error::new(
+                Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "simulated network error",
-                )));
+                )))
             } else {
-                return Ok(inner
+                Ok(inner
                     .complete_multipart(id, upload_id, parts)
                     .await
-                    .unwrap());
+                    .unwrap())
             }
         }
     }
@@ -2181,10 +2181,10 @@ mod tests {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
             if *attempt == 1 {
-                return Err(Error::Io(std::io::Error::new(
+                Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "simulated network error",
-                )));
+                )))
             } else {
                 inner.get_metadata(id).await
             }
