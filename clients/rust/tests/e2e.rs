@@ -3,14 +3,15 @@ mod common;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 
-use common::{TEST_EDDSA_PRIVKEY, test_server, test_token_generator};
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_client::{Client, Error, OperationResult, Permission, Usecase};
-use objectstore_test::server::TEST_EDDSA_KID;
+use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY};
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 use serde::Serialize;
+
+use common::{test_server, test_token_generator};
 
 #[derive(Serialize)]
 struct JwtClaims {
