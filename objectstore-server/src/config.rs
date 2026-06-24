@@ -357,6 +357,17 @@ fn default_enforce() -> bool {
     true
 }
 
+impl AuthZ {
+    /// Returns whether content-based authorization is active.
+    ///
+    /// Authorization is considered active if enforcement is enabled or at least one key is
+    /// configured. Without enforcement, authorization checks are still performed and reported but
+    /// failures will not result in `403 Unauthorized`
+    pub fn is_active(&self) -> bool {
+        self.enforce || !self.keys.is_empty()
+    }
+}
+
 impl Default for AuthZ {
     fn default() -> Self {
         Self {
