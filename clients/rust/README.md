@@ -286,6 +286,7 @@ via [`ClientBuilder::token`]. It accepts either:
   and scope being accessed.
 - A **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
   Use this for external services that receive a token from another source.
+- An `Option` of any of the above — useful for chained builder calls.
 
 ```rust,ignore
 use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};

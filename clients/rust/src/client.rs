@@ -9,6 +9,7 @@ use objectstore_types::scope;
 use reqwest::RequestBuilder;
 use url::Url;
 
+use crate::IntoTokenProvider;
 use crate::auth::TokenProvider;
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
@@ -110,13 +111,15 @@ impl ClientBuilder {
 
     /// Sets the authentication token to use for requests to Objectstore.
     ///
-    /// Accepts anything that implements `Into<TokenProvider>`:
+    /// Accepts anything that implements [`IntoTokenProvider`]:
     /// - A [`TokenGenerator`](crate::TokenGenerator) — for internal services that have access to
     ///   an EdDSA keypair. The generator signs a fresh JWT for each request.
     /// - A `String` or `&str` — a pre-signed JWT, used as-is for every request.
-    pub fn token(self, token: impl Into<TokenProvider>) -> Self {
+    /// - An `Option` of any of the above — a `None` leaves the client unauthenticated, which is
+    ///   convenient when authentication is configured conditionally.
+    pub fn token(self, token: impl IntoTokenProvider) -> Self {
         let Ok(mut inner) = self.0 else { return self };
-        inner.token = Some(token.into());
+        inner.token = token.into_token_provider();
         Self(Ok(inner))
     }
 
@@ -361,6 +364,23 @@ pub(crate) struct ClientInner {
 ///
 /// let client = Client::builder("http://localhost:8888/")
 ///     .token(token)
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Optional authentication — pass an `Option` straight through, leaving the client
+/// unauthenticated when it is `None`:
+///
+/// ```no_run
+/// use objectstore_client::Client;
+///
+/// # fn example() -> objectstore_client::Result<()> {
+/// // Authenticate only if a token is present in the environment.
+/// let token_opt = std::env::var("OBJECTSTORE_TOKEN").ok();
+///
+/// let client = Client::builder("http://localhost:8888/")
+///     .token(token_opt)
 ///     .build()?;
 /// # Ok(())
 /// # }

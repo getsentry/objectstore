@@ -18,14 +18,12 @@ pub struct HttpRemote {
 impl HttpRemote {
     /// Creates a new `HttpRemote` instance with the given remote URL and optional token generator.
     pub fn new(remote: &str, token: Option<TokenGenerator>) -> Self {
-        let mut builder = Client::builder(remote).configure_reqwest(|r| r.no_hickory_dns());
-        if let Some(t) = token {
-            builder = builder.token(t);
-        }
         Self {
-            // INVARIANT: builder is always valid — remote is a caller-supplied URL and no
-            // fallible configuration is applied.
-            client: builder.build().unwrap(),
+            client: Client::builder(remote)
+                .configure_reqwest(|r| r.no_hickory_dns())
+                .token(token)
+                .build()
+                .unwrap(),
         }
     }
 

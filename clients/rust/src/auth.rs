@@ -55,21 +55,44 @@ impl std::fmt::Debug for TokenProvider {
     }
 }
 
-impl From<TokenGenerator> for TokenProvider {
-    fn from(generator: TokenGenerator) -> Self {
-        TokenProvider::Generator(generator)
+/// Conversion into an optional [`TokenProvider`] for [`ClientBuilder::token`].
+///
+/// This is implemented for [`TokenGenerator`], `String`, and `&str`, each of which yields a
+/// configured provider. It is also implemented for any `Option<T>` where `T: IntoTokenProvider`,
+/// so a `None` resolves to no authentication and a `Some(value)` to the inner provider. This lets
+/// callers pass optional auth configuration to [`ClientBuilder::token`] without an explicit
+/// conditional.
+///
+/// [`ClientBuilder::token`]: crate::ClientBuilder::token
+pub trait IntoTokenProvider {
+    /// Converts `self` into an optional [`TokenProvider`].
+    fn into_token_provider(self) -> Option<TokenProvider>;
+}
+
+impl<T> IntoTokenProvider for Option<T>
+where
+    T: IntoTokenProvider,
+{
+    fn into_token_provider(self) -> Option<TokenProvider> {
+        self.and_then(|t| t.into_token_provider())
     }
 }
 
-impl From<String> for TokenProvider {
-    fn from(token: String) -> Self {
-        TokenProvider::Static(token)
+impl IntoTokenProvider for TokenGenerator {
+    fn into_token_provider(self) -> Option<TokenProvider> {
+        Some(TokenProvider::Generator(self))
     }
 }
 
-impl From<&str> for TokenProvider {
-    fn from(token: &str) -> Self {
-        TokenProvider::Static(token.to_owned())
+impl IntoTokenProvider for String {
+    fn into_token_provider(self) -> Option<TokenProvider> {
+        Some(TokenProvider::Static(self))
+    }
+}
+
+impl IntoTokenProvider for &str {
+    fn into_token_provider(self) -> Option<TokenProvider> {
+        Some(TokenProvider::Static(self.to_owned()))
     }
 }
 
@@ -78,9 +101,10 @@ impl From<&str> for TokenProvider {
 /// Tokens are signed with an EdDSA private key and have certain permissions and expiry timeouts
 /// applied.
 ///
-/// Use this for internal services that have access to an EdDSA keypair. You can pass a
-/// `TokenGenerator` directly to [`ClientBuilder::token`](crate::ClientBuilder::token),
-/// and it will be automatically converted into a [`TokenProvider::Generator`].
+/// Use this for internal services that have access to an EdDSA keypair. A `TokenGenerator`
+/// implements [`IntoTokenProvider`], so it can be passed directly to
+/// [`ClientBuilder::token`](crate::ClientBuilder::token), where it becomes a
+/// [`TokenProvider::Generator`].
 #[derive(Debug)]
 pub struct TokenGenerator {
     kid: String,
