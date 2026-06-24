@@ -21,7 +21,7 @@ pub enum AuthError {
     #[error("failed to verify token")]
     VerificationFailure,
 
-    /// Indicates that the requested operation is not authorized and auth enforcement is enabled.
+    /// Indicates that the requested operation is not permitted on the resource.
     #[error("operation not allowed")]
     NotPermitted,
 }
@@ -40,7 +40,7 @@ impl AuthError {
 
     /// Increment a counter and emit a log for this auth failure.
     ///
-    /// If `warn` is true, the log will be at WARN level; otherwise it will be at DEBUG level.`
+    /// If `warn` is true, the log will be at WARN level; otherwise it will be at DEBUG level.
     pub fn log(&self, warn: bool) {
         let code = self.code();
         objectstore_metrics::count!("server.auth.failure", code = code);

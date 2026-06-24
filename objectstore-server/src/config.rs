@@ -337,8 +337,9 @@ pub struct AuthZVerificationKey {
 pub struct AuthZ {
     /// Whether to enforce content-based authorization or not.
     ///
-    /// Defaults to `true`. If this is set to `false`, checks are still performed but failures
-    /// will not result in `403 Unauthorized` responses.
+    /// Defaults to `true`, resulting in `403 Unauthorized` responses for unauthorized requests. Set
+    /// to `false` to permit unauthorized requests. Authorization checks are still performed if
+    /// keys are configured, but only result in warnings.
     #[serde(default = "default_enforce")]
     pub enforce: bool,
 
