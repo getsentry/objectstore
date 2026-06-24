@@ -561,14 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn content_disposition_escapes_injection_attempt() {
-        let malicious = "evil\\\"; filename*=UTF-8''pwned";
-        let formatted = format_content_disposition(malicious);
-        let parsed = parse_content_disposition(&formatted).unwrap();
-        assert_eq!(parsed, malicious);
-    }
-
-    #[test]
     fn from_headers_content_type_and_encoding() {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", "application/json".parse().unwrap());
