@@ -419,7 +419,7 @@ pub fn parse_content_disposition(value: &str) -> Option<String> {
     let value = value.strip_prefix("attachment;")?.trim();
     let value = value.strip_prefix("filename=\"")?;
     let value = value.strip_suffix('"')?;
-    Some(value.replace("\\\"", "\"").replace("\\\\", "\\"))
+    Some(value.replace("\\\\", "\\").replace("\\\"", "\""))
 }
 
 /// Validates that `content_type` is a valid [IANA Media
