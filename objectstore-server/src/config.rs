@@ -508,7 +508,7 @@ pub struct Service {
     /// # Default
     ///
     /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
-    pub max_concurrency: usize,
+    pub max_concurrency: u32,
 }
 
 impl Default for Service {

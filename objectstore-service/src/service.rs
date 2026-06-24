@@ -36,7 +36,7 @@ pub type DeleteResponse = ();
 ///
 /// This value is used when no explicit limit is set via
 /// [`StorageService::with_concurrency_limit`].
-pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
+pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -95,23 +95,23 @@ impl StorageService {
     ///
     /// Must be called before [`start`](Self::start). Operations beyond this
     /// limit are rejected with [`Error::AtCapacity`].
-    pub fn with_concurrency_limit(mut self, max: usize) -> Self {
+    pub fn with_concurrency_limit(mut self, max: u32) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
         self
     }
 
     /// Returns the number of backend task slots currently available.
-    pub fn tasks_available(&self) -> usize {
+    pub fn tasks_available(&self) -> u32 {
         self.concurrency.available_permits()
     }
 
     /// Returns the number of backend tasks currently running.
-    pub fn tasks_running(&self) -> usize {
+    pub fn tasks_running(&self) -> u32 {
         self.concurrency.used_permits()
     }
 
     /// Returns the configured limit for concurrent backend tasks.
-    pub fn tasks_limit(&self) -> usize {
+    pub fn tasks_limit(&self) -> u32 {
         self.concurrency.total_permits()
     }
 
@@ -123,7 +123,7 @@ impl StorageService {
     /// [`Error::AtCapacity`] immediately before any operations are read.
     pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
-        let window = (available as f64 * 0.10).ceil() as usize;
+        let window = available.div_ceil(10);
 
         let acquire_result = match window {
             0 => Err(Error::AtCapacity),
@@ -674,7 +674,7 @@ mod tests {
 
     // --- Concurrency limit tests ---
 
-    fn make_limited_service(limit: usize) -> (StorageService, TestBackend<GateOnPut>) {
+    fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
         let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
         (service, backend)

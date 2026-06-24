@@ -219,13 +219,13 @@ impl std::fmt::Debug for OpResponse {
 #[derive(Debug)]
 pub struct StreamExecutor {
     pub(crate) backend: Arc<dyn Backend>,
-    pub(crate) window: usize,
+    pub(crate) window: u32,
     pub(crate) reservation: ConcurrencyPermit,
 }
 
 impl StreamExecutor {
     /// Returns the concurrency window computed at construction.
-    pub fn window(&self) -> usize {
+    pub fn window(&self) -> u32 {
         self.window
     }
 
@@ -277,7 +277,7 @@ impl StreamExecutor {
                     (idx, spawn.await.map_err(E::from))
                 }
             })
-            .buffer_unordered(window)
+            .buffer_unordered(window as usize)
     }
 }
 
@@ -342,7 +342,7 @@ mod tests {
         }
     }
 
-    fn make_service_with_limit(limit: usize) -> StorageService {
+    fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
             .with_concurrency_limit(limit)
     }
