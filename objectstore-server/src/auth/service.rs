@@ -44,11 +44,11 @@ impl AuthAwareService {
     /// Creates a new `AuthAwareService` using the given [`StorageService`], [`AuthContext`], and
     /// enforcement setting.
     ///
-    /// If enforcement is enabled, an `AuthContext` must be provided and its checks must succeed
-    /// for an operation to be permitted.
+    /// If a `context` is provided, it will be used to check whether each operation is authorized.
+    /// `enforce` controls whether authorization failures will result in an error response or be
+    /// ignored.
     ///
-    /// If enforcement is disabled, an `AuthContext` is not required. If one is provided, its
-    /// checks will be run but their results ignored. All operations will be permitted.
+    /// Without a `context`, all operations are permitted.
     pub fn new(service: StorageService, context: Option<AuthContext>, enforce: bool) -> Self {
         Self {
             service,
