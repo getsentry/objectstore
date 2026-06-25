@@ -18,7 +18,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(all(target_os = "linux", feature = "profiling"))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
-pub static malloc_conf: &[u8] = b"prof:true,prof_active:false,lg_prof_sample:19\0";
+static malloc_conf: &[u8] = b"prof:true,prof_active:false,lg_prof_sample:19\0";
 
 fn main() {
     match cli::execute() {

@@ -45,7 +45,7 @@ async fn require_loopback(request: Request, next: Next) -> Response {
     let is_loopback = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map_or(false, |ConnectInfo(addr)| addr.ip().is_loopback());
+        .is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback());
 
     if is_loopback {
         next.run(request).await
