@@ -404,22 +404,68 @@ impl Metadata {
     }
 }
 
+/// Sanitizes a filename for use in a `Content-Disposition` header.
+///
+/// - Normalizes `/` and `\` to `-`
+/// - Replaces filenames consisting entirely of dots with dashes
+fn sanitize_filename(filename: &str) -> Cow<'_, str> {
+    let all_dots = !filename.is_empty() && filename.chars().all(|c| c == '.');
+    let has_slashes = filename.contains('/') || filename.contains('\\');
+
+    if !all_dots && !has_slashes {
+        return Cow::Borrowed(filename);
+    }
+
+    Cow::Owned(
+        filename
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' => '-',
+                '.' if all_dots => '-',
+                c => c,
+            })
+            .collect(),
+    )
+}
+
 /// Formats a `Content-Disposition: attachment` header value for the given filename.
 ///
-/// Escapes `\` and `"` in the filename per RFC 6266 quoted-string rules.
+/// The filename is first [sanitized](sanitize_filename), then escaped for use in
+/// an RFC 6266 quoted-string (escaping `\` and `"`).
 pub fn format_content_disposition(filename: &str) -> String {
-    let escaped = filename.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("attachment; filename=\"{escaped}\"")
+    let sanitized = sanitize_filename(filename);
+    let mut result = String::from("attachment; filename=\"");
+    for c in sanitized.chars() {
+        if c == '\\' || c == '"' {
+            result.push('\\');
+        }
+        result.push(c);
+    }
+    result.push('"');
+    result
 }
 
 /// Extracts the filename from a `Content-Disposition: attachment` header value.
 ///
-/// Inverse of [`format_content_disposition`].
+/// Inverse of [`format_content_disposition`]'s quoting (but not its sanitization —
+/// the returned filename is the sanitized form).
 pub fn parse_content_disposition(value: &str) -> Option<String> {
     let value = value.strip_prefix("attachment;")?.trim();
     let value = value.strip_prefix("filename=\"")?;
     let value = value.strip_suffix('"')?;
-    Some(value.replace("\\\\", "\\").replace("\\\"", "\""))
+
+    let mut result = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                result.push(next);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    Some(result)
 }
 
 /// Validates that `content_type` is a valid [IANA Media
@@ -547,17 +593,83 @@ mod tests {
 
     #[test]
     fn content_disposition_roundtrip() {
-        for name in [
-            "report.pdf",
-            "file with spaces.txt",
-            "has\"quote.txt",
-            "has\\backslash.txt",
-            "tricky\\\"combo.txt",
-        ] {
+        for name in ["report.pdf", "file with spaces.txt", "has\"quote.txt"] {
             let formatted = format_content_disposition(name);
             let parsed = parse_content_disposition(&formatted).unwrap();
             assert_eq!(parsed, name, "roundtrip failed for: {name}");
         }
+    }
+
+    #[test]
+    fn content_disposition_sanitizes_slashes() {
+        assert_eq!(
+            format_content_disposition("path/to/file.txt"),
+            "attachment; filename=\"path-to-file.txt\""
+        );
+        assert_eq!(
+            format_content_disposition("path\\to\\file.txt"),
+            "attachment; filename=\"path-to-file.txt\""
+        );
+    }
+
+    #[test]
+    fn content_disposition_sanitizes_dots_only() {
+        assert_eq!(
+            format_content_disposition("."),
+            "attachment; filename=\"-\""
+        );
+        assert_eq!(
+            format_content_disposition(".."),
+            "attachment; filename=\"--\""
+        );
+        assert_eq!(
+            format_content_disposition("..."),
+            "attachment; filename=\"---\""
+        );
+        // Mixed dots and other chars are left alone
+        assert_eq!(
+            format_content_disposition("..a"),
+            "attachment; filename=\"..a\""
+        );
+        assert_eq!(
+            format_content_disposition(".hidden"),
+            "attachment; filename=\".hidden\""
+        );
+    }
+
+    #[test]
+    fn content_disposition_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            format_content_disposition("has\"quote.txt"),
+            "attachment; filename=\"has\\\"quote.txt\""
+        );
+        // Backslash is sanitized to dash (not escaped), so no \\ in output
+        assert_eq!(
+            format_content_disposition("has\\backslash.txt"),
+            "attachment; filename=\"has-backslash.txt\""
+        );
+        // Quote + slash combo
+        assert_eq!(
+            format_content_disposition("tricky/\"combo.txt"),
+            "attachment; filename=\"tricky-\\\"combo.txt\""
+        );
+    }
+
+    #[test]
+    fn content_disposition_control_characters() {
+        // Control characters pass through format_content_disposition as-is.
+        // They are rejected at the HTTP header layer (HeaderValue::from_str)
+        // when the server constructs the response.
+        let with_null = "file\x00name.txt";
+        let formatted = format_content_disposition(with_null);
+        assert!(formatted.contains('\x00'));
+
+        let with_newline = "file\nname.txt";
+        let formatted = format_content_disposition(with_newline);
+        assert!(formatted.contains('\n'));
+
+        // Verify that such values are rejected by HTTP header parsing
+        assert!(formatted.parse::<http::HeaderValue>().is_err());
     }
 
     #[test]

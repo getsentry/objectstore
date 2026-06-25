@@ -9,9 +9,7 @@ use std::{fmt, io};
 use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
-use objectstore_types::metadata::{
-    ExpirationPolicy, Metadata, format_content_disposition, parse_content_disposition,
-};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
 use reqwest::{
@@ -129,10 +127,6 @@ struct GcsObject {
     )]
     pub time_created: Option<SystemTime>,
 
-    /// Content-Disposition of the object data, used to store [`Metadata::filename`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_disposition: Option<String>,
-
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
@@ -145,7 +139,6 @@ impl GcsObject {
             content_type: metadata.content_type.clone(),
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
-            content_disposition: metadata.filename.as_deref().map(format_content_disposition),
             custom_time: None,
             time_created: metadata.time_created,
             metadata: BTreeMap::new(),
@@ -175,6 +168,12 @@ impl GcsObject {
                 .insert(GcsMetaKey::Origin, origin.clone());
         }
 
+        if let Some(filename) = &metadata.filename {
+            gcs_object
+                .metadata
+                .insert(GcsMetaKey::Filename, filename.clone());
+        }
+
         for (key, value) in &metadata.custom {
             gcs_object
                 .metadata
@@ -197,11 +196,7 @@ impl GcsObject {
             .unwrap_or_default();
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
-
-        let filename = self
-            .content_disposition
-            .as_deref()
-            .and_then(parse_content_disposition);
+        let filename = self.metadata.remove(&GcsMetaKey::Filename);
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
@@ -251,6 +246,8 @@ enum GcsMetaKey {
     Expiration,
     /// Built-in metadata key for [`Metadata::origin`].
     Origin,
+    /// Built-in metadata key for [`Metadata::filename`].
+    Filename,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -268,6 +265,7 @@ impl std::str::FromStr for GcsMetaKey {
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
             Some("origin") => GcsMetaKey::Origin,
+            Some("filename") => GcsMetaKey::Filename,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -282,6 +280,7 @@ impl fmt::Display for GcsMetaKey {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
             Self::Origin => write!(f, "{BUILTIN_META_PREFIX}origin"),
+            Self::Filename => write!(f, "{BUILTIN_META_PREFIX}filename"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -349,15 +348,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     }
 
     if let Some(filename) = &metadata.filename {
-        headers.insert(
-            header::CONTENT_DISPOSITION,
-            format_content_disposition(filename)
-                .parse()
-                .map_err(|e| Error::Generic {
-                    context: "GCS: invalid content-disposition header value".into(),
-                    cause: Some(Box::new(e)),
-                })?,
-        );
+        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Filename, filename)?;
     }
 
     for (key, value) in &metadata.custom {
