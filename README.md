@@ -243,6 +243,44 @@ cargo run -- run
 You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.
 
+### Heap Profiling
+
+Production release builds include on-demand heap profiling via jemalloc. Profiling is compiled
+in but dormant at startup — you enable and disable it through HTTP endpoints that are only
+reachable from loopback (i.e. from inside the pod or over `kubectl port-forward`).
+
+To capture a heap profile from a running pod:
+
+```sh
+# Forward the server port to your local machine
+kubectl port-forward pod/<name> 8888:8888
+
+# Enable sampling, let the workload run, then dump a profile
+curl -s -XPOST localhost:8888/debug/pprof/enable
+# ... wait for the leak or load to accumulate ...
+curl -s localhost:8888/debug/pprof/heap > heap.pb.gz
+
+# Disable sampling when done
+curl -s -XPOST localhost:8888/debug/pprof/disable
+```
+
+The dump is a symbolized gzipped pprof file — function names are resolved against the running
+binary's debug info, so no local binary is needed to analyze it. Open it with `go tool pprof`:
+
+```sh
+go tool pprof -top heap.pb.gz
+
+# To isolate growth between two snapshots, use the -base flag:
+curl -s localhost:8888/debug/pprof/heap > heap1.pb.gz
+# ... wait for more growth ...
+curl -s localhost:8888/debug/pprof/heap > heap2.pb.gz
+go tool pprof -base heap1.pb.gz heap2.pb.gz
+```
+
+Sampling overhead is negligible (jemalloc default: one sample per ~512 KiB allocated on
+average), so profiling can be left enabled for an extended capture window without measurably
+affecting request latency.
+
 ### Tests
 
 To run tests:

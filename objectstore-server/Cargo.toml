@@ -45,8 +45,12 @@ tower = { workspace = true }
 tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+jemalloc_pprof = { workspace = true, optional = true }
 tikv-jemallocator = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
+
+[features]
+profiling = ["dep:jemalloc_pprof", "tikv-jemallocator/profiling"]
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }
