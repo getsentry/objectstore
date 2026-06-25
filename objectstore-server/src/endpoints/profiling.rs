@@ -1,22 +1,20 @@
-//! On-demand heap profiling endpoints (Linux + `profiling` feature only).
+//! On-demand heap profiling endpoints.
 //!
 //! Exposes three routes under `/debug/pprof/`:
 //!
 //! | Method | Path | Description |
 //! |--------|------|-------------|
-//! | `POST` | `/debug/pprof/enable` | Activate jemalloc heap sampling |
+//! | `POST` | `/debug/pprof/enable` | Activate heap sampling |
 //! | `POST` | `/debug/pprof/disable` | Deactivate heap sampling |
 //! | `GET` | `/debug/pprof/heap` | Dump a symbolized gzipped pprof profile |
 //!
-//! All routes are guarded by a loopback-only middleware: requests whose TCP peer is not
-//! a loopback address (`127.0.0.1` or `::1`) are rejected with `403 Forbidden`. This
-//! makes the endpoints reachable via `kubectl port-forward` or an ephemeral debug
-//! container (both present as loopback inside the pod netns) while blocking normal
-//! Service/ingress traffic.
+//! **Requires the `profiling` feature.** When included, profiling is available
+//! but disabled at startup. Enable it on demand to start capturing samples.
+//! With `GET /debug/pprof/heap`, you can then download a pprof snapshot with
+//! all allocations since profiling was enabled.
 //!
-//! Profiling is compiled in but dormant at startup (`prof_active:false`). Enable it on
-//! demand via `POST /debug/pprof/enable`, capture with `GET /debug/pprof/heap`, then
-//! disable with `POST /debug/pprof/disable`.
+//! **Note**:Due to their sensitive nature, these routes are only reachable via
+//! the loopback interface.
 
 use std::net::SocketAddr;
 
@@ -28,6 +26,9 @@ use axum::{Router, routing};
 use jemalloc_pprof::PROF_CTL;
 
 use crate::state::ServiceState;
+
+const HEAP_DISPOSITION: HeaderValue =
+    HeaderValue::from_static("attachment; filename=\"heap.pb.gz\"");
 
 /// Returns a router for all `/debug/pprof/*` endpoints, protected by the loopback gate.
 pub fn router() -> Router<ServiceState> {
@@ -50,7 +51,7 @@ async fn require_loopback(request: Request, next: Next) -> Response {
     if is_loopback {
         next.run(request).await
     } else {
-        StatusCode::FORBIDDEN.into_response()
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
@@ -60,10 +61,10 @@ async fn require_loopback(request: Request, next: Next) -> Response {
 /// at startup via `malloc_conf` (`lg_prof_sample:19`, i.e. 512 KiB mean interval).
 async fn enable() -> Response {
     let Some(ctl) = &*PROF_CTL else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "profiling unavailable").into_response();
+        return unavailable();
     };
-    let mut guard = ctl.lock().await;
-    match guard.activate() {
+
+    match ctl.lock().await.activate() {
         Ok(()) => {
             objectstore_log::info!("Heap profiling enabled");
             StatusCode::OK.into_response()
@@ -75,10 +76,10 @@ async fn enable() -> Response {
 /// Deactivates jemalloc heap sampling.
 async fn disable() -> Response {
     let Some(ctl) = &*PROF_CTL else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "profiling unavailable").into_response();
+        return unavailable();
     };
-    let mut guard = ctl.lock().await;
-    match guard.deactivate() {
+
+    match ctl.lock().await.deactivate() {
         Ok(()) => {
             objectstore_log::info!("Heap profiling disabled");
             StatusCode::OK.into_response()
@@ -89,42 +90,30 @@ async fn disable() -> Response {
 
 /// Dumps a symbolized, gzipped pprof heap profile.
 ///
-/// Returns `403` if profiling is not currently active. Activate first with
+/// Returns `409 Conflict` if profiling is not currently active. Activate first with
 /// `POST /debug/pprof/enable`.
 ///
 /// The response body is a gzipped pprof protobuf (`heap.pb.gz`), ready for
 /// `go tool pprof` or Speedscope without shipping a separate binary.
 async fn heap() -> Response {
     let Some(ctl) = &*PROF_CTL else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "profiling unavailable").into_response();
+        return unavailable();
     };
-    let mut guard = ctl.lock().await;
 
+    let mut guard = ctl.lock().await;
     if !guard.activated() {
-        return (
-            StatusCode::FORBIDDEN,
-            "profiling not active; POST /debug/pprof/enable first",
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, "profiling not enabled").into_response();
     }
 
+    objectstore_log::info!("Heap profile requested");
     match guard.dump_pprof() {
-        Ok(bytes) => {
-            objectstore_log::info!("Heap profile requested");
-            let headers = [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/octet-stream"),
-                ),
-                (
-                    header::CONTENT_DISPOSITION,
-                    HeaderValue::from_static("attachment; filename=\"heap.pb.gz\""),
-                ),
-            ];
-            (headers, bytes).into_response()
-        }
+        Ok(bytes) => ([(header::CONTENT_DISPOSITION, HEAP_DISPOSITION)], bytes).into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
+}
+
+fn unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, "profiling unavailable").into_response()
 }
 
 #[cfg(test)]
@@ -180,13 +169,13 @@ mod tests {
             .oneshot(request_with_peer("203.0.113.1:1234"))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn no_connect_info_rejected() {
         let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = make_loopback_app().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
