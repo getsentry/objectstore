@@ -430,8 +430,8 @@ fn sanitize_filename(filename: &str) -> Cow<'_, str> {
 
 /// Formats a `Content-Disposition: attachment` header value for the given filename.
 ///
-/// The filename is first [sanitized](sanitize_filename), then escaped for use in
-/// an RFC 6266 quoted-string (escaping `\` and `"`).
+/// The filename is first sanitized (`/` and `\` become `-`, dots-only names become
+/// all dashes), then escaped for use in an RFC 6266 quoted-string (`\` and `"`).
 pub fn format_content_disposition(filename: &str) -> String {
     let sanitized = sanitize_filename(filename);
     let mut result = String::from("attachment; filename=\"");
