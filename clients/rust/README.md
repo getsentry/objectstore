@@ -38,7 +38,7 @@ Within a Usecase, [`Scope`]s provide further isolation — typically keyed by or
 and project IDs. A [`Session`] ties a Client to a specific Usecase + Scope for operations.
 
 Scope components form a hierarchical path, so their order matters:
-`org=42/project=1337` and `project=1337/org=42` are different scopes. The convenience
+`org=42;project=1337` and `project=1337;org=42` are different scopes. The convenience
 method [`Usecase::for_project`] pushes `org` then `project` in the recommended order.
 
 ```rust,ignore
@@ -273,7 +273,7 @@ session
     .await
     .error_for_failures()
     .await
-    .map_err(|errors| { /* errors: Vec<Error> */ })?;
+    .map_err(|errors| { /* Iterator<Item = objectstore_client::Error> */ })?;
 ```
 
 ### Authentication

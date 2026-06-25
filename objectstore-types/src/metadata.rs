@@ -1,8 +1,11 @@
 //! Per-object metadata types and HTTP header serialization.
 //!
 //! This module defines [`Metadata`], the per-object metadata structure that
-//! accompanies every stored object, along with [`ExpirationPolicy`] and
-//! [`Compression`].
+//! travels through the entire system: clients set it via HTTP headers, the
+//! server parses and validates it, the service passes it to backends, and
+//! backends persist it alongside the stored object.
+//!
+//! The module also defines further types used in metadata.
 //!
 //! # Serialization
 //!

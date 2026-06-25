@@ -1,4 +1,16 @@
-//! Types for HTTP range requests.
+//! Types for HTTP byte-range requests and responses.
+//!
+//! HTTP range requests ([RFC 9110 §14.2](https://www.rfc-editor.org/rfc/rfc9110#section-14.2))
+//! allow a client to request a partial transfer of a resource instead of the full content.
+//! The client expresses the desired byte range in a `Range` request header; the server
+//! responds with the selected bytes and a `Content-Range` header that identifies which
+//! portion of the object is being returned along with its total size.
+//!
+//! This module provides two types that mirror that request/response split:
+//!
+//! - [`ByteRange`] — a range *request*: which bytes the client wants.
+//! - [`ContentRange`] — a range *response*: which bytes the server is returning, plus
+//!   the total object size.
 
 use std::fmt;
 use std::str::FromStr;
@@ -6,7 +18,12 @@ use std::str::FromStr;
 use http::header::HeaderValue;
 use thiserror::Error;
 
-/// Specifier for a single byte range.
+/// Byte range requested by the client via a `Range` header.
+///
+/// Parse from a `Range` header string via [`FromStr`] or construct a variant
+/// directly. Serialize back to a header with [`to_header_value`](Self::to_header_value).
+/// Once the total object size is known, call [`resolve`](Self::resolve) to
+/// validate the range and convert it into a [`ContentRange`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteRange {
     /// Bounded range with start and end, inclusive
@@ -110,7 +127,12 @@ impl FromStr for ByteRange {
     }
 }
 
-/// Describes which bytes of the full object are present in the response body.
+/// Byte range returned by the server in a `Content-Range` response header.
+///
+/// Describes which bytes of the full object are present in the response body
+/// ([`start`](Self::start)–[`end`](Self::end), inclusive) and the total object
+/// size ([`total`](Self::total)). Produced by [`ByteRange::resolve`] or parsed
+/// from a `Content-Range` header string via [`FromStr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentRange {
     /// Byte offset of the first byte in the body (inclusive).
