@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
@@ -9,13 +9,20 @@ use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
+/// Ordered scope entry stored in JWT resource claims and [`AuthContext`].
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct JwtScope {
+    /// Scope name, such as `org` or `project`.
+    name: String,
+    /// Scope value, or `*` to authorize any value at that position.
+    value: StringOrWildcard,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
     usecase: String,
-
-    #[serde(flatten)]
-    scope: BTreeMap<String, StringOrWildcard>,
+    scopes: Vec<JwtScope>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -47,7 +54,7 @@ pub struct AuthContext {
     /// The scope elements that this request may act on.
     ///
     /// See also: [`ObjectContext::scopes`].
-    pub scopes: BTreeMap<String, StringOrWildcard>,
+    pub scopes: Vec<(String, StringOrWildcard)>,
 
     /// The permissions that this request has been granted.
     pub permissions: HashSet<Permission>,
@@ -116,7 +123,13 @@ impl AuthContext {
         let verified_claims = verified_claims.ok_or(AuthError::VerificationFailure)?;
 
         let usecase = verified_claims.claims.res.usecase;
-        let scope = verified_claims.claims.res.scope;
+        let scopes = verified_claims
+            .claims
+            .res
+            .scopes
+            .into_iter()
+            .map(|scope| (scope.name, scope.value))
+            .collect();
 
         // Taking the intersection here ensures the `AuthContext` does not have any permissions
         // that `key_config.max_permissions` doesn't have, even if the token tried to grant them.
@@ -129,7 +142,7 @@ impl AuthContext {
 
         Ok(AuthContext {
             usecase,
-            scopes: scope,
+            scopes,
             permissions,
         })
     }
@@ -148,16 +161,24 @@ impl AuthContext {
             return Err(AuthError::NotPermitted);
         }
 
-        for scope in &context.scopes {
-            let authorized = match self.scopes.get(scope.name()) {
-                Some(StringOrWildcard::String(s)) => s == scope.value(),
-                Some(StringOrWildcard::Wildcard) => true,
-                None => false,
+        // All authorized scopes need to match a prefix of the requested scopes. Order matters.
+        let mut request_scopes = context.scopes.iter();
+        for (authorized_name, authorized_value) in &self.scopes {
+            // Always reject when the requested scope is less specific (shorter) than the authorized scope.
+            let Some(request_scope) = request_scopes.next() else {
+                return Err(AuthError::NotPermitted);
             };
+            let authorized = authorized_name == request_scope.name()
+                && match authorized_value {
+                    StringOrWildcard::String(s) => s == request_scope.value(),
+                    StringOrWildcard::Wildcard => true,
+                };
             if !authorized {
                 return Err(AuthError::NotPermitted);
             }
         }
+        // `request_scopes` could contain more values which we didn't consume, which means that the
+        // request is for a subscope of what this `AuthContext` authorizes, which is fine.
 
         Ok(())
     }
@@ -194,7 +215,7 @@ mod tests {
             max_permissions,
         };
         PublicKeyDirectory {
-            keys: BTreeMap::from([(TEST_EDDSA_KID.into(), public_key)]),
+            keys: std::collections::BTreeMap::from([(TEST_EDDSA_KID.into(), public_key)]),
         }
     }
 
@@ -223,8 +244,10 @@ mod tests {
         serde_json::from_value(json!({
             "res": {
                 "os:usecase": usecase,
-                "org": org,
-                "project": proj,
+                "scopes": [
+                    {"name": "org", "value": org},
+                    {"name": "project", "value": proj},
+                ],
             },
             "permissions": permissions,
         }))
@@ -235,7 +258,16 @@ mod tests {
         AuthContext {
             usecase: "attachments".into(),
             permissions,
-            scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
+            scopes: vec![
+                (
+                    "org".into(),
+                    StringOrWildcard::deserialize(json!(org)).unwrap(),
+                ),
+                (
+                    "project".into(),
+                    StringOrWildcard::deserialize(json!(proj)).unwrap(),
+                ),
+            ],
         }
     }
 
@@ -373,18 +405,79 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         Ok(())
     }
 
-    // Allowed:
+    // Not allowed:
     //   auth_context: org.123 / proj.456
     //         object: org.123
     #[test]
-    fn test_assert_authorized_org_only_path_allowed() -> Result<(), AuthError> {
+    fn test_assert_authorized_less_specific_request_scope_fails() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = ObjectContext {
             usecase: "attachments".into(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
 
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        assert_eq!(result, Err(AuthError::NotPermitted));
+
+        Ok(())
+    }
+
+    // Allowed:
+    //   auth_context: org.123 / proj.*
+    //         object: org.123 / proj.456 / extra.789
+    #[test]
+    fn test_assert_authorized_more_specific_request_scope_succeeds() -> Result<(), AuthError> {
+        let auth_context = sample_auth_context("123", "*", max_permission());
+        let object = ObjectContext {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([
+                Scope::create("org", "123").unwrap(),
+                Scope::create("project", "456").unwrap(),
+                Scope::create("extra", "789").unwrap(),
+            ]),
+        };
+
         auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+
+        Ok(())
+    }
+
+    // Allowed:
+    //   auth_context: (empty vec)
+    //         object: org.123
+    #[test]
+    fn test_assert_authorized_empty_scope_allows_any_request() -> Result<(), AuthError> {
+        let auth_context = AuthContext {
+            usecase: "attachments".into(),
+            permissions: max_permission(),
+            scopes: vec![],
+        };
+        let object = ObjectContext {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
+        };
+
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+
+        Ok(())
+    }
+
+    // Not allowed:
+    //   auth_context: org.123 / proj.*
+    //         object: proj.456 / org.123
+    #[test]
+    fn test_assert_authorized_scope_wrong_order_fails() -> Result<(), AuthError> {
+        let auth_context = sample_auth_context("123", "*", max_permission());
+        let object = ObjectContext {
+            usecase: "attachments".into(),
+            scopes: Scopes::from_iter([
+                Scope::create("project", "456").unwrap(),
+                Scope::create("org", "123").unwrap(),
+            ]),
+        };
+
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
     }

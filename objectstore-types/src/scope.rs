@@ -27,9 +27,10 @@
 //! 1. **Organization** — they define a hierarchical folder-like structure
 //!    within a usecase. The storage path directly reflects the scope hierarchy
 //!    (e.g. `org.17/project.42/objects/{key}`).
-//! 2. **Authorization** — JWT tokens include scope claims that are matched
-//!    against the request's scopes. A token scoped to `organization=17` can
-//!    only access objects under that organization.
+//! 2. **Authorization** — JWT tokens include ordered scope claims that are
+//!    matched against the request's scopes by prefix. A token scoped to
+//!    `organization=17` can only access objects under that organization, and
+//!    `organization=17/project=*` matches deeper nested scopes in that order.
 //! 3. **Compartmentalization** — scopes isolate impact through rate limits and
 //!    killswitches, guaranteeing quality of service between tenants.
 //!

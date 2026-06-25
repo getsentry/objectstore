@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_types::scope;
@@ -114,12 +114,16 @@ pub struct TokenGenerator {
 }
 
 #[derive(Serialize, Deserialize)]
+struct JwtScope {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
     usecase: String,
-
-    #[serde(flatten)]
-    scopes: BTreeMap<String, String>,
+    scopes: Vec<JwtScope>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,7 +189,10 @@ impl TokenGenerator {
                 scopes: scope
                     .scopes()
                     .iter()
-                    .map(|scope| (scope.name().to_string(), scope.value().to_string()))
+                    .map(|scope| JwtScope {
+                        name: scope.name().to_string(),
+                        value: scope.value().to_string(),
+                    })
                     .collect(),
             },
         };
