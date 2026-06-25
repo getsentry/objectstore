@@ -154,9 +154,8 @@ impl Backend for LocalFsBackend {
                         .ok_or(Error::RangeNotSatisfiable {
                             total: payload_size,
                         })?;
-                reader
-                    .seek(std::io::SeekFrom::Current(content_range.start as i64))
-                    .await?;
+                let payload_start = metadata_line.len() as u64 + content_range.start;
+                reader.seek(std::io::SeekFrom::Start(payload_start)).await?;
                 let limited = reader.take(content_range.len());
                 (Some(content_range), ReaderStream::new(limited).boxed())
             }

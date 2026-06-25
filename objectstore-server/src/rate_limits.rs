@@ -338,6 +338,18 @@ impl EwmaEstimator {
     }
 }
 
+/// Returns `value * pct / 100`, saturating at `u32::MAX`.
+fn pct_of_u32(value: u32, pct: u8) -> u32 {
+    let scaled = u64::from(value) * u64::from(pct) / 100;
+    u32::try_from(scaled).unwrap_or(u32::MAX)
+}
+
+/// Returns `value * pct / 100`, saturating at `u64::MAX`.
+fn pct_of_u64(value: u64, pct: u8) -> u64 {
+    let scaled = u128::from(value) * u128::from(pct) / 100;
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
@@ -513,14 +525,14 @@ impl BandwidthRateLimiter {
     fn usecase_bps(&self) -> Option<u64> {
         let global_bps = self.config.global_bps?;
         let pct = self.config.usecase_pct?;
-        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+        Some(pct_of_u64(global_bps, pct))
     }
 
     /// Returns the effective BPS for per-scope limiting, if configured.
     fn scope_bps(&self) -> Option<u64> {
         let global_bps = self.config.global_bps?;
         let pct = self.config.scope_pct?;
-        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+        Some(pct_of_u64(global_bps, pct))
     }
 }
 
@@ -658,23 +670,21 @@ impl ThroughputRateLimiter {
     fn usecase_rps(&self) -> Option<u32> {
         let global_rps = self.config.global_rps?;
         let pct = self.config.usecase_pct?;
-        Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
+        Some(pct_of_u32(global_rps, pct))
     }
 
     /// Returns the effective RPS for per-scope limiting, if configured.
     fn scope_rps(&self) -> Option<u32> {
         let global_rps = self.config.global_rps?;
         let pct = self.config.scope_pct?;
-        Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
+        Some(pct_of_u32(global_rps, pct))
     }
 
     /// Returns the effective RPS for a rule, if it has a valid limit.
     fn rule_rps(&self, rule: &ThroughputRule) -> Option<u32> {
-        let pct_limit = rule.pct.and_then(|p| {
-            self.config
-                .global_rps
-                .map(|g| ((g as f64) * (p as f64 / 100.0)) as u32)
-        });
+        let pct_limit = rule
+            .pct
+            .and_then(|p| self.config.global_rps.map(|g| pct_of_u32(g, p)));
 
         match (rule.rps, pct_limit) {
             (Some(r), Some(p)) => Some(r.min(p)),

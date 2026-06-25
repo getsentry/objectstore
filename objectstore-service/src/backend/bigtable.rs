@@ -213,11 +213,7 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
 
 /// Wraps `inner` so that it only matches live (non-expired) cells.
 fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
-    let now_micros = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-        * 1000;
+    let now_micros = time_to_micros_saturating(SystemTime::now());
 
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
@@ -1161,6 +1157,16 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
     })
 }
 
+/// Converts a wall-clock time to Bigtable's microsecond timestamp, saturating at `i64::MAX`
+/// (unreachable until approximately year 294,247).
+fn time_to_micros_saturating(t: SystemTime) -> i64 {
+    let millis = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis * 1000).unwrap_or(i64::MAX)
+}
+
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.
 fn micros_to_time(micros: i64) -> Option<SystemTime> {
     let micros = u64::try_from(micros).ok()?;
@@ -1321,11 +1327,7 @@ mod tests {
         } else {
             let t =
                 time_expires.unwrap_or(SystemTime::now() + expiration_policy.expires_in().unwrap());
-            let timestamp = t
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            (FAMILY_GC, timestamp as i64 * 1000)
+            (FAMILY_GC, time_to_micros_saturating(t))
         };
 
         let path = id.as_storage_path().to_string().into_bytes();

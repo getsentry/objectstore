@@ -28,15 +28,15 @@ const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone, Debug)]
 pub struct ConcurrencyLimiter {
     semaphore: Arc<Semaphore>,
-    max: usize,
+    max: u32,
     released: Arc<Notify>,
 }
 
 impl ConcurrencyLimiter {
     /// Creates a new limiter with the given maximum number of permits.
-    pub fn new(max: usize) -> Self {
+    pub fn new(max: u32) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(max)),
+            semaphore: Arc::new(Semaphore::new(max as usize)),
             max,
             released: Arc::new(Notify::new()),
         }
@@ -48,11 +48,11 @@ impl ConcurrencyLimiter {
     /// notifies waiters on drop, just like single-permit acquisition.
     ///
     /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
-    pub fn try_acquire_many(&self, count: usize) -> Result<ConcurrencyPermit> {
+    pub fn try_acquire_many(&self, count: u32) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
-            .try_acquire_many_owned(count as u32)
+            .try_acquire_many_owned(count)
             .map_err(|_| Error::AtCapacity)?;
         Ok(ConcurrencyPermit {
             permit: Some(permit),
@@ -70,17 +70,17 @@ impl ConcurrencyLimiter {
     }
 
     /// Returns the number of permits currently available.
-    pub fn available_permits(&self) -> usize {
-        self.semaphore.available_permits()
+    pub fn available_permits(&self) -> u32 {
+        u32::try_from(self.semaphore.available_permits()).unwrap_or(self.max)
     }
 
     /// Returns the number of permits currently held.
-    pub fn used_permits(&self) -> usize {
-        self.max - self.semaphore.available_permits()
+    pub fn used_permits(&self) -> u32 {
+        self.max - self.available_permits()
     }
 
     /// Returns the total number of permits.
-    pub fn total_permits(&self) -> usize {
+    pub fn total_permits(&self) -> u32 {
         self.max
     }
 
@@ -102,7 +102,7 @@ impl ConcurrencyLimiter {
     /// task alongside the service.
     pub async fn run_emitter<F, Fut>(&self, mut emit: F)
     where
-        F: FnMut(usize) -> Fut,
+        F: FnMut(u32) -> Fut,
         Fut: Future<Output = ()>,
     {
         let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
@@ -198,7 +198,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
     use crate::error::Error;
@@ -270,7 +270,7 @@ mod tests {
         let limiter = ConcurrencyLimiter::new(5);
         let _permit = limiter.try_acquire().unwrap();
 
-        let emitted = Arc::new(AtomicUsize::new(0));
+        let emitted = Arc::new(AtomicU32::new(0));
         let emitted_clone = Arc::clone(&emitted);
 
         let emitter = limiter.run_emitter(move |count| {
