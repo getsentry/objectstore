@@ -12,10 +12,10 @@ All object operations live under the `/v1/` prefix:
 | Method   | Path                                      | Description                  |
 |----------|-------------------------------------------|------------------------------|
 | `POST`   | `/v1/objects/{usecase}/{scopes}/`         | Insert with server-generated key |
-| `GET`    | `/v1/objects/{usecase}/{scopes}/{key}`    | Retrieve object              |
-| `HEAD`   | `/v1/objects/{usecase}/{scopes}/{key}`    | Retrieve metadata only       |
-| `PUT`    | `/v1/objects/{usecase}/{scopes}/{key}`    | Insert or overwrite with key |
-| `DELETE` | `/v1/objects/{usecase}/{scopes}/{key}`    | Delete object                |
+| `GET`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve object              |
+| `HEAD`   | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve metadata only       |
+| `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Insert or overwrite with key |
+| `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}`   | Delete object                |
 | `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
 
 ### Multipart Upload Endpoints
@@ -24,10 +24,10 @@ All object operations live under the `/v1/` prefix:
 |-----------|--------------------------------------------------------------|--------------------------------------|
 | `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
 | `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
-| `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | Upload a part (`uploadId`, `partNumber` query params) |
-| `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{key}`       | List uploaded parts (`uploadId` query param) |
-| `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{key}`    | Complete upload (`uploadId` query param) |
-| `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{key}`             | Abort upload (`uploadId` query param) |
+| `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | Upload a part (`uploadId`, `partNumber` query params) |
+| `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | List uploaded parts (`uploadId` query param) |
+| `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{*key}`   | Complete upload (`uploadId` query param) |
+| `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Abort upload (`uploadId` query param) |
 
 The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
 
@@ -89,8 +89,7 @@ unauthenticated development setups.
 
 Tokens must include:
 - **Header**: `kid` (key ID) and `alg: EdDSA`
-- **Claims**: `aud: "objectstore"`, `iss: "sentry"` or `"relay"`, `exp`
-  (expiration timestamp)
+- **Claims**: `exp` (expiration timestamp)
 - **Resource claims** (`res`): the usecase and scope values the token grants
   access to (e.g., `{"os:usecase": "attachments", "org": "123"}`)
 - **Permissions**: array of granted operations (`object.read`, `object.write`,

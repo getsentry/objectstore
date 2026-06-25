@@ -273,7 +273,7 @@ session
     .await
     .error_for_failures()
     .await
-    .map_err(|errors| { /* errors: Vec<Error> */ })?;
+    .map_err(|errors| { /* Iterator<Item = objectstore_client::Error> */ })?;
 ```
 
 ### Authentication
