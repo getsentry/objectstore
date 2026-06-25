@@ -151,7 +151,7 @@ fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
 /// Returns `None` if the resulting value is not a valid HTTP header value (e.g.
 /// the filename contains control characters).
 fn format_content_disposition(filename: &str) -> Option<http::HeaderValue> {
-    let all_dots = !filename.is_empty() && filename.chars().all(|c| c == '.');
+    let all_dots = filename.chars().all(|c| c == '.');
 
     let mut result = String::from("attachment; filename=\"");
     for c in filename.chars() {
