@@ -344,7 +344,7 @@ class Session:
         if origin:
             headers[HEADER_ORIGIN] = origin
 
-        if filename:
+        if filename is not None:
             headers[HEADER_FILENAME] = filename
 
         if metadata:
@@ -527,7 +527,7 @@ class Session:
         if origin:
             headers[HEADER_ORIGIN] = origin
 
-        if filename:
+        if filename is not None:
             headers[HEADER_FILENAME] = filename
 
         if metadata:
