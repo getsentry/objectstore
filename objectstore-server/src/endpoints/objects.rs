@@ -8,7 +8,7 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::metadata::{Metadata, format_content_disposition};
+use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
@@ -132,15 +132,43 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 }
 
 fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    if let Some(Ok(val)) = metadata
+    if let Some(val) = metadata
         .filename
         .as_deref()
-        .map(|f| format_content_disposition(f).parse())
+        .and_then(format_content_disposition)
     {
         response
             .headers_mut()
             .insert(http::header::CONTENT_DISPOSITION, val);
     }
+}
+
+/// Formats a `Content-Disposition: attachment; filename="..."` header value.
+///
+/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all
+/// dashes) and then escaped for RFC 6266 quoted-string (`"` is backslash-escaped).
+///
+/// Returns `None` if the resulting value is not a valid HTTP header value (e.g.
+/// the filename contains control characters).
+fn format_content_disposition(filename: &str) -> Option<http::HeaderValue> {
+    let all_dots = !filename.is_empty() && filename.chars().all(|c| c == '.');
+
+    let mut result = String::from("attachment; filename=\"");
+    for c in filename.chars() {
+        let c = match c {
+            '/' | '\\' => '-',
+            '.' if all_dots => '-',
+            '"' => {
+                result.push('\\');
+                '"'
+            }
+            c => c,
+        };
+        result.push(c);
+    }
+    result.push('"');
+
+    http::HeaderValue::from_str(&result).ok()
 }
 
 async fn object_put(
