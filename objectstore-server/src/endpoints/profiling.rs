@@ -64,7 +64,10 @@ async fn enable() -> Response {
     };
     let mut guard = ctl.lock().await;
     match guard.activate() {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            objectstore_log::info!("Heap profiling enabled");
+            StatusCode::OK.into_response()
+        }
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }
@@ -76,7 +79,10 @@ async fn disable() -> Response {
     };
     let mut guard = ctl.lock().await;
     match guard.deactivate() {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            objectstore_log::info!("Heap profiling disabled");
+            StatusCode::OK.into_response()
+        }
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }
@@ -104,6 +110,7 @@ async fn heap() -> Response {
 
     match guard.dump_pprof() {
         Ok(bytes) => {
+            objectstore_log::info!("Heap profile requested");
             let headers = [
                 (
                     header::CONTENT_TYPE,

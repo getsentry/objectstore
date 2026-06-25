@@ -245,41 +245,33 @@ You can copy and save additional config files next to the examples in
 
 ### Heap Profiling
 
-Production release builds include on-demand heap profiling via jemalloc. Profiling is compiled
-in but dormant at startup — you enable and disable it through HTTP endpoints that are only
-reachable from loopback (i.e. from inside the pod or over `kubectl port-forward`).
+Production release builds include on-demand heap profiling via jemalloc. It can
+be enabled and disabled through HTTP endpoints that are only reachable from
+loopback.
 
-To capture a heap profile from a running pod:
+To capture a heap profile from a running server, for example on localhost with
+default port:
 
 ```sh
-# Forward the server port to your local machine
-kubectl port-forward pod/<name> 8888:8888
-
 # Enable sampling, let the workload run, then dump a profile
-curl -s -XPOST localhost:8888/debug/pprof/enable
-# ... wait for the leak or load to accumulate ...
-curl -s localhost:8888/debug/pprof/heap > heap.pb.gz
+curl -X POST http://localhost:8888/debug/pprof/enable
+curl http://localhost:8888/debug/pprof/heap > heap.pb.gz
 
 # Disable sampling when done
-curl -s -XPOST localhost:8888/debug/pprof/disable
+curl -X POST http://localhost:8888/debug/pprof/disable
 ```
 
-The dump is a symbolized gzipped pprof file — function names are resolved against the running
-binary's debug info, so no local binary is needed to analyze it. Open it with `go tool pprof`:
+Analyze the profile dump with `go tool pprof`:
 
 ```sh
-go tool pprof -top heap.pb.gz
+go tool pprof heap.pb.gz
 
 # To isolate growth between two snapshots, use the -base flag:
-curl -s localhost:8888/debug/pprof/heap > heap1.pb.gz
-# ... wait for more growth ...
-curl -s localhost:8888/debug/pprof/heap > heap2.pb.gz
-go tool pprof -base heap1.pb.gz heap2.pb.gz
+go tool pprof -base before.pb.gz after.pb.gz
 ```
 
-Sampling overhead is negligible (jemalloc default: one sample per ~512 KiB allocated on
-average), so profiling can be left enabled for an extended capture window without measurably
-affecting request latency.
+The sampling overhead is expected to be low, so profiling can be left enabled
+for an extended capture window safely.
 
 ### Tests
 
