@@ -329,7 +329,13 @@ async fn batch_operations() {
     // key-2 uses default compression (zstd), others are uncompressed
     let results: Vec<_> = session
         .many()
-        .push(session.put("first object").compression(None).key("key-1"))
+        .push(
+            session
+                .put("first object")
+                .compression(None)
+                .filename("report.pdf")
+                .key("key-1"),
+        )
         .push(session.put("second object").key("key-2"))
         .push(session.put("third object").compression(None).key("key-3"))
         .push(session.put("fourth object").compression(None).key("key-4"))
@@ -395,6 +401,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
+    assert_eq!(get1.metadata.filename.as_deref(), Some("report.pdf"));
     assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
 
     // GET key-2 (automatic decompression)
@@ -405,6 +412,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get2.metadata.compression, None);
     assert!(get2.metadata.time_created.is_some());
+    assert!(get2.metadata.filename.is_none());
     assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
 
     // DELETE key-3

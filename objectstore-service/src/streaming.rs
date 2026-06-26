@@ -84,7 +84,7 @@ pub struct Head {
 #[derive(Debug)]
 pub enum Operation {
     /// Insert a new object.
-    Insert(Insert),
+    Insert(Box<Insert>),
     /// Get an existing object.
     Get(Get),
     /// Delete an object.
@@ -424,11 +424,11 @@ mod tests {
             Operation::Get(Get {
                 key: "nonexistent".into(),
             }),
-            Operation::Insert(Insert {
+            Operation::Insert(Box::new(Insert {
                 key: Some("key2".into()),
                 metadata: Metadata::default(),
                 payload: Bytes::from("world"),
-            }),
+            })),
             Operation::Delete(Delete { key: "key1".into() }),
         ];
 
@@ -547,11 +547,11 @@ mod tests {
         // Submit 10 inserts. With window=10, all should be in-flight simultaneously.
         let ops: Vec<Operation> = (0..10)
             .map(|i| {
-                Operation::Insert(Insert {
+                Operation::Insert(Box::new(Insert {
                     key: Some(format!("key{i}")),
                     metadata: Metadata::default(),
                     payload: Bytes::from(format!("data{i}")),
-                })
+                }))
             })
             .collect();
 

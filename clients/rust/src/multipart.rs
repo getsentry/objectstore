@@ -146,6 +146,15 @@ impl InitiateMultipartBuilder {
         self
     }
 
+    /// Sets the filename of the object.
+    ///
+    /// When present, the server will include a `Content-Disposition: attachment; filename="<filename>"`
+    /// header in GET responses.
+    pub fn filename(mut self, filename: impl Into<String>) -> Self {
+        self.metadata.filename = Some(filename.into());
+        self
+    }
+
     /// Sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.

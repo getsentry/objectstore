@@ -48,6 +48,8 @@ pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
 pub const HEADER_TIME_EXPIRES: &str = "x-sn-time-expires";
 /// The custom HTTP header that contains the origin of the object.
 pub const HEADER_ORIGIN: &str = "x-sn-origin";
+/// The custom HTTP header that contains the filename of the object.
+pub const HEADER_FILENAME: &str = "x-sn-filename";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -262,6 +264,14 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 
+    /// An optional filename associated with this object (header: `x-sn-filename`).
+    ///
+    /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
+    /// header in GET responses, prompting browsers and download tools to save the file
+    /// under this name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
     /// Size of the data in bytes, if known.
     ///
     /// Not transmitted via HTTP headers; set by backends when the object is
@@ -320,6 +330,9 @@ impl Metadata {
                         HEADER_ORIGIN => {
                             metadata.origin = Some(value.to_str()?.to_owned());
                         }
+                        HEADER_FILENAME => {
+                            metadata.filename = Some(value.to_str()?.to_owned());
+                        }
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
@@ -344,6 +357,7 @@ impl Metadata {
             content_type,
             compression,
             origin,
+            filename,
             expiration_policy,
             time_created,
             time_expires,
@@ -378,6 +392,10 @@ impl Metadata {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_ORIGIN}"))?;
             headers.append(name, origin.parse()?);
         }
+        if let Some(filename) = filename {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_FILENAME}"))?;
+            headers.append(name, filename.parse()?);
+        }
 
         // customer-provided metadata
         for (key, value) in custom {
@@ -405,6 +423,7 @@ impl Default for Metadata {
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
             origin: None,
+            filename: None,
             size: None,
             custom: BTreeMap::new(),
         }
@@ -463,6 +482,52 @@ mod tests {
         let headers = metadata.to_headers("").unwrap();
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.origin, metadata.origin);
+    }
+
+    #[test]
+    fn from_headers_with_filename() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_FILENAME, "report.pdf".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.filename.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn from_headers_without_filename() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert!(metadata.filename.is_none());
+    }
+
+    #[test]
+    fn to_headers_with_filename() {
+        let metadata = Metadata {
+            filename: Some("report.pdf".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        assert_eq!(headers.get(HEADER_FILENAME).unwrap(), "report.pdf");
+    }
+
+    #[test]
+    fn to_headers_without_filename() {
+        let metadata = Metadata::default();
+        let headers = metadata.to_headers("").unwrap();
+        assert!(headers.get(HEADER_FILENAME).is_none());
+    }
+
+    #[test]
+    fn filename_header_roundtrip() {
+        let metadata = Metadata {
+            filename: Some("report.pdf".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        let roundtripped = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(roundtripped.filename, metadata.filename);
     }
 
     #[test]
@@ -571,6 +636,7 @@ mod tests {
             content_type: "text/html".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
+            filename: Some("report.pdf".into()),
             size: None,
             custom: BTreeMap::from([("foo".into(), "bar".into())]),
         };
@@ -586,6 +652,7 @@ mod tests {
             "content-encoding": "zstd",
             "content-type": "text/html",
             "pfx-x-sn-expiration": "ttl:1m",
+            "pfx-x-sn-filename": "report.pdf",
             "pfx-x-sn-origin": "10.0.0.1",
             "pfx-x-sn-time-created": "2023-11-14T22:13:20.000000Z",
             "pfx-x-sn-time-expires": "2023-11-14T22:14:20.000000Z",
@@ -604,6 +671,7 @@ mod tests {
             content_type: "image/png".into(),
             compression: Some(Compression::Zstd),
             origin: Some("192.168.1.1".into()),
+            filename: Some("image.png".into()),
             size: None,
             custom: BTreeMap::from([
                 ("key1".into(), "value1".into()),
@@ -618,6 +686,7 @@ mod tests {
         assert_eq!(roundtripped.content_type, metadata.content_type);
         assert_eq!(roundtripped.compression, metadata.compression);
         assert_eq!(roundtripped.origin, metadata.origin);
+        assert_eq!(roundtripped.filename, metadata.filename);
         assert_eq!(roundtripped.time_created, metadata.time_created);
         assert_eq!(roundtripped.time_expires, metadata.time_expires);
         assert_eq!(roundtripped.custom, metadata.custom);
@@ -660,6 +729,7 @@ mod tests {
             content_type: "application/json".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
+            filename: Some("data.json".into()),
             size: Some(1024),
             custom: BTreeMap::from([("key".into(), "value".into())]),
         };
@@ -688,6 +758,7 @@ mod tests {
         assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.compression.is_none());
         assert!(metadata.origin.is_none());
+        assert!(metadata.filename.is_none());
         assert!(metadata.time_created.is_none());
         assert!(metadata.time_expires.is_none());
         assert!(metadata.size.is_none());

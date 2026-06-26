@@ -120,11 +120,11 @@ async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, Bat
                 }
                 payload.extend_from_slice(&chunk);
             }
-            Operation::Insert(Insert {
+            Operation::Insert(Box::new(Insert {
                 key,
                 metadata,
                 payload: payload.freeze(),
-            })
+            }))
         }
         _ => {
             return Err(BatchError::BadRequest(format!(

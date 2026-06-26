@@ -156,6 +156,7 @@ def test_full_cycle(server_url: str) -> None:
     retrieved = session.get(object_key)
     assert retrieved.payload.read() == b"test data"
     assert retrieved.metadata.time_created is not None
+    assert retrieved.metadata.filename is None
 
     new_key = session.put(b"new data", key=object_key)
     assert new_key == object_key
@@ -205,12 +206,13 @@ def test_full_cycle_with_origin(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    object_key = session.put(b"test data", origin="203.0.113.42")
+    object_key = session.put(b"test data", origin="203.0.113.42", filename="report.pdf")
     assert object_key is not None
 
     retrieved = session.get(object_key)
     assert retrieved.payload.read() == b"test data"
     assert retrieved.metadata.origin == "203.0.113.42"
+    assert retrieved.metadata.filename == "report.pdf"
 
 
 def test_full_cycle_uncompressed(server_url: str) -> None:
@@ -584,6 +586,7 @@ def test_multipart_metadata_preserved(server_url: str) -> None:
         key="mp-metadata",
         content_type="text/plain",
         origin="203.0.113.42",
+        filename="archive.tar.gz",
         metadata={"my-key": "my-value"},
     )
 
@@ -593,6 +596,7 @@ def test_multipart_metadata_preserved(server_url: str) -> None:
     retrieved = session.get(final_key)
     assert retrieved.metadata.content_type == "text/plain"
     assert retrieved.metadata.origin == "203.0.113.42"
+    assert retrieved.metadata.filename == "archive.tar.gz"
     assert retrieved.metadata.custom.get("my-key") == "my-value"
 
 

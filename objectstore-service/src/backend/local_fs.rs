@@ -472,6 +472,7 @@ mod tests {
             time_expires: None,
             compression: Some(Compression::Zstd),
             origin: Some("203.0.113.42".into()),
+            filename: Some("hello.txt".into()),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,
         };

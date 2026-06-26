@@ -16,6 +16,7 @@ from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
+    HEADER_FILENAME,
     HEADER_META_PREFIX,
     HEADER_ORIGIN,
     Compression,
@@ -302,6 +303,7 @@ class Session:
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
+        filename: str | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -341,6 +343,9 @@ class Session:
 
         if origin:
             headers[HEADER_ORIGIN] = origin
+
+        if filename is not None:
+            headers[HEADER_FILENAME] = filename
 
         if metadata:
             for k, v in metadata.items():
@@ -489,6 +494,7 @@ class Session:
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
+        filename: str | None = None,
     ) -> MultipartUpload:
         """
         Initiates a multipart upload.
@@ -520,6 +526,9 @@ class Session:
 
         if origin:
             headers[HEADER_ORIGIN] = origin
+
+        if filename is not None:
+            headers[HEADER_FILENAME] = filename
 
         if metadata:
             for k, v in metadata.items():

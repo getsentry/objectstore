@@ -168,6 +168,12 @@ impl GcsObject {
                 .insert(GcsMetaKey::Origin, origin.clone());
         }
 
+        if let Some(filename) = &metadata.filename {
+            gcs_object
+                .metadata
+                .insert(GcsMetaKey::Filename, filename.clone());
+        }
+
         for (key, value) in &metadata.custom {
             gcs_object
                 .metadata
@@ -190,6 +196,7 @@ impl GcsObject {
             .unwrap_or_default();
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
+        let filename = self.metadata.remove(&GcsMetaKey::Filename);
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
@@ -223,6 +230,7 @@ impl GcsObject {
             expiration_policy,
             compression,
             origin,
+            filename,
             size,
             custom,
             time_created,
@@ -238,6 +246,8 @@ enum GcsMetaKey {
     Expiration,
     /// Built-in metadata key for [`Metadata::origin`].
     Origin,
+    /// Built-in metadata key for [`Metadata::filename`].
+    Filename,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -255,6 +265,7 @@ impl std::str::FromStr for GcsMetaKey {
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
             Some("origin") => GcsMetaKey::Origin,
+            Some("filename") => GcsMetaKey::Filename,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -269,6 +280,7 @@ impl fmt::Display for GcsMetaKey {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
             Self::Origin => write!(f, "{BUILTIN_META_PREFIX}origin"),
+            Self::Filename => write!(f, "{BUILTIN_META_PREFIX}filename"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
@@ -333,6 +345,10 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
 
     if let Some(origin) = &metadata.origin {
         insert_gcs_meta_header(&mut headers, &GcsMetaKey::Origin, origin)?;
+    }
+
+    if let Some(filename) = &metadata.filename {
+        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Filename, filename)?;
     }
 
     for (key, value) in &metadata.custom {
@@ -1102,6 +1118,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             origin: Some("203.0.113.42".into()),
+            filename: Some("hello.txt".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             time_created: Some(SystemTime::now()),
             time_expires: None,
@@ -1119,6 +1136,7 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.origin, metadata.origin);
+        assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
         assert!(metadata.time_created.is_some());
 
