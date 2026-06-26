@@ -243,6 +243,36 @@ cargo run -- run
 You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.
 
+### Heap Profiling
+
+Production release builds include on-demand heap profiling via jemalloc. It can
+be enabled and disabled through HTTP endpoints that are only reachable from
+loopback.
+
+To capture a heap profile from a running server, for example on localhost with
+default port:
+
+```sh
+# Enable sampling, let the workload run, then dump a profile
+curl -X POST http://localhost:8888/debug/pprof/enable
+curl http://localhost:8888/debug/pprof/heap > heap.pb.gz
+
+# Disable sampling when done
+curl -X POST http://localhost:8888/debug/pprof/disable
+```
+
+Analyze the profile dump with `go tool pprof`:
+
+```sh
+go tool pprof heap.pb.gz
+
+# To isolate growth between two snapshots, use the -base flag:
+go tool pprof -base before.pb.gz after.pb.gz
+```
+
+The sampling overhead is expected to be low, so profiling can be left enabled
+for an extended capture window safely.
+
 ### Tests
 
 To run tests:

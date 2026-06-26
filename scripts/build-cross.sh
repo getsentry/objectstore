@@ -28,7 +28,7 @@ docker run --rm \
     -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
     -v "$HOME/.cargo/git":/usr/local/cargo/git \
     objectstore-build \
-    -p "$PACKAGE"
+    -p "$PACKAGE" --features profiling
 
 docker build \
     --platform linux/amd64 \
