@@ -6,7 +6,6 @@ use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::body::MeteredBody;
 use crate::state::ServiceState;
-use crate::web::SentryStreamExt;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -258,9 +257,7 @@ async fn complete(
             }
         }
     };
-    let stream = stream
-        .map(Ok::<_, Infallible>)
-        .bind_hub(sentry::Hub::current());
+    let stream = stream.map(Ok::<_, Infallible>);
 
     let mut headers = HeaderMap::new();
     headers.insert(

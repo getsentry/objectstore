@@ -23,7 +23,6 @@ use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchOperationStream};
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
-use crate::web::SentryStreamExt;
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
@@ -132,9 +131,7 @@ async fn batch(
         async move { convert_to_part(idx, result, &state, &context).await }
     });
 
-    responses
-        .bind_hub(sentry::Hub::current())
-        .into_multipart_response(rand::random())
+    responses.into_multipart_response(rand::random())
 }
 
 /// Converts a single operation result to a multipart [`Part`].

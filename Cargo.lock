@@ -2696,6 +2696,7 @@ dependencies = [
  "futures-util",
  "globset",
  "http 1.4.2",
+ "http-body",
  "humantime",
  "humantime-serde",
  "jemalloc_pprof",
