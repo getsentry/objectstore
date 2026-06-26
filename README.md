@@ -261,13 +261,20 @@ curl http://localhost:8888/debug/pprof/heap > heap.pb.gz
 curl -X POST http://localhost:8888/debug/pprof/disable
 ```
 
+Profiles are unsymbolicated — you need the server binary to resolve stack
+frames. Copy it from the Docker image with `docker cp <image>:/bin/entrypoint
+./objectstore`.
+
 Analyze the profile dump with `go tool pprof`:
 
 ```sh
-go tool pprof heap.pb.gz
+go tool pprof objectstore heap.pb.gz
 
 # To isolate growth between two snapshots, use the -base flag:
-go tool pprof -base before.pb.gz after.pb.gz
+go tool pprof -base before.pb.gz after.pb.gz objectstore
+
+# Web UI with flame graph:
+go tool pprof -http=:8080 objectstore heap.pb.gz
 ```
 
 The sampling overhead is expected to be low, so profiling can be left enabled
