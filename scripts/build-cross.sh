@@ -6,8 +6,14 @@ cd "$(dirname "$0")/.."
 BINARY=${1:-objectstore}
 DEBUG_IMAGE=${DEBUG_IMAGE:-false}
 case "$BINARY" in
-    objectstore) PACKAGE="objectstore-server" ;;
-    *) PACKAGE="$BINARY" ;;
+objectstore)
+    PACKAGE="objectstore-server"
+    FEATURES="profiling"
+    ;;
+*)
+    PACKAGE="$BINARY"
+    FEATURES=""
+    ;;
 esac
 
 if [[ "$DEBUG_IMAGE" =~ ^(true|1|yes|on)$ ]]; then
@@ -28,7 +34,7 @@ docker run --rm \
     -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
     -v "$HOME/.cargo/git":/usr/local/cargo/git \
     objectstore-build \
-    -p "$PACKAGE" --features profiling
+    -p "$PACKAGE" --features "$FEATURES"
 
 docker build \
     --platform linux/amd64 \
