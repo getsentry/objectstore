@@ -6,6 +6,7 @@
 use std::any::Any;
 
 use objectstore_log::Level;
+use reqwest::StatusCode;
 use thiserror::Error as ThisError;
 
 use crate::stream::ClientError;
@@ -45,6 +46,23 @@ pub enum Error {
         /// The underlying reqwest error.
         #[source]
         cause: reqwest::Error,
+    },
+
+    /// An HTTP error response from a storage backend (e.g., GCS, S3).
+    ///
+    /// Unlike [`Reqwest`](Self::Reqwest), which covers transport-level failures, this variant
+    /// captures application-level error responses where the server returned a 4xx/5xx status code
+    /// along with a structured error body.
+    #[error("{context} ({status}). {message} (code {code})")]
+    BackendResponse {
+        /// Context describing the request that failed.
+        context: &'static str,
+        /// The HTTP status code returned by the backend.
+        status: StatusCode,
+        /// Machine-readable error code from the response body (e.g., "InvalidArgument").
+        code: String,
+        /// Human-readable error message from the response body.
+        message: String,
     },
 
     /// Errors related to de/serialization and parsing of object metadata.
@@ -154,6 +172,7 @@ impl Error {
             Self::Io(_) => Level::ERROR,
             Self::Serde { .. } => Level::ERROR,
             Self::Reqwest { .. } => Level::ERROR,
+            Self::BackendResponse { .. } => Level::ERROR,
             Self::GcpAuth(_) => Level::ERROR,
             Self::Panic(_) => Level::ERROR,
             Self::Dropped => Level::ERROR,

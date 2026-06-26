@@ -12,11 +12,10 @@ use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
-use reqwest::{
-    Body, IntoUrl, Method, RequestBuilder, Response, StatusCode, Url, header, multipart,
-};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
+use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
@@ -378,16 +377,20 @@ fn insert_gcs_meta_header(
 }
 
 /// Returns `true` if the error is a transient reqwest failure worth retrying.
-fn is_retryable(error: &Error) -> bool {
-    let Error::Reqwest { cause, .. } = error else {
-        return false;
-    };
-    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
-        return true;
+fn error_is_retryable(error: &Error) -> bool {
+    match error {
+        Error::Reqwest { cause, .. } => {
+            cause.is_timeout()
+                || cause.is_connect()
+                || cause.is_request()
+                || cause.status().is_some_and(status_is_retryable)
+        }
+        Error::BackendResponse { status, .. } => status_is_retryable(*status),
+        _ => false,
     }
-    let Some(status) = cause.status() else {
-        return false;
-    };
+}
+
+fn status_is_retryable(status: StatusCode) -> bool {
     // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
         status,
@@ -511,7 +514,7 @@ impl GcsBackend {
         loop {
             match f().await {
                 Ok(res) => return Ok(res),
-                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
+                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && error_is_retryable(e) => {
                     retry_count += 1;
                     objectstore_metrics::count!("gcs.retries", action = action);
                     objectstore_log::warn!(!!e, retry_count, action, "Retrying request");
@@ -541,8 +544,8 @@ impl GcsBackend {
                 }
 
                 let metadata: GcsObject = resp
-                    .error_for_status()
-                    .map_err(|e| Error::reqwest("GCS: get metadata status", e))?
+                    .check_error("GCS: get metadata status")
+                    .await?
                     .json()
                     .await
                     .map_err(|e| Error::reqwest("GCS: get metadata parse", e))?;
@@ -594,8 +597,8 @@ impl GcsBackend {
                 .json(&CustomTimeRequest { custom_time })
                 .send()
                 .await
-                .and_then(Response::error_for_status)
-                .map_err(|e| Error::reqwest("GCS: update custom time", e))?;
+                .check_error("GCS: update custom time")
+                .await?;
             Ok(())
         })
         .await
@@ -660,18 +663,19 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        self.request(Method::POST, self.upload_url(id, "multipart")?)
+        let resp = self
+            .request(Method::POST, self.upload_url(id, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .and_then(Response::error_for_status)
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::reqwest("GCS: upload object", e),
             })?;
 
+        resp.check_error("GCS: upload object").await?;
         Ok(())
     }
 
@@ -717,8 +721,7 @@ impl Backend for GcsBackend {
                     }
                 }
 
-                resp.error_for_status()
-                    .map_err(|e| Error::reqwest("GCS: get payload", e))
+                resp.check_error("GCS: get payload").await
             })
             .await?;
 
@@ -771,8 +774,7 @@ impl Backend for GcsBackend {
                 return Ok(());
             }
 
-            resp.error_for_status()
-                .map_err(|e| Error::reqwest("GCS: delete object", e))?;
+            resp.check_error("GCS: delete object").await?;
 
             Ok(())
         })
@@ -913,8 +915,8 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = builder
             .send()
             .await
-            .and_then(Response::error_for_status)
-            .map_err(|e| Error::reqwest("GCS: initiate multipart upload", e))?;
+            .check_error("GCS: initiate multipart upload")
+            .await?;
 
         let body = resp
             .bytes()
@@ -956,11 +958,7 @@ impl MultipartUploadBackend for GcsBackend {
             builder = builder.header("content-md5", md5);
         }
 
-        let resp = builder
-            .send()
-            .await
-            .and_then(Response::error_for_status)
-            .map_err(|e| Error::reqwest("GCS: upload part", e))?;
+        let resp = builder.send().await.check_error("GCS: upload part").await?;
 
         let etag = resp
             .headers()
@@ -998,8 +996,8 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(Response::error_for_status)
-            .map_err(|e| Error::reqwest("GCS: list parts", e))?;
+            .check_error("GCS: list parts")
+            .await?;
 
         let body = resp
             .bytes()
@@ -1029,8 +1027,8 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(Response::error_for_status)
-            .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
+            .check_error("GCS: abort multipart upload")
+            .await?;
 
         Ok(())
     }
@@ -1059,8 +1057,8 @@ impl MultipartUploadBackend for GcsBackend {
             .body(xml)
             .send()
             .await
-            .and_then(Response::error_for_status)
-            .map_err(|e| Error::reqwest("GCS: complete multipart upload", e))?;
+            .check_error("GCS: complete multipart upload")
+            .await?;
 
         let body = resp
             .bytes()

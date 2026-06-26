@@ -9,6 +9,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
+use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
@@ -198,12 +199,7 @@ where
             }
         }
 
-        let response = response
-            .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to get object".to_string(),
-                cause,
-            })?;
+        let response = response.check_error("S3: failed to get object").await?;
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
@@ -261,15 +257,8 @@ where
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send TTI update request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to update expiration time for object with TTI".to_string(),
-                cause,
-            })?;
+            .check_error("S3: update expiration time")
+            .await?;
 
         Ok(())
     }
@@ -311,13 +300,13 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         stream: ClientStream,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
-        self.request(Method::PUT, self.object_url(id))
+        let resp = self
+            .request(Method::PUT, self.object_url(id))
             .await?
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .and_then(Response::error_for_status)
             .map_err(|cause| match stream::unpack_client_error(&cause) {
                 Some(ce) => Error::Client(ce),
                 _ => Error::Reqwest {
@@ -325,6 +314,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                     cause,
                 },
             })?;
+        resp.check_error("S3: failed to put object").await?;
 
         Ok(())
     }
@@ -365,13 +355,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
-            objectstore_log::debug!("Object not found");
-            response
-                .error_for_status()
-                .map_err(|cause| Error::Reqwest {
-                    context: "S3: failed to delete object".to_string(),
-                    cause,
-                })?;
+            response.check_error("S3: failed to delete object").await?;
         }
 
         Ok(())
