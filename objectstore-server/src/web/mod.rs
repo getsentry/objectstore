@@ -15,8 +15,10 @@
 mod app;
 mod middleware;
 mod request_counter;
+mod sentry_stream;
 mod server;
 
 pub use app::App;
 pub use request_counter::RequestCounter;
+pub use sentry_stream::{SentryStream, SentryStreamExt};
 pub use server::server;

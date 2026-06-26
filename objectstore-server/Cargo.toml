@@ -31,6 +31,7 @@ objectstore-metrics = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
+pin-project-lite = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-no-alpn"] }
