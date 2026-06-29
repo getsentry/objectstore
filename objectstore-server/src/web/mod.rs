@@ -15,6 +15,7 @@
 mod app;
 mod middleware;
 mod request_counter;
+mod sentry_body;
 mod server;
 
 pub use app::App;
