@@ -68,11 +68,8 @@ pub trait ResponseExt {
 impl ResponseExt for Response {
     async fn check_error(self, context: &'static str) -> Result<Response> {
         let status = self.status();
-
         if !(status.is_client_error() || status.is_server_error()) {
-            return self
-                .error_for_status()
-                .map_err(|e| Error::reqwest(context, e));
+            return Ok(self);
         }
 
         let ct = self
@@ -81,9 +78,9 @@ impl ResponseExt for Response {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        let (code, message) = if ct.starts_with("application/json") {
+        let detail = if ct.starts_with("application/json") {
             parse_json_error(self).await
-        } else if ct.starts_with("application/xml") || ct.starts_with("text/xml") {
+        } else if ct.starts_with("application/xml") {
             parse_xml_error(self).await
         } else {
             return self
@@ -94,7 +91,7 @@ impl ResponseExt for Response {
         Err(Error::BackendResponse {
             context,
             status,
-            detail: BackendDetail { code, message },
+            detail,
         })
     }
 }
@@ -111,8 +108,7 @@ impl ResponseExt for Result<Response, reqwest::Error> {
     }
 }
 
-async fn parse_json_error(resp: Response) -> (String, String) {
-    let status = resp.status();
+async fn parse_json_error(resp: Response) -> BackendDetail {
     match resp.json::<JsonApiError>().await {
         Ok(body) => {
             let code = body
@@ -120,22 +116,26 @@ async fn parse_json_error(resp: Response) -> (String, String) {
                 .errors
                 .first()
                 .map(|e| e.reason.clone())
-                .unwrap_or_else(|| status.as_str().to_owned());
-            (code, body.error.message)
+                .unwrap_or_else(|| "unknown".to_owned());
+
+            BackendDetail {
+                code,
+                message: body.error.message,
+            }
         }
-        Err(_) => (status.as_str().to_owned(), status.to_string()),
+        Err(_) => BackendDetail::none(),
     }
 }
 
-async fn parse_xml_error(resp: Response) -> (String, String) {
-    let status = resp.status();
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => return (status.as_str().to_owned(), status.to_string()),
-    };
-
-    match quick_xml::de::from_reader::<_, XmlApiError>(bytes.as_ref()) {
-        Ok(body) => (body.code, body.message),
-        Err(_) => (status.as_str().to_owned(), status.to_string()),
+async fn parse_xml_error(resp: Response) -> BackendDetail {
+    if let Ok(bytes) = resp.bytes().await
+        && let Ok(body) = quick_xml::de::from_reader::<_, XmlApiError>(bytes.as_ref())
+    {
+        BackendDetail {
+            code: body.code,
+            message: body.message,
+        }
+    } else {
+        BackendDetail::none()
     }
 }
