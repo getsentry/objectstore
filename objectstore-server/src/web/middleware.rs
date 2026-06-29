@@ -111,7 +111,6 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
 struct EmitMetricsGuard<'a> {
     route: &'a str,
     method: Method,
-    service: DownstreamService,
     start: Instant,
     status: Option<StatusCode>,
 }
@@ -128,7 +127,6 @@ impl<'a> EmitMetricsGuard<'a> {
         Self {
             route,
             method: method.clone(),
-            service,
             start: Instant::now(),
             status: None,
         }
@@ -147,7 +145,7 @@ impl Drop for EmitMetricsGuard<'_> {
             route = self.route.to_owned(),
             method = self.method.as_str().to_owned(),
             status = status,
-            service = self.service.to_string(),
+            // service omitted to limit cardinality
         );
     }
 }
