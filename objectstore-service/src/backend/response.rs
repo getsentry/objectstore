@@ -112,18 +112,18 @@ impl ResponseExt for Result<Response, reqwest::Error> {
 }
 
 async fn parse_json_error(resp: Response) -> BackendDetail {
-    match resp.json::<JsonApiError>().await {
-        Ok(body) => {
-            let code = body
-                .error
+    match resp.json().await {
+        Ok(JsonApiError { error }) => {
+            let code = error
                 .errors
-                .first()
-                .map(|e| e.reason.clone())
+                .into_iter()
+                .next()
+                .map(|e| e.reason)
                 .unwrap_or_else(|| "unknown".to_owned());
 
             BackendDetail {
                 code,
-                message: body.error.message,
+                message: error.message,
             }
         }
         Err(_) => BackendDetail::none(),
@@ -132,13 +132,17 @@ async fn parse_json_error(resp: Response) -> BackendDetail {
 
 async fn parse_xml_error(resp: Response) -> BackendDetail {
     if let Ok(bytes) = resp.bytes().await
-        && let Ok(body) = quick_xml::de::from_reader::<_, XmlApiError>(bytes.as_ref())
+        && let Ok(XmlApiError {
+            code,
+            message,
+            details,
+        }) = quick_xml::de::from_reader(bytes.as_ref())
     {
         BackendDetail {
-            code: body.code,
-            message: match body.details.as_str() {
-                "" => body.message,
-                details => format!("{}: {details}", body.message),
+            code,
+            message: match details.as_str() {
+                "" => message,
+                _ => format!("{}: {details}", message),
             },
         }
     } else {
