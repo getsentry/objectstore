@@ -300,21 +300,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         stream: ClientStream,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
-        let resp = self
-            .request(Method::PUT, self.object_url(id))
+        self.request(Method::PUT, self.object_url(id))
             .await?
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .map_err(|cause| match stream::unpack_client_error(&cause) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::Reqwest {
-                    context: "S3: failed to put object".to_string(),
-                    cause,
-                },
-            })?;
-        resp.check_error("S3: failed to put object").await?;
+            .check_error("S3: failed to put object")
+            .await?;
 
         Ok(())
     }

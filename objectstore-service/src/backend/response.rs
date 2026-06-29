@@ -9,6 +9,7 @@ use reqwest::{Response, header};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::stream;
 
 const MAX_ERROR_BODY_LEN: usize = 1024;
 
@@ -76,20 +77,20 @@ impl ResponseExt for Response {
                 .map_err(|e| Error::reqwest(context, e));
         }
 
-        let content_type = self
+        let ct = self
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        let (code, message) = if content_type.starts_with("application/json") {
+        let (code, message) = if ct.starts_with("application/json") {
             parse_json_error(self).await
-        } else if content_type.starts_with("application/xml")
-            || content_type.starts_with("text/xml")
-        {
+        } else if ct.starts_with("application/xml") || ct.starts_with("text/xml") {
             parse_xml_error(self).await
         } else {
-            parse_fallback(self).await
+            return self
+                .error_for_status()
+                .map_err(|e| Error::reqwest(context, e));
         };
 
         Err(Error::BackendResponse {
@@ -105,7 +106,10 @@ impl ResponseExt for Result<Response, reqwest::Error> {
     async fn check_error(self, context: &'static str) -> Result<Response> {
         match self {
             Ok(resp) => resp.check_error(context).await,
-            Err(e) => Err(Error::reqwest(context, e)),
+            Err(e) => Err(match stream::unpack_client_error(&e) {
+                Some(ce) => Error::Client(ce),
+                None => Error::reqwest(context, e),
+            }),
         }
     }
 }
@@ -136,21 +140,5 @@ async fn parse_xml_error(resp: Response) -> (String, String) {
     match quick_xml::de::from_reader::<_, XmlApiError>(bytes.as_ref()) {
         Ok(body) => (body.code, body.message),
         Err(_) => (status.as_str().to_owned(), status.to_string()),
-    }
-}
-
-async fn parse_fallback(resp: Response) -> (String, String) {
-    let status = resp.status();
-    match resp.text().await {
-        Ok(text) if !text.is_empty() => {
-            let truncated = if text.len() > MAX_ERROR_BODY_LEN {
-                let end = text.floor_char_boundary(MAX_ERROR_BODY_LEN);
-                format!("{}...(truncated)", &text[..end])
-            } else {
-                text
-            };
-            (status.as_str().to_owned(), truncated)
-        }
-        _ => (status.as_str().to_owned(), status.to_string()),
     }
 }

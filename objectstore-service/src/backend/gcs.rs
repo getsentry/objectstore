@@ -663,19 +663,15 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        let resp = self
-            .request(Method::POST, self.upload_url(id, "multipart")?)
+        self.request(Method::POST, self.upload_url(id, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::reqwest("GCS: upload object", e),
-            })?;
+            .check_error("GCS: upload object")
+            .await?;
 
-        resp.check_error("GCS: upload object").await?;
         Ok(())
     }
 
