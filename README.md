@@ -261,16 +261,35 @@ curl http://localhost:8888/debug/pprof/heap > heap.pb.gz
 curl -X POST http://localhost:8888/debug/pprof/disable
 ```
 
-Analyze the profile dump with `go tool pprof`:
+Profiles are unsymbolicated — you need the server binary to resolve stack
+frames. Copy it from the Docker image with:
 
 ```sh
-go tool pprof heap.pb.gz
-
-# To isolate growth between two snapshots, use the -base flag:
-go tool pprof -base before.pb.gz after.pb.gz
+docker create --name tmp <image>
+docker cp tmp:/bin/entrypoint ./objectstore
+docker rm tmp
 ```
 
-The sampling overhead is expected to be low, so profiling can be left enabled
+To analyze profile dumps, use the standalone `pprof` tool. The go builtin tool
+does not support symbolizing ELF files on macOS hosts:
+
+```sh
+go install github.com/google/pprof@latest
+```
+
+Then point pprof at the binary and the heap dump(s) you want to analyze:
+
+```sh
+$(go env GOPATH)/bin/pprof -top objectstore heap.pb.gz
+
+# To isolate growth between two snapshots, use the -diff_base flag:
+$(go env GOPATH)/bin/pprof -top -diff_base before.pb.gz objectstore after.pb.gz
+
+# Interactive browser UI with flamegraph:
+$(go env GOPATH)/bin/pprof -http=:8080 objectstore heap.pb.gz
+```
+
+The sampling overhead is around 5%, so profiling can be left enabled
 for an extended capture window safely.
 
 ### Tests
