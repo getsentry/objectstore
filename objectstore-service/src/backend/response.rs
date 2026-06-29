@@ -48,13 +48,13 @@ struct XmlApiError {
 
 /// Extension trait for [`reqwest::Response`] that preserves error response bodies.
 ///
-/// Use `check_status` instead of [`reqwest::Response::error_for_status`] to avoid
-/// losing the response body on 4xx/5xx errors. The method parses the structured
-/// error body (JSON or XML) and returns an [`Error::BackendResponse`] with the
-/// extracted error code and message.
+/// Use [`check_error`](Self::check_error) instead of
+/// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
+/// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
+/// [`Error::BackendResponse`] with the extracted error code and message.
 ///
-/// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>`
-/// so it can be chained directly after `.send().await`.
+/// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
+/// chained directly.
 pub trait ResponseExt {
     /// Checks the HTTP status and returns the response on success.
     ///
@@ -83,7 +83,7 @@ impl ResponseExt for Response {
 
         let detail = if ct.starts_with("application/json") {
             parse_json_error(self).await
-        } else if ct.starts_with("application/xml") {
+        } else if ct.starts_with("application/xml") || ct.starts_with("text/xml") {
             parse_xml_error(self).await
         } else {
             return self
@@ -119,7 +119,7 @@ async fn parse_json_error(resp: Response) -> BackendDetail {
                 .into_iter()
                 .next()
                 .map(|e| e.reason)
-                .unwrap_or_else(|| "unknown".to_owned());
+                .unwrap_or_default();
 
             BackendDetail {
                 code,
@@ -142,7 +142,7 @@ async fn parse_xml_error(resp: Response) -> BackendDetail {
             code,
             message: match details.as_str() {
                 "" => message,
-                _ => format!("{}: {details}", message),
+                _ => format!("{message}: {details}"),
             },
         }
     } else {
