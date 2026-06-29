@@ -8,10 +8,8 @@
 use reqwest::{Response, header};
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
+use crate::error::{BackendDetail, Error, Result};
 use crate::stream;
-
-const MAX_ERROR_BODY_LEN: usize = 1024;
 
 /// GCS JSON API error envelope (`{"error": {"message": "...", ...}}`).
 #[derive(Deserialize)]
@@ -96,8 +94,7 @@ impl ResponseExt for Response {
         Err(Error::BackendResponse {
             context,
             status,
-            code,
-            message,
+            detail: BackendDetail { code, message },
         })
     }
 }

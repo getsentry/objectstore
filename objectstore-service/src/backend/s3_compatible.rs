@@ -15,7 +15,7 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`S3CompatibleBackend`].
 ///

@@ -27,7 +27,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
 ///
