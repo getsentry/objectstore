@@ -169,7 +169,12 @@ every chunk polled. For non-streamed payloads (e.g., batch INSERT where the
 size is known upfront), bytes are recorded directly via
 [`record_bandwidth`](state::Services::record_bandwidth).
 
-Rate-limited requests receive HTTP 429.
+Rate-limited requests receive HTTP 429. Each rejection is counted in the
+`server.request.rate_limited` metric, tagged with the `operation` kind
+(`get`/`head`/`insert`/`delete`, the multipart kinds, or `batch` for a whole
+batch rejected at its entry gate), the `reason` (which limit triggered), and the
+`usecase`. For batch requests, individual operations rejected mid-stream are
+tagged with their own operation kind.
 
 ### Web Concurrency Limit
 

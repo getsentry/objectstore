@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::operation::OperationKind;
 
 use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyPermit;
@@ -115,13 +116,13 @@ impl Operation {
         }
     }
 
-    /// Returns the kind name for this operation.
-    pub fn kind(&self) -> &'static str {
+    /// Returns the kind of this operation.
+    pub fn kind(&self) -> OperationKind {
         match self {
-            Operation::Insert(_) => "insert",
-            Operation::Get(_) => "get",
-            Operation::Delete(_) => "delete",
-            Operation::Head(_) => "head",
+            Operation::Insert(_) => OperationKind::Insert,
+            Operation::Get(_) => OperationKind::Get,
+            Operation::Delete(_) => OperationKind::Delete,
+            Operation::Head(_) => OperationKind::Head,
         }
     }
 }
@@ -270,9 +271,10 @@ impl StreamExecutor {
                         Err(e) => return (idx, Err(e)),
                     };
 
-                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, async move {
-                        execute_operation(backend, context, op).await
-                    });
+                    let spawn =
+                        crate::concurrency::spawn_metered(op.kind().as_str(), permit, async move {
+                            execute_operation(backend, context, op).await
+                        });
 
                     (idx, spawn.await.map_err(E::from))
                 }

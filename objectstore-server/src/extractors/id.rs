@@ -5,12 +5,28 @@ use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_types::operation::OperationKind;
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use serde::{Deserialize, de};
 
+use crate::endpoints::RouteOperation;
 use crate::extractors::Xt;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::state::ServiceState;
+
+/// Reads the [`OperationKind`] annotated on the matched route via `.op(...)`.
+///
+/// Every object/multipart/batch route is annotated, so the `Insert` fallback is
+/// unreachable in practice; the debug assertion catches a missing annotation in
+/// tests.
+fn route_operation(parts: &Parts) -> OperationKind {
+    let operation = parts.extensions.get::<RouteOperation>().map(|r| r.0);
+    debug_assert!(
+        operation.is_some(),
+        "route is missing an .op(...) operation annotation"
+    );
+    operation.unwrap_or(OperationKind::Insert)
+}
 
 #[derive(Debug)]
 pub enum ObjectRejection {
@@ -68,7 +84,11 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(id.context(), Some(id.key())) {
+        let operation = route_operation(parts);
+        if !state
+            .rate_limiter
+            .check(operation, id.context(), Some(id.key()))
+        {
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -141,7 +161,8 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(&context, None) {
+        let operation = route_operation(parts);
+        if !state.rate_limiter.check(operation, &context, None) {
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -233,6 +254,7 @@ mod tests {
 
     use crate::auth::PublicKeyDirectory;
     use crate::config::Config;
+    use crate::endpoints::OpRoute;
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
@@ -271,8 +293,14 @@ mod tests {
 
     fn test_router(state: ServiceState) -> Router {
         Router::new()
-            .route("/objects/{usecase}/{scopes}/{*key}", get(handle_object_id))
-            .route("/objects/{usecase}/{scopes}/", post(handle_object_context))
+            .route(
+                "/objects/{usecase}/{scopes}/{*key}",
+                get(handle_object_id).op(OperationKind::Get),
+            )
+            .route(
+                "/objects/{usecase}/{scopes}/",
+                post(handle_object_context).op(OperationKind::Insert),
+            )
             .with_state(state)
     }
 
