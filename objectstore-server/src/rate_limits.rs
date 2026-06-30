@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::id::ObjectContext;
-use objectstore_types::operation::OperationKind;
+use objectstore_service::operation::OperationKind;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
 

@@ -41,12 +41,12 @@ use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
-use objectstore_types::operation::OperationKind;
 
 use crate::backend::common::Backend;
 use crate::concurrency::ConcurrencyPermit;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
+use crate::operation::OperationKind;
 use crate::service::GetResponse;
 
 /// An insert operation: stores an object at the given key.

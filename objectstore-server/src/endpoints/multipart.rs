@@ -20,12 +20,12 @@ use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
+use objectstore_service::operation::OperationKind;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
     InitiateResponse, ListPartsResponse, PartInfo, UploadPartResponse,
 };
-use objectstore_types::operation::OperationKind;
 use serde::Deserialize;
 
 pub fn router() -> Router<ServiceState> {

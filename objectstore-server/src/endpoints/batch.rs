@@ -11,8 +11,8 @@ use futures::TryStreamExt;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_service::operation::OperationKind;
 use objectstore_service::streaming::{OpResponse, Operation};
-use objectstore_types::operation::OperationKind;
 use percent_encoding::NON_ALPHANUMERIC;
 
 use crate::auth::AuthAwareService;

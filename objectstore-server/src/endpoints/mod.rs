@@ -4,7 +4,7 @@
 
 use axum::routing::MethodRouter;
 use axum::{Extension, Router};
-use objectstore_types::operation::OperationKind;
+use objectstore_service::operation::OperationKind;
 
 use crate::state::ServiceState;
 
