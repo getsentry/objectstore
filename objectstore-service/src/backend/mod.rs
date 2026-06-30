@@ -18,6 +18,7 @@ pub mod counting;
 pub mod gcs;
 pub mod in_memory;
 pub mod local_fs;
+mod response;
 pub mod s3_compatible;
 pub mod tiered;
 
