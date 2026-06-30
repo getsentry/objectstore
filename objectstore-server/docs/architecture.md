@@ -64,7 +64,10 @@ A request flows through several layers before reaching the storage service:
    `Authorization` header (fallback), then validated and decoded into an
    [`AuthContext`](auth::AuthContext).
    The optional `x-downstream-service` header is extracted for killswitch
-   matching.
+   matching and metric tagging. Its value is normalized on ingest by stripping
+   any trailing Kubernetes ReplicaSet hash and pod suffix (e.g.
+   `getsentry-incinerator-7d8f9c5b6d-abc12` becomes `getsentry-incinerator`) to
+   avoid high metric cardinality.
 3. **Admission control**: [killswitches](killswitches) and
    [rate limits](rate_limits) are checked during extraction. Rejected requests
    never reach the handler.
@@ -287,8 +290,9 @@ matched, cause requests to be rejected with HTTP 403:
 
 - **Usecase**: exact match on the usecase string
 - **Scopes**: all specified scope key-value pairs must be present
-- **Service**: a glob pattern matched against the `x-downstream-service`
-  request header (e.g., `"relay-*"` to block all relay instances)
+- **Service**: a glob pattern matched against the normalized
+  `x-downstream-service` value (Kubernetes hash/pod suffixes are stripped on
+  ingest, so patterns match the base service name, e.g. `"relay*"`)
 
 A killswitch with no conditions matches all traffic. Multiple killswitches are
 evaluated with OR semantics — any match triggers rejection. Killswitches are
