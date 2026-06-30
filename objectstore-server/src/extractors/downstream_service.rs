@@ -70,7 +70,6 @@ impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
             .headers
             .get(HEADER_SERVICE)
             .and_then(|v| v.to_str().ok())
-            .map(strip_pod_suffix)
             .map(str::to_owned);
 
         if let Some(ref service) = service {
@@ -79,7 +78,8 @@ impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
             });
         }
 
-        Ok(DownstreamService(service))
+        let normalized = service.as_deref().map(strip_pod_suffix).map(str::to_owned);
+        Ok(DownstreamService(normalized))
     }
 }
 
