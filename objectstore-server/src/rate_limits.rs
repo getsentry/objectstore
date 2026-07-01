@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::id::ObjectContext;
+use objectstore_service::operation::OperationKind;
 use objectstore_types::scope::Scopes;
 use serde::{Deserialize, Serialize};
 
@@ -215,9 +216,15 @@ impl RateLimiter {
     /// Checks if the given context is within the rate limits.
     ///
     /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection, emits a
-    /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked before
-    /// throughput so that rejected requests are never counted toward admitted traffic.
-    pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> bool {
+    /// `server.request.rate_limited` metric counter (tagged with the `operation` kind) and a `warn!`
+    /// log. Bandwidth is checked before throughput so that rejected requests are never counted toward
+    /// admitted traffic.
+    pub fn check(
+        &self,
+        operation: OperationKind,
+        context: &ObjectContext,
+        key: Option<&str>,
+    ) -> bool {
         // Bandwidth is checked first because it is a pure read (no token consumption).
         // Throughput increments the EWMA accumulator only on success, so checking it
         // second ensures rejected requests are never counted toward admitted traffic.
@@ -232,10 +239,12 @@ impl RateLimiter {
 
         objectstore_metrics::count!(
             "server.request.rate_limited",
+            operation = operation.as_str(),
             reason = rejection.as_str(),
             usecase = context.usecase.clone()
         );
         objectstore_log::warn!(
+            operation = operation.as_str(),
             reason = rejection.as_str(),
             usecase = &context.usecase,
             scopes = %context.scopes.as_api_path(),
@@ -910,7 +919,7 @@ mod tests {
             .store(1, std::sync::atomic::Ordering::Relaxed);
 
         let context = make_context();
-        assert!(!limiter.check(&context, None));
+        assert!(!limiter.check(OperationKind::Get, &context, None));
 
         // The throughput accumulator must still be 0.
         assert_eq!(
@@ -920,6 +929,36 @@ mod tests {
                 .accumulator
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
+        );
+    }
+
+    #[test]
+    fn rejection_metric_is_tagged_with_operation() {
+        let limiter = RateLimiter::new(RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        // Prime the bandwidth EWMA so the check rejects.
+        limiter
+            .bandwidth
+            .global
+            .estimate
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+
+        let context = make_context();
+        let captured = objectstore_metrics::with_capturing_test_client(|| {
+            assert!(!limiter.check(OperationKind::Head, &context, None));
+        });
+
+        assert!(
+            captured
+                .iter()
+                .any(|m| m.starts_with("server.request.rate_limited")
+                    && m.contains("operation:head")),
+            "expected rate_limited metric tagged operation:head, captured: {captured:?}"
         );
     }
 

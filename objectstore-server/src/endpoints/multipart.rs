@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::time::{Duration, SystemTime};
 
 use crate::auth::AuthAwareService;
+use crate::endpoints::OpRoute;
 use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::body::MeteredBody;
@@ -19,6 +20,7 @@ use http::header;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
+use objectstore_service::operation::OperationKind;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::multipart::{
     CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
@@ -27,7 +29,7 @@ use objectstore_types::multipart::{
 use serde::Deserialize;
 
 pub fn router() -> Router<ServiceState> {
-    let initiate_no_key = routing::post(initiate_post);
+    let initiate_no_key = routing::post(initiate_post).op(OperationKind::InitiateMultipart);
     Router::new()
         .route(
             "/objects:multipart/{usecase}/{scopes}",
@@ -36,15 +38,19 @@ pub fn router() -> Router<ServiceState> {
         .route("/objects:multipart/{usecase}/{scopes}/", initiate_no_key)
         .route(
             "/objects:multipart/{usecase}/{scopes}/{*key}",
-            routing::put(initiate_put).delete(abort),
+            routing::put(initiate_put)
+                .op(OperationKind::InitiateMultipart)
+                .merge(routing::delete(abort).op(OperationKind::AbortMultipart)),
         )
         .route(
             "/objects:multipart:parts/{usecase}/{scopes}/{*key}",
-            routing::get(list_parts).put(upload_part),
+            routing::get(list_parts)
+                .op(OperationKind::ListParts)
+                .merge(routing::put(upload_part).op(OperationKind::UploadPart)),
         )
         .route(
             "/objects:multipart:complete/{usecase}/{scopes}/{*key}",
-            routing::post(complete),
+            routing::post(complete).op(OperationKind::CompleteMultipart),
         )
 }
 

@@ -8,23 +8,26 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_service::operation::OperationKind;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
+use crate::endpoints::OpRoute;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
-    let collection_routes = routing::post(objects_post);
+    let collection_routes = routing::post(objects_post).op(OperationKind::Insert);
     let object_routes = routing::get(object_get)
-        .head(object_head)
-        .put(object_put)
+        .op(OperationKind::Get)
+        .merge(routing::head(object_head).op(OperationKind::Head))
+        .merge(routing::put(object_put).op(OperationKind::Insert))
         // TODO(ja): Implement PATCH (metadata update w/o body)
-        .delete(object_delete);
+        .merge(routing::delete(object_delete).op(OperationKind::Delete));
 
     Router::new()
         .route("/objects/{usecase}/{scopes}", collection_routes.clone())

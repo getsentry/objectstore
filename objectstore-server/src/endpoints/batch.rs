@@ -11,6 +11,7 @@ use futures::TryStreamExt;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
+use objectstore_service::operation::OperationKind;
 use objectstore_service::streaming::{OpResponse, Operation};
 use percent_encoding::NON_ALPHANUMERIC;
 
@@ -18,6 +19,7 @@ use crate::auth::AuthAwareService;
 use crate::batch::{
     HEADER_BATCH_OPERATION_INDEX, HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND,
 };
+use crate::endpoints::OpRoute;
 use crate::endpoints::common::{ApiError, ApiErrorResponse};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchOperationStream};
@@ -29,7 +31,10 @@ const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 pub fn router() -> Router<ServiceState> {
     Router::new()
-        .route("/objects:batch/{usecase}/{scopes}/", routing::post(batch))
+        .route(
+            "/objects:batch/{usecase}/{scopes}/",
+            routing::post(batch).op(OperationKind::Batch),
+        )
         // Enforced by https://github.com/tokio-rs/axum/blob/4404f27cea206b0dca63637b1c76dff23772a5cc/axum/src/extract/multipart.rs#L78
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
 }
@@ -78,8 +83,8 @@ async fn batch(
     let rate_limited = validate(parsed, {
         let state = Arc::clone(&state);
         let context = context.clone();
-        move |_op| {
-            if state.rate_limiter.check(&context, None) {
+        move |op| {
+            if state.rate_limiter.check(op.kind(), &context, None) {
                 Ok(())
             } else {
                 Err(ApiError::from(BatchError::RateLimited))
