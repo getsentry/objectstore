@@ -66,8 +66,10 @@ A request flows through several layers before reaching the storage service:
    The optional `x-downstream-service` header is extracted for killswitch
    matching and metric tagging. Its value is normalized on ingest by stripping
    any trailing Kubernetes ReplicaSet hash and pod suffix (e.g.
-   `getsentry-incinerator-7d8f9c5b6d-abc12` becomes `getsentry-incinerator`) to
-   avoid high metric cardinality.
+   `getsentry-incinerator-7d8f9c5b6d-abc12` becomes `getsentry-incinerator`) or
+   StatefulSet ordinal (e.g. `web-0` becomes `web`) to avoid high metric
+   cardinality. The raw pod name is still recorded on the Sentry
+   `downstream_service` tag for per-instance debugging.
 3. **Admission control**: [killswitches](killswitches) and
    [rate limits](rate_limits) are checked during extraction. Rejected requests
    never reach the handler.

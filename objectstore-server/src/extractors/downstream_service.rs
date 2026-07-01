@@ -28,38 +28,43 @@ impl std::fmt::Display for DownstreamService {
     }
 }
 
-/// Strips a Kubernetes ReplicaSet hash and pod suffix from a service name.
+/// Strips a Kubernetes pod suffix from a service name, leaving the base workload name.
 ///
-/// Deployment pods are named `<deployment>-<replicaset-hash>-<pod-suffix>`, where the hash
-/// and suffix are random lowercase-alphanumeric strings. These create extremely high metric
-/// cardinality and carry no useful information, so they are dropped here.
-///
-/// The suffix is only stripped when the trailing two `-`-separated segments match the shape
-/// `<hash>-<5-char suffix>` (both non-empty, lowercase alphanumeric). Values that do not
-/// match are returned unchanged.
+/// Deployment pods are named `<deployment>-<replicaset-hash>-<pod-suffix>` and StatefulSet
+/// pods `<name>-<ordinal>`. The hash/suffix and ordinal change on every rollout, creating
+/// useless metric cardinality. Segment lengths follow the Kubernetes naming rules to limit
+/// false positives; anything else is returned unchanged.
 fn strip_pod_suffix(service: &str) -> &str {
     let is_hash = |segment: &str| {
-        !segment.is_empty()
-            && segment
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
     };
 
-    let Some((rest, pod_suffix)) = service.rsplit_once('-') else {
+    let Some((rest, last)) = service.rsplit_once('-') else {
         return service;
     };
-    if pod_suffix.len() != 5 || !is_hash(pod_suffix) {
+    if rest.is_empty() {
         return service;
     }
 
-    let Some((deployment, replicaset_hash)) = rest.rsplit_once('-') else {
-        return service;
-    };
-    if deployment.is_empty() || !is_hash(replicaset_hash) {
-        return service;
+    // Deployment: the pod suffix is 5 chars and the ReplicaSet hash is 7-10 chars.
+    if last.len() == 5
+        && is_hash(last)
+        && let Some((deployment, hash)) = rest.rsplit_once('-')
+        && !deployment.is_empty()
+        && (7..=10).contains(&hash.len())
+        && is_hash(hash)
+    {
+        return deployment;
     }
 
-    deployment
+    // StatefulSet: the pod suffix is a numeric ordinal.
+    if !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) {
+        return rest;
+    }
+
+    service
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
@@ -73,6 +78,8 @@ impl<S: Send + Sync> FromRequestParts<S> for DownstreamService {
             .map(str::to_owned);
 
         if let Some(ref service) = service {
+            // Tag the raw pod name intentionally: it pinpoints the exact instance when
+            // debugging, and tag cardinality is not a concern here.
             sentry::configure_scope(|s| {
                 s.set_tag("downstream_service", service);
             });
@@ -129,5 +136,30 @@ mod tests {
     #[test]
     fn keeps_empty_deployment() {
         assert_eq!(strip_pod_suffix("-abcde-fghij"), "-abcde-fghij");
+    }
+
+    #[test]
+    fn keeps_wrong_length_hash() {
+        // Hash segment is just outside the 7-10 char range, so it is not a ReplicaSet hash.
+        assert_eq!(strip_pod_suffix("foo-sixchr-abcde"), "foo-sixchr-abcde");
+        assert_eq!(
+            strip_pod_suffix("foo-abcdefghijk-abcde"),
+            "foo-abcdefghijk-abcde"
+        );
+    }
+
+    #[test]
+    fn strips_min_length_hash() {
+        // A 7-char hash is the shortest that is still treated as a ReplicaSet hash.
+        assert_eq!(strip_pod_suffix("svc-abcdefg-hijkl"), "svc");
+    }
+
+    #[test]
+    fn strips_statefulset_ordinal() {
+        assert_eq!(
+            strip_pod_suffix("getsentry-incinerator-0"),
+            "getsentry-incinerator"
+        );
+        assert_eq!(strip_pod_suffix("web-12"), "web");
     }
 }
