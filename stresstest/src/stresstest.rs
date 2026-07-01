@@ -12,8 +12,8 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
 use sketches_ddsketch::DDSketch;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
-use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
@@ -420,16 +420,17 @@ async fn run_batch_workload(
 
                     let mut payload_info = HashMap::with_capacity(payloads.len());
 
-                    for (internal_id, payload) in payloads {
+                    for (internal_id, mut payload) in payloads {
                         let key = internal_id.to_string();
-                        payload_info.insert(key.clone(), (internal_id, payload.len));
-                        let stream = ReaderStream::new(payload).boxed();
-                        many = many.push(
-                            session
-                                .put_stream(stream)
-                                .compression(None)
-                                .key(key),
-                        );
+                        let size = payload.len;
+                        payload_info.insert(key.clone(), (internal_id, size));
+                        // Buffer the payload to ensure the operation can be classified as batchable.
+                        let mut body = Vec::with_capacity(size as usize);
+                        payload
+                            .read_to_end(&mut body)
+                            .await
+                            .expect("reading an in-memory payload cannot fail");
+                        many = many.push(session.put(body).compression(None).key(key));
                     }
 
                     metrics.lock().unwrap().many_requests += 1;
