@@ -593,7 +593,7 @@ impl TryFrom<&UploadId> for TieredUploadId {
     fn try_from(value: &UploadId) -> Result<Self, Self::Error> {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value.as_bytes())
-            .map_err(|e| Error::generic(format!("invalid multipart upload ID: {e}")))?;
+            .map_err(|e| Error::generic_cause("invalid multipart upload ID", e))?;
         serde_json::from_slice(&json).map_err(|e| Error::serde("decoding multipart token", e))
     }
 }

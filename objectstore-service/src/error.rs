@@ -4,6 +4,7 @@
 //! and backend-specific failures. [`Result`] is the corresponding alias.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fmt;
 
 use objectstore_log::Level;
@@ -62,7 +63,7 @@ pub enum Error {
     #[error("serde error: {context}")]
     Serde {
         /// Context describing what was being serialized/deserialized.
-        context: String,
+        context: &'static str,
         /// The underlying serde error.
         #[source]
         cause: serde_json::Error,
@@ -75,7 +76,7 @@ pub enum Error {
     #[error("reqwest error: {context}")]
     Reqwest {
         /// Context describing the request that failed.
-        context: String,
+        context: &'static str,
         /// The underlying reqwest error.
         #[source]
         cause: reqwest::Error,
@@ -138,7 +139,7 @@ pub enum Error {
     #[error("storage backend error: {context}")]
     Generic {
         /// Context describing the operation that failed.
-        context: String,
+        context: Cow<'static, str>,
         /// The underlying error, if available.
         #[source]
         cause: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -167,26 +168,31 @@ impl Error {
     }
 
     /// Creates an [`Error::Reqwest`] from a reqwest error with context.
-    pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
-        Self::Reqwest {
-            context: context.into(),
-            cause,
-        }
+    pub fn reqwest(context: &'static str, cause: reqwest::Error) -> Self {
+        Self::Reqwest { context, cause }
     }
 
     /// Creates an [`Error::Serde`] from a serde error with context.
-    pub fn serde(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self::Serde {
-            context: context.into(),
-            cause,
-        }
+    pub fn serde(context: &'static str, cause: serde_json::Error) -> Self {
+        Self::Serde { context, cause }
     }
 
     /// Creates an [`Error::Generic`] with a context string and no cause.
-    pub fn generic(context: impl Into<String>) -> Self {
+    pub fn generic(context: impl Into<Cow<'static, str>>) -> Self {
         Self::Generic {
             context: context.into(),
             cause: None,
+        }
+    }
+
+    /// Creates an [`Error::Generic`] with a context string and a cause.
+    pub fn generic_cause(
+        context: impl Into<Cow<'static, str>>,
+        cause: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Generic {
+            context: context.into(),
+            cause: Some(Box::new(cause)),
         }
     }
 

@@ -1133,27 +1133,30 @@ impl HighVolumeBackend for BigTableBackend {
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| Error::Generic {
-        context: format!(
+    let deadline = from.checked_add(ttl).ok_or_else(|| {
+        Error::generic(format!(
             "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
             humantime::format_rfc3339_seconds(from),
             ttl.as_secs()
-        ),
-        cause: None,
+        ))
     })?;
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| Error::Generic {
-            context: format!(
-                "unable to get duration since UNIX_EPOCH for SystemTime {}",
-                humantime::format_rfc3339_seconds(deadline)
-            ),
-            cause: Some(Box::new(e)),
+        .map_err(|e| {
+            Error::generic_cause(
+                format!(
+                    "unable to get duration since UNIX_EPOCH for SystemTime {}",
+                    humantime::format_rfc3339_seconds(deadline)
+                ),
+                e,
+            )
         })?
         .as_millis();
-    (millis * 1000).try_into().map_err(|e| Error::Generic {
-        context: format!("failed to convert {millis}ms to i64 microseconds"),
-        cause: Some(Box::new(e)),
+    (millis * 1000).try_into().map_err(|e| {
+        Error::generic_cause(
+            format!("failed to convert {millis}ms to i64 microseconds"),
+            e,
+        )
     })
 }
 
@@ -1186,10 +1189,10 @@ where
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
                 objectstore_metrics::count!("bigtable.failures", action = context);
-                return Err(Error::Generic {
-                    context: format!("Bigtable: `{context}` failed"),
-                    cause: Some(Box::new(e)),
-                });
+                return Err(Error::generic_cause(
+                    format!("Bigtable: `{context}` failed"),
+                    e,
+                ));
             }
             Err(e) => {
                 retry_count += 1;

@@ -148,7 +148,7 @@ where
                     .get_token()
                     .await
                     .map_err(|err| Error::Generic {
-                        context: "S3: failed to get authentication token".to_owned(),
+                        context: "S3: failed to get authentication token".into(),
                         cause: Some(err.into()),
                     })?
                     .as_str(),
@@ -172,10 +172,10 @@ where
         if let Some(r) = range {
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
-        let response = builder.send().await.map_err(|cause| Error::Reqwest {
-            context: "S3: failed to send request".to_string(),
-            cause,
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|cause| Error::reqwest("S3: failed to send request", cause))?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -191,10 +191,9 @@ where
             match total {
                 Some(total) => return Err(Error::RangeNotSatisfiable { total }),
                 None => {
-                    return Err(Error::Generic {
-                        context: format!("S3: 416 response with invalid Content-Range: {raw:?}"),
-                        cause: None,
-                    });
+                    return Err(Error::generic(format!(
+                        "S3: 416 response with invalid Content-Range: {raw:?}"
+                    )));
                 }
             }
         }
@@ -209,9 +208,8 @@ where
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
-                .ok_or_else(|| Error::Generic {
-                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
-                    cause: None,
+                .ok_or_else(|| {
+                    Error::generic("S3: 206 response missing valid Content-Range header")
                 })?;
             metadata.size = Some(range.total as usize);
             Some(range)
@@ -341,10 +339,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send delete request".to_string(),
-                cause,
-            })?;
+            .map_err(|cause| Error::reqwest("S3: failed to send delete request", cause))?;
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
