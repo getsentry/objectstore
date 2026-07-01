@@ -25,7 +25,6 @@ reqwest = { version = "0.13.1", default-features = false, features = ["charset",
 sentry-core = { version = ">=0.41", default-features = false, features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
-# See https://github.com/getsentry/relay/blob/9c491a185a289e09ee9d3f56d89bd9d1fa71d815/Cargo.toml#L211
 tokio = { version = "1.45.0", default-features = false, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
 url = { workspace = true }
