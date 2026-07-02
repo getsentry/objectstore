@@ -438,7 +438,7 @@ fn delete_row_mutation() -> v2::Mutation {
     ))
 }
 
-/// Returns a copy of `metadata` with `time_expires` refreshed for a TTI bump.
+/// Returns a clone of `metadata` with `time_expires` refreshed for a TTI bump.
 ///
 /// [`object_mutations`] persists `time_expires` verbatim, so the bumped deadline must be applied
 /// to the metadata before rewriting the row.
@@ -457,15 +457,9 @@ fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
 fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mutation; 3]> {
-    let (family, timestamp_micros) = match metadata.expiration_policy {
-        ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-        ExpirationPolicy::TimeToLive(_) | ExpirationPolicy::TimeToIdle(_) => {
-            let deadline = metadata.time_expires.ok_or_else(|| Error::Generic {
-                context: "BigTable: timeout expiration policy without resolved time_expires".into(),
-                cause: None,
-            })?;
-            (FAMILY_GC, deadline_to_micros(deadline)?)
-        }
+    let (family, timestamp_micros) = match metadata.time_expires {
+        None => (FAMILY_MANUAL, -1),
+        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
     };
 
     // Record the payload size in the metadata before persisting it.
@@ -806,11 +800,11 @@ impl BigTableBackend {
     async fn put_row(
         &self,
         path: Vec<u8>,
-        metadata: &Metadata,
+        metadata: Metadata,
         payload: Vec<u8>,
         action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
-        let mutations = object_mutations(metadata.clone(), payload)?;
+        let mutations = object_mutations(metadata, payload)?;
         self.mutate(path, mutations, action).await
     }
 
@@ -827,7 +821,6 @@ impl BigTableBackend {
     /// Best-effort TTI bump for a row.
     ///
     /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
-    // TODO: extract into dedicated call from service
     async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
         let expiration_policy = row.expiration_policy();
 
@@ -850,7 +843,7 @@ impl BigTableBackend {
             RowData::Object { metadata, payload } if loaded => {
                 let bumped = bumped_tti_metadata(metadata);
                 let _ = self
-                    .put_row(path, &bumped, payload.clone(), "tti-bump")
+                    .put_row(path, bumped, payload.clone(), "tti-bump")
                     .await;
             }
             RowData::Object { metadata, .. } => {
@@ -860,7 +853,7 @@ impl BigTableBackend {
 
                 if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
                     let bumped = bumped_tti_metadata(metadata);
-                    let _ = self.put_row(path, &bumped, payload, "tti-bump").await;
+                    let _ = self.put_row(path, bumped, payload, "tti-bump").await;
                 }
             }
         }
@@ -920,8 +913,9 @@ impl Backend for BigTableBackend {
             payload.push(chunk);
         }
 
-        self.put_row(path, metadata, payload.into_bytes().into(), "put")
+        self.put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
+
         Ok(())
     }
 
@@ -1019,6 +1013,7 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredGet::NotFound);
         };
 
+        // TODO: extract into dedicated call from service
         if row.needs_tti_bump() {
             self.bump_tti(path.clone(), &row, true, id).await;
         }
@@ -1057,6 +1052,7 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredMetadata::NotFound);
         };
 
+        // TODO: extract into dedicated call from service
         if row.needs_tti_bump() {
             self.bump_tti(path.clone(), &row, false, id).await;
         }
@@ -1158,14 +1154,15 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
         ),
         cause: None,
     })?;
-    deadline_to_micros(deadline)
+
+    system_time_to_micros(deadline)
 }
 
-/// Converts an absolute expiration timestamp to a microsecond-precision unix timestamp.
+/// Converts a [`SystemTime`] to a microsecond-precision unix timestamp.
 ///
 /// As required by BigTable, the resulting timestamp has millisecond precision, with the last digits
 /// at 0.
-fn deadline_to_micros(deadline: SystemTime) -> Result<i64> {
+fn system_time_to_micros(deadline: SystemTime) -> Result<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| Error::Generic {
@@ -1176,6 +1173,7 @@ fn deadline_to_micros(deadline: SystemTime) -> Result<i64> {
             cause: Some(Box::new(e)),
         })?
         .as_millis();
+
     (millis * 1000).try_into().map_err(|e| Error::Generic {
         context: format!("failed to convert {millis}ms to i64 microseconds"),
         cause: Some(Box::new(e)),

@@ -74,6 +74,9 @@ pub enum Error {
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
+    /// An internal consistency invariant on the metadata was violated.
+    #[error("invariant violation: {0}")]
+    Invariant(&'static str),
 }
 impl From<header::InvalidHeaderValue> for Error {
     fn from(err: header::InvalidHeaderValue) -> Self {
@@ -289,22 +292,36 @@ pub struct Metadata {
 impl Metadata {
     /// Parses the metadata headers accepted from writing endpoints.
     ///
-    /// Unlike [`from_headers`](Self::from_headers), this skips read-only and output attributes so
-    /// clients cannot set them via headers. It stamps [`time_created`](Self::time_created) and
-    /// resolves [`time_expires`](Self::time_expires) from the expiration policy, giving every
-    /// backend a single, consistent expiration to persist.
+    /// Unlike [`from_headers`](Self::from_headers), this skips parsing read-only attributes so
+    /// clients cannot set them via headers.
+    ///
+    /// This materializes the following attributes:
+    /// - [`time_created`](Self::time_created)
+    /// - [`time_expires`](Self::time_expires)
     ///
     /// A prefix can also be provided which is stripped from custom non-standard headers.
     pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
 
-        // Resolve both timestamps from a single `now` so every backend persists the same
-        // expiration instead of each recomputing it at write time.
         let now = SystemTime::now();
         metadata.time_created = Some(now);
         metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
 
         Ok(metadata)
+    }
+
+    /// Validates internal consistency of the metadata.
+    ///
+    /// A time-based [`expiration_policy`](Self::expiration_policy) must carry a resolved
+    /// [`time_expires`](Self::time_expires); backends rely on this to persist a concrete
+    /// expiration.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.expiration_policy.is_timeout() && self.time_expires.is_none() {
+            return Err(Error::Invariant(
+                "expiration policy requires a resolved expiration time",
+            ));
+        }
+        Ok(())
     }
 
     /// Extracts public API metadata from the given [`HeaderMap`].
@@ -667,6 +684,32 @@ mod tests {
         let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
         assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.time_expires.is_none());
+    }
+
+    #[test]
+    fn validate_accepts_resolved_timeout() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(30)),
+            ..Default::default()
+        };
+        assert!(metadata.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_manual_without_expiry() {
+        let metadata = Metadata::default();
+        assert!(metadata.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_timeout_without_expiry() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: None,
+            ..Default::default()
+        };
+        assert!(matches!(metadata.validate(), Err(Error::Invariant(_))));
     }
 
     #[test]

@@ -57,24 +57,22 @@ A request flows through several layers before reaching the storage service:
 
 1. **Middleware**: metrics collection, in-flight request tracking, panic
    recovery, Sentry transaction tracing, distributed tracing.
-2. **Extractors**: path parameters are parsed into an
-   [`ObjectId`](objectstore_service::id::ObjectId) or
-   [`ObjectContext`](objectstore_service::id::ObjectContext). The auth token is
-   read from the `X-Os-Auth` header (preferred) or the standard
-   `Authorization` header (fallback), then validated and decoded into an
-   [`AuthContext`](auth::AuthContext).
-   The optional `x-downstream-service` header is extracted for killswitch
-   matching.
-3. **Admission control**: [killswitches](killswitches) and
-   [rate limits](rate_limits) are checked during extraction. Rejected requests
-   never reach the handler.
-4. **Handler**: the endpoint handler calls the
+2. **Extractors**: extracts object context from path parameters and then
+   constructs a service wrapper that authorizes all operations on the target
+   resource. Other endpoint-specific extractors also run at this stage.
+3. **Admission control**: As part of the extractors,
+   [killswitches](killswitches) and [rate limits](rate_limits) are evaluated.
+   Rejected requests never reach the handler.
+4. **Metadata**: Another extractor constructs inbound `Metadata` from request
+   headers. At this point, certain server-side fields are materialized, so they
+   are provided consistently to the service and backends.
+5. **Handler**: the endpoint handler calls the
    [`AuthAwareService`](auth::AuthAwareService), which checks permissions
    before delegating to the underlying
    [`StorageService`](objectstore_service::StorageService). The service
    enforces its own backpressure before executing the
    operation.
-5. **Response**: metadata is mapped to HTTP headers (see
+6. **Response**: metadata is mapped to HTTP headers (see
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back.
 

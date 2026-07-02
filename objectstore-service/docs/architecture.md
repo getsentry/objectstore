@@ -169,11 +169,9 @@ capabilities. For example, BigTable has built-in TTL via garbage collection
 policies, and GCS supports object lifecycle management. The service does not
 perform active garbage collection.
 
-The absolute expiration timestamp (`time_expires`) is resolved **once** on write
-from the policy and creation time (see
-[`Metadata::from_insert_headers`](objectstore_types::metadata::Metadata::from_insert_headers)),
-so every backend persists the same deadline instead of each recomputing it. On a
-time-to-idle access, backends refresh this timestamp as part of the idle bump.
+Apart from the expiration policy, metadata during object creation must carry a
+`time_expires` field with the correct expiration timestamp. This is ensured
+during metadata creation by the server.
 
 # Backpressure
 
