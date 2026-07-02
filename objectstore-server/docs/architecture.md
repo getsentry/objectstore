@@ -287,8 +287,9 @@ matched, cause requests to be rejected with HTTP 403:
 
 - **Usecase**: exact match on the usecase string
 - **Scopes**: all specified scope key-value pairs must be present
-- **Service**: a glob pattern matched against the `x-downstream-service`
-  request header (e.g., `"relay-*"` to block all relay instances)
+- **Service**: a glob pattern matched against the normalized
+  `x-downstream-service` value (Kubernetes hash/pod suffixes are stripped on
+  ingest, so patterns match the base service name, e.g. `"relay*"`)
 
 A killswitch with no conditions matches all traffic. Multiple killswitches are
 evaluated with OR semantics — any match triggers rejection. Killswitches are
