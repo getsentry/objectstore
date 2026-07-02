@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate:
-    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@586df8a9214a4bb7d5cf0a39b6bb3887ddab70c6 # v1.0.1
+    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@5ae5958b3c4bf104efc46d61e9d155f45cefe1d8 # TODO: Replace!
     secrets:
       SENTRY_INTERNAL_APP_PRIVATE_KEY: ${{ secrets.SENTRY_INTERNAL_APP_PRIVATE_KEY }}
     with:
