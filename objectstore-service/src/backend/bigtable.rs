@@ -438,20 +438,34 @@ fn delete_row_mutation() -> v2::Mutation {
     ))
 }
 
+/// Returns a copy of `metadata` with `time_expires` refreshed for a TTI bump.
+///
+/// [`object_mutations`] persists `time_expires` verbatim, so the bumped deadline must be applied
+/// to the metadata before rewriting the row.
+fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
+    let mut metadata = metadata.clone();
+    metadata.time_expires = metadata
+        .expiration_policy
+        .expires_in()
+        .map(|tti| SystemTime::now() + tti);
+    metadata
+}
+
 /// Builds the three mutations that write an object row: clear existing data,
 /// then set the payload and metadata cells.
 ///
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
-fn object_mutations(
-    mut metadata: Metadata,
-    payload: Vec<u8>,
-    now: SystemTime,
-) -> Result<[v2::Mutation; 3]> {
+fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mutation; 3]> {
     let (family, timestamp_micros) = match metadata.expiration_policy {
         ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-        ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-        ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+        ExpirationPolicy::TimeToLive(_) | ExpirationPolicy::TimeToIdle(_) => {
+            let deadline = metadata.time_expires.ok_or_else(|| Error::Generic {
+                context: "BigTable: timeout expiration policy without resolved time_expires".into(),
+                cause: None,
+            })?;
+            (FAMILY_GC, deadline_to_micros(deadline)?)
+        }
     };
 
     // Record the payload size in the metadata before persisting it.
@@ -796,7 +810,7 @@ impl BigTableBackend {
         payload: Vec<u8>,
         action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
-        let mutations = object_mutations(metadata.clone(), payload, SystemTime::now())?;
+        let mutations = object_mutations(metadata.clone(), payload)?;
         self.mutate(path, mutations, action).await
     }
 
@@ -813,6 +827,7 @@ impl BigTableBackend {
     /// Best-effort TTI bump for a row.
     ///
     /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
+    // TODO: extract into dedicated call from service
     async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
         let expiration_policy = row.expiration_policy();
 
@@ -833,8 +848,9 @@ impl BigTableBackend {
                 let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
             }
             RowData::Object { metadata, payload } if loaded => {
+                let bumped = bumped_tti_metadata(metadata);
                 let _ = self
-                    .put_row(path, metadata, payload.clone(), "tti-bump")
+                    .put_row(path, &bumped, payload.clone(), "tti-bump")
                     .await;
             }
             RowData::Object { metadata, .. } => {
@@ -843,7 +859,8 @@ impl BigTableBackend {
                     .await;
 
                 if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
-                    let _ = self.put_row(path, metadata, payload, "tti-bump").await;
+                    let bumped = bumped_tti_metadata(metadata);
+                    let _ = self.put_row(path, &bumped, payload, "tti-bump").await;
                 }
             }
         }
@@ -951,7 +968,7 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata.clone(), payload.to_vec(), SystemTime::now())?;
+        let mutations = object_mutations(metadata.clone(), payload.to_vec())?;
 
         for _ in 0..CAS_RETRY_COUNT {
             let write_succeeded = self
@@ -1118,7 +1135,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         let mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
-            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec(), now)?.into(),
+            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec())?.into(),
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
@@ -1141,6 +1158,14 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
         ),
         cause: None,
     })?;
+    deadline_to_micros(deadline)
+}
+
+/// Converts an absolute expiration timestamp to a microsecond-precision unix timestamp.
+///
+/// As required by BigTable, the resulting timestamp has millisecond precision, with the last digits
+/// at 0.
+fn deadline_to_micros(deadline: SystemTime) -> Result<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| Error::Generic {
@@ -1291,7 +1316,13 @@ mod tests {
         now: SystemTime,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata.clone(), payload.to_vec(), now)?;
+        // Resolve `time_expires` from `now` (as `from_insert_headers` does) unless the test set
+        // it explicitly, so `object_mutations` has an expiration to persist.
+        let mut metadata = metadata.clone();
+        if metadata.time_expires.is_none() {
+            metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+        }
+        let mutations = object_mutations(metadata, payload.to_vec())?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -1398,6 +1429,34 @@ mod tests {
         let head_meta = backend.get_metadata(&id).await?.unwrap();
         assert_eq!(head_meta.content_type, metadata.content_type);
         assert_eq!(head_meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    /// Verifies that a server-resolved `time_expires` is persisted verbatim, not recomputed.
+    #[tokio::test]
+    async fn test_time_expires_roundtrip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let ttl = Duration::from_hours(2 * 24);
+        let expires = SystemTime::now() + ttl;
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &metadata, b"data", SystemTime::now()).await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        // Bigtable stores the deadline as the GC cell timestamp at millisecond precision.
+        let stored_ms = meta
+            .time_expires
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_millis();
+        let expected_ms = expires.duration_since(SystemTime::UNIX_EPOCH)?.as_millis();
+        assert_eq!(stored_ms, expected_ms);
 
         Ok(())
     }

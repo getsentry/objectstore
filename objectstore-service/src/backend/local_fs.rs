@@ -469,7 +469,7 @@ mod tests {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_created: Some(SystemTime::now()),
-            time_expires: None,
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
             compression: Some(Compression::Zstd),
             origin: Some("203.0.113.42".into()),
             filename: Some("hello.txt".into()),

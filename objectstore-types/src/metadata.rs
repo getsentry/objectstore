@@ -290,12 +290,20 @@ impl Metadata {
     /// Parses the metadata headers accepted from writing endpoints.
     ///
     /// Unlike [`from_headers`](Self::from_headers), this skips read-only and output attributes so
-    /// clients cannot set them via headers.
+    /// clients cannot set them via headers. It stamps [`time_created`](Self::time_created) and
+    /// resolves [`time_expires`](Self::time_expires) from the expiration policy, giving every
+    /// backend a single, consistent expiration to persist.
     ///
     /// A prefix can also be provided which is stripped from custom non-standard headers.
     pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
-        metadata.time_created = Some(SystemTime::now());
+
+        // Resolve both timestamps from a single `now` so every backend persists the same
+        // expiration instead of each recomputing it at write time.
+        let now = SystemTime::now();
+        metadata.time_created = Some(now);
+        metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+
         Ok(metadata)
     }
 
@@ -627,6 +635,37 @@ mod tests {
 
         let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
         assert!(metadata.time_created.is_some());
+        assert!(metadata.time_expires.is_none());
+    }
+
+    #[test]
+    fn from_insert_headers_resolves_time_expires_for_ttl() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "ttl:30s".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let created = metadata.time_created.unwrap();
+        let expires = metadata.time_expires.unwrap();
+        // Both timestamps derive from the same `now`, so the expiry is exact.
+        assert_eq!(expires, created + Duration::from_secs(30));
+    }
+
+    #[test]
+    fn from_insert_headers_resolves_time_expires_for_tti() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "tti:1h".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let created = metadata.time_created.unwrap();
+        let expires = metadata.time_expires.unwrap();
+        assert_eq!(expires, created + Duration::from_hours(1));
+    }
+
+    #[test]
+    fn from_insert_headers_manual_leaves_time_expires_none() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.time_expires.is_none());
     }
 
