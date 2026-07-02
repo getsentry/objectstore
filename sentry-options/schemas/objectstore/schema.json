@@ -1,6 +1,5 @@
 {
   "version": "1.0",
   "type": "object",
-  "description": "Active killswitches that may disable access to specific object contexts.",
   "properties": {}
 }
