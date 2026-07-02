@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -45,8 +43,7 @@ async fn objects_post(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    metadata.time_created = Some(SystemTime::now());
+    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
         .config
@@ -178,8 +175,7 @@ async fn object_put(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    metadata.time_created = Some(SystemTime::now());
+    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     let ObjectId { context, key } = id;
 

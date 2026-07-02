@@ -110,7 +110,7 @@ async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, Bat
             })?,
         }),
         "insert" => {
-            let metadata = Metadata::from_headers(field.headers(), "")?;
+            let metadata = Metadata::from_insert_headers(field.headers(), "")?;
             let mut payload = BytesMut::new();
             while let Some(chunk) = field.chunk().await? {
                 if payload.len() + chunk.len() > MAX_FIELD_SIZE {

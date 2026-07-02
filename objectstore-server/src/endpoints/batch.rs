@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
@@ -109,13 +108,12 @@ async fn batch(
         }
     });
 
-    // Step 5: stamp inserts with time_created and record bandwidth
-    let stamped = policy_checked.map({
+    // Step 5: record bandwidth for inserts
+    let metered = policy_checked.map({
         let state = Arc::clone(&state);
         let context = context.clone();
-        move |(idx, mut item)| {
-            if let Ok(Operation::Insert(ins)) = &mut item {
-                ins.metadata.time_created = Some(SystemTime::now());
+        move |(idx, item)| {
+            if let Ok(Operation::Insert(ins)) = &item {
                 state.record_bandwidth(&context, ins.payload.len() as u64);
             }
             (idx, item)
@@ -125,7 +123,7 @@ async fn batch(
     // Step 6: execute concurrently, then convert each result to a multipart Part
     let state_ref = Arc::clone(&state);
     let context_ref = context.clone();
-    let responses = batch.execute(context, stamped).then(move |(idx, result)| {
+    let responses = batch.execute(context, metered).then(move |(idx, result)| {
         let state = Arc::clone(&state_ref);
         let context = context_ref.clone();
         async move { convert_to_part(idx, result, &state, &context).await }
