@@ -23,7 +23,8 @@ rand_distr = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 sketches-ddsketch = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs"] }
 tokio-util = { workspace = true, features = ["io"] }
 yansi = { workspace = true }
 
