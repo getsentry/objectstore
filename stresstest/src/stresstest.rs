@@ -13,7 +13,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
-use tokio_util::io::ReaderStream;
 use yansi::Paint;
 
 use crate::http::HttpRemote;
@@ -420,16 +419,29 @@ async fn run_batch_workload(
 
                     let mut payload_info = HashMap::with_capacity(payloads.len());
 
-                    for (internal_id, payload) in payloads {
+                    // Write each payload to a temp file so the batch client can classify it as
+                    // batchable (streamed bodies are treated as unknown-size and skip batching)
+                    // without buffering every body in memory. `put_path` defers opening each file
+                    // until the request is sent, keeping file descriptor usage within the active
+                    // concurrency window rather than opening the whole batch at once.
+                    let temp_dir = tempfile::Builder::new()
+                        .prefix("objectstore-stresstest-")
+                        .tempdir()
+                        .expect("failed to create temp dir for batch payloads")
+                        .keep();
+
+                    for (internal_id, mut payload) in payloads {
                         let key = internal_id.to_string();
-                        payload_info.insert(key.clone(), (internal_id, payload.len));
-                        let stream = ReaderStream::new(payload).boxed();
-                        many = many.push(
-                            session
-                                .put_stream(stream)
-                                .compression(None)
-                                .key(key),
-                        );
+                        let size = payload.len;
+                        payload_info.insert(key.clone(), (internal_id, size));
+                        let path = temp_dir.join(&key);
+                        let mut file = tokio::fs::File::create(&path)
+                            .await
+                            .expect("failed to create temp file for batch payload");
+                        tokio::io::copy(&mut payload, &mut file)
+                            .await
+                            .expect("writing an in-memory payload to a temp file cannot fail");
+                        many = many.push(session.put_path(path).compression(None).key(key));
                     }
 
                     metrics.lock().unwrap().many_requests += 1;
@@ -472,6 +484,15 @@ async fn run_batch_workload(
                         .unwrap()
                         .batch_timing
                         .add(batch_start.elapsed().as_secs_f64());
+
+                    // Remove the temp files now that the batch has been uploaded.
+                    if let Err(err) = tokio::fs::remove_dir_all(&temp_dir).await {
+                        eprintln!(
+                            "failed to clean up batch temp dir {}: {err}",
+                            temp_dir.display()
+                        );
+                    }
+
                     drop(permit);
                 };
                 tokio::spawn(task);

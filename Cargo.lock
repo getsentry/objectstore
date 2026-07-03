@@ -4306,6 +4306,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sketches-ddsketch",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
