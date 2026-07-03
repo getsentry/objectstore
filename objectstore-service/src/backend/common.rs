@@ -264,6 +264,15 @@ impl TieredWrite {
     }
 }
 
+/// Drains the body of a response we are otherwise done with.
+///
+/// reqwest only returns a connection to its pool once the response body has been fully read, so we
+/// need to explicitly drain it.
+/// Errors are swallowed, since the caller has already obtained everything it needs from the response.
+pub async fn consume_body(mut response: reqwest::Response) {
+    while let Ok(Some(_)) = response.chunk().await {}
+}
+
 /// Creates a reqwest client with required defaults.
 ///
 /// Automatic decompression is disabled because backends store pre-compressed

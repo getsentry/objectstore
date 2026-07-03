@@ -8,6 +8,7 @@
 use reqwest::{Response, header};
 use serde::Deserialize;
 
+use crate::backend::common::consume_body;
 use crate::error::{BackendDetail, Error, Result};
 use crate::stream;
 
@@ -86,9 +87,11 @@ impl ResponseExt for Response {
         } else if ct.starts_with("application/xml") || ct.starts_with("text/xml") {
             parse_xml_error(self).await
         } else {
-            return self
-                .error_for_status()
-                .map_err(|e| Error::reqwest(context, e));
+            let Err(e) = self.error_for_status_ref() else {
+                return Ok(self);
+            };
+            consume_body(self).await;
+            return Err(Error::reqwest(context, e));
         };
 
         Err(Error::BackendResponse {

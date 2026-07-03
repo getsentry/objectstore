@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse,
+    PutResponse, consume_body,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -540,6 +540,7 @@ impl GcsBackend {
                     .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
+                    consume_body(resp).await;
                     return Ok(None);
                 }
 
@@ -592,13 +593,15 @@ impl GcsBackend {
         }
 
         self.with_retry("update_custom_time", || async {
-            self.request(Method::PATCH, object_url.clone())
+            let resp = self
+                .request(Method::PATCH, object_url.clone())
                 .await?
                 .json(&CustomTimeRequest { custom_time })
                 .send()
                 .await
                 .check_error("GCS: update custom time")
                 .await?;
+            consume_body(resp).await;
             Ok(())
         })
         .await
@@ -663,7 +666,8 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        self.request(Method::POST, self.upload_url(id, "multipart")?)
+        let resp = self
+            .request(Method::POST, self.upload_url(id, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
@@ -671,6 +675,7 @@ impl Backend for GcsBackend {
             .await
             .check_error("GCS: upload object")
             .await?;
+        consume_body(resp).await;
 
         Ok(())
     }
@@ -704,17 +709,17 @@ impl Backend for GcsBackend {
                         .get(header::CONTENT_RANGE)
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-                    match total {
-                        Some(total) => return Err(Error::RangeNotSatisfiable { total }),
-                        None => {
-                            return Err(Error::Generic {
-                                context: format!(
-                                    "GCS: 416 response with invalid Content-Range: {raw:?}"
-                                ),
-                                cause: None,
-                            });
-                        }
-                    }
+                    let err = match total {
+                        Some(total) => Error::RangeNotSatisfiable { total },
+                        None => Error::Generic {
+                            context: format!(
+                                "GCS: 416 response with invalid Content-Range: {raw:?}"
+                            ),
+                            cause: None,
+                        },
+                    };
+                    consume_body(resp).await;
+                    return Err(err);
                 }
 
                 resp.check_error("GCS: get payload").await
@@ -767,10 +772,12 @@ impl Backend for GcsBackend {
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
+                consume_body(resp).await;
                 return Ok(());
             }
 
-            resp.check_error("GCS: delete object").await?;
+            let resp = resp.check_error("GCS: delete object").await?;
+            consume_body(resp).await;
 
             Ok(())
         })
@@ -963,6 +970,8 @@ impl MultipartUploadBackend for GcsBackend {
             .map(|s| s.to_owned())
             .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
 
+        consume_body(resp).await;
+
         Ok(etag)
     }
 
@@ -1019,12 +1028,14 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
-        self.request(Method::DELETE, url)
+        let resp = self
+            .request(Method::DELETE, url)
             .await?
             .send()
             .await
             .check_error("GCS: abort multipart upload")
             .await?;
+        consume_body(resp).await;
 
         Ok(())
     }
