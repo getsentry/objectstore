@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 arc-swap = { workspace = true }
-sentry-options = "1.0.5"
+sentry-options = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

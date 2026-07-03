@@ -32,7 +32,7 @@ objectstore-types = { path = "objectstore-types", version = "0.1.12" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.102"
-arc-swap = "1.7.1"
+arc-swap = "1.9.2"
 argh = "0.1.19"
 async-compression = "0.4.42"
 async-stream = "0.3.6"
@@ -58,7 +58,7 @@ indicatif = "0.18.4"
 infer = { version = "0.19.0", default-features = false }
 insta = "1.48.0"
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
-lru = "0.16.3"
+lru = "0.18.0"
 mediatype = "0.21.0"
 metrics = "0.24.6"
 metrics-exporter-dogstatsd = "0.9.8"
@@ -75,7 +75,8 @@ regex = "1.12.4"
 reqwest = { version = "0.13.4", default-features = false }
 rustls = { version = "0.23.40", default-features = false }
 secrecy = "0.10.3"
-sentry = { version = "0.48.3" }
+sentry = "0.48.3"
+sentry-options = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"
@@ -83,7 +84,7 @@ sketches-ddsketch = "0.3.1"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 thread_local = "1.1.9"
-jemalloc_pprof = { version = "0.9.0" }
+jemalloc_pprof = "0.9.0"
 tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "override_allocator_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tokio = "1.52.3"
@@ -100,5 +101,4 @@ zstd = "0.13.3"
 zstd-safe = "7.2.4"
 
 [patch.crates-io]
-sentry-options = { git = "https://github.com/getsentry/sentry-options", branch = "feat/additional-properties-map-schema" }
-sentry-options-validation = { git = "https://github.com/getsentry/sentry-options", branch = "feat/additional-properties-map-schema" }
+sentry-options = { git = "https://github.com/getsentry/sentry-options", branch = "feat/expose-builder-build" }

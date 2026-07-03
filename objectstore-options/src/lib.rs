@@ -7,11 +7,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use sentry_options::Options as Inner;
 use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "objectstore";
 const SCHEMA: &str = include_str!("../../sentry-options/schemas/objectstore/schema.json");
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Global instance of the raw sentry options.
+static INNER: OnceLock<Inner> = OnceLock::new();
 
 /// Global instance of the options, initialized by [`init`] and accessed via [`Options::get`].
 static OPTIONS: OnceLock<ArcSwap<Options>> = OnceLock::new();
@@ -55,8 +58,11 @@ impl Options {
     /// [`init`] does not need to be called. Use [`override_options`] to test non-default values.
     #[cfg(feature = "testing")]
     pub fn get() -> Arc<Options> {
-        let inner = sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])
+        let inner = Inner::builder()
+            .with_schemas(&[(NAMESPACE, SCHEMA)])
+            .build()
             .expect("options schema should be valid");
+
         Arc::new(Self::deserialize(&inner).expect("failed to deserialize options"))
     }
 
@@ -115,37 +121,40 @@ pub struct Killswitch {
 ///
 /// Must be called from within a Tokio runtime.
 pub fn init() -> Result<(), Error> {
-    if OPTIONS.get().is_none() {
-        // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the
-        // application will not silently run with defaults or fail later when options are accessed.
-        let inner = sentry_options::Options::from_schemas(&[(NAMESPACE, SCHEMA)])?;
-        let initial = Options::deserialize(&inner)?;
-
-        if OPTIONS.set(ArcSwap::from_pointee(initial)).is_ok() {
-            tokio::spawn(refresh(inner));
-        }
+    if OPTIONS.get().is_some() {
+        return Err(sentry_options::OptionsError::AlreadyInitialized.into());
     }
 
-    Ok(())
+    // Load an initial snapshot and fail loudly if it can't be loaded. This ensures the
+    // application will not silently run with defaults or fail later when options are accessed.
+    let inner = Inner::builder()
+        .with_schemas(&[(NAMESPACE, SCHEMA)])
+        .with_callback(refresh)
+        .build()?;
+
+    OPTIONS
+        .set(ArcSwap::from_pointee(Options::deserialize(&inner)?))
+        .map_err(|_| sentry_options::OptionsError::AlreadyInitialized)?;
+
+    INNER
+        .set(inner)
+        .map_err(|_| sentry_options::OptionsError::AlreadyInitialized.into())
 }
 
 /// Periodically reloads options from disk and atomically swaps in the new snapshot.
-async fn refresh(inner: sentry_options::Options) {
-    let Some(snapshot) = OPTIONS.get() else {
+fn refresh(namespace: &str, _delay: f64) {
+    if namespace != NAMESPACE {
+        return;
+    }
+
+    let (Some(snapshot), Some(inner)) = (OPTIONS.get(), INNER.get()) else {
         return;
     };
 
-    let mut interval = tokio::time::interval(REFRESH_INTERVAL);
-    interval.tick().await; // consume the immediate first tick
-
-    loop {
-        interval.tick().await;
-
-        match Options::deserialize(&inner) {
-            Ok(new_snapshot) => snapshot.store(Arc::new(new_snapshot)),
-            Err(ref err) => {
-                objectstore_log::error!(!!err, "Failed to refresh objectstore options")
-            }
+    match Options::deserialize(inner) {
+        Ok(new_snapshot) => snapshot.store(Arc::new(new_snapshot)),
+        Err(ref err) => {
+            objectstore_log::error!(!!err, "Failed to refresh objectstore options")
         }
     }
 }
