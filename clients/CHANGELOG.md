@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.1.12
+
+### Bug Fixes 🐛
+
+- (rust-client) Classify zstd batch inserts by worst-case post-compression size by @lcian in [#500](https://github.com/getsentry/objectstore/pull/500)
+
+## 0.1.11
+
+### New Features ✨
+
+- (py-client) Add HEAD API by @lcian in [#488](https://github.com/getsentry/objectstore/pull/488)
+
+## 0.1.10
+
+### New Features ✨
+
+- (py-client) Add Multipart Upload API by @lcian in [#476](https://github.com/getsentry/objectstore/pull/476)
+- (rust-client) Add Multipart Upload API by @lcian in [#468](https://github.com/getsentry/objectstore/pull/468)
+
+## 0.1.9
+
+### New Features ✨
+
+- (rust-client) Make concurrency configurable in ManyBuilder by @lcian in [#457](https://github.com/getsentry/objectstore/pull/457)
+- (server/rust-client) Add batchable HEAD operation by @lcian in [#478](https://github.com/getsentry/objectstore/pull/478)
+
+## 0.1.8
+
+### New Features ✨
+
+- (py-client) Pin `uv_build==0.9.26` by @lcian in [#460](https://github.com/getsentry/objectstore/pull/460)
+
+### Bug Fixes 🐛
+
+- (py-client) Unpin `uv_build` by @lcian in [#459](https://github.com/getsentry/objectstore/pull/459)
+
+## 0.1.7
+
+### New Features ✨
+
+- (auth) Default auth enforcement to true by @lcian in [#447](https://github.com/getsentry/objectstore/pull/447)
+- (py-client) Add permission and expiry overrides to sign_for_scope by @lcian in [#432](https://github.com/getsentry/objectstore/pull/432)
+
+## 0.1.6
+
+### New Features ✨
+
+- (server) Add X-Os-Auth as alternative auth header by @lcian in [#422](https://github.com/getsentry/objectstore/pull/422)
+
+### Internal Changes 🔧
+
+- (python) Pin uv_build version with upper bound by @jan-auer in [#420](https://github.com/getsentry/objectstore/pull/420)
+
 ## 0.1.5
 
 ### New Features ✨

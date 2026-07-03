@@ -7,6 +7,12 @@ use crate::state::ServiceState;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
+/// Custom header for Objectstore authentication. Checked before the standard
+/// `Authorization` header so that proxy setups (e.g. Django) can use
+/// `Authorization` for their own auth while forwarding an Objectstore token in
+/// this header.
+const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
+
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;
 
@@ -14,30 +20,30 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<Self, Self::Rejection> {
-        let encoded_token = parts
+        let enforce = state.config.auth.enforce;
+        if !state.config.auth.is_active() {
+            return Ok(AuthAwareService::new(state.service.clone(), None, enforce));
+        }
+
+        let token = parts
             .headers
-            .get(header::AUTHORIZATION)
+            .get(OBJECTSTORE_AUTH_HEADER)
+            .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        let enforce = state.config.auth.enforce;
         // Attempt to decode / verify the JWT, logging failure
-        let auth_result = AuthContext::from_encoded_jwt(encoded_token, &state.key_directory)
-            .inspect_err(|err| err.log(None, None, enforce));
+        let auth_result = AuthContext::from_encoded_jwt(token, &state.key_directory)
+            .inspect_err(|e| e.log(!enforce));
 
-        // If auth enforcement is enabled, `from_encoded_jwt()` must have succeeded.
-        // If auth enforcement is disabled, we'll pass the context along if it succeeded but will
-        // still proceed with `None` if it failed.
-        let auth_context = match enforce {
-            true => Some(auth_result?),
-            false => auth_result.ok(),
+        // If enforcement is disabled, proceed without an auth context even on failure
+        let auth = match auth_result {
+            Ok(auth) => Some(auth),
+            Err(error) if enforce => return Err(ApiError::Auth(error)),
+            Err(_) => None,
         };
 
-        AuthAwareService::new(
-            state.service.clone(),
-            auth_context,
-            state.config.auth.enforce,
-        )
+        Ok(AuthAwareService::new(state.service.clone(), auth, enforce))
     }
 }
 

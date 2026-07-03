@@ -12,9 +12,11 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import utils
-from objectstore_client.auth import TokenGenerator, TokenProvider
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
+from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
+    HEADER_FILENAME,
     HEADER_META_PREFIX,
     HEADER_ORIGIN,
     Compression,
@@ -27,21 +29,13 @@ from objectstore_client.metrics import (
     NoOpMetricsBackend,
     measure_storage_operation,
 )
+from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 
 
 class GetResponse(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
-
-
-class RequestError(Exception):
-    """Exception raised if an API call to Objectstore fails."""
-
-    def __init__(self, message: str, status: int, response: str):
-        super().__init__(message)
-        self.status = status
-        self.response = response
 
 
 class Usecase:
@@ -228,10 +222,36 @@ class Session:
         self._scope = scope
         self._token = token
 
-    def mint_token(self) -> str | None:
+    def mint_token(
+        self,
+        permissions: list[Permission] | None = None,
+        expiry_seconds: int | None = None,
+    ) -> str:
         """
-        Returns a signed token if a token or generator was provided or `None` otherwise.
+        Returns a signed token.
+
+        When ``permissions`` is ``None``, the generator's default
+        permissions are used. When provided, they must be a subset of
+        the generator's permissions.
+
+        When ``expiry_seconds`` is ``None``, the generator's default
+        expiry is used.
+
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured
+        or if any requested permission is not granted to the
+        generator.
         """
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
+        return self._token.sign_for_scope(
+            self._usecase.name,
+            self._scope,
+            permissions,
+            expiry_seconds,
+        )
+
+    def _auth_token(self) -> str | None:
+        """Returns a token for internal auth headers."""
         if isinstance(self._token, TokenGenerator):
             return self._token.sign_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
@@ -244,8 +264,8 @@ class Session:
             headers.update(
                 dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
             )
-        if token := self.mint_token():
-            headers["Authorization"] = f"Bearer {token}"
+        if token := self._auth_token():
+            headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
@@ -253,6 +273,25 @@ class Session:
         path = self._base_path.rstrip("/") + relative_path
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
+        return path
+
+    def _make_multipart_url(
+        self,
+        action: str | None,
+        key: str | None,
+        query: str | None = None,
+    ) -> str:
+        if action == "parts":
+            resource = "objects:multipart:parts"
+        elif action == "complete":
+            resource = "objects:multipart:complete"
+        else:
+            resource = "objects:multipart"
+
+        relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
+        path = self._base_path.rstrip("/") + relative_path
+        if query:
+            return f"{path}?{query}"
         return path
 
     def put(
@@ -264,6 +303,7 @@ class Session:
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
+        filename: str | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -303,6 +343,9 @@ class Session:
 
         if origin:
             headers[HEADER_ORIGIN] = origin
+
+        if filename is not None:
+            headers[HEADER_FILENAME] = filename
 
         if metadata:
             for k, v in metadata.items():
@@ -403,6 +446,29 @@ class Session:
         """
         return self._make_url(key, full=True)
 
+    def head(self, key: str) -> Metadata | None:
+        """
+        Checks whether an object exists and retrieves its metadata.
+
+        Returns the object's ``Metadata`` if it exists, ``None`` otherwise.
+
+        If the object has a TTI expiration policy, this is considered an access,
+        and therefore bumps its expiration.
+        """
+        headers = self._make_headers()
+        with measure_storage_operation(
+            self._metrics_backend, "head", self._usecase.name
+        ):
+            response = self._pool.request(
+                "HEAD",
+                self._make_url(key),
+                headers=headers,
+            )
+            if response.status == 404:
+                return None
+            raise_for_status(response)
+            return Metadata.from_headers(response.headers)
+
     def delete(self, key: str) -> None:
         """
         Deletes the blob with the given `key`.
@@ -419,12 +485,78 @@ class Session:
             )
             raise_for_status(response)
 
+    def initiate_multipart_upload(
+        self,
+        *,
+        key: str | None = None,
+        compression: Compression | Literal["none"] | None = None,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+        filename: str | None = None,
+    ) -> MultipartUpload:
+        """
+        Initiates a multipart upload.
 
-def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
-    if response.status >= 400:
-        res = (response.data or response.read() or b"").decode("utf-8", "replace")
-        raise RequestError(
-            f"Objectstore request failed with status {response.status}",
-            response.status,
-            res,
-        )
+        Returns a :class:`~objectstore_client.multipart.MultipartUpload` handle
+        that can be used to upload parts, list parts, complete, or abort.
+
+        **Important:** unlike :meth:`put`, the ``compression`` parameter only
+        records the compression algorithm in the object's metadata.
+        The caller is responsible for compressing each part in accordance with the
+        chosen algorithm before passing it to
+        :meth:`~objectstore_client.multipart.MultipartUpload.upload_part`.
+        """
+        if compression and compression not in ("none", "zstd"):
+            raise ValueError(f"Invalid compression: {compression}")
+
+        headers = self._make_headers()
+
+        compression = compression or self._usecase._compression
+        if compression and compression != "none":
+            headers["Content-Encoding"] = compression
+
+        if content_type:
+            headers["Content-Type"] = content_type
+
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
+        if expiration_policy:
+            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+
+        if origin:
+            headers[HEADER_ORIGIN] = origin
+
+        if filename is not None:
+            headers[HEADER_FILENAME] = filename
+
+        if metadata:
+            for k, v in metadata.items():
+                headers[f"{HEADER_META_PREFIX}{k}"] = v
+
+        if key == "":
+            key = None
+
+        with measure_storage_operation(
+            self._metrics_backend, "multipart.initiate", self._usecase.name
+        ):
+            response = self._pool.request(
+                "POST" if not key else "PUT",
+                self._make_multipart_url(None, key),
+                headers=headers,
+                preload_content=True,
+                decode_content=True,
+            )
+            raise_for_status(response)
+            res = response.json()
+            return MultipartUpload(self, res["key"], res["upload_id"])
+
+    def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
+        """
+        Reconstructs a multipart upload handle.
+
+        This does not make any network calls.
+        Use it to resume an upload after a process restart or to
+        continue an upload started elsewhere.
+        """
+        return MultipartUpload(self, key, upload_id)

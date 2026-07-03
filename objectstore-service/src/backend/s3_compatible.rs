@@ -5,15 +5,17 @@ use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
+use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::{self, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`S3CompatibleBackend`].
 ///
@@ -62,7 +64,7 @@ const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 /// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
 const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
 /// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {
@@ -127,8 +129,7 @@ fn metadata_to_gcs_headers(
     let mut headers = metadata.to_headers(prefix)?;
     // GCS custom-time for lifecycle expiration
     if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at =
-            humantime::format_rfc3339_seconds(std::time::SystemTime::now() + expires_in);
+        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -163,34 +164,65 @@ where
         &self,
         method: Method,
         id: &ObjectId,
-    ) -> Result<Option<(Metadata, reqwest::Response)>> {
+        range: Option<ByteRange>,
+    ) -> Result<Option<(Metadata, Option<ContentRange>, Response)>> {
         let object_url = self.object_url(id);
 
-        let response = self
-            .request(method, &object_url)
-            .await?
-            .send()
-            .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send request".to_string(),
-                cause,
-            })?;
+        let mut builder = self.request(method, &object_url).await?;
+        if let Some(r) = range {
+            builder = builder.header(reqwest::header::RANGE, r.to_header_value());
+        }
+        let response = builder.send().await.map_err(|cause| Error::Reqwest {
+            context: "S3: failed to send request".to_string(),
+            cause,
+        })?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
             return Ok(None);
         }
 
-        let response = response
-            .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to get object".to_string(),
-                cause,
-            })?;
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            let raw = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok());
+            let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
+            match total {
+                Some(total) => return Err(Error::RangeNotSatisfiable { total }),
+                None => {
+                    return Err(Error::Generic {
+                        context: format!("S3: 416 response with invalid Content-Range: {raw:?}"),
+                        cause: None,
+                    });
+                }
+            }
+        }
+
+        let response = response.check_error("S3: failed to get object").await?;
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
-        metadata.size = response.content_length().map(|len| len as usize);
+
+        let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
+            let range = headers
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<ContentRange>().ok())
+                .ok_or_else(|| Error::Generic {
+                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
+                    cause: None,
+                })?;
+            metadata.size = Some(range.total as usize);
+            Some(range)
+        } else {
+            if let Some(len) = response.content_length() {
+                metadata.size = Some(len as usize);
+            } else {
+                objectstore_log::warn!("S3: 200 response missing Content-Length header");
+            }
+            None
+        };
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
@@ -208,7 +240,7 @@ where
             }
         }
 
-        Ok(Some((metadata, response)))
+        Ok(Some((metadata, content_range, response)))
     }
 
     /// Issues a request to update the metadata for the given object.
@@ -225,15 +257,8 @@ where
             .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
             .send()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send TTI update request".to_string(),
-                cause,
-            })?
-            .error_for_status()
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to update expiration time for object with TTI".to_string(),
-                cause,
-            })?;
+            .check_error("S3: update expiration time")
+            .await?;
 
         Ok(())
     }
@@ -281,35 +306,31 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .and_then(|response| response.error_for_status())
-            .map_err(|cause| match stream::unpack_client_error(&cause) {
-                Some(ce) => Error::Client(ce),
-                _ => Error::Reqwest {
-                    context: "S3: failed to put object".to_string(),
-                    cause,
-                },
-            })?;
+            .check_error("S3: failed to put object")
+            .await?;
 
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse> {
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
-        let Some((metadata, response)) = self.request_object(Method::GET, id).await? else {
+        let Some((metadata, content_range, response)) =
+            self.request_object(Method::GET, id, range).await?
+        else {
             return Ok(None);
         };
 
         let stream = response.bytes_stream().map_err(io::Error::other);
-        Ok(Some((metadata, stream.boxed())))
+        Ok(Some((metadata, content_range, stream.boxed())))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
-        let response = self.request_object(Method::HEAD, id).await?;
-        Ok(response.map(|(metadata, _)| metadata))
+        let response = self.request_object(Method::HEAD, id, None).await?;
+        Ok(response.map(|(metadata, _, _)| metadata))
     }
 
     #[tracing::instrument(level = "trace", fields(?id), skip_all)]
@@ -327,15 +348,47 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // Do not error for objects that do not exist.
         if response.status() != StatusCode::NOT_FOUND {
-            objectstore_log::debug!("Object not found");
-            response
-                .error_for_status()
-                .map_err(|cause| Error::Reqwest {
-                    context: "S3: failed to delete object".to_string(),
-                    cause,
-                })?;
+            response.check_error("S3: failed to delete object").await?;
         }
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use objectstore_types::scope::{Scope, Scopes};
+
+    use super::*;
+    use crate::backend::common::Backend;
+    use crate::id::ObjectContext;
+
+    // NB: To run these tests, you need to have a MinIO server running. This is done
+    // automatically in CI.
+    //
+    // Refer to the readme for how to set up MinIO via devservices.
+
+    fn create_test_backend() -> S3CompatibleBackend<NoToken> {
+        S3CompatibleBackend::without_token(S3CompatibleConfig {
+            endpoint: "http://localhost:8089".into(),
+            bucket: "test-bucket".into(),
+        })
+    }
+
+    fn make_id() -> ObjectId {
+        ObjectId::random(ObjectContext {
+            usecase: "testing".into(),
+            scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_get_metadata_nonexistent() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let result = backend.get_metadata(&id).await?;
+        assert!(result.is_none());
         Ok(())
     }
 }

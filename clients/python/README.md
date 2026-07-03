@@ -32,7 +32,7 @@ Within a Usecase, Scopes provide further isolation — typically keyed by organi
 and project IDs. A Session ties a Client to a specific Usecase + Scope for operations.
 
 Scope components form a hierarchical path, so their order matters:
-`org=42/project=1337` and `project=1337/org=42` are different scopes. We recommend
+`org=42;project=1337` and `project=1337;org=42` are different scopes. We recommend
 using `org` and `project` as the first two components.
 
 ```python
@@ -89,6 +89,66 @@ Arbitrary key-value pairs can be attached to objects and retrieved on download.
 
 ```python
 session.put(b"payload", metadata={"source": "upload-service"})
+```
+
+### Multipart Upload API
+
+For large objects, use multipart uploads to upload parts independently and then
+assemble them into a final object.
+
+**Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
+The caller must pre-compress each part according to the compression set as part of the metadata
+when initiating the upload.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+import zstandard
+
+from objectstore_client.multipart import MultipartCompleteError
+
+upload = session.initiate_multipart_upload(
+    key="my-large-object",
+    compression="zstd",
+    metadata={"source": "upload-service"},
+)
+
+compressor = zstandard.ZstdCompressor()
+chunks = [b"part1", b"part2", b"part3", b"part4"]
+
+def upload_part(part_number: int, data: bytes):
+    compressed = compressor.compress(data)
+    return upload.put_part(
+        compressed, part_number=part_number, content_length=len(compressed)
+    )
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [
+        executor.submit(upload_part, i + 1, chunk)
+        for i, chunk in enumerate(chunks)
+    ]
+    parts = [f.result() for f in futures]
+
+try:
+    key = upload.complete(parts)
+except MultipartCompleteError:
+    upload.abort()
+    raise
+```
+
+To resume an in-progress multipart upload after a process restart, persist the
+`key` and `upload_id`, then reconstruct the upload handle later:
+
+```python
+saved_key = upload.key
+saved_upload_id = upload.upload_id
+
+resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
+existing_parts = resumed.list_parts()
+
+# Upload missing parts...
+
+key = resumed.complete(new_parts + existing_parts)
 ```
 
 ### Authentication

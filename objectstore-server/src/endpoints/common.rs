@@ -5,6 +5,7 @@ use std::error::Error;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +31,10 @@ pub enum ApiError {
     /// Errors encountered when parsing or executing a batch request.
     #[error("batch error: {0}")]
     Batch(#[from] BatchError),
+
+    /// Internal server errors.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Result type for API operations.
@@ -89,9 +94,19 @@ impl ApiError {
 
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
+                StatusCode::RANGE_NOT_SATISFIABLE
+            }
+            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => {
                 objectstore_log::error!(!!self, "error handling request");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+
+            ApiError::Internal(_) => {
+                objectstore_log::error!(!!self, "internal error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
@@ -103,4 +118,12 @@ impl IntoResponse for ApiError {
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()
     }
+}
+
+/// Inserts `Accept-Ranges: bytes` into the response headers.
+pub fn insert_accept_ranges(response: &mut Response) {
+    response.headers_mut().insert(
+        http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
 }

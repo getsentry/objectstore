@@ -17,12 +17,12 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use argh::FromArgs;
+use objectstore_client::{SecretKey, TokenGenerator};
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
-use stresstest::workload::WorkloadMode;
 
 use crate::config::Config;
 
@@ -36,8 +36,9 @@ pub struct Args {
     pub config: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -47,28 +48,26 @@ async fn main() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_reader(config_file).context("failed to parse config YAML")?;
 
-    let remote = HttpRemote::new(&config.remote);
+    let token = if let Some(auth) = &config.auth {
+        let key = std::fs::read_to_string(&auth.key_path)
+            .with_context(|| format!("failed to read private key from {:?}", auth.key_path))?;
+        let generator = TokenGenerator::new(SecretKey {
+            kid: auth.kid.clone(),
+            secret_key: key,
+        })?;
+        Some(generator)
+    } else {
+        None
+    };
+
+    let remote = HttpRemote::new(&config.remote, token);
     let mut stresstest = Stresstest::new(remote)
         .duration(config.duration)
         .cleanup(config.cleanup);
 
     for w in config.workloads {
-        if matches!(w.mode, WorkloadMode::Batch) {
-            if w.actions.reads > 0 || w.actions.deletes > 0 {
-                bail!(
-                    "workload '{}': batch mode only supports writes, but reads={} and deletes={} were configured",
-                    w.name,
-                    w.actions.reads,
-                    w.actions.deletes
-                );
-            }
-            if w.actions.writes == 0 {
-                bail!(
-                    "workload '{}': batch mode requires actions.writes > 0",
-                    w.name
-                );
-            }
-        }
+        w.validate()?;
+        let multipart = w.multipart_config();
 
         let workload = Workload::builder(w.name)
             .concurrency(w.concurrency)
@@ -77,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
             .max_size(w.file_sizes.max.map(|b| b.0))
             .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
+            .multipart(multipart)
             .build();
 
         stresstest = stresstest.workload(workload);

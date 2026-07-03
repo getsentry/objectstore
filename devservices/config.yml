@@ -9,10 +9,12 @@ x-sentry-service-config:
       description: Google Cloud BigTable emulator
     gcs:
       description: Google Cloud Storage emulator
+    minio:
+      description: MinIO server
   modes:
     default: []
     containerized: [objectstore]
-    full: [bigtable, gcs]
+    full: [bigtable, gcs, minio]
 
 x-programs:
   devserver:
@@ -25,6 +27,7 @@ services:
       OS__STORAGE__TYPE: "filesystem"
       OS__STORAGE__PATH: "/data"
       OS__LOGGING__LEVEL: "debug"
+      OS__AUTH__ENFORCE: "false"
     command: run
     healthcheck:
       test: ["CMD", "/bin/entrypoint", "healthcheck"]
@@ -60,7 +63,7 @@ services:
       - orchestrator=devservices
     restart: unless-stopped
   gcs:
-    image: gcr.io/cloud-devrel-public-resources/storage-testbench:latest
+    build: https://github.com/getsentry/google-cloud-storage-testbench.git#main
     environment:
       GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME: test-bucket
     healthcheck:
@@ -70,6 +73,23 @@ services:
       retries: 5
     ports:
       - 127.0.0.1:8087:9000
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
+  minio:
+    image: minio/minio
+    entrypoint: /run-minio.sh
+    healthcheck:
+      test: mc ready local
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    ports:
+      - 127.0.0.1:8089:9000
+    volumes:
+      - ./run-minio.sh:/run-minio.sh
     networks:
       - devservices
     labels:

@@ -46,7 +46,7 @@ use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
-pub use objectstore_service::backend::StorageConfig;
+pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -58,7 +58,7 @@ const ENV_PREFIX: &str = "OS__";
 /// Newtype around `String` that may protect against accidental
 /// logging of secrets in our configuration struct. Use with
 /// [`secrecy::SecretBox`].
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigSecret(String);
 
 impl ConfigSecret {
@@ -311,8 +311,8 @@ impl Default for Sentry {
 // Logging configuration is defined in `objectstore_log::LoggingConfig`.
 // Metrics configuration is defined in `objectstore_metrics::MetricsConfig`.
 
-/// A key that may be used to verify a request's `Authorization` header and its
-/// associated permissions. May contain multiple key versions to facilitate rotation.
+/// A key that may be used to verify a request's auth token and its associated
+/// permissions. May contain multiple key versions to facilitate rotation.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZVerificationKey {
     /// Files that contain versions of this key's key material which may be used to verify
@@ -325,29 +325,57 @@ pub struct AuthZVerificationKey {
 
     /// The maximum set of permissions that this key's signer is authorized to grant.
     ///
-    /// If a request's `Authorization` header grants full permission but it was signed by
-    /// a key that is only allowed to grant read permission, then the request only has
+    /// If a request's auth token grants full permission but it was signed by a key
+    /// that is only allowed to grant read permission, then the request only has
     /// read permission.
     #[serde(default)]
     pub max_permissions: HashSet<Permission>,
 }
 
 /// Configuration for content-based authorization.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AuthZ {
     /// Whether to enforce content-based authorization or not.
     ///
-    /// If this is set to `false`, checks are still performed but failures will not result
-    /// in `403 Unauthorized` responses.
+    /// Defaults to `true`, resulting in `403 Unauthorized` responses for unauthorized requests. Set
+    /// to `false` to permit unauthorized requests. Authorization checks are still performed if
+    /// keys are configured, but only result in warnings.
+    #[serde(default = "default_enforce")]
     pub enforce: bool,
 
-    /// Keys that may be used to verify a request's `Authorization` header.
+    /// Keys that may be used to verify a request's auth token.
     ///
-    /// This field is a container that is keyed on a key's ID. When verifying a JWT
-    /// from the `Authorization` header, the `kid` field should be read from the JWT
-    /// header and used to index into this map to select the appropriate key.
+    /// The auth token is read from the `X-Os-Auth` header (preferred)
+    /// or the standard `Authorization` header (fallback). This field is a
+    /// container keyed on a key's ID. When verifying a JWT, the `kid` field
+    /// should be read from the JWT header and used to index into this map to
+    /// select the appropriate key.
     #[serde(default)]
     pub keys: BTreeMap<String, AuthZVerificationKey>,
+}
+
+fn default_enforce() -> bool {
+    true
+}
+
+impl AuthZ {
+    /// Returns whether content-based authorization is active.
+    ///
+    /// Authorization is considered active if enforcement is enabled or at least one key is
+    /// configured. Without enforcement, authorization checks are still performed and reported but
+    /// failures will not result in `403 Unauthorized`
+    pub fn is_active(&self) -> bool {
+        self.enforce || !self.keys.is_empty()
+    }
+}
+
+impl Default for AuthZ {
+    fn default() -> Self {
+        Self {
+            enforce: true,
+            keys: BTreeMap::new(),
+        }
+    }
 }
 
 /// Main configuration struct for the objectstore server.
@@ -443,7 +471,7 @@ pub struct Config {
     /// Content-based authorization configuration.
     ///
     /// Controls the verification and enforcement of content-based access control based on the
-    /// JWT in a request's `Authorization` header.
+    /// JWT in a request's `X-Os-Auth` or `Authorization` header.
     pub auth: AuthZ,
 
     /// A list of matchers for requests to discard without processing.
@@ -492,7 +520,7 @@ pub struct Service {
     /// # Default
     ///
     /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
-    pub max_concurrency: usize,
+    pub max_concurrency: u32,
 }
 
 impl Default for Service {
@@ -609,7 +637,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
-    use objectstore_service::backend::HighVolumeStorageConfig;
+    use objectstore_service::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -755,7 +783,7 @@ mod tests {
             };
             let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
-            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
+            let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
                 panic!("expected gcs long_term");
             };
             assert_eq!(lt.bucket, "my-objectstore-bucket");
@@ -784,7 +812,7 @@ mod tests {
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
-            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
+            let MultipartUploadStorageConfig::FileSystem(lt) = &c.long_term else {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
@@ -886,6 +914,44 @@ mod tests {
             assert_eq!(kid2.key_files[0], Path::new("12345"));
             assert_eq!(kid2.max_permissions, HashSet::new());
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_defaults_to_true() {
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(None).unwrap();
+            assert!(config.auth.enforce);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_defaults_to_true_when_omitted_from_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+                auth:
+                    keys: {}
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert!(config.auth.enforce);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_enforce_can_be_disabled() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__AUTH__ENFORCE", "false");
+            let config = Config::load(None).unwrap();
+            assert!(!config.auth.enforce);
             Ok(())
         });
     }

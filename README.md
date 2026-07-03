@@ -19,11 +19,14 @@ The platform is split into the following core components:
   more information.
 - `objectstore-types`: Shared type definitions for the client and server,
   including metadata, scopes, expiration, and permissions.
+- `objectstore-log`: Logging macros and subscriber initialization shared across
+  service components.
 - `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
   across service components.
 - `objectstore-options`: Runtime options backed by
   [`sentry-options`](https://crates.io/crates/sentry-options), providing
   dynamic configuration to service components.
+- `objectstore-test`: Test utilities shared across the workspace.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
 
@@ -186,6 +189,7 @@ the required images and configuration, such as port mapping.
 column families.
  - For **Google Cloud Storage** (GCS), a test bucket is already configured in
   the dev container.
+ - For **MinIO** (S3-compatible), a public test bucket is created on startup.
 
 The emulators example config is pre-configured with a tiered configuration using
 both backends. To use it:
@@ -241,6 +245,55 @@ cargo run -- run
 
 You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.
+
+### Heap Profiling
+
+Production release builds include on-demand heap profiling via jemalloc. It can
+be enabled and disabled through HTTP endpoints that are only reachable from
+loopback.
+
+To capture a heap profile from a running server, for example on localhost with
+default port:
+
+```sh
+# Enable sampling, let the workload run, then dump a profile
+curl -X POST http://localhost:8888/debug/pprof/enable
+curl http://localhost:8888/debug/pprof/heap > heap.pb.gz
+
+# Disable sampling when done
+curl -X POST http://localhost:8888/debug/pprof/disable
+```
+
+Profiles are unsymbolicated — you need the server binary to resolve stack
+frames. Copy it from the Docker image with:
+
+```sh
+docker create --name tmp <image>
+docker cp tmp:/bin/entrypoint ./objectstore
+docker rm tmp
+```
+
+To analyze profile dumps, use the standalone `pprof` tool. The go builtin tool
+does not support symbolizing ELF files on macOS hosts:
+
+```sh
+go install github.com/google/pprof@latest
+```
+
+Then point pprof at the binary and the heap dump(s) you want to analyze:
+
+```sh
+$(go env GOPATH)/bin/pprof -top objectstore heap.pb.gz
+
+# To isolate growth between two snapshots, use the -diff_base flag:
+$(go env GOPATH)/bin/pprof -top -diff_base before.pb.gz objectstore after.pb.gz
+
+# Interactive browser UI with flamegraph:
+$(go env GOPATH)/bin/pprof -http=:8080 objectstore heap.pb.gz
+```
+
+The sampling overhead is around 5%, so profiling can be left enabled
+for an extended capture window safely.
 
 ### Tests
 

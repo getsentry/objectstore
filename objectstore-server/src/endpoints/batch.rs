@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
@@ -79,7 +78,7 @@ async fn batch(
         let state = Arc::clone(&state);
         let context = context.clone();
         move |_op| {
-            if state.rate_limiter.check(&context) {
+            if state.rate_limiter.check(&context, None) {
                 Ok(())
             } else {
                 Err(ApiError::from(BatchError::RateLimited))
@@ -109,13 +108,12 @@ async fn batch(
         }
     });
 
-    // Step 5: stamp inserts with time_created and record bandwidth
-    let stamped = policy_checked.map({
+    // Step 5: record bandwidth for inserts
+    let metered = policy_checked.map({
         let state = Arc::clone(&state);
         let context = context.clone();
-        move |(idx, mut item)| {
-            if let Ok(Operation::Insert(ins)) = &mut item {
-                ins.metadata.time_created = Some(SystemTime::now());
+        move |(idx, item)| {
+            if let Ok(Operation::Insert(ins)) = &item {
                 state.record_bandwidth(&context, ins.payload.len() as u64);
             }
             (idx, item)
@@ -125,7 +123,7 @@ async fn batch(
     // Step 6: execute concurrently, then convert each result to a multipart Part
     let state_ref = Arc::clone(&state);
     let context_ref = context.clone();
-    let responses = batch.execute(context, stamped).then(move |(idx, result)| {
+    let responses = batch.execute(context, metered).then(move |(idx, result)| {
         let state = Arc::clone(&state_ref);
         let context = context_ref.clone();
         async move { convert_to_part(idx, result, &state, &context).await }
@@ -147,7 +145,7 @@ async fn convert_to_part(
     match result {
         Ok(OpResponse::Got {
             key,
-            response: Some((metadata, stream)),
+            response: Some((metadata, _content_range, stream)),
         }) => got_to_part(idx, key, metadata, stream, state, context)
             .await
             .unwrap_or_else(|e| create_error_part(idx, &e)),
@@ -179,6 +177,41 @@ async fn convert_to_part(
             &key,
             "delete",
             StatusCode::NO_CONTENT,
+            None,
+            Bytes::new(),
+            None,
+        ),
+        Ok(OpResponse::Head {
+            key,
+            metadata: Some(metadata),
+        }) => {
+            let metadata_headers = metadata.to_headers("").map_err(|err| {
+                ApiError::from(BatchError::ResponseSerialization {
+                    context: "serializing object metadata".to_owned(),
+                    cause: Box::new(err),
+                })
+            });
+            match metadata_headers {
+                Ok(headers) => create_success_part(
+                    idx,
+                    &key,
+                    "head",
+                    StatusCode::NO_CONTENT,
+                    None,
+                    Bytes::new(),
+                    Some(headers),
+                ),
+                Err(e) => create_error_part(idx, &e),
+            }
+        }
+        Ok(OpResponse::Head {
+            key,
+            metadata: None,
+        }) => create_success_part(
+            idx,
+            &key,
+            "head",
+            StatusCode::NOT_FOUND,
             None,
             Bytes::new(),
             None,

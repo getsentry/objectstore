@@ -12,11 +12,30 @@ All object operations live under the `/v1/` prefix:
 | Method   | Path                                      | Description                  |
 |----------|-------------------------------------------|------------------------------|
 | `POST`   | `/v1/objects/{usecase}/{scopes}/`         | Insert with server-generated key |
-| `GET`    | `/v1/objects/{usecase}/{scopes}/{key}`    | Retrieve object              |
-| `HEAD`   | `/v1/objects/{usecase}/{scopes}/{key}`    | Retrieve metadata only       |
-| `PUT`    | `/v1/objects/{usecase}/{scopes}/{key}`    | Insert or overwrite with key |
-| `DELETE` | `/v1/objects/{usecase}/{scopes}/{key}`    | Delete object                |
+| `GET`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve object              |
+| `HEAD`   | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve metadata only       |
+| `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Insert or overwrite with key |
+| `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}`   | Delete object                |
 | `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
+
+### Multipart Upload Endpoints
+
+| Method    | Path                                                         | Description                          |
+|-----------|--------------------------------------------------------------|--------------------------------------|
+| `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
+| `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
+| `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | Upload a part (`uploadId`, `partNumber` query params) |
+| `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | List uploaded parts (`uploadId` query param) |
+| `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{*key}`   | Complete upload (`uploadId` query param) |
+| `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Abort upload (`uploadId` query param) |
+
+The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
+
+The complete endpoint returns `200 OK` immediately, with a streaming body that
+will contain the error (if any) as JSON. Whitespace is sent in the streaming body
+to keep the connection open.
+Clients must parse the body to determine the actual outcome, and not rely on the
+status code.
 
 Scopes are encoded in the URL path using Matrix URI syntax:
 `org=123;project=456`. An underscore (`_`) represents empty scopes.
@@ -40,8 +59,10 @@ A request flows through several layers before reaching the storage service:
    recovery, Sentry transaction tracing, distributed tracing.
 2. **Extractors**: path parameters are parsed into an
    [`ObjectId`](objectstore_service::id::ObjectId) or
-   [`ObjectContext`](objectstore_service::id::ObjectContext). The `Authorization`
-   header is validated and decoded into an [`AuthContext`](auth::AuthContext).
+   [`ObjectContext`](objectstore_service::id::ObjectContext). The auth token is
+   read from the `X-Os-Auth` header (preferred) or the standard
+   `Authorization` header (fallback), then validated and decoded into an
+   [`AuthContext`](auth::AuthContext).
    The optional `x-downstream-service` header is extracted for killswitch
    matching.
 3. **Admission control**: [killswitches](killswitches) and
@@ -60,16 +81,15 @@ A request flows through several layers before reaching the storage service:
 ## Authentication & Authorization
 
 Objectstore uses **JWT tokens with EdDSA signatures** (Ed25519) for
-authentication. Auth enforcement is optional and controlled by the
-[`auth.enforce`](config) config flag, allowing unauthenticated development
-setups.
+authentication. Auth enforcement is **enabled by default** and controlled by the
+[`auth.enforce`](config) config flag. Set `enforce: false` explicitly for
+unauthenticated development setups.
 
 ### Token Structure
 
 Tokens must include:
 - **Header**: `kid` (key ID) and `alg: EdDSA`
-- **Claims**: `aud: "objectstore"`, `iss: "sentry"` or `"relay"`, `exp`
-  (expiration timestamp)
+- **Claims**: `exp` (expiration timestamp)
 - **Resource claims** (`res`): the usecase and scope values the token grants
   access to (e.g., `{"os:usecase": "attachments", "org": "123"}`)
 - **Permissions**: array of granted operations (`object.read`, `object.write`,
@@ -98,8 +118,8 @@ this precedence (highest wins):
 1. **Environment variables** — prefixed with `OS__`, using `__` as a nested
    separator. Example: `OS__STORAGE__TYPE=tiered`
 2. **YAML file** — passed via the `-c` / `--config` CLI flag
-3. **Defaults** — sensible development defaults (local filesystem backend,
-   auth disabled)
+3. **Defaults** — sensible defaults (local filesystem backend,
+   auth enabled)
 
 Key configuration sections:
 - `storage` — backend type and connection parameters; use `type: tiered` for
@@ -267,8 +287,9 @@ matched, cause requests to be rejected with HTTP 403:
 
 - **Usecase**: exact match on the usecase string
 - **Scopes**: all specified scope key-value pairs must be present
-- **Service**: a glob pattern matched against the `x-downstream-service`
-  request header (e.g., `"relay-*"` to block all relay instances)
+- **Service**: a glob pattern matched against the normalized
+  `x-downstream-service` value (Kubernetes hash/pod suffixes are stripped on
+  ingest, so patterns match the base service name, e.g. `"relay*"`)
 
 A killswitch with no conditions matches all traffic. Multiple killswitches are
 evaluated with OR semantics — any match triggers rejection. Killswitches are

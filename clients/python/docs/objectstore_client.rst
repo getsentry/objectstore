@@ -25,6 +25,14 @@ objectstore\_client.client module
    :show-inheritance:
    :undoc-members:
 
+objectstore\_client.errors module
+---------------------------------
+
+.. automodule:: objectstore_client.errors
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 objectstore\_client.metadata module
 -----------------------------------
 
@@ -37,6 +45,14 @@ objectstore\_client.metrics module
 ----------------------------------
 
 .. automodule:: objectstore_client.metrics
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+objectstore\_client.multipart module
+------------------------------------
+
+.. automodule:: objectstore_client.multipart
    :members:
    :show-inheritance:
    :undoc-members:

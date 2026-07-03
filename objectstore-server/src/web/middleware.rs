@@ -2,6 +2,7 @@ use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::RequestExt;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
@@ -13,6 +14,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::endpoints::is_internal_route;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::web::RequestCounter;
+use crate::web::sentry_body::SentryBody;
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
@@ -57,10 +59,7 @@ pub fn make_http_span(request: &Request) -> tracing::Span {
         client_addr = tracing::field::Empty,
     );
 
-    if let Some(ConnectInfo(addr)) = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-    {
+    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
         span.record("client_addr", tracing::field::display(addr.ip()));
     }
 
@@ -83,6 +82,18 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 
     let response = (StatusCode::INTERNAL_SERVER_ERROR, detail);
     response.into_response()
+}
+
+/// Wraps the response body so the request's Sentry hub stays active during polling.
+///
+/// Use this with [`from_fn`](axum::middleware::from_fn). Place it below the Sentry
+/// tower layers so that `Hub::current()` returns the request-scoped hub.
+pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
+    let hub = sentry::Hub::current();
+    let response = next.run(request).await;
+    let (parts, body) = response.into_parts();
+    let sentry_body = Body::new(SentryBody::new(hub, body));
+    Response::from_parts(parts, sentry_body)
 }
 
 /// A middleware that logs web request timings as metrics.
@@ -114,7 +125,6 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
 struct EmitMetricsGuard<'a> {
     route: &'a str,
     method: Method,
-    service: DownstreamService,
     start: Instant,
     status: Option<StatusCode>,
 }
@@ -131,7 +141,6 @@ impl<'a> EmitMetricsGuard<'a> {
         Self {
             route,
             method: method.clone(),
-            service,
             start: Instant::now(),
             status: None,
         }
@@ -150,7 +159,7 @@ impl Drop for EmitMetricsGuard<'_> {
             route = self.route.to_owned(),
             method = self.method.as_str().to_owned(),
             status = status,
-            service = self.service.to_string(),
+            // service omitted to limit cardinality
         );
     }
 }

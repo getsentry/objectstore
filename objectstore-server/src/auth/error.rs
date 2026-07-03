@@ -1,4 +1,3 @@
-use objectstore_types::auth::Permission;
 use thiserror::Error;
 
 /// Error type for different authorization failure scenarios.
@@ -22,7 +21,7 @@ pub enum AuthError {
     #[error("failed to verify token")]
     VerificationFailure,
 
-    /// Indicates that the requested operation is not authorized and auth enforcement is enabled.
+    /// Indicates that the requested operation is not permitted on the resource.
     #[error("operation not allowed")]
     NotPermitted,
 }
@@ -39,18 +38,17 @@ impl AuthError {
         }
     }
 
-    /// Increment a counter and emit a debug log for this auth failure.
+    /// Increment a counter and emit a log for this auth failure.
     ///
-    /// If `enforce` is false, authentication failures will be logged as warnings to ensure they
-    /// are found and fixed to unblock enabling enforcement.
-    pub fn log(&self, permission: Option<Permission>, usecase: Option<&str>, enforce: bool) {
+    /// If `warn` is true, the log will be at WARN level; otherwise it will be at DEBUG level.
+    pub fn log(&self, warn: bool) {
         let code = self.code();
         objectstore_metrics::count!("server.auth.failure", code = code);
-        let msg = self.to_string();
-        if !enforce {
-            objectstore_log::warn!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+
+        if warn {
+            objectstore_log::warn!(code, reason=%self, "Auth failure");
         } else {
-            objectstore_log::debug!(?permission, ?usecase, ?code, ?msg, "Auth failure");
+            objectstore_log::debug!(code, reason=%self, "Auth failure");
         }
     }
 }

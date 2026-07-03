@@ -9,8 +9,9 @@ use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
 };
+use bytes::BytesMut;
 use futures::{StreamExt, stream::BoxStream};
-use objectstore_service::streaming::{Delete, Get, Insert, Operation};
+use objectstore_service::streaming::{Delete, Get, Head, Insert, Operation};
 use objectstore_types::metadata::Metadata;
 use thiserror::Error;
 
@@ -50,7 +51,7 @@ pub enum BatchError {
     },
 }
 
-async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchError> {
+async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, BatchError> {
     let kind = field
         .headers()
         .get(HEADER_BATCH_OPERATION_KIND)
@@ -101,19 +102,29 @@ async fn try_operation_from_field(field: Field<'_>) -> Result<Operation, BatchEr
                 ))
             })?,
         }),
+        "head" => Operation::Head(Head {
+            key: key.ok_or_else(|| {
+                BatchError::BadRequest(format!(
+                    "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                ))
+            })?,
+        }),
         "insert" => {
-            let metadata = Metadata::from_headers(field.headers(), "")?;
-            let payload = field.bytes().await?;
-            if payload.len() > MAX_FIELD_SIZE {
-                return Err(BatchError::LimitExceeded(format!(
-                    "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
-                )));
+            let metadata = Metadata::from_insert_headers(field.headers(), "")?;
+            let mut payload = BytesMut::new();
+            while let Some(chunk) = field.chunk().await? {
+                if payload.len() + chunk.len() > MAX_FIELD_SIZE {
+                    return Err(BatchError::LimitExceeded(format!(
+                        "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
+                    )));
+                }
+                payload.extend_from_slice(&chunk);
             }
-            Operation::Insert(Insert {
+            Operation::Insert(Box::new(Insert {
                 key,
                 metadata,
-                payload,
-            })
+                payload: payload.freeze(),
+            }))
         }
         _ => {
             return Err(BatchError::BadRequest(format!(
@@ -387,5 +398,57 @@ mod tests {
             &operations[MAX_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_head_operation() {
+        let key = percent_encoding::percent_encode(b"head-key", NON_ALPHANUMERIC);
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KEY}: {key}\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: head\r\n\
+             \r\n\
+             \r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 1);
+
+        let Operation::Head(head_op) = &operations[0].as_ref().unwrap() else {
+            panic!("expected head operation");
+        };
+        assert_eq!(head_op.key, "head-key");
+    }
+
+    #[tokio::test]
+    async fn test_head_without_key_is_error() {
+        let body = format!(
+            "--boundary\r\n\
+             {HEADER_BATCH_OPERATION_KIND}: head\r\n\
+             \r\n\
+             \r\n\
+             --boundary--\r\n",
+        );
+
+        let request = Request::builder()
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        let batch_request = BatchOperationStream::from_request(request, &())
+            .await
+            .unwrap();
+        let operations: Vec<_> = batch_request.0.collect().await;
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(&operations[0], Err(BatchError::BadRequest(_))));
     }
 }

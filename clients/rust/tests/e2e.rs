@@ -1,19 +1,17 @@
+mod common;
+
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
-use std::sync::LazyLock;
 
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_client::{
-    Client, Error, OperationResult, Permission, SecretKey, TokenGenerator, Usecase,
-};
-use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY_PATH, TestServer, config};
+use objectstore_client::{Client, Error, OperationResult, Permission, Usecase};
+use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY};
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 use serde::Serialize;
 
-pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
-    LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
+use common::{test_server, test_token_generator};
 
 #[derive(Serialize)]
 struct JwtClaims {
@@ -51,25 +49,6 @@ fn sign_static_token(usecase: &str, scopes: &[(&str, &str)]) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(TEST_EDDSA_KID.into());
     encode(&header, &claims, &encoding_key).unwrap()
-}
-
-async fn test_server() -> TestServer {
-    TestServer::with_config(config::Config {
-        auth: config::AuthZ {
-            enforce: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
-}
-
-fn test_token_generator() -> TokenGenerator {
-    TokenGenerator::new(SecretKey {
-        kid: TEST_EDDSA_KID.into(),
-        secret_key: TEST_EDDSA_PRIVKEY.clone(),
-    })
-    .unwrap()
 }
 
 #[tokio::test]
@@ -172,9 +151,12 @@ async fn stores_under_given_key() {
 
 #[tokio::test]
 async fn stores_structured_keys() {
-    let server = TestServer::new().await;
+    let server = test_server().await;
 
-    let client = Client::builder(server.url("/")).build().unwrap();
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
@@ -291,14 +273,14 @@ async fn fails_with_insufficient_auth_token_perms() {
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let put_result = session.put("initial body").send().await;
-    println!("{:?}", put_result);
+    println!("{put_result:?}");
     match put_result {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
 
     let delete_result = session.delete("some-key").send().await;
-    println!("{:?}", delete_result);
+    println!("{delete_result:?}");
     match delete_result {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
@@ -347,7 +329,13 @@ async fn batch_operations() {
     // key-2 uses default compression (zstd), others are uncompressed
     let results: Vec<_> = session
         .many()
-        .push(session.put("first object").compression(None).key("key-1"))
+        .push(
+            session
+                .put("first object")
+                .compression(None)
+                .filename("report.pdf")
+                .key("key-1"),
+        )
         .push(session.put("second object").key("key-2"))
         .push(session.put("third object").compression(None).key("key-3"))
         .push(session.put("fourth object").compression(None).key("key-4"))
@@ -361,7 +349,7 @@ async fn batch_operations() {
         .iter()
         .map(|r| match r {
             OperationResult::Put(key, Ok(_)) => key.clone(),
-            other => panic!("Expected Put result, got: {:?}", other),
+            other => panic!("Expected Put result, got: {other:?}"),
         })
         .collect();
     keys.sort();
@@ -401,7 +389,7 @@ async fn batch_operations() {
             OperationResult::Put(key, Ok(_)) => {
                 puts.insert(key);
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
     }
 
@@ -413,6 +401,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
+    assert_eq!(get1.metadata.filename.as_deref(), Some("report.pdf"));
     assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
 
     // GET key-2 (automatic decompression)
@@ -423,6 +412,7 @@ async fn batch_operations() {
         .unwrap();
     assert_eq!(get2.metadata.compression, None);
     assert!(get2.metadata.time_created.is_some());
+    assert!(get2.metadata.filename.is_none());
     assert_eq!(get2.payload().await.unwrap().as_ref(), b"second object");
 
     // DELETE key-3
@@ -465,7 +455,7 @@ async fn batch_insert_without_key() {
 
     let server_key = match &results[0] {
         OperationResult::Put(key, Ok(_)) => key.clone(),
-        other => panic!("Expected Put result, got: {:?}", other),
+        other => panic!("Expected Put result, got: {other:?}"),
     };
 
     // The server should have assigned a non-empty key
@@ -523,7 +513,7 @@ async fn batch_partial_failures() {
             OperationResult::Delete(key, inner) => {
                 deletes.insert(key, inner);
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
     }
 
@@ -537,14 +527,14 @@ async fn batch_partial_failures() {
     let put_result = puts.remove("write-key").expect("missing put result");
     match put_result {
         Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
-        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+        other => panic!("Expected OperationFailure(403), got: {other:?}"),
     }
 
     // DELETE should fail with 403 (no delete permission)
     let delete_result = deletes.remove("delete-key").expect("missing delete result");
     match delete_result {
         Err(Error::OperationFailure { status, .. }) => assert_eq!(status, 403),
-        other => panic!("Expected OperationFailure(403), got: {:?}", other),
+        other => panic!("Expected OperationFailure(403), got: {other:?}"),
     }
 
     // GETs after the failures should still succeed
@@ -609,7 +599,7 @@ async fn batch_put_files() {
         .iter()
         .map(|r| match r {
             OperationResult::Put(key, Ok(_)) => key.clone(),
-            other => panic!("Expected successful Put result, got: {:?}", other),
+            other => panic!("Expected successful Put result, got: {other:?}"),
         })
         .collect();
     keys.sort();
@@ -694,4 +684,90 @@ async fn put_file_with_compression() {
 
     let received = response.payload().await.unwrap();
     assert_eq!(received, body);
+}
+
+#[tokio::test]
+async fn head_returns_metadata() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session
+        .put("hello head!")
+        .compression(None)
+        .key("head-test-key")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let metadata = session.head(&stored_id).send().await.unwrap();
+    assert!(metadata.is_some());
+    let metadata = metadata.unwrap();
+    assert!(metadata.time_created.is_some());
+
+    let missing = session.head("nonexistent-key").send().await.unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn batch_head_operations() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    session
+        .many()
+        .push(session.put("obj-a").compression(None).key("head-a"))
+        .push(session.put("obj-b").compression(None).key("head-b"))
+        .send()
+        .await
+        .error_for_failures()
+        .await
+        .unwrap_or_else(|e| panic!("setup failures: {:?}", e.collect::<Vec<_>>()));
+
+    let results: Vec<_> = session
+        .many()
+        .push(session.head("head-a"))
+        .push(session.head("head-b"))
+        .push(session.head("head-missing"))
+        .send()
+        .await
+        .collect()
+        .await;
+
+    assert_eq!(results.len(), 3);
+
+    let mut heads = BTreeMap::new();
+    for result in results {
+        match result {
+            OperationResult::Head(key, inner) => {
+                heads.insert(key, inner);
+            }
+            other => panic!("Expected Head result, got: {other:?}"),
+        }
+    }
+
+    let head_a = heads.remove("head-a").expect("missing head-a").unwrap();
+    assert!(head_a.is_some());
+    assert!(head_a.unwrap().time_created.is_some());
+
+    let head_b = heads.remove("head-b").expect("missing head-b").unwrap();
+    assert!(head_b.is_some());
+
+    let head_missing = heads
+        .remove("head-missing")
+        .expect("missing head-missing")
+        .unwrap();
+    assert!(head_missing.is_none());
 }

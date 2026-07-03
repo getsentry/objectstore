@@ -12,8 +12,13 @@ profile.json.gz
 .claude/settings.local.json
 .claude/plans
 .claude/worktrees
+.worktrees
 
 # Build artifacts
 /**/target
 **/__pycache__
 /dist
+
+# Coverage
+.coverage
+*.lcov

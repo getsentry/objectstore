@@ -41,7 +41,7 @@ impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
-            compression: Some(self.scope.usecase().compression()),
+            compression: self.scope.usecase().compression(),
             ..Default::default()
         };
 
@@ -165,6 +165,16 @@ impl PutBuilder {
     /// ```
     pub fn origin(mut self, origin: impl Into<String>) -> Self {
         self.metadata.origin = Some(origin.into());
+        self
+    }
+
+    /// Sets the filename of the object.
+    ///
+    /// When present, the server will include a `Content-Disposition: attachment; filename="<filename>"`
+    /// header in GET responses, prompting browsers and download tools to save the file under
+    /// this name.
+    pub fn filename(mut self, filename: impl Into<String>) -> Self {
+        self.metadata.filename = Some(filename.into());
         self
     }
 

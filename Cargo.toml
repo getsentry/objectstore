@@ -28,34 +28,76 @@ objectstore-options = { path = "objectstore-options" }
 objectstore-server = { path = "objectstore-server" }
 objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
-objectstore-types = { path = "objectstore-types", version = "0.1.5" }
-percent-encoding = "2.3"
+objectstore-types = { path = "objectstore-types", version = "0.1.12" }
 stresstest = { path = "stresstest" }
 
+anyhow = "1.0.102"
 arc-swap = "1.7.1"
-anyhow = "1.0.69"
-async-trait = "0.1.88"
-bytes = "1.11.1"
-futures = "0.3.31"
-futures-util = "0.3.31"
-http = "1.3.1"
-humantime = "2.2.0"
+argh = "0.1.19"
+async-compression = "0.4.42"
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+axum = "0.8.9"
+base64 = "0.22.1"
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
+bytes = "1.12.0"
+bytesize = "2.4.0"
+chrono = "0.4.45"
+console = "0.16.3"
+elegant-departure = "0.3.2"
+figment = "0.10.19"
+futures = "0.3.32"
+futures-util = "0.3.32"
+gcp_auth = "0.12.6"
+globset = "0.4.18"
+http = "1.4.2"
+http-body = "1.0.1"
+humantime = "2.3.0"
 humantime-serde = "1.1.1"
-jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
-mimalloc = { version = "0.1.48", features = ["v3", "override"] }
-rand = "0.9.1"
-regex = "1.12.3"
-reqwest = { version = "0.12.22" }
-sentry = { version = "0.45.0" }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-tempfile = "3.20.0"
-thiserror = "2.0.17"
-tokio = "1.47.0"
-tokio-util = { version = "0.7.15", features = ["rt"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
-uuid = { version = "1.17.0", features = ["v4"] }
+indicatif = "0.18.4"
+infer = { version = "0.19.0", default-features = false }
+insta = "1.48.0"
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+lru = "0.16.3"
+mediatype = "0.21.0"
+metrics = "0.24.6"
+metrics-exporter-dogstatsd = "0.9.8"
+multer = "3.1.0"
+nix = "0.31.3"
+num_cpus = "1.17.0"
+papaya = "0.2.4"
+pin-project-lite = "0.2.17"
+percent-encoding = "2.3.2"
+quick-xml = "0.40.1"
+rand = "0.10.1"
+rand_distr = "0.6.0"
+regex = "1.12.4"
+reqwest = { version = "0.13.4", default-features = false }
+rustls = { version = "0.23.40", default-features = false }
+secrecy = "0.10.3"
+sentry = { version = "0.48.3" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml = "0.9.34-deprecated"
+sketches-ddsketch = "0.3.1"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+thread_local = "1.1.9"
+jemalloc_pprof = { version = "0.9.0" }
+tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "override_allocator_on_supported_platforms"] }
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
+tokio = "1.52.3"
+tokio-util = "0.7.18"
+tonic = { version = "0.14.6", default-features = false }
+tower = "0.5.3"
+tower-http = { version = "0.7.0", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
+uuid = { version = "1.23.3", features = ["v4"] }
+yansi = "1.0.1"
+zstd = "0.13.3"
+zstd-safe = "7.2.4"
 
 [patch.crates-io]
 sentry-options = { git = "https://github.com/getsentry/sentry-options", branch = "feat/additional-properties-map-schema" }

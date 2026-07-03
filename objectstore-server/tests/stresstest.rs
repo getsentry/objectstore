@@ -32,7 +32,8 @@ async fn test_basic() {
         .env("OS__HTTP_ADDR", &addr)
         .env("OS__STORAGE__TYPE", "filesystem")
         .env("OS__STORAGE__PATH", tempdir.path().display().to_string())
-        .env("OS__LOGGING__LEVEL", "warn");
+        .env("OS__LOGGING__LEVEL", "warn")
+        .env("OS__AUTH__ENFORCE", "false");
     if let Ok(statsd_host) = std::env::var("STATSD_HOST") {
         cmd.env("OS__METRICS__ADDR", statsd_host);
     }
@@ -43,9 +44,9 @@ async fn test_basic() {
         .expect("Failed to spawn subprocess");
 
     // Give the server time to start, or else stresstest might fail to connect.
-    std::thread::sleep(Duration::from_secs(1));
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let remote = HttpRemote::new(&format!("http://{addr}"));
+    let remote = HttpRemote::new(&format!("http://{addr}"), None);
     let workload = Workload::builder("test")
         .concurrency(10)
         .size_distribution(1000, 10_000)

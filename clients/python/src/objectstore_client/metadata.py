@@ -13,6 +13,7 @@ HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_TIME_CREATED = "x-sn-time-created"
 HEADER_TIME_EXPIRES = "x-sn-time-expires"
 HEADER_ORIGIN = "x-sn-origin"
+HEADER_FILENAME = "x-sn-filename"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -61,6 +62,14 @@ class Metadata:
     (e.g., the IP of a Sentry SDK or CLI).
     """
 
+    filename: str | None
+    """
+    An optional filename associated with this object.
+
+    When present, the server includes a Content-Disposition header in GET responses,
+    prompting browsers and download tools to save the file under this name.
+    """
+
     custom: dict[str, str]
 
     @classmethod
@@ -71,6 +80,7 @@ class Metadata:
         time_created = None
         time_expires = None
         origin = None
+        filename = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -86,6 +96,8 @@ class Metadata:
                 time_expires = datetime.fromisoformat(v)
             elif k == HEADER_ORIGIN:
                 origin = v
+            elif k == HEADER_FILENAME:
+                filename = v
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -96,6 +108,7 @@ class Metadata:
             time_created=time_created,
             time_expires=time_expires,
             origin=origin,
+            filename=filename,
             custom=custom_metadata,
         )
 

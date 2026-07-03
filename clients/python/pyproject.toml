@@ -1,6 +1,6 @@
 [project]
 name = "objectstore-client"
-version = "0.1.5"
+version = "0.1.12"
 description = "Client SDK for Objectstore, the Sentry object storage platform"
 readme = "README.md"
 authors = [{ name = "Sentry", email = "oss@sentry.io" }]
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["uv_build"]
+requires = ["uv_build==0.9.26"]
 build-backend = "uv_build"
 
 [dependency-groups]

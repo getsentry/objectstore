@@ -112,6 +112,10 @@ async fn test_killswitches() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_global_rps_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(2),
@@ -143,7 +147,7 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
 
     // Refill bucket
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // After waiting, request succeeds
     let response = client
@@ -158,6 +162,10 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_usecase_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(100),
@@ -197,7 +205,7 @@ async fn test_throughput_usecase_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     // Refill bucket
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // After waiting, request to first usecase should succeed again
     let response = client
@@ -212,6 +220,10 @@ async fn test_throughput_usecase_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_scope_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(100),
@@ -251,7 +263,7 @@ async fn test_throughput_scope_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     // Refill bucket
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // After waiting, request to first scope should succeed again
     let response = client
@@ -266,6 +278,10 @@ async fn test_throughput_scope_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_throughput_rule() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             throughput: ThroughputLimits {
                 global_rps: None,
@@ -315,7 +331,7 @@ async fn test_throughput_rule() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     // Refill bucket
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // After waiting, request matching rule should succeed again
     let response = client
@@ -330,6 +346,10 @@ async fn test_throughput_rule() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_global_bps_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(500),
@@ -355,7 +375,7 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Wait a few EWMA ticks (50ms each) so the estimator incorporates the bandwidth.
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The next request should be rejected with 429
     let response = client
@@ -368,7 +388,7 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
     // Wait long enough for the EWMA to decay below the limit.
     // With alpha=0.2, EWMA decays as 0.8^n per tick. Peak ~16384 needs ~16 ticks (800ms)
     // to drop below 500. Use 2s for CI reliability.
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // After decay, the request should succeed again
     let response = client
@@ -384,6 +404,10 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(100_000),
@@ -410,7 +434,7 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The next request to the same usecase should be rejected with 429
     let response = client
@@ -429,7 +453,7 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Wait for the EWMA to decay below the limit
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // After decay, the request to the original usecase should succeed again
     let response = client
@@ -445,6 +469,10 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_scope_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
                 global_bps: Some(100_000),
@@ -471,7 +499,7 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Wait a few EWMA ticks so the estimator incorporates the bandwidth.
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     // The next request to the same scope should be rejected with 429
     let response = client
@@ -490,7 +518,7 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Wait for the EWMA to decay below the limit
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // After decay, the request to the original scope should succeed again
     let response = client
@@ -560,7 +588,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                         manual: ManualPolicyConfig { allowed: false },
                         ttl: DurationPolicyConfig {
                             allowed: true,
-                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                            max: Some(Duration::from_hours(90 * 24)),
                         },
                         tti: DurationPolicyConfig {
                             allowed: false,
@@ -580,7 +608,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                         },
                         tti: DurationPolicyConfig {
                             allowed: true,
-                            max: Some(Duration::from_secs(90 * 24 * 3600)),
+                            max: Some(Duration::from_hours(90 * 24)),
                         },
                     },
                 },

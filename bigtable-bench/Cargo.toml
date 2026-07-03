@@ -11,17 +11,18 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-argh = "0.1.13"
+argh = { workspace = true }
 bytes = { workspace = true }
-bytesize = "2.0.1"
-futures-util = { workspace = true }
-mimalloc = { workspace = true }
+bytesize = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
-rand = { workspace = true, features = ["small_rng"] }
-rand_distr = "0.5.1"
-rustls = { version = "0.23", default-features = false }
-sketches-ddsketch = "0.3.0"
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rustls = { workspace = true }
+sketches-ddsketch = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "signal"] }
 tokio-util = { workspace = true }
-yansi = "1.0.1"
+yansi = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true }

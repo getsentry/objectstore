@@ -3,11 +3,16 @@
 use std::fmt;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::range::{ByteRange, ContentRange};
 
 use bytes::Bytes;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -18,7 +23,7 @@ pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERS
 /// Backend response for put operations.
 pub type PutResponse = ();
 /// Backend response for get operations.
-pub type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
 /// Backend response for metadata-only get operations.
 pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
@@ -38,15 +43,16 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         stream: ClientStream,
     ) -> Result<PutResponse>;
 
-    /// Retrieves an object at the given path, returning its metadata and a stream of bytes.
-    async fn get_object(&self, id: &ObjectId) -> Result<GetResponse>;
+    /// Retrieves (part of) an object at the given path, returning its metadata, a description of
+    /// the part being returned, and the payload.
+    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse>;
 
     /// Retrieves only the metadata for an object, without the payload.
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         Ok(self
-            .get_object(id)
+            .get_object(id, None)
             .await?
-            .map(|(metadata, _stream)| metadata))
+            .map(|(metadata, _range, _stream)| metadata))
     }
 
     /// Deletes the object at the given path.
@@ -58,6 +64,67 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// (such as [`TieredStorage`](super::tiered::TieredStorage)) should override this
     /// to wait for those tasks to complete.
     async fn join(&self) {}
+
+    /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
+    ///
+    /// The default returns [`Error::NotImplemented`]. Backends that implement
+    /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
+        Err(Error::NotImplemented)
+    }
+}
+
+/// Trait for backends that support our S3-style multipart upload protocol.
+#[async_trait::async_trait]
+pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
+    /// Initiates a new multipart upload at `id` with the given metadata.
+    async fn initiate_multipart(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+    ) -> Result<InitiateMultipartResponse>;
+
+    /// Uploads a single part of the upload identified by `(id, upload_id)`.
+    async fn upload_part(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<&str>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse>;
+
+    /// Lists the parts uploaded so far for `(id, upload_id)`.
+    async fn list_parts(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse>;
+
+    /// Aborts the upload identified by `(id, upload_id)`.
+    async fn abort_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+    ) -> Result<AbortMultipartResponse>;
+
+    /// Finalizes the upload identified by `(id, upload_id)` with the given
+    /// ordered list of parts.
+    ///
+    /// Note that this returns `Result<Option<CompleteMultipartError>>`.
+    /// It's therefore possible to get `Ok(Some(err))`, meaning that at the server level this will
+    /// translate to HTTP `200 OK` with an error contained in the response body.
+    /// We need to do it this way to mirror backends that also behave like this (namely S3 and
+    /// GCS).
+    async fn complete_multipart(
+        &self,
+        id: &ObjectId,
+        upload_id: &UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse>;
 }
 
 /// Trait for backends that support tombstone-conditional operations.
@@ -84,11 +151,12 @@ pub trait HighVolumeBackend: Backend {
         payload: Bytes,
     ) -> Result<Option<Tombstone>>;
 
-    /// Retrieves an object with explicit tombstone awareness.
+    /// Retrieves (part of) an object with explicit tombstone awareness.
     ///
     /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
-    async fn get_tiered_object(&self, id: &ObjectId) -> Result<TieredGet>;
+    async fn get_tiered_object(&self, id: &ObjectId, range: Option<ByteRange>)
+    -> Result<TieredGet>;
 
     /// Retrieves only metadata with explicit tombstone awareness.
     ///
@@ -108,7 +176,8 @@ pub trait HighVolumeBackend: Backend {
     /// Atomically mutates the row if the current redirect state matches.
     ///
     /// `current` determines the precondition:
-    /// - `None`: succeeds only if no tombstone exists (row absent or inline).
+    /// - `None`: succeeds only if no live tombstone exists (row absent, inline,
+    ///   or tombstone present but logically expired).
     /// - `Some(target)`: succeeds only if a tombstone exists whose redirect
     ///   resolves to `target`.
     ///
@@ -127,7 +196,7 @@ pub trait HighVolumeBackend: Backend {
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tombstone {
     /// The [`ObjectId`] of the object in the long-term backend.
     ///
@@ -142,7 +211,7 @@ pub struct Tombstone {
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
 pub enum TieredGet {
     /// A real object was found.
-    Object(Metadata, PayloadStream),
+    Object(Metadata, Option<ContentRange>, PayloadStream),
     /// A redirect tombstone was found; the real object lives in the long-term backend.
     Tombstone(Tombstone),
     /// No entry exists at this key.
@@ -152,9 +221,10 @@ pub enum TieredGet {
 impl fmt::Debug for TieredGet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TieredGet::Object(metadata, _stream) => f
+            TieredGet::Object(metadata, content_range, _stream) => f
                 .debug_tuple("Object")
                 .field(metadata)
+                .field(content_range)
                 .finish_non_exhaustive(),
             TieredGet::Tombstone(info) => f.debug_tuple("Tombstone").field(info).finish(),
             TieredGet::NotFound => write!(f, "NotFound"),

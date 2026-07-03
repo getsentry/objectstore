@@ -24,12 +24,12 @@ impl IntoResponse for ObjectRejection {
         match self {
             ObjectRejection::Path(rejection) => rejection.into_response(),
             ObjectRejection::Killswitched => (
-                axum::http::StatusCode::FORBIDDEN,
+                http::StatusCode::FORBIDDEN,
                 "Object access is disabled for this scope through killswitches",
             )
                 .into_response(),
             ObjectRejection::RateLimited => (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                http::StatusCode::TOO_MANY_REQUESTS,
                 "Object access is rate limited",
             )
                 .into_response(),
@@ -68,7 +68,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(id.context()) {
+        if !state.rate_limiter.check(id.context(), Some(id.key())) {
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -104,7 +104,7 @@ where
         .split(';')
         .map(|s| {
             let (key, value) = s
-                .split_once("=")
+                .split_once('=')
                 .ok_or_else(|| de::Error::custom("scope must be 'key=value'"))?;
 
             Scope::create(key, value).map_err(de::Error::custom)
@@ -141,7 +141,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(&context) {
+        if !state.rate_limiter.check(&context, None) {
             return Err(ObjectRejection::RateLimited);
         }
 
@@ -240,7 +240,7 @@ mod tests {
 
     async fn test_state(config: Config) -> ServiceState {
         let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")));
-        let key_directory = PublicKeyDirectory::try_from(&config.auth).unwrap();
+        let key_directory = PublicKeyDirectory::from_config(&config.auth).await.unwrap();
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
         Arc::new(Services {
@@ -276,7 +276,7 @@ mod tests {
             .with_state(state)
     }
 
-    async fn response_body(response: axum::http::Response<Body>) -> String {
+    async fn response_body(response: http::Response<Body>) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

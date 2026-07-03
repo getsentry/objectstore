@@ -94,7 +94,10 @@ pub struct Killswitch {
     /// Optional service glob pattern to match.
     ///
     /// If `None`, matches any service (or absence of service header).
-    /// If specified, the request must have a matching `x-downstream-service` header.
+    /// If specified, the request must have a matching `x-downstream-service` header. The header
+    /// value is normalized before matching: any trailing Kubernetes ReplicaSet hash and pod
+    /// suffix are stripped, so patterns should match the base service name (e.g. `relay*`, not
+    /// `relay-7d8f9c5b6d-*`).
     #[serde(default)]
     pub service: Option<String>,
 }

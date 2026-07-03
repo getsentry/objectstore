@@ -217,7 +217,7 @@ impl RateLimiter {
     /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection, emits a
     /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked before
     /// throughput so that rejected requests are never counted toward admitted traffic.
-    pub fn check(&self, context: &ObjectContext) -> bool {
+    pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> bool {
         // Bandwidth is checked first because it is a pure read (no token consumption).
         // Throughput increments the EWMA accumulator only on success, so checking it
         // second ensures rejected requests are never counted toward admitted traffic.
@@ -230,9 +230,16 @@ impl RateLimiter {
             return true;
         };
 
-        objectstore_metrics::count!("server.request.rate_limited", reason = rejection.as_str());
+        objectstore_metrics::count!(
+            "server.request.rate_limited",
+            reason = rejection.as_str(),
+            usecase = context.usecase.clone()
+        );
         objectstore_log::warn!(
             reason = rejection.as_str(),
+            usecase = &context.usecase,
+            scopes = %context.scopes.as_api_path(),
+            key,
             "Request rejected: rate limit exceeded"
         );
         false
@@ -331,6 +338,18 @@ impl EwmaEstimator {
     }
 }
 
+/// Returns `value * pct / 100`, saturating at `u32::MAX`.
+fn pct_of_u32(value: u32, pct: u8) -> u32 {
+    let scaled = u64::from(value) * u64::from(pct) / 100;
+    u32::try_from(scaled).unwrap_or(u32::MAX)
+}
+
+/// Returns `value * pct / 100`, saturating at `u64::MAX`.
+fn pct_of_u64(value: u64, pct: u8) -> u64 {
+    let scaled = u128::from(value) * u128::from(pct) / 100;
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
@@ -380,7 +399,11 @@ impl BandwidthRateLimiter {
         const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
 
         let mut interval = tokio::time::interval(TICK);
-        let to_bps = 1.0 / TICK.as_secs_f64(); // Conversion factor from bytes to bps
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick of a tokio interval fires immediately. Consume it so the
+        // first real iteration has a full ~50ms of elapsed time.
+        interval.tick().await;
+        let mut last = Instant::now();
         let mut global_ewma: f64 = 0.0;
         // Shadow EWMAs for per-usecase/per-scope entries, keyed the same way as the maps.
         let mut usecase_ewmas: std::collections::HashMap<String, f64> =
@@ -390,6 +413,10 @@ impl BandwidthRateLimiter {
 
         loop {
             interval.tick().await;
+
+            let now = Instant::now();
+            let to_bps = 1.0 / now.duration_since(last).as_secs_f64();
+            last = now;
 
             // Global
             global.update_ewma(&mut global_ewma, to_bps);
@@ -498,14 +525,14 @@ impl BandwidthRateLimiter {
     fn usecase_bps(&self) -> Option<u64> {
         let global_bps = self.config.global_bps?;
         let pct = self.config.usecase_pct?;
-        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+        Some(pct_of_u64(global_bps, pct))
     }
 
     /// Returns the effective BPS for per-scope limiting, if configured.
     fn scope_bps(&self) -> Option<u64> {
         let global_bps = self.config.global_bps?;
         let pct = self.config.scope_pct?;
-        Some(((global_bps as f64) * (pct as f64 / 100.0)) as u64)
+        Some(pct_of_u64(global_bps, pct))
     }
 }
 
@@ -551,10 +578,15 @@ impl ThroughputRateLimiter {
         tokio::task::spawn(async move {
             const TICK: Duration = Duration::from_millis(50);
             let mut interval = tokio::time::interval(TICK);
-            let to_rps = 1.0 / TICK.as_secs_f64();
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            let mut last = Instant::now();
             let mut global_ewma: f64 = 0.0;
             loop {
                 interval.tick().await;
+                let now = Instant::now();
+                let to_rps = 1.0 / now.duration_since(last).as_secs_f64();
+                last = now;
                 global_estimator.update_ewma(&mut global_ewma, to_rps);
                 objectstore_metrics::gauge!("server.throughput.ewma" = global_ewma.floor() as u64);
                 if let Some(limit) = global_limit {
@@ -638,23 +670,21 @@ impl ThroughputRateLimiter {
     fn usecase_rps(&self) -> Option<u32> {
         let global_rps = self.config.global_rps?;
         let pct = self.config.usecase_pct?;
-        Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
+        Some(pct_of_u32(global_rps, pct))
     }
 
     /// Returns the effective RPS for per-scope limiting, if configured.
     fn scope_rps(&self) -> Option<u32> {
         let global_rps = self.config.global_rps?;
         let pct = self.config.scope_pct?;
-        Some(((global_rps as f64) * (pct as f64 / 100.0)) as u32)
+        Some(pct_of_u32(global_rps, pct))
     }
 
     /// Returns the effective RPS for a rule, if it has a valid limit.
     fn rule_rps(&self, rule: &ThroughputRule) -> Option<u32> {
-        let pct_limit = rule.pct.and_then(|p| {
-            self.config
-                .global_rps
-                .map(|g| ((g as f64) * (p as f64 / 100.0)) as u32)
-        });
+        let pct_limit = rule
+            .pct
+            .and_then(|p| self.config.global_rps.map(|g| pct_of_u32(g, p)));
 
         match (rule.rps, pct_limit) {
             (Some(r), Some(p)) => Some(r.min(p)),
@@ -880,7 +910,7 @@ mod tests {
             .store(1, std::sync::atomic::Ordering::Relaxed);
 
         let context = make_context();
-        assert!(!limiter.check(&context));
+        assert!(!limiter.check(&context, None));
 
         // The throughput accumulator must still be 0.
         assert_eq!(

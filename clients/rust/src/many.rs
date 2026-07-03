@@ -15,8 +15,8 @@ use reqwest::multipart::Part;
 use crate::error::Error;
 use crate::put::PutBody;
 use crate::{
-    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, ObjectKey, PutBuilder, PutResponse,
-    Session, get, put,
+    DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, HeadResponse, ObjectKey,
+    PutBuilder, PutResponse, Session, get, put,
 };
 
 const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
@@ -30,15 +30,17 @@ const MAX_BATCH_OPS: usize = 1000;
 /// Maximum amount of bytes to send as a part's body in a batch request.
 const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 
-/// Operations that are guaranteed to exceed `MAX_BATCH_PART_SIZE` are executed using requests to
-/// the individual object endpoint, rather than the batch endpoint.
-/// This determines the maximum number of such requests that can be executed concurrently.
-const MAX_INDIVIDUAL_CONCURRENCY: usize = 5;
+/// Default maximum number of concurrent individual (non-batch) requests.
+///
+/// Can be overridden via [`ManyBuilder::max_individual_concurrency`].
+const DEFAULT_INDIVIDUAL_CONCURRENCY: usize = 5;
 
-/// Maximum number of requests to the batch endpoint that can be executed concurrently.
-const MAX_BATCH_CONCURRENCY: usize = 3;
+/// Default maximum number of concurrent batch requests.
+///
+/// Can be overridden via [`ManyBuilder::max_batch_concurrency`].
+const DEFAULT_BATCH_CONCURRENCY: usize = 3;
 
-/// Maximum total body size (pre-compression) to include in a single batch request.
+/// Maximum total body (post-compression, estimated) size to include in a single batch request.
 const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// A builder that can be used to enqueue multiple operations.
@@ -49,6 +51,8 @@ const MAX_BATCH_BODY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 pub struct ManyBuilder {
     session: Session,
     operations: Vec<BatchOperation>,
+    max_individual_concurrency: Option<usize>,
+    max_batch_concurrency: Option<usize>,
 }
 
 impl Session {
@@ -60,6 +64,8 @@ impl Session {
         ManyBuilder {
             session: self.clone(),
             operations: vec![],
+            max_individual_concurrency: None,
+            max_batch_concurrency: None,
         }
     }
 }
@@ -78,6 +84,9 @@ enum BatchOperation {
         body: PutBody,
     },
     Delete {
+        key: ObjectKey,
+    },
+    Head {
         key: ObjectKey,
     },
 }
@@ -124,6 +133,16 @@ impl From<DeleteBuilder> for BatchOperation {
     }
 }
 
+impl From<HeadBuilder> for BatchOperation {
+    fn from(value: HeadBuilder) -> Self {
+        let HeadBuilder {
+            key,
+            session: _session,
+        } = value;
+        BatchOperation::Head { key }
+    }
+}
+
 impl BatchOperation {
     async fn into_part(self) -> crate::Result<Part> {
         match self {
@@ -144,6 +163,10 @@ impl BatchOperation {
             }
             BatchOperation::Delete { key } => {
                 let headers = operation_headers("delete", Some(&key));
+                Ok(Part::text("").headers(headers))
+            }
+            BatchOperation::Head { key } => {
+                let headers = operation_headers("head", Some(&key));
                 Ok(Part::text("").headers(headers))
             }
         }
@@ -179,6 +202,10 @@ pub enum OperationResult {
     Put(ObjectKey, Result<PutResponse, Error>),
     /// The result of a delete operation.
     Delete(ObjectKey, Result<DeleteResponse, Error>),
+    /// The result of a head (metadata-only) operation.
+    ///
+    /// Returns `Ok(None)` if the object was not found.
+    Head(ObjectKey, Result<HeadResponse, Error>),
     /// An error occurred while parsing or correlating a response part.
     ///
     /// This makes it impossible to attribute the error to a specific operation.
@@ -200,6 +227,9 @@ enum OperationContext {
     Delete {
         key: ObjectKey,
     },
+    Head {
+        key: ObjectKey,
+    },
 }
 
 impl From<&BatchOperation> for OperationContext {
@@ -216,6 +246,7 @@ impl From<&BatchOperation> for OperationContext {
             },
             BatchOperation::Insert { key, .. } => OperationContext::Insert { key: key.clone() },
             BatchOperation::Delete { key } => OperationContext::Delete { key: key.clone() },
+            BatchOperation::Head { key } => OperationContext::Head { key: key.clone() },
         }
     }
 }
@@ -223,13 +254,16 @@ impl From<&BatchOperation> for OperationContext {
 impl OperationContext {
     fn key(&self) -> Option<&str> {
         match self {
-            OperationContext::Get { key, .. } | OperationContext::Delete { key } => Some(key),
+            OperationContext::Get { key, .. }
+            | OperationContext::Delete { key }
+            | OperationContext::Head { key } => Some(key),
             OperationContext::Insert { key } => key.as_deref(),
         }
     }
 }
 
 /// The result of classifying a single operation for batch processing.
+#[derive(Debug)]
 enum Classified {
     /// The operation can be included in a batch request, with its estimated body size in bytes.
     Batchable(BatchOperation, u64),
@@ -246,6 +280,7 @@ fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
         OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
         OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+        OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
     }
 }
 
@@ -317,8 +352,11 @@ impl OperationResult {
 
         let body = field.bytes().await?;
 
-        let is_error =
-            status >= 400 && !(matches!(ctx, OperationContext::Get { .. }) && status == 404);
+        let is_error = status >= 400
+            && !(matches!(
+                ctx,
+                OperationContext::Get { .. } | OperationContext::Head { .. }
+            ) && status == 404);
 
         // For error responses, the key may be absent (e.g., server-generated key inserts
         // that fail before execution — the server never generated a key and the client
@@ -343,6 +381,7 @@ impl OperationResult {
                     OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
                     OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
                     OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
+                    OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
                 },
             ));
         }
@@ -370,6 +409,14 @@ impl OperationResult {
                 OperationResult::Put(key.clone(), Ok(PutResponse { key }))
             }
             OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
+            OperationContext::Head { .. } => {
+                if status == 404 {
+                    OperationResult::Head(key, Ok(None))
+                } else {
+                    let metadata = Metadata::from_headers(&headers, "")?;
+                    OperationResult::Head(key, Ok(Some(metadata)))
+                }
+            }
         };
         Ok((index, result))
     }
@@ -397,9 +444,7 @@ impl OperationResults {
     ///
     /// Returns an error containing an iterator of all individual errors for the operations
     /// that failed, if any.
-    pub async fn error_for_failures(
-        mut self,
-    ) -> crate::Result<(), impl Iterator<Item = crate::Error>> {
+    pub async fn error_for_failures(mut self) -> crate::Result<(), impl Iterator<Item = Error>> {
         let mut errs = Vec::new();
         while let Some(res) = self.next().await {
             match res {
@@ -415,6 +460,11 @@ impl OperationResults {
                 }
                 OperationResult::Delete(_, delete) => {
                     if let Err(e) = delete {
+                        errs.push(e);
+                    }
+                }
+                OperationResult::Head(_, head) => {
+                    if let Err(e) = head {
                         errs.push(e);
                     }
                 }
@@ -440,7 +490,7 @@ async fn send_batch(
     let num_operations = operations.len();
 
     let mut form = reqwest::multipart::Form::new();
-    for op in operations.into_iter() {
+    for op in operations {
         let part = op.into_part().await?;
         form = form.part("part", part);
     }
@@ -516,6 +566,14 @@ async fn classify(op: BatchOperation) -> Classified {
                 PutBody::Stream(_) => None,
             };
 
+            let size = match (metadata.compression, size) {
+                (Some(Compression::Zstd), Some(size)) => {
+                    usize::try_from(size).ok().map(zstd_safe::compress_bound)
+                }
+                (None, Some(size)) => usize::try_from(size).ok(),
+                (_, None) => None,
+            };
+
             let op = BatchOperation::Insert {
                 key,
                 metadata,
@@ -523,7 +581,7 @@ async fn classify(op: BatchOperation) -> Classified {
             };
 
             match size {
-                Some(s) if s <= MAX_BATCH_PART_SIZE as u64 => Classified::Batchable(op, s),
+                Some(s) if s <= MAX_BATCH_PART_SIZE as usize => Classified::Batchable(op, s as u64),
                 _ => Classified::Individual(op),
             }
         }
@@ -595,6 +653,13 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
             };
             OperationResult::Delete(key, delete.send().await)
         }
+        BatchOperation::Head { key } => {
+            let head = HeadBuilder {
+                session: session.clone(),
+                key: key.clone(),
+            };
+            OperationResult::Head(key, head.send().await)
+        }
     }
 }
 
@@ -649,6 +714,14 @@ impl ManyBuilder {
     /// The results are not guaranteed to be in the order they were originally enqueued in.
     pub async fn send(self) -> OperationResults {
         let session = self.session;
+        let individual_concurrency = self
+            .max_individual_concurrency
+            .unwrap_or(DEFAULT_INDIVIDUAL_CONCURRENCY)
+            .max(1);
+        let batch_concurrency = self
+            .max_batch_concurrency
+            .unwrap_or(DEFAULT_BATCH_CONCURRENCY)
+            .max(1);
 
         // Classify all operations
         let (batchable, individual, failed) = partition(self.operations).await;
@@ -662,7 +735,7 @@ impl ManyBuilder {
                     async move { execute_individual(op, &session).await }
                 }
             })
-            .buffer_unordered(MAX_INDIVIDUAL_CONCURRENCY);
+            .buffer_unordered(individual_concurrency);
 
         // Chunk batchable operations and execute as batch requests, concurrently
         let batch_results = futures_util::stream::iter(iter_batches(batchable))
@@ -670,7 +743,7 @@ impl ManyBuilder {
                 let session = session.clone();
                 async move { execute_batch(chunk, &session).await }
             })
-            .buffer_unordered(MAX_BATCH_CONCURRENCY)
+            .buffer_unordered(batch_concurrency)
             .flat_map(futures_util::stream::iter);
 
         let results = futures_util::stream::iter(failed)
@@ -678,6 +751,26 @@ impl ManyBuilder {
             .chain(batch_results);
 
         OperationResults(results.boxed())
+    }
+
+    /// Sets the maximum number of concurrent individual (non-batch) requests.
+    ///
+    /// Operations that exceed the per-part size limit are sent as individual requests.
+    /// This controls how many such requests can be in-flight simultaneously.
+    /// Defaults to 5 if not set.
+    pub fn max_individual_concurrency(mut self, concurrency: usize) -> Self {
+        self.max_individual_concurrency = Some(concurrency);
+        self
+    }
+
+    /// Sets the maximum number of concurrent batch requests.
+    ///
+    /// Batchable operations are grouped into chunks and sent as multipart batch requests.
+    /// This controls how many such batch requests can be in-flight simultaneously.
+    /// Defaults to 3 if not set.
+    pub fn max_batch_concurrency(mut self, concurrency: usize) -> Self {
+        self.max_batch_concurrency = Some(concurrency);
+        self
     }
 
     /// Enqueues an operation.
@@ -716,6 +809,41 @@ mod tests {
 
     fn batches(ops: Vec<(BatchOperation, u64)>) -> Vec<Vec<BatchOperation>> {
         iter_batches(ops).collect()
+    }
+
+    fn put_with_zstd(size: usize) -> BatchOperation {
+        BatchOperation::Insert {
+            key: Some("k".to_owned()),
+            metadata: Metadata {
+                compression: Some(Compression::Zstd),
+                ..Default::default()
+            },
+            body: PutBody::Buffer(vec![0; size].into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn zstd_put_at_limit_is_batchable() {
+        let size = 1_044_496;
+        let post_compression = zstd_safe::compress_bound(size);
+        assert!(post_compression == MAX_BATCH_PART_SIZE as usize);
+
+        core::assert_matches!(
+            classify(put_with_zstd(size)).await,
+            Classified::Batchable(_, s) if s == post_compression as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn zstd_put_above_limit_is_individual() {
+        let size = 1_044_497;
+        let post_compression = zstd_safe::compress_bound(size);
+        assert!(post_compression > MAX_BATCH_PART_SIZE as usize);
+
+        core::assert_matches!(
+            classify(put_with_zstd(size)).await,
+            Classified::Individual(_)
+        );
     }
 
     #[test]

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use argh::FromArgs;
 use bytesize::ByteSize;
+use rand::RngExt;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, LogNormal};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
@@ -62,8 +62,9 @@ struct Args {
     table: String,
 }
 
+#[cfg(target_os = "linux")]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -188,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
             ]),
         };
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ..Metadata::default()
         };
 
@@ -212,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move {
                 let _permit = permit;
 
-                let mut rng = SmallRng::from_os_rng();
+                let mut rng: SmallRng = rand::make_rng();
                 let object_size = (size_dist.sample(&mut rng) as u64).min(MAX_OBJECT_SIZE) as usize;
                 let mut buf = vec![0u8; object_size];
                 rng.fill(&mut buf[..]);
@@ -305,6 +306,6 @@ fn format_throughput(bytes_per_sec: f64) -> String {
     } else if bytes_per_sec >= 1e3 {
         format!("{:.2} kB/s", bytes_per_sec / 1e3)
     } else {
-        format!("{:.0} B/s", bytes_per_sec)
+        format!("{bytes_per_sec:.0} B/s")
     }
 }

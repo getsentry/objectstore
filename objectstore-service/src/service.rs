@@ -9,16 +9,22 @@ use std::future::Future;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::{ByteRange, ContentRange};
 
 use crate::backend::common::Backend;
+use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId};
+use crate::multipart::{
+    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
+    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
+};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
 /// Service response for [`StorageService::get_object`].
-pub type GetResponse = Option<(Metadata, PayloadStream)>;
+pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
 /// Service response for [`StorageService::get_metadata`].
 pub type MetadataResponse = Option<Metadata>;
 /// Service response for [`StorageService::insert_object`].
@@ -30,7 +36,7 @@ pub type DeleteResponse = ();
 ///
 /// This value is used when no explicit limit is set via
 /// [`StorageService::with_concurrency_limit`].
-pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
+pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -73,9 +79,14 @@ pub struct StorageService {
 
 impl StorageService {
     /// Creates a new `StorageService` wrapping the given backend.
+    ///
+    /// The backend is wrapped in a [`CountingBackend`] which increments a COGS usage counter for
+    /// each operation run. Single-object operations served directly by `StorageService` are covered
+    /// as we batched operations served by [`StreamExecutor`]. See
+    /// [`backend::counting`](crate::backend::counting) for details.
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
-            inner: Arc::from(backend),
+            inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
@@ -84,23 +95,23 @@ impl StorageService {
     ///
     /// Must be called before [`start`](Self::start). Operations beyond this
     /// limit are rejected with [`Error::AtCapacity`].
-    pub fn with_concurrency_limit(mut self, max: usize) -> Self {
+    pub fn with_concurrency_limit(mut self, max: u32) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
         self
     }
 
     /// Returns the number of backend task slots currently available.
-    pub fn tasks_available(&self) -> usize {
+    pub fn tasks_available(&self) -> u32 {
         self.concurrency.available_permits()
     }
 
     /// Returns the number of backend tasks currently running.
-    pub fn tasks_running(&self) -> usize {
+    pub fn tasks_running(&self) -> u32 {
         self.concurrency.used_permits()
     }
 
     /// Returns the configured limit for concurrent backend tasks.
-    pub fn tasks_limit(&self) -> usize {
+    pub fn tasks_limit(&self) -> u32 {
         self.concurrency.total_permits()
     }
 
@@ -112,7 +123,7 @@ impl StorageService {
     /// [`Error::AtCapacity`] immediately before any operations are read.
     pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
-        let window = (available as f64 * 0.10).ceil() as usize;
+        let window = available.div_ceil(10);
 
         let acquire_result = match window {
             0 => Err(Error::AtCapacity),
@@ -205,10 +216,10 @@ impl StorageService {
             .await
     }
 
-    /// Streams the contents of an object.
-    pub async fn get_object(&self, id: ObjectId) -> Result<GetResponse> {
+    /// Streams (part of) the contents of an object.
+    pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn("get", async move { inner.get_object(&id).await })
+        self.spawn("get", async move { inner.get_object(&id, range).await })
             .await
     }
 
@@ -233,6 +244,114 @@ impl StorageService {
     pub async fn join(&self) {
         self.inner.join().await;
     }
+
+    // --- Multipart upload operations ---
+
+    /// Initiates a new multipart upload.
+    pub async fn initiate_multipart(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+    ) -> Result<InitiateMultipartResponse> {
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
+        self.spawn("initiate_multipart", async move {
+            inner
+                .as_multipart_upload_backend()?
+                .initiate_multipart(&id, &metadata)
+                .await
+        })
+        .await
+    }
+
+    /// Uploads a single part.
+    ///
+    /// Note that this requires a `content_length`.
+    /// This grants us the broadest and most seamless compatibility when it comes to backends.
+    /// For example, MinIO rejects `UploadPart` requests without a `Content-Length` on plain PUT
+    /// requests.
+    /// This can be worked around by using AWS SigV4 chunked streaming requests, which we could use
+    /// if one day we'll have a usecase where the client doesn't know the part length upfront.
+    pub async fn upload_part(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        part_number: PartNumber,
+        content_length: u64,
+        content_md5: Option<String>,
+        body: ClientStream,
+    ) -> Result<UploadPartResponse> {
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
+        self.spawn("upload_part", async move {
+            inner
+                .as_multipart_upload_backend()?
+                .upload_part(
+                    &id,
+                    &upload_id,
+                    part_number,
+                    content_length,
+                    content_md5.as_deref(),
+                    body,
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Lists the parts uploaded so far.
+    pub async fn list_parts(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        max_parts: Option<u32>,
+        part_number_marker: Option<PartNumber>,
+    ) -> Result<ListPartsResponse> {
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
+        self.spawn("list_parts", async move {
+            inner
+                .as_multipart_upload_backend()?
+                .list_parts(&id, &upload_id, max_parts, part_number_marker)
+                .await
+        })
+        .await
+    }
+
+    /// Aborts a multipart upload.
+    pub async fn abort_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+    ) -> Result<AbortMultipartResponse> {
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
+        self.spawn("abort_multipart", async move {
+            inner
+                .as_multipart_upload_backend()?
+                .abort_multipart(&id, &upload_id)
+                .await
+        })
+        .await
+    }
+
+    /// Finalizes a multipart upload.
+    pub async fn complete_multipart(
+        &self,
+        id: ObjectId,
+        upload_id: UploadId,
+        parts: Vec<CompletedPart>,
+    ) -> Result<CompleteMultipartResponse> {
+        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
+        let inner = self.inner.clone();
+        self.spawn("complete_multipart", async move {
+            inner
+                .as_multipart_upload_backend()?
+                .complete_multipart(&id, &upload_id, parts)
+                .await
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +362,7 @@ mod tests {
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
     use objectstore_types::metadata::Metadata;
+    use objectstore_types::range::ByteRange;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -275,7 +395,7 @@ mod tests {
             .insert_object(
                 make_context(),
                 None,
-                Default::default(),
+                Metadata::default(),
                 stream::single("auto-keyed"),
             )
             .await
@@ -292,13 +412,13 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("testing".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single("oh hai!"),
             )
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(key).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -318,13 +438,13 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("testing".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single("oh hai!"),
             )
             .await
             .unwrap();
 
-        let (_metadata, stream) = service.get_object(key).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -360,14 +480,14 @@ mod tests {
             .insert_object(
                 make_context(),
                 Some("delete-cleanup-test".into()),
-                Default::default(),
+                Metadata::default(),
                 stream::single(payload),
             )
             .await
             .unwrap();
 
         // Sanity: the object is readable through the service (follows the tombstone).
-        let (_, stream) = service.get_object(id.clone()).await.unwrap().unwrap();
+        let (_, _, stream) = service.get_object(id.clone(), None).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload_len);
 
@@ -375,11 +495,11 @@ mod tests {
         service.delete_object(id.clone()).await.unwrap();
 
         // The tombstone in BigTable should be gone, so the service returns None.
-        let after_delete = service.get_object(id.clone()).await.unwrap();
+        let after_delete = service.get_object(id.clone(), None).await.unwrap();
         assert!(after_delete.is_none(), "tombstone not deleted");
 
         // The real object in GCS must also be gone — no orphan.
-        let orphan = gcs_backend.get_object(&id).await.unwrap();
+        let orphan = gcs_backend.get_object(&id, None).await.unwrap();
         assert!(orphan.is_none(), "object leaked");
     }
 
@@ -399,7 +519,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, stream) = service.get_object(id).await.unwrap().unwrap();
+        let (_, _, stream) = service.get_object(id, None).await.unwrap().unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.as_ref(), b"hello world");
     }
@@ -423,7 +543,7 @@ mod tests {
 
         service.delete_object(id.clone()).await.unwrap();
 
-        let after = service.get_object(id).await.unwrap();
+        let after = service.get_object(id, None).await.unwrap();
         assert!(after.is_none());
     }
 
@@ -436,6 +556,7 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
+            _range: Option<ByteRange>,
         ) -> Result<GetResponse> {
             panic!("intentional panic in get_object");
         }
@@ -446,7 +567,7 @@ mod tests {
         let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)));
 
         let id = ObjectId::new(make_context(), "panic-test".into());
-        let result = service.get_object(id).await;
+        let result = service.get_object(id, None).await;
 
         let Err(Error::Panic(msg)) = result else {
             panic!("expected Panic error");
@@ -553,7 +674,7 @@ mod tests {
 
     // --- Concurrency limit tests ---
 
-    fn make_limited_service(limit: usize) -> (StorageService, TestBackend<GateOnPut>) {
+    fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
         let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
         (service, backend)
@@ -642,11 +763,11 @@ mod tests {
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
-        let result = service.get_object(id.clone()).await;
+        let result = service.get_object(id.clone(), None).await;
         assert!(matches!(result, Err(Error::Panic(_))));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
-        let result = service.get_object(id).await;
+        let result = service.get_object(id, None).await;
         assert!(
             !matches!(result, Err(Error::AtCapacity)),
             "permit was not released after panic"

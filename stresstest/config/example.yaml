@@ -40,3 +40,16 @@ workloads:
       writes: 20000
       reads: 0
       deletes: 0
+  - name: large-uploads
+    concurrency: 4
+    organizations: 100
+    file_sizes:
+      p50: 20 MiB
+      p99: 100 MiB
+    multipart:
+      concurrency: 4
+      part_size: 10 MiB
+    actions:
+      writes: 100
+      reads: 0
+      deletes: 0

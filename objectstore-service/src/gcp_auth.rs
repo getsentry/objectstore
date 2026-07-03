@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl gcp_auth::TokenProvider for MockTokenProvider {
+    impl TokenProvider for MockTokenProvider {
         async fn token(&self, _scopes: &[&str]) -> Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
             let mut responses = self.responses.lock().expect("lock poisoned");
             responses
@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn constructor_fetches_initial_token() {
-        let token = make_token(Duration::from_secs(3600));
+        let token = make_token(Duration::from_hours(1));
         let mock = MockTokenProvider::new(vec![Ok(token)]);
 
         let provider = PrefetchingTokenProvider::new(
@@ -295,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_cached_token() {
-        let token = make_token(Duration::from_secs(3600));
+        let token = make_token(Duration::from_hours(1));
         let mock = MockTokenProvider::new(vec![Ok(token.clone())]);
 
         let provider = PrefetchingTokenProvider::new(mock, &["scope-a"])
@@ -317,7 +317,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn background_refresh_before_expiry() {
         let initial = make_token(Duration::from_secs(25));
-        let refreshed = make_token(Duration::from_secs(3600));
+        let refreshed = make_token(Duration::from_hours(1));
 
         let mock = MockTokenProvider::new(vec![Ok(initial), Ok(refreshed)]);
 
@@ -340,7 +340,7 @@ mod tests {
     async fn waits_when_near_expiry() {
         // Token that expires in 8 seconds (below WAIT_THRESHOLD of 10s).
         let initial = make_token(Duration::from_secs(8));
-        let refreshed = make_token(Duration::from_secs(3600));
+        let refreshed = make_token(Duration::from_hours(1));
 
         let mock = MockTokenProvider::new(vec![Ok(initial), Ok(refreshed)]);
 
@@ -362,8 +362,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retries_silently_while_token_valid() {
         // Token with 60s expiry: after 40s (sleep = 60 - 20 = 40), refresh is attempted.
-        let initial = make_token(Duration::from_secs(60));
-        let after_retry = make_token(Duration::from_secs(3600));
+        let initial = make_token(Duration::from_mins(1));
+        let after_retry = make_token(Duration::from_hours(1));
 
         let mock = MockTokenProvider::new(vec![
             Ok(initial),
@@ -430,8 +430,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn recovers_after_error() {
-        let initial = make_token(Duration::from_secs(60));
-        let recovered = make_token(Duration::from_secs(3600));
+        let initial = make_token(Duration::from_mins(1));
+        let recovered = make_token(Duration::from_hours(1));
 
         let mock = MockTokenProvider::new(vec![
             Ok(initial),
@@ -459,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_cancels_task() {
-        let token = make_token(Duration::from_secs(3600));
+        let token = make_token(Duration::from_hours(1));
         let mock = MockTokenProvider::new(vec![Ok(token)]);
 
         let provider = PrefetchingTokenProvider::new(mock, &["scope"])
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_id_delegates() {
-        let token = make_token(Duration::from_secs(3600));
+        let token = make_token(Duration::from_hours(1));
         let mock = MockTokenProvider::new(vec![Ok(token)]);
 
         let provider = PrefetchingTokenProvider::new(mock, &["scope"])
@@ -492,8 +492,8 @@ mod tests {
 
     #[tokio::test]
     async fn mismatched_scopes_fall_through() {
-        let cached_token = make_token(Duration::from_secs(3600));
-        let fallthrough_token = make_token(Duration::from_secs(60));
+        let cached_token = make_token(Duration::from_hours(1));
+        let fallthrough_token = make_token(Duration::from_mins(1));
 
         let mock = MockTokenProvider::new(vec![Ok(cached_token), Ok(fallthrough_token)]);
 

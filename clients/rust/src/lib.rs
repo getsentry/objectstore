@@ -7,8 +7,11 @@ mod client;
 mod delete;
 mod error;
 mod get;
+mod head;
 mod key;
 mod many;
+#[cfg(feature = "multipart")]
+mod multipart;
 mod put;
 pub mod utils;
 
@@ -19,6 +22,9 @@ pub use client::*;
 pub use delete::*;
 pub use error::*;
 pub use get::*;
+pub use head::*;
 pub use key::*;
 pub use many::*;
+#[cfg(feature = "multipart")]
+pub use multipart::*;
 pub use put::*;

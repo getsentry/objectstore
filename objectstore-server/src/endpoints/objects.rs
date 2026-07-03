@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -9,10 +7,12 @@ use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult};
+use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
+use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -43,8 +43,7 @@ async fn objects_post(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    metadata.time_created = Some(SystemTime::now());
+    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
         .config
@@ -64,15 +63,56 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    OptionalByteRange(byte_range): OptionalByteRange,
+    _headers: HeaderMap,
 ) -> ApiResult<Response> {
     let context = id.context().clone();
-    let Some((metadata, stream)) = service.get_object(id).await? else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
-    };
-    let stream = state.meter_stream(stream, &context);
+    let result = service.get_object(id, byte_range).await;
 
-    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
-    Ok((headers, Body::from_stream(stream)).into_response())
+    let (metadata, content_range, stream) = match result {
+        Ok(Some(result)) => result,
+        Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
+            let mut response = (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(
+                    http::header::CONTENT_RANGE,
+                    ContentRange::unsatisfiable_total_to_header_value(total),
+                )],
+            )
+                .into_response();
+            insert_accept_ranges(&mut response);
+            return Ok(response);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let stream = state.meter_stream(stream, &context);
+    let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+
+    let mut response = match content_range {
+        Some(ref content_range) => {
+            let mut resp = (
+                StatusCode::PARTIAL_CONTENT,
+                metadata_headers,
+                Body::from_stream(stream),
+            )
+                .into_response();
+            let headers = resp.headers_mut();
+            headers.insert(
+                http::header::CONTENT_LENGTH,
+                content_range.len_to_header_value(),
+            );
+            headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
+            resp
+        }
+        None => (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response(),
+    };
+
+    insert_content_disposition(&mut response, &metadata);
+    insert_accept_ranges(&mut response);
+
+    Ok(response)
 }
 
 async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
@@ -82,7 +122,50 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
     let headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
-    Ok((StatusCode::NO_CONTENT, headers).into_response())
+    let mut response = (StatusCode::NO_CONTENT, headers).into_response();
+    insert_content_disposition(&mut response, &metadata);
+    insert_accept_ranges(&mut response);
+    Ok(response)
+}
+
+fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
+    if let Some(val) = metadata
+        .filename
+        .as_deref()
+        .and_then(format_content_disposition)
+    {
+        response
+            .headers_mut()
+            .insert(http::header::CONTENT_DISPOSITION, val);
+    }
+}
+
+/// Formats a `Content-Disposition: attachment; filename="..."` header value.
+///
+/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all
+/// dashes) and then escaped for RFC 6266 quoted-string (`"` is backslash-escaped).
+///
+/// Returns `None` if the resulting value is not a valid HTTP header value (e.g.
+/// the filename contains control characters).
+fn format_content_disposition(filename: &str) -> Option<http::HeaderValue> {
+    let all_dots = filename.chars().all(|c| c == '.');
+
+    let mut result = String::from("attachment; filename=\"");
+    for c in filename.chars() {
+        let c = match c {
+            '/' | '\\' => '-',
+            '.' if all_dots => '-',
+            '"' => {
+                result.push('\\');
+                '"'
+            }
+            c => c,
+        };
+        result.push(c);
+    }
+    result.push('"');
+
+    http::HeaderValue::from_str(&result).ok()
 }
 
 async fn object_put(
@@ -92,8 +175,7 @@ async fn object_put(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    metadata.time_created = Some(SystemTime::now());
+    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     let ObjectId { context, key } = id;
 
