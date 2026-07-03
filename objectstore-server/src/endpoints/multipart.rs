@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
@@ -95,9 +95,8 @@ async fn initiate_inner(
     id: ObjectId,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let mut metadata = Metadata::from_headers(&headers, "").map_err(ServiceError::from)?;
-    // TODO: Do this in `complete` instead, when we have a Service API to mutate metadata.
-    metadata.time_created = Some(SystemTime::now());
+    // TODO: Update time_created in `complete`, when we have a Service API to mutate metadata.
+    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
         .config

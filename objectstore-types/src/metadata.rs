@@ -287,10 +287,35 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Parses the metadata headers accepted from writing endpoints.
+    ///
+    /// Unlike [`from_headers`](Self::from_headers), this skips read-only and output attributes so
+    /// clients cannot set them via headers.
+    ///
+    /// A prefix can also be provided which is stripped from custom non-standard headers.
+    pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
+        let mut metadata = Self::parse_headers(headers, prefix, true)?;
+        metadata.time_created = Some(SystemTime::now());
+        Ok(metadata)
+    }
+
     /// Extracts public API metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
     pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
+        Self::parse_headers(headers, prefix, false)
+    }
+
+    /// Parses metadata from the given [`HeaderMap`].
+    ///
+    /// When `skip_read_only` is set, read-only attributes are not parsed off the headers, so a
+    /// malformed client-supplied value cannot fail the parse. A prefix can also be provided which
+    /// is stripped from custom non-standard headers.
+    fn parse_headers(
+        headers: &HeaderMap,
+        prefix: &str,
+        skip_read_only: bool,
+    ) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
@@ -317,12 +342,12 @@ impl Metadata {
                             metadata.expiration_policy =
                                 ExpirationPolicy::from_str(expiration_policy)?;
                         }
-                        HEADER_TIME_CREATED => {
+                        HEADER_TIME_CREATED if !skip_read_only => {
                             let timestamp = value.to_str()?;
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_created = Some(time);
                         }
-                        HEADER_TIME_EXPIRES => {
+                        HEADER_TIME_EXPIRES if !skip_read_only => {
                             let timestamp = value.to_str()?;
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_expires = Some(time);
@@ -568,6 +593,41 @@ mod tests {
         let metadata = Metadata::from_headers(&headers, "").unwrap();
         assert!(metadata.time_created.is_some());
         assert!(metadata.time_expires.is_some());
+    }
+
+    #[test]
+    fn from_insert_headers_ignores_read_only_fields() {
+        // Read-only and output attributes must never be taken from an untrusted
+        // client request, even if the client supplies the headers.
+        let forged_created = "2024-01-15T12:00:00.000000Z";
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        headers.insert(HEADER_TIME_CREATED, forged_created.parse().unwrap());
+        headers.insert(
+            HEADER_TIME_EXPIRES,
+            "2024-01-16T12:00:00.000000Z".parse().unwrap(),
+        );
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        // `time_created` is stamped by the server, not the client's forged value.
+        let created = metadata.time_created.unwrap();
+        assert_ne!(created, parse_rfc3339(forged_created).unwrap());
+        assert!(metadata.time_expires.is_none());
+        assert!(metadata.size.is_none());
+        // Client-settable fields are still parsed.
+        assert_eq!(metadata.content_type, "text/plain");
+    }
+
+    #[test]
+    fn from_insert_headers_ignores_malformed_read_only_fields() {
+        // A malformed read-only header must not fail the write: it is skipped, not parsed.
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TIME_CREATED, "not-a-timestamp".parse().unwrap());
+        headers.insert(HEADER_TIME_EXPIRES, "not-a-timestamp".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        assert!(metadata.time_created.is_some());
+        assert!(metadata.time_expires.is_none());
     }
 
     #[test]
