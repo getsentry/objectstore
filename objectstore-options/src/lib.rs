@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use sentry_options::Options as Inner;
@@ -117,9 +116,7 @@ pub struct Killswitch {
 /// 3. `sentry-options/` relative to the current working directory
 /// 4. Schema defaults (if no values file is present)
 ///
-/// Idempotent: if already initialized, returns `Ok(())` without re-loading.
-///
-/// Must be called from within a Tokio runtime.
+/// Returns an `Err(AlreadyInitialized)` if called more than once.
 pub fn init() -> Result<(), Error> {
     if OPTIONS.get().is_some() {
         return Err(sentry_options::OptionsError::AlreadyInitialized.into());
