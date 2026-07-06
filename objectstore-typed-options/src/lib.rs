@@ -14,7 +14,8 @@
 //!   the schema is resolved as `{path}/schemas/{namespace}/schema.json`
 //!
 //! Each struct field must implement [`serde::Deserialize`] and corresponds to a key of the
-//! same name within the namespace.
+//! same name within the namespace. To look up a key that differs from the field name, annotate
+//! the field with `#[sentry_options(rename = "...")]`.
 //!
 //! # Generated API
 //!
@@ -66,6 +67,7 @@
 //!     path = "../../sentry-options"
 //! )]
 //! pub struct Options {
+//!     #[sentry_options(rename = "retries")]
 //!     max_retries: u32,
 //!     allowed_orgs: Vec<u32>,
 //! }
@@ -143,7 +145,7 @@ pub fn refresh<T: SentryOptions>(
     match T::deserialize(inner) {
         Ok(new_snapshot) => snapshot.store(Arc::new(new_snapshot)),
         Err(ref err) => {
-            objectstore_log::error!(!!err, "Failed to refresh objectstore options")
+            objectstore_log::error!(!!err, "Failed to refresh sentry options")
         }
     }
 }

@@ -14,10 +14,16 @@ use syn::{DeriveInput, Fields, LitStr, parse_macro_input};
 /// - `path` — relative path to the `sentry-options/` directory; the schema is resolved as
 ///   `{path}/schemas/{namespace}/schema.json`
 ///
+/// # Field attributes
+///
+/// - `rename` — the option key to look up for this field, overriding the default (the field's
+///   Rust identifier). Use it when the schema key differs from the field name, e.g.
+///   `#[sentry_options(rename = "max-retries")] max_retries: u32`.
+///
 /// # Generated code
 ///
 /// For each struct field, `deserialize` calls `Deserialize::deserialize(options.get(NAMESPACE,
-/// "<field>")?)`.
+/// "<key>")?)`, where `<key>` is the `rename` value if present and otherwise the field name.
 ///
 /// Additionally generates:
 /// - `SentryOptions` trait impl with `NAMESPACE`, `SCHEMA`, and `deserialize`
@@ -72,6 +78,31 @@ fn parse_attrs(input: &DeriveInput) -> syn::Result<Attrs> {
     Ok(Attrs { namespace, path })
 }
 
+/// Returns the option key for a field: the `#[sentry_options(rename = "...")]` value if present,
+/// otherwise the field's Rust identifier.
+fn parse_field_key(field: &syn::Field) -> syn::Result<String> {
+    let field_name = field.ident.as_ref().expect("named field");
+    let mut rename: Option<LitStr> = None;
+
+    for attr in &field.attrs {
+        if !attr.path().is_ident("sentry_options") {
+            continue;
+        }
+
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                let value = meta.value()?;
+                rename = Some(value.parse::<LitStr>()?);
+                Ok(())
+            } else {
+                Err(meta.error("unknown sentry_options field attribute"))
+            }
+        })?;
+    }
+
+    Ok(rename.map_or_else(|| field_name.to_string(), |lit| lit.value()))
+}
+
 fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let attrs = parse_attrs(&input)?;
     let name = &input.ident;
@@ -98,18 +129,18 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let path_str = &attrs.path;
 
     // Build deserialize body: one line per field.
-    let field_deserializations: Vec<_> = fields
+    let field_deserializations = fields
         .iter()
         .map(|f| {
             let field_name = f.ident.as_ref().expect("named field");
-            let field_key = field_name.to_string();
-            quote! {
+            let field_key = parse_field_key(f)?;
+            Ok(quote! {
                 #field_name: ::objectstore_typed_options::serde::Deserialize::deserialize(
                     options.get(Self::NAMESPACE, #field_key)?
                 )?
-            }
+            })
         })
-        .collect();
+        .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
         const _: () = {
