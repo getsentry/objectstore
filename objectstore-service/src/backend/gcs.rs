@@ -15,10 +15,10 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::response::ResponseExt;
+use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse, SendTraced,
+    PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;

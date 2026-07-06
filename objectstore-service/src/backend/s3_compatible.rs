@@ -9,9 +9,9 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
-use super::response::ResponseExt;
+use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse, SendTraced,
+    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;

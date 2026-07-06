@@ -6,7 +6,6 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 
 use bytes::Bytes;
-use tracing::Instrument;
 
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -279,32 +278,4 @@ pub(super) fn reqwest_client() -> reqwest::Client {
         .no_deflate()
         .build()
         .expect("Client::new()")
-}
-
-/// Extension trait that sends a request inside a tracing span.
-pub(super) trait SendTraced {
-    /// Sends the request, wrapping it in a span that covers the full request
-    /// duration and records the response status code.
-    async fn send_traced(self) -> reqwest::Result<reqwest::Response>;
-}
-
-impl SendTraced for reqwest::RequestBuilder {
-    async fn send_traced(self) -> reqwest::Result<reqwest::Response> {
-        let (client, request) = self.build_split();
-        let request = request?;
-        let span = tracing::debug_span!(
-            "http.request",
-            method = %request.method(),
-            url = %request.url(),
-            http.status_code = tracing::field::Empty,
-        );
-        let send_future = async {
-            let response = client.execute(request).await;
-            if let Ok(response) = &response {
-                tracing::Span::current().record("http.status_code", response.status().as_u16());
-            }
-            response
-        };
-        send_future.instrument(span).await
-    }
 }
