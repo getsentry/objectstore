@@ -89,11 +89,17 @@ pub enum PresignError {
 /// normalized to `GET`, and [`X_OS_SIG`] is excluded from the canonical query
 /// string.
 ///
-/// `path` must be the request path as it appears in the URL (the same value the
-/// signer put on the wire and the verifier reads back, e.g. `uri.path()`); it is
-/// percent-encoded wholesale. `query` is the list of decoded query parameter
-/// key/value pairs; they are re-encoded canonically here, so ordering of the
-/// input does not matter.
+/// `path` is percent-encoded wholesale here (the `/` separators are deliberately
+/// not treated specially). This function is oblivious to the path's contents;
+/// correctness only requires that the signer and verifier pass **byte-identical**
+/// path strings. The natural choice is the raw path exactly as it appears in the
+/// request line — `uri.path()` on the server, and the equivalent from the built URL
+/// on the client. Do **not** percent-decode it first: decoding is lossy (`%2F` and a
+/// literal `/` collapse to the same byte), which would weaken the signature and risk
+/// a signer/verifier mismatch.
+///
+/// `query` is the list of decoded query parameter key/value pairs; they are
+/// re-encoded canonically here, so ordering of the input does not matter.
 ///
 /// `signed_headers` is the list of request headers named by `X-Os-Signed-Headers`
 /// (name/value pairs); names are lowercased, values are whitespace-trimmed, and
