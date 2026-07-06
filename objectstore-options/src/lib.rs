@@ -177,6 +177,10 @@ pub fn override_options(
 mod tests {
     use super::*;
 
+    // Required for schema validation.
+    #[cfg(not(feature = "testing"))]
+    compile_error!("tests require the `testing` feature: run with `--features testing`");
+
     #[test]
     fn schema_is_valid() {
         let _ = Options::get();
