@@ -2777,11 +2777,14 @@ dependencies = [
 name = "objectstore-types"
 version = "0.1.12"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "http 1.4.2",
  "humantime",
  "humantime-serde",
  "insta",
  "mediatype",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

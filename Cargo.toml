@@ -42,6 +42,7 @@ bytes = "1.12.0"
 bytesize = "2.4.0"
 chrono = "0.4.45"
 console = "0.16.3"
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
 elegant-departure = "0.3.2"
 figment = "0.10.19"
 futures = "0.3.32"

@@ -8,5 +8,6 @@
 pub mod auth;
 pub mod metadata;
 pub mod multipart;
+pub mod presign;
 pub mod range;
 pub mod scope;
