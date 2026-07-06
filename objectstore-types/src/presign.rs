@@ -1,49 +1,49 @@
-//! Canonicalization and signing primitives for pre-signed URLs.
+//! Utilities for signing and verifying pre-signed URLs.
 //!
-//! A pre-signed URL lets a client that owns an Ed25519 keypair (e.g. Relay or
-//! Sentry) hand out a time-limited URL that authorizes a single **GET** or
-//! **HEAD** object read, without the recipient needing an auth token. The
-//! authorization lives entirely in query parameters:
+//! A pre-signed URL lets a client that owns an Ed25519 keypair hand out a
+//! time-limited URL that authorizes a specific request.
+//! Example:
 //!
 //! ```text
 //! GET /v1/objects/<usecase>/<scopes>/<key>
 //!     ?X-Os-Key-Id=relay
-//!     &X-Os-Timestamp=1985-04-12T23:20:50.52Z
-//!     &X-Os-Expires=3600            # validity in seconds
-//!     &X-Os-Sig=<base64url signature>
+//!     &X-Os-Timestamp=2026-04-20T13:37:00.00Z
+//!     &X-Os-Expires=<duration in seconds>
+//!     &X-Os-Sig=<signature>
 //! ```
 //!
-//! The signature covers a **canonical form** of the request (see
-//! [`canonical_request`]). The signer builds and signs it with [`sign`]; the
-//! verifier rebuilds the identical canonical form from the received request and
-//! checks the signature with [`verify`] against the public key selected by
-//! `X-Os-Key-Id`.
+//! The signature covers a **canonical form** (see below) of the request.
+//!
+//! In addition to the above query parameters, the following query
+//! parameters are intended to be introduced in future if/when needed:
+//! - `X-Os-Alg`: specifies the signing algorithm. When unspecified, defaults to
+//!   Ed25519.
+//! - `X-Os-Signed-Headers`: specifies the request headers that are signed (see below).
 //!
 //! # Canonical form
 //!
-//! The canonical form is four newline-separated components:
+//! The canonical form is comprised of four newline-separated components:
 //!
 //! ```text
-//! <method>\n
+//! <canonical method>\n
 //! <canonical path>\n
 //! <canonical query string>\n
 //! <canonical headers>
 //! ```
 //!
-//! - **method** — the uppercase HTTP method, with `HEAD` normalized to `GET` so
-//!   that a single signature is valid for either (a `HEAD` is a bodyless `GET`).
-//! - **canonical path** — the request path, percent-encoded as a single string
-//!   using [`NON_ALPHANUMERIC`] (uppercase hex). The `/` separator is not
-//!   treated specially; it is encoded like any other reserved byte.
-//! - **canonical query string** — every query parameter except [`X_OS_SIG`],
-//!   with keys and values percent-encoded (same set), sorted by encoded key then
-//!   encoded value, and joined as `key=value` pairs with `&`.
-//! - **canonical headers** — empty for now. Signing specific request headers is
-//!   a future extension (`X-Os-Signed-Headers`), so the canonical form currently
-//!   always ends with a trailing newline (an empty final line).
+//! - canonical method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
+//! - canonical path: the percent-encoded request path;
+//! - canonical query string: every query parameter except `X-Os-Sig`,
+//!   with keys and values percent-encoded, sorted by encoded key then
+//!   encoded value, joined as `key=value` pairs with `&` separator.
+//! - canonical headers: the request headers named in `X-Os-Signed-Headers`, each
+//!   rendered as `name:value` with a lowercase name and its value's surrounding
+//!   whitespace stripped, sorted by name, and joined with a `\n` separator.
+//!   When no headers are signed this component is empty, so the canonical form ends
+//!   with a trailing newline.
 //!
-//! The signature algorithm is fixed to Ed25519 today; `X-Os-Alg` is reserved for
-//! a future extension.
+//! Percent encoding of the path and query is always performed using the
+//! [`NON_ALPHANUMERIC`] character set into uppercase hex digits.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -94,7 +94,19 @@ pub enum PresignError {
 /// percent-encoded wholesale. `query` is the list of decoded query parameter
 /// key/value pairs; they are re-encoded canonically here, so ordering of the
 /// input does not matter.
-pub fn canonical_request(method: &Method, path: &str, query: &[(String, String)]) -> String {
+///
+/// `signed_headers` is the list of request headers named by `X-Os-Signed-Headers`
+/// (name/value pairs); names are lowercased, values are whitespace-trimmed, and
+/// the entries are sorted by name here, so input ordering does not matter. Pass an
+/// empty slice when no headers are signed. Values must come from a validated HTTP
+/// header map (they must not contain CR/LF); see the
+/// [module-level documentation](self).
+pub fn canonical_request(
+    method: &Method,
+    path: &str,
+    query: &[(&str, &str)],
+    signed_headers: &[(&str, &str)],
+) -> String {
     let method = if *method == Method::HEAD {
         "GET"
     } else {
@@ -105,8 +117,8 @@ pub fn canonical_request(method: &Method, path: &str, query: &[(String, String)]
 
     let mut pairs: Vec<(String, String)> = query
         .iter()
-        .filter(|(key, _)| key.as_str() != X_OS_SIG)
-        .map(|(key, value)| {
+        .filter(|&&(key, _)| key != X_OS_SIG)
+        .map(|&(key, value)| {
             (
                 percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string(),
                 percent_encode(value.as_bytes(), NON_ALPHANUMERIC).to_string(),
@@ -121,7 +133,19 @@ pub fn canonical_request(method: &Method, path: &str, query: &[(String, String)]
         .collect::<Vec<_>>()
         .join("&");
 
-    format!("{method}\n{canonical_path}\n{canonical_query}\n")
+    let mut headers: Vec<(String, &str)> = signed_headers
+        .iter()
+        .map(|&(name, value)| (name.to_ascii_lowercase(), value.trim()))
+        .collect();
+    headers.sort();
+
+    let canonical_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("{method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}")
 }
 
 /// Signs a canonical request string with Ed25519.
@@ -166,16 +190,13 @@ mod tests {
         SigningKey::from_bytes(&[0x42; 32])
     }
 
-    fn sample_query() -> Vec<(String, String)> {
+    fn sample_query() -> Vec<(&'static str, &'static str)> {
         // Intentionally unsorted, and includes X-Os-Sig which must be excluded.
         vec![
-            (
-                X_OS_TIMESTAMP.to_owned(),
-                "1985-04-12T23:20:50.52Z".to_owned(),
-            ),
-            (X_OS_KEY_ID.to_owned(), "relay".to_owned()),
-            (X_OS_EXPIRES.to_owned(), "3600".to_owned()),
-            (X_OS_SIG.to_owned(), "should-be-excluded".to_owned()),
+            (X_OS_TIMESTAMP, "1985-04-12T23:20:50.52Z"),
+            (X_OS_KEY_ID, "relay"),
+            (X_OS_EXPIRES, "3600"),
+            (X_OS_SIG, "should-be-excluded"),
         ]
     }
 
@@ -185,11 +206,12 @@ mod tests {
             &Method::GET,
             "/v1/objects/testing/org=17;project=42/foo/bar",
             &sample_query(),
+            &[],
         );
 
         // Known-answer test that pins the exact bytes: path fully percent-encoded
         // (slashes too), X-Os-Sig excluded, params sorted by encoded key, and a
-        // trailing empty header line.
+        // trailing empty header line (no signed headers).
         assert_eq!(
             canonical,
             "GET\n\
@@ -205,8 +227,8 @@ mod tests {
         let path = "/v1/objects/testing/_/key";
         let query = sample_query();
         assert_eq!(
-            canonical_request(&Method::HEAD, path, &query),
-            canonical_request(&Method::GET, path, &query),
+            canonical_request(&Method::HEAD, path, &query, &[]),
+            canonical_request(&Method::GET, path, &query, &[]),
         );
     }
 
@@ -215,8 +237,12 @@ mod tests {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
 
-        let canonical =
-            canonical_request(&Method::GET, "/v1/objects/testing/_/key", &sample_query());
+        let canonical = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[("Content-Type", "application/json")],
+        );
         let signature = sign(&sk, &canonical);
 
         assert_eq!(verify(&vk, &canonical, &signature), Ok(()));
@@ -227,12 +253,20 @@ mod tests {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
 
-        let canonical =
-            canonical_request(&Method::GET, "/v1/objects/testing/_/key", &sample_query());
+        let canonical = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
         let signature = sign(&sk, &canonical);
 
-        let tampered =
-            canonical_request(&Method::GET, "/v1/objects/testing/_/other", &sample_query());
+        let tampered = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/other",
+            &sample_query(),
+            &[],
+        );
         assert_eq!(
             verify(&vk, &tampered, &signature),
             Err(PresignError::VerificationFailed)
@@ -244,8 +278,12 @@ mod tests {
         let sk = test_signing_key();
         let other_vk = SigningKey::from_bytes(&[0x01; 32]).verifying_key();
 
-        let canonical =
-            canonical_request(&Method::GET, "/v1/objects/testing/_/key", &sample_query());
+        let canonical = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
         let signature = sign(&sk, &canonical);
 
         assert_eq!(
@@ -257,8 +295,12 @@ mod tests {
     #[test]
     fn verify_rejects_bad_signature_encoding() {
         let vk = test_signing_key().verifying_key();
-        let canonical =
-            canonical_request(&Method::GET, "/v1/objects/testing/_/key", &sample_query());
+        let canonical = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
 
         // Not valid base64url.
         assert_eq!(
@@ -270,5 +312,44 @@ mod tests {
             verify(&vk, &canonical, &URL_SAFE_NO_PAD.encode([0u8; 10])),
             Err(PresignError::InvalidSignatureEncoding)
         );
+    }
+
+    #[test]
+    fn canonical_headers_are_lowercased_trimmed_and_sorted() {
+        // Intentionally unsorted, mixed-case names, padded values.
+        let headers = [
+            ("Host", "objectstore.example.com"),
+            ("Content-Type", "  application/json  "),
+        ];
+        let canonical = canonical_request(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &headers,
+        );
+
+        // The canonical headers replace the previously-empty final component:
+        // names lowercased, values trimmed, sorted by name, joined with `\n`.
+        assert_eq!(
+            canonical,
+            "GET\n\
+             %2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\n\
+             X%2DOs%2DExpires=3600&\
+             X%2DOs%2DKey%2DId=relay&\
+             X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n\
+             content-type:application/json\n\
+             host:objectstore.example.com"
+        );
+    }
+
+    #[test]
+    fn empty_signed_headers_matches_trailing_newline_form() {
+        // Passing no signed headers must be byte-identical to the historical
+        // three-component form, so existing GET/HEAD signatures keep verifying.
+        let path = "/v1/objects/testing/_/key";
+        let query = sample_query();
+        let canonical = canonical_request(&Method::GET, path, &query, &[]);
+        assert!(canonical.ends_with("\n"));
+        assert!(!canonical.contains(':'));
     }
 }
