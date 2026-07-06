@@ -128,8 +128,8 @@ fn metadata_to_gcs_headers(
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
     // GCS custom-time for lifecycle expiration
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at = humantime::format_rfc3339_seconds(SystemTime::now() + expires_in);
+    if let Some(expires_at) = metadata.time_expires {
+        let expires_at = humantime::format_rfc3339_seconds(expires_at);
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -224,6 +224,7 @@ where
             None
         };
 
+        // TODO: extract into dedicated call from service
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // TODO: Inject the access time from the request.
@@ -236,7 +237,11 @@ where
                 .unwrap_or(access_time);
 
             if expire_at < access_time + tti - TTI_DEBOUNCE {
-                self.update_metadata(id, &metadata).await?;
+                // The write helper persists `time_expires` verbatim, so refresh it to the bumped
+                // deadline here. The returned `metadata` keeps the pre-access value.
+                let mut bumped = metadata.clone();
+                bumped.time_expires = Some(access_time + tti);
+                self.update_metadata(id, &bumped).await?;
             }
         }
 
@@ -381,6 +386,23 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    #[test]
+    fn metadata_to_gcs_headers_uses_time_expires() {
+        let expires = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+
+        // The lifecycle custom-time is the server-resolved expiry (second precision).
+        let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
+        let expected = humantime::format_rfc3339_seconds(expires).to_string();
+        assert_eq!(custom_time, expected);
     }
 
     #[tokio::test]

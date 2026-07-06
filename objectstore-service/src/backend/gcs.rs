@@ -146,9 +146,7 @@ impl GcsObject {
         // For time-based expiration, set the `customTime` field. The bucket must have a
         // `daysSinceCustomTime` lifecycle rule configured to delete objects with this field set.
         // This rule automatically skips objects without `customTime` set.
-        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-            gcs_object.custom_time = Some(SystemTime::now() + expires_in);
-        }
+        gcs_object.custom_time = metadata.time_expires;
 
         if let Some(compression) = metadata.compression {
             gcs_object.content_encoding = Some(compression.to_string());
@@ -309,8 +307,7 @@ impl Serialize for GcsMetaKey {
 fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let custom_time = SystemTime::now() + expires_in;
+    if let Some(custom_time) = metadata.time_expires {
         let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
@@ -1137,6 +1134,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn from_metadata_uses_provided_time_expires() {
+        let expires = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+
+        let gcs_object = GcsObject::from_metadata(&metadata);
+        assert_eq!(gcs_object.custom_time, Some(expires));
+
+        let roundtripped = gcs_object.into_metadata().unwrap();
+        assert_eq!(roundtripped.time_expires, Some(expires));
+    }
+
     #[tokio::test]
     async fn test_get_nonexistent() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -1220,6 +1233,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1243,6 +1257,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1301,6 +1316,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(SystemTime::now() + tti),
             ..Default::default()
         };
 
@@ -1344,6 +1360,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(SystemTime::now() + tti),
             ..Default::default()
         };
 
@@ -1741,6 +1758,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1758,6 +1776,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 

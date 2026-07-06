@@ -169,6 +169,10 @@ capabilities. For example, BigTable has built-in TTL via garbage collection
 policies, and GCS supports object lifecycle management. The service does not
 perform active garbage collection.
 
+Apart from the expiration policy, metadata during object creation must carry a
+`time_expires` field with the correct expiration timestamp. This is ensured
+during metadata creation by the server.
+
 # Backpressure
 
 The service applies backpressure to protect backends from overload. Rather than
