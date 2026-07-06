@@ -15,7 +15,8 @@ include!(concat!(env!("OUT_DIR"), "/constants.gen.rs"));
 ///
 /// When built with the `sentry` feature, also attaches a Sentry tracing layer if the Sentry client
 /// has been initialized. `ERROR` and `WARN` events become Sentry events; `INFO`/`DEBUG` become
-/// Sentry logs; `TRACE` is ignored.
+/// Sentry logs; `TRACE` events are ignored. `ERROR`..`DEBUG` spans become Sentry spans; `TRACE`
+/// spans are ignored.
 pub fn init(config: &LoggingConfig) {
     #[cfg(feature = "sentry")]
     let sentry_layer = sentry::Hub::current()
@@ -23,13 +24,15 @@ pub fn init(config: &LoggingConfig) {
         .filter(|c| c.is_enabled())
         .map(|_| {
             use sentry::integrations::tracing as sentry_tracing;
-            sentry_tracing::layer().event_filter(|metadata| match *metadata.level() {
-                Level::ERROR | Level::WARN => {
-                    sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
-                }
-                Level::INFO | Level::DEBUG => sentry_tracing::EventFilter::Log,
-                Level::TRACE => sentry_tracing::EventFilter::Ignore,
-            })
+            sentry_tracing::layer()
+                .event_filter(|metadata| match *metadata.level() {
+                    Level::ERROR | Level::WARN => {
+                        sentry_tracing::EventFilter::Event | sentry_tracing::EventFilter::Log
+                    }
+                    Level::INFO | Level::DEBUG => sentry_tracing::EventFilter::Log,
+                    Level::TRACE => sentry_tracing::EventFilter::Ignore,
+                })
+                .span_filter(|metadata| !matches!(*metadata.level(), Level::TRACE))
         });
 
     let format = tracing_subscriber::fmt::layer()

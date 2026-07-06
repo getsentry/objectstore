@@ -121,6 +121,7 @@ impl ChangeManager {
     ///
     /// When the [`ChangeGuard`] is dropped, a background process is spawned to
     /// clean up any unreferenced objects in LT storage.
+    #[tracing::instrument(level = "debug", fields(id = ?change.id, new = ?change.new, old = ?change.old), skip_all)]
     pub async fn record(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
         let token = self.tracker.token();
 
@@ -143,6 +144,7 @@ impl ChangeManager {
     /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state.
     /// Unlike other states, this guard does nothing on drop, leaving the burden of cleaning up to
     /// the [`ChangeLog`].
+    #[tracing::instrument(level = "debug", fields(id = ?change.id, new = ?change.new, old = ?change.old), skip_all)]
     pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
         let token = self.tracker.token();
 

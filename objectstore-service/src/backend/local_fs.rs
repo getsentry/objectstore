@@ -76,7 +76,7 @@ impl Backend for LocalFsBackend {
         Ok(self)
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -119,7 +119,7 @@ impl Backend for LocalFsBackend {
     }
 
     // TODO: Return `Ok(None)` if object is found but past expiry
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
@@ -164,7 +164,7 @@ impl Backend for LocalFsBackend {
         Ok(Some((metadata, content_range, stream)))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
