@@ -152,6 +152,33 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ::objectstore_typed_options::sentry_options::Options
         > = ::std::sync::OnceLock::new();
 
+        /// Reloads options and atomically swaps in the new snapshot.
+        ///
+        /// Registered as the sentry-options propagation callback by `init` and invoked
+        /// whenever values change.
+        fn __refresh(namespace: &str, _delay: f64) {
+            if namespace != #namespace_str {
+                return;
+            }
+
+            let (::std::option::Option::Some(snapshot), ::std::option::Option::Some(inner)) =
+                (__OPTIONS.get(), __INNER.get())
+            else {
+                return;
+            };
+
+            match <#name as ::objectstore_typed_options::SentryOptions>::deserialize(inner) {
+                ::std::result::Result::Ok(new_snapshot) => {
+                    snapshot.store(::std::sync::Arc::new(new_snapshot))
+                }
+                ::std::result::Result::Err(ref err) => {
+                    ::objectstore_typed_options::log_error(
+                        #namespace_str, "failed to refresh options", err,
+                    )
+                }
+            }
+        }
+
         impl ::objectstore_typed_options::SentryOptions for #name {
             const NAMESPACE: &str = #namespace_str;
             const SCHEMA: &str = include_str!(
@@ -230,11 +257,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 // accessed.
                 let inner = ::objectstore_typed_options::sentry_options::Options::builder()
                     .with_schemas(&[(Self::NAMESPACE, Self::SCHEMA)])
-                    .with_callback(|namespace: &str, delay: f64| {
-                        ::objectstore_typed_options::refresh::<Self>(
-                            &__OPTIONS, &__INNER, namespace, delay,
-                        )
-                    })
+                    .with_callback(__refresh)
                     .build()?;
 
                 __OPTIONS
