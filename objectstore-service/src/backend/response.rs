@@ -66,6 +66,13 @@ pub trait ResponseExt {
     /// When called on `Result<Response, reqwest::Error>`, transport errors are
     /// wrapped as [`Error::Reqwest`] with the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
+
+    /// Drains the response body of a response we are otherwise done with.
+    ///
+    /// reqwest only returns a connection to its pool once the response body has been fully read, so
+    /// we need to explicitly drain it. Errors are swallowed, since the caller has already obtained
+    /// everything it needs from the response.
+    async fn drain_body(self);
 }
 
 impl ResponseExt for Response {
@@ -86,9 +93,11 @@ impl ResponseExt for Response {
         } else if ct.starts_with("application/xml") || ct.starts_with("text/xml") {
             parse_xml_error(self).await
         } else {
-            return self
-                .error_for_status()
-                .map_err(|e| Error::reqwest(context, e));
+            let Err(e) = self.error_for_status_ref() else {
+                return Ok(self);
+            };
+            self.drain_body().await;
+            return Err(Error::reqwest(context, e));
         };
 
         Err(Error::BackendResponse {
@@ -96,6 +105,10 @@ impl ResponseExt for Response {
             status,
             detail,
         })
+    }
+
+    async fn drain_body(mut self) {
+        while let Ok(Some(_)) = self.chunk().await {}
     }
 }
 
@@ -107,6 +120,12 @@ impl ResponseExt for Result<Response, reqwest::Error> {
                 Some(ce) => Error::Client(ce),
                 None => Error::reqwest(context, e),
             }),
+        }
+    }
+
+    async fn drain_body(self) {
+        if let Ok(resp) = self {
+            resp.drain_body().await;
         }
     }
 }

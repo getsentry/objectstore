@@ -537,6 +537,7 @@ impl GcsBackend {
                     .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
+                    resp.drain_body().await;
                     return Ok(None);
                 }
 
@@ -595,7 +596,9 @@ impl GcsBackend {
                 .send()
                 .await
                 .check_error("GCS: update custom time")
-                .await?;
+                .await?
+                .drain_body()
+                .await;
             Ok(())
         })
         .await
@@ -667,7 +670,9 @@ impl Backend for GcsBackend {
             .send()
             .await
             .check_error("GCS: upload object")
-            .await?;
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -701,17 +706,14 @@ impl Backend for GcsBackend {
                         .get(header::CONTENT_RANGE)
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-                    match total {
-                        Some(total) => return Err(Error::RangeNotSatisfiable { total }),
-                        None => {
-                            return Err(Error::Generic {
-                                context: format!(
-                                    "GCS: 416 response with invalid Content-Range: {raw:?}"
-                                ),
-                                cause: None,
-                            });
-                        }
-                    }
+                    let err = match total {
+                        Some(total) => Error::RangeNotSatisfiable { total },
+                        None => Error::generic(format!(
+                            "GCS: 416 response with invalid Content-Range: {raw:?}"
+                        )),
+                    };
+                    resp.drain_body().await;
+                    return Err(err);
                 }
 
                 resp.check_error("GCS: get payload").await
@@ -764,10 +766,14 @@ impl Backend for GcsBackend {
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
+                resp.drain_body().await;
                 return Ok(());
             }
 
-            resp.check_error("GCS: delete object").await?;
+            resp.check_error("GCS: delete object")
+                .await?
+                .drain_body()
+                .await;
 
             Ok(())
         })
@@ -960,6 +966,8 @@ impl MultipartUploadBackend for GcsBackend {
             .map(|s| s.to_owned())
             .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
 
+        resp.drain_body().await;
+
         Ok(etag)
     }
 
@@ -1021,7 +1029,9 @@ impl MultipartUploadBackend for GcsBackend {
             .send()
             .await
             .check_error("GCS: abort multipart upload")
-            .await?;
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }

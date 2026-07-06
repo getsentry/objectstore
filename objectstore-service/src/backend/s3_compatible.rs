@@ -179,6 +179,7 @@ where
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
+            response.drain_body().await;
             return Ok(None);
         }
 
@@ -188,15 +189,14 @@ where
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok());
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-            match total {
-                Some(total) => return Err(Error::RangeNotSatisfiable { total }),
-                None => {
-                    return Err(Error::Generic {
-                        context: format!("S3: 416 response with invalid Content-Range: {raw:?}"),
-                        cause: None,
-                    });
-                }
-            }
+            let err = match total {
+                Some(total) => Error::RangeNotSatisfiable { total },
+                None => Error::generic(format!(
+                    "S3: 416 response with invalid Content-Range: {raw:?}"
+                )),
+            };
+            response.drain_body().await;
+            return Err(err);
         }
 
         let response = response.check_error("S3: failed to get object").await?;
@@ -263,7 +263,9 @@ where
             .send()
             .await
             .check_error("S3: update expiration time")
-            .await?;
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -312,7 +314,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .send()
             .await
             .check_error("S3: failed to put object")
-            .await?;
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -352,9 +356,16 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             })?;
 
         // Do not error for objects that do not exist.
-        if response.status() != StatusCode::NOT_FOUND {
-            response.check_error("S3: failed to delete object").await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            response.drain_body().await;
+            return Ok(());
         }
+
+        response
+            .check_error("S3: failed to delete object")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
