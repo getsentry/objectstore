@@ -8,7 +8,6 @@
 use reqwest::{Response, header};
 use serde::Deserialize;
 
-use crate::backend::common::consume_body;
 use crate::error::{BackendDetail, Error, Result};
 use crate::stream;
 
@@ -67,6 +66,13 @@ pub trait ResponseExt {
     /// When called on `Result<Response, reqwest::Error>`, transport errors are
     /// wrapped as [`Error::Reqwest`] with the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
+
+    /// Drains the response body of a response we are otherwise done with.
+    ///
+    /// reqwest only returns a connection to its pool once the response body has been fully read, so
+    /// we need to explicitly drain it. Errors are swallowed, since the caller has already obtained
+    /// everything it needs from the response.
+    async fn drain_body(self);
 }
 
 impl ResponseExt for Response {
@@ -90,7 +96,7 @@ impl ResponseExt for Response {
             let Err(e) = self.error_for_status_ref() else {
                 return Ok(self);
             };
-            consume_body(self).await;
+            self.drain_body().await;
             return Err(Error::reqwest(context, e));
         };
 
@@ -99,6 +105,10 @@ impl ResponseExt for Response {
             status,
             detail,
         })
+    }
+
+    async fn drain_body(mut self) {
+        while let Ok(Some(_)) = self.chunk().await {}
     }
 }
 
@@ -110,6 +120,12 @@ impl ResponseExt for Result<Response, reqwest::Error> {
                 Some(ce) => Error::Client(ce),
                 None => Error::reqwest(context, e),
             }),
+        }
+    }
+
+    async fn drain_body(self) {
+        if let Ok(resp) = self {
+            resp.drain_body().await;
         }
     }
 }
