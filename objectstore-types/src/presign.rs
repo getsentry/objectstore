@@ -13,7 +13,7 @@
 //!     &os-sig=<signature>
 //! ```
 //!
-//! The signature covers a **canonical form** (see below) of the request.
+//! The signature covers a canonical form of the request.
 //!
 //! # Canonical form
 //!
