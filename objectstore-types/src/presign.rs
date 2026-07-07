@@ -102,7 +102,8 @@ impl CanonicalRequest {
                     let key = key.to_ascii_lowercase();
                     (key != "x-os-sig").then(|| format!("{key}={value}"))
                 } else {
-                    Some(pair.to_ascii_lowercase())
+                    let key = pair.to_ascii_lowercase();
+                    (key != "x-os-sig").then_some(key)
                 }
             })
             .collect();
@@ -206,6 +207,16 @@ mod tests {
              x-os-key-id=relay&\
              x-os-timestamp=1985-04-12T23:20:50.52Z"
         );
+    }
+
+    #[test]
+    fn key_only_sig_param_is_excluded() {
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            Some("a=1&X-Os-Sig&b=2"),
+        );
+        assert_eq!(canonical.0, "GET\n/v1/objects/testing/_/key\na=1&b=2");
     }
 
     #[test]
