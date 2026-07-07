@@ -15,7 +15,7 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::response::ResponseExt;
+use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
@@ -540,13 +540,14 @@ impl GcsBackend {
 
     /// Fetches the GCS object metadata (without the payload), bumps TTI if
     /// needed, and returns the parsed [`Metadata`].
+    #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
     async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
                     .request(Method::GET, object_url.clone())
                     .await?
-                    .send()
+                    .send_traced()
                     .await
                     .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
 
@@ -595,6 +596,7 @@ impl GcsBackend {
         Ok(Some(metadata))
     }
 
+    #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
     async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<()> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -607,7 +609,7 @@ impl GcsBackend {
             self.request(Method::PATCH, object_url.clone())
                 .await?
                 .json(&CustomTimeRequest { custom_time })
-                .send()
+                .send_traced()
                 .await
                 .check_error("GCS: update custom time")
                 .await?
@@ -638,7 +640,7 @@ impl Backend for GcsBackend {
         Ok(self)
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -679,7 +681,7 @@ impl Backend for GcsBackend {
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
-            .send()
+            .send_traced()
             .await
             .check_error("GCS: upload object")
             .await?
@@ -689,7 +691,7 @@ impl Backend for GcsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
@@ -708,7 +710,7 @@ impl Backend for GcsBackend {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
                 let resp = req
-                    .send()
+                    .send_traced()
                     .await
                     .map_err(|e| Error::reqwest("GCS: get payload", e))?;
 
@@ -756,14 +758,14 @@ impl Backend for GcsBackend {
         Ok(Some((metadata, content_range, stream)))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
         self.fetch_gcs_metadata(&object_url).await
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from GCS backend");
         let object_url = self.object_url(id)?;
@@ -772,7 +774,7 @@ impl Backend for GcsBackend {
             let resp = self
                 .request(Method::DELETE, object_url.clone())
                 .await?
-                .send()
+                .send_traced()
                 .await
                 .map_err(|e| Error::reqwest("GCS: delete object", e))?;
 
@@ -902,7 +904,7 @@ impl From<XmlError> for crate::multipart::CompleteMultipartError {
 /// that we test against has an incomplete implementation of the XML multipart API that likely doesn't match GCS's behavior in many cases.
 #[async_trait::async_trait]
 impl MultipartUploadBackend for GcsBackend {
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn initiate_multipart(
         &self,
         id: &ObjectId,
@@ -924,7 +926,7 @@ impl MultipartUploadBackend for GcsBackend {
         }
 
         let resp = builder
-            .send()
+            .send_traced()
             .await
             .check_error("GCS: initiate multipart upload")
             .await?;
@@ -943,7 +945,7 @@ impl MultipartUploadBackend for GcsBackend {
         Ok(xml.try_into()?)
     }
 
-    #[tracing::instrument(level = "trace", fields(?id, upload_id, part_number), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self, content_md5, body))]
     async fn upload_part(
         &self,
         id: &ObjectId,
@@ -969,7 +971,11 @@ impl MultipartUploadBackend for GcsBackend {
             builder = builder.header("content-md5", md5);
         }
 
-        let resp = builder.send().await.check_error("GCS: upload part").await?;
+        let resp = builder
+            .send_traced()
+            .await
+            .check_error("GCS: upload part")
+            .await?;
 
         let etag = resp
             .headers()
@@ -983,7 +989,7 @@ impl MultipartUploadBackend for GcsBackend {
         Ok(etag)
     }
 
-    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn list_parts(
         &self,
         id: &ObjectId,
@@ -1007,7 +1013,7 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = self
             .request(Method::GET, url)
             .await?
-            .send()
+            .send_traced()
             .await
             .check_error("GCS: list parts")
             .await?;
@@ -1026,7 +1032,7 @@ impl MultipartUploadBackend for GcsBackend {
         Ok(xml.into())
     }
 
-    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn abort_multipart(
         &self,
         id: &ObjectId,
@@ -1038,7 +1044,7 @@ impl MultipartUploadBackend for GcsBackend {
 
         self.request(Method::DELETE, url)
             .await?
-            .send()
+            .send_traced()
             .await
             .check_error("GCS: abort multipart upload")
             .await?
@@ -1048,7 +1054,7 @@ impl MultipartUploadBackend for GcsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?id, upload_id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self, parts))]
     async fn complete_multipart(
         &self,
         id: &ObjectId,
@@ -1070,7 +1076,7 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .header(header::CONTENT_TYPE, "application/xml")
             .body(xml)
-            .send()
+            .send_traced()
             .await
             .check_error("GCS: complete multipart upload")
             .await?;

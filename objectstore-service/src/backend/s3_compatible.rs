@@ -9,7 +9,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
-use super::response::ResponseExt;
+use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
@@ -173,7 +173,7 @@ where
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
         let response = builder
-            .send()
+            .send_traced()
             .await
             .map_err(|cause| Error::reqwest("S3: failed to send request", cause))?;
 
@@ -268,7 +268,7 @@ where
                     )
                 })?,
             )
-            .send()
+            .send_traced()
             .await
             .check_error("S3: update expiration time")
             .await?
@@ -307,7 +307,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         "s3-compatible"
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -323,7 +323,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
                 })?,
             )
             .body(Body::wrap_stream(stream))
-            .send()
+            .send_traced()
             .await
             .check_error("S3: failed to put object")
             .await?
@@ -333,7 +333,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
@@ -347,20 +347,20 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         Ok(Some((metadata, content_range, stream.boxed())))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
         let response = self.request_object(Method::HEAD, id, None).await?;
         Ok(response.map(|(metadata, _, _)| metadata))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
             .await?
-            .send()
+            .send_traced()
             .await
             .map_err(|cause| Error::reqwest("S3: failed to send delete request", cause))?;
 

@@ -267,6 +267,7 @@ impl TieredStorage {
     ///
     /// If a tombstone already exists, attempts to swap it for the new object and delete the old
     /// long-term object.
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_high_volume(
         &self,
         id: &ObjectId,
@@ -313,6 +314,7 @@ impl TieredStorage {
     ///
     /// Deletes the previous long-term object if overwriting an existing tombstone. If the tombstone
     /// write fails, the new long-term object is cleaned up.
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_long_term(
         &self,
         id: &ObjectId,
@@ -370,6 +372,7 @@ impl Backend for TieredStorage {
         Ok(self)
     }
 
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -415,6 +418,7 @@ impl Backend for TieredStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         let timer = objectstore_metrics::timer!(
             "get.latency.pre-response",
@@ -458,6 +462,7 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
 
@@ -479,6 +484,7 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         let timer =
             objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
@@ -600,6 +606,7 @@ impl TryFrom<&UploadId> for TieredUploadId {
 
 #[async_trait::async_trait]
 impl MultipartUploadBackend for TieredStorage {
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn initiate_multipart(
         &self,
         id: &ObjectId,
@@ -627,6 +634,7 @@ impl MultipartUploadBackend for TieredStorage {
         Ok(id)
     }
 
+    #[tracing::instrument(level = "debug", fields(?id, part_number, content_length), skip_all)]
     async fn upload_part(
         &self,
         id: &ObjectId,
@@ -669,6 +677,7 @@ impl MultipartUploadBackend for TieredStorage {
         Ok(etag)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, upload_id))]
     async fn list_parts(
         &self,
         id: &ObjectId,
@@ -697,6 +706,7 @@ impl MultipartUploadBackend for TieredStorage {
         Ok(response)
     }
 
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn abort_multipart(
         &self,
         id: &ObjectId,
@@ -723,6 +733,7 @@ impl MultipartUploadBackend for TieredStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn complete_multipart(
         &self,
         id: &ObjectId,
