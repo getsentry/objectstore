@@ -73,9 +73,11 @@ pub enum AuthContext {
 
     /// A valid pre-signed signature already authorized this exact request.
     ///
-    /// The signature covers the request's method, path, query, and signed headers, so the
-    /// request is permitted as-is without any further scope or permission checks.
-    Preauthorized,
+    /// The signature covers the request's method, path, query, and signed headers, so no scope
+    /// check is required. The wrapped set is the signing key's `max_permissions`: the operation's
+    /// permission must still be within it, so a restricted (e.g. read-only) key cannot be used to
+    /// pre-sign a more privileged operation.
+    Preauthorized(HashSet<Permission>),
 
     /// A verified JWT; each operation is checked against these scopes and permissions.
     Scoped(ScopedContext),
@@ -241,22 +243,35 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        Ok(AuthContext::Preauthorized)
+        // The `Preauthorized` context carries the signing key's `max_permissions` so that
+        // `assert_authorized` can still reject operations the key was never allowed to grant.
+        Ok(AuthContext::Preauthorized(
+            key_config.max_permissions.clone(),
+        ))
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
     /// `Err(AuthError::NotPermitted)` is returned.
     ///
-    /// [`AuthContext::Disabled`] and [`AuthContext::Preauthorized`] permit every operation. For
-    /// [`AuthContext::Scoped`], the passed-in `perm` is checked against the granted permissions
-    /// and the request's usecase and scopes are checked against the granted ones.
+    /// [`AuthContext::Disabled`] permits every operation. [`AuthContext::Preauthorized`] permits
+    /// the operation as long as `perm` is within the signing key's `max_permissions` (the
+    /// signature already binds the request's usecase and scopes). For [`AuthContext::Scoped`], the
+    /// passed-in `perm` is checked against the granted permissions and the request's usecase and
+    /// scopes are checked against the granted ones.
     pub fn assert_authorized(
         &self,
         perm: Permission,
         context: &ObjectContext,
     ) -> Result<(), AuthError> {
         let scoped = match self {
-            AuthContext::Disabled | AuthContext::Preauthorized => return Ok(()),
+            AuthContext::Disabled => return Ok(()),
+            AuthContext::Preauthorized(max_permissions) => {
+                return if max_permissions.contains(&perm) {
+                    Ok(())
+                } else {
+                    Err(AuthError::NotPermitted)
+                };
+            }
             AuthContext::Scoped(scoped) => scoped,
         };
 
@@ -294,8 +309,8 @@ fn find_query_param<'a>(query: &'a str, name: &str) -> Option<Cow<'a, str>> {
 mod tests {
     use super::*;
     use crate::auth::{PublicKey, PublicKeyConfig};
-    use ed25519_dalek::VerifyingKey;
-    use ed25519_dalek::pkcs8::DecodePublicKey;
+    use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+    use ed25519_dalek::{SigningKey, VerifyingKey};
     use jsonwebtoken::DecodingKey;
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
@@ -570,5 +585,57 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
+    }
+
+    // A `Preauthorized` context must still honor the signing key's `max_permissions`, so a
+    // read-only key cannot authorize a delete even though the signature is valid.
+    #[test]
+    fn test_preauthorized_respects_max_permissions() {
+        let context = AuthContext::Preauthorized(HashSet::from([Permission::ObjectRead]));
+        let object = sample_object_context("123", "456");
+
+        assert_eq!(
+            context.assert_authorized(Permission::ObjectRead, &object),
+            Ok(())
+        );
+        assert_eq!(
+            context.assert_authorized(Permission::ObjectDelete, &object),
+            Err(AuthError::NotPermitted)
+        );
+    }
+
+    // Verifying a pre-signed request yields a `Preauthorized` context carrying the signing key's
+    // `max_permissions`, which is what enforces the limit above end-to-end.
+    #[test]
+    fn test_from_presigned_request_carries_max_permissions() {
+        use objectstore_types::presign::{
+            CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_TIMESTAMP,
+        };
+
+        let read_only = HashSet::from([Permission::ObjectRead]);
+        let key_directory = test_key_config(read_only.clone());
+
+        let path = "/v1/objects/test/org=1/key";
+        let timestamp = humantime::format_rfc3339(SystemTime::now()).to_string();
+        let base = format!(
+            "{X_OS_KEY_ID}={TEST_EDDSA_KID}&{X_OS_TIMESTAMP}={timestamp}&{X_OS_EXPIRES}=3600"
+        );
+
+        let signing_key = SigningKey::from_pkcs8_pem(TEST_EDDSA_PRIVKEY).unwrap();
+        let canonical =
+            CanonicalRequest::new(&Method::GET, path, Some(&base), &HeaderMap::new(), &[]).unwrap();
+        let query = format!("{base}&{X_OS_SIG}={}", canonical.sign(&signing_key));
+
+        let context = AuthContext::from_presigned_request(
+            &Method::GET,
+            path,
+            Some(&query),
+            &HeaderMap::new(),
+            &key_directory,
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(context, AuthContext::Preauthorized(read_only));
     }
 }

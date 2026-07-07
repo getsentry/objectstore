@@ -132,9 +132,11 @@ path instead of looking for a JWT:
 - The validity window (`X-Os-Timestamp` + `X-Os-Expires`) is enforced, capped at
   **one week** so a URL cannot be minted to be effectively immortal.
 
-A verified pre-signed request yields an `AuthContext::Preauthorized`, which permits
-the request as-is — the signature already binds it to the specific method, path,
-and signed headers.
+A verified pre-signed request yields an `AuthContext::Preauthorized` carrying the
+signing key's `max_permissions`. The signature already binds the request's method,
+path, and signed headers, so no scope check is needed — but the operation's
+permission is still checked against `max_permissions`, so a restricted (e.g.
+read-only) key cannot pre-sign a more privileged operation such as `DELETE`.
 
 ## Configuration
 
