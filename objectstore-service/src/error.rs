@@ -17,20 +17,31 @@ use crate::stream::{self, ClientStreamError};
 
 /// The category of a service error.
 ///
+/// These kinds describe the *cause* of a failure, independent of any HTTP
+/// semantics. It is up to the API layer to decide how to map each kind onto a
+/// status code, and which kinds to group together.
+///
 /// Users should rely on the kind for classification and handling, rather than matching on
 /// specific variants.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     /// Error originating from a client-supplied request body stream.
     ClientStream,
-    /// Transient failure that may succeed if retried.
-    Transient,
-    /// Malformed client input.
-    BadRequest,
+    /// Malformed client input (bad metadata, JSON, upload id, …).
+    InvalidInput,
+    /// The requested byte range is not satisfiable for the object's size.
+    RangeNotSatisfiable,
+    /// This service instance has reached its own concurrency limit and is
+    /// shedding load.
+    AtCapacity,
+    /// A storage backend rejected the operation with a rate-limit response.
+    BackendRateLimited,
+    /// A storage backend timed out.
+    BackendTimeout,
+    /// A storage backend is temporarily unavailable.
+    BackendUnavailable,
     /// Operation unsupported by this service instance.
     NotImplemented,
-    /// Service or upstream capacity limit.
-    TooManyRequests,
     /// Internal failure.
     Internal,
 }
@@ -92,7 +103,7 @@ pub enum Error {
 
     /// The requested byte range is not satisfiable for the object's size.
     #[error("range not satisfiable (object size: {total} bytes)")]
-    #[error_kind(ErrorKind, BadRequest)]
+    #[error_kind(ErrorKind, RangeNotSatisfiable)]
     RangeNotSatisfiable {
         /// Total size of the object in bytes.
         total: u64,
@@ -100,7 +111,7 @@ pub enum Error {
 
     /// The service has reached its concurrency limit and cannot accept more operations.
     #[error("concurrency limit reached")]
-    #[error_kind(ErrorKind, TooManyRequests)]
+    #[error_kind(ErrorKind, AtCapacity)]
     AtCapacity,
 
     /// Any other error stemming from one of the storage backends, which might be specific to that
@@ -122,7 +133,7 @@ pub enum Error {
 
     /// Invalid upload ID for a multipart upload.
     #[error(transparent)]
-    #[error_kind(ErrorKind, BadRequest)]
+    #[error_kind(ErrorKind, InvalidInput)]
     InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
 }
 
@@ -175,7 +186,7 @@ impl Error {
     /// error.
     pub fn serde_client(context: impl Into<Cow<'static, str>>, cause: serde_json::Error) -> Self {
         Self::Serde(SerdeError {
-            kind: ErrorKind::BadRequest,
+            kind: ErrorKind::InvalidInput,
             context: context.into(),
             cause,
         })
@@ -201,7 +212,7 @@ impl Error {
         cause: objectstore_types::metadata::Error,
     ) -> Self {
         Self::Metadata(MetadataError {
-            kind: ErrorKind::BadRequest,
+            kind: ErrorKind::InvalidInput,
             context: context.into(),
             cause,
         })
@@ -218,8 +229,13 @@ impl Error {
     /// Returns the appropriate log level for this error.
     pub fn level(&self) -> Level {
         match self.kind() {
-            ErrorKind::ClientStream | ErrorKind::BadRequest => Level::DEBUG,
-            ErrorKind::Transient | ErrorKind::TooManyRequests => Level::WARN,
+            ErrorKind::ClientStream | ErrorKind::InvalidInput | ErrorKind::RangeNotSatisfiable => {
+                Level::DEBUG
+            }
+            ErrorKind::AtCapacity
+            | ErrorKind::BackendRateLimited
+            | ErrorKind::BackendTimeout
+            | ErrorKind::BackendUnavailable => Level::WARN,
             ErrorKind::NotImplemented | ErrorKind::Internal => Level::ERROR,
         }
     }
@@ -256,17 +272,20 @@ impl ReqwestError {
     fn transparent(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         let kind = if let Some(status) = cause.status() {
             match status {
-                StatusCode::TOO_MANY_REQUESTS => ErrorKind::TooManyRequests,
-                StatusCode::REQUEST_TIMEOUT
-                | StatusCode::INTERNAL_SERVER_ERROR
+                StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
+                    ErrorKind::BackendTimeout
+                }
+                StatusCode::INTERNAL_SERVER_ERROR
                 | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT => ErrorKind::Transient,
-                status if status.is_client_error() => ErrorKind::BadRequest,
+                | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
+                status if status.is_client_error() => ErrorKind::InvalidInput,
                 _ => ErrorKind::Internal,
             }
-        } else if cause.is_timeout() || cause.is_connect() || cause.is_request() {
-            ErrorKind::Transient
+        } else if cause.is_timeout() {
+            ErrorKind::BackendTimeout
+        } else if cause.is_connect() || cause.is_request() {
+            ErrorKind::BackendUnavailable
         } else {
             ErrorKind::Internal
         };

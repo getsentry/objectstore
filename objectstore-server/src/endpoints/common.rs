@@ -92,15 +92,17 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
-            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
-                StatusCode::RANGE_NOT_SATISFIABLE
-            }
             ApiError::Service(error) => match error.kind() {
-                ServiceErrorKind::ClientStream | ServiceErrorKind::BadRequest => {
+                ServiceErrorKind::ClientStream | ServiceErrorKind::InvalidInput => {
                     StatusCode::BAD_REQUEST
                 }
-                ServiceErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-                ServiceErrorKind::Transient => StatusCode::SERVICE_UNAVAILABLE,
+                ServiceErrorKind::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+                ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
+                // Local load-shedding and backend unavailability are both surfaced as a
+                // temporary 503 so callers back off and retry.
+                ServiceErrorKind::AtCapacity
+                | ServiceErrorKind::BackendTimeout
+                | ServiceErrorKind::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
                 ServiceErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
                 ServiceErrorKind::Internal => {
                     objectstore_log::error!(!!self, "error handling request");

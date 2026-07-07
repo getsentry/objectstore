@@ -157,8 +157,10 @@ immediately so the caller can shed load or retry.
 
 # Error Classification
 
-The service error type exposes a coarse [`ErrorKind`](error::ErrorKind) so API
-layers can map failures without matching every specific variant.
+The service error type exposes a fine-grained [`ErrorKind`](error::ErrorKind)
+that describes the *cause* of a failure independent of HTTP semantics, so API
+layers can map failures without matching every specific variant and remain free
+to decide how each kind maps onto a status code.
 
 ## Concurrency Limit
 

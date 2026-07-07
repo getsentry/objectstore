@@ -199,7 +199,7 @@ Beyond rate limiting and the web concurrency limit, the
 [`StorageService`](objectstore_service::StorageService) enforces a second
 layer of backpressure through a concurrency limit on in-flight backend
 operations, configured via `service.max_concurrency`. When exceeded, requests
-receive HTTP 429. See the [service architecture docs](objectstore_service) for
+receive HTTP 503. See the [service architecture docs](objectstore_service) for
 details.
 
 ## KEDA Metrics
