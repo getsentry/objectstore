@@ -58,7 +58,7 @@ const ENV_PREFIX: &str = "OS__";
 /// Newtype around `String` that may protect against accidental
 /// logging of secrets in our configuration struct. Use with
 /// [`secrecy::SecretBox`].
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigSecret(String);
 
 impl ConfigSecret {
@@ -337,8 +337,9 @@ pub struct AuthZVerificationKey {
 pub struct AuthZ {
     /// Whether to enforce content-based authorization or not.
     ///
-    /// Defaults to `true`. If this is set to `false`, checks are still performed but failures
-    /// will not result in `403 Unauthorized` responses.
+    /// Defaults to `true`, resulting in `403 Unauthorized` responses for unauthorized requests. Set
+    /// to `false` to permit unauthorized requests. Authorization checks are still performed if
+    /// keys are configured, but only result in warnings.
     #[serde(default = "default_enforce")]
     pub enforce: bool,
 
@@ -355,6 +356,17 @@ pub struct AuthZ {
 
 fn default_enforce() -> bool {
     true
+}
+
+impl AuthZ {
+    /// Returns whether content-based authorization is active.
+    ///
+    /// Authorization is considered active if enforcement is enabled or at least one key is
+    /// configured. Without enforcement, authorization checks are still performed and reported but
+    /// failures will not result in `403 Unauthorized`
+    pub fn is_active(&self) -> bool {
+        self.enforce || !self.keys.is_empty()
+    }
 }
 
 impl Default for AuthZ {
@@ -508,7 +520,7 @@ pub struct Service {
     /// # Default
     ///
     /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
-    pub max_concurrency: usize,
+    pub max_concurrency: u32,
 }
 
 impl Default for Service {

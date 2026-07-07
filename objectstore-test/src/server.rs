@@ -13,8 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
-use std::sync::LazyLock;
 
 use objectstore_server::config::{
     AuthZVerificationKey, Config, MultipartUploadStorageConfig, StorageConfig,
@@ -31,26 +29,18 @@ pub use objectstore_server::config;
 pub const TEST_EDDSA_KID: &str = "test_kid";
 
 /// Filesystem path to the test Ed25519 private key PEM file.
-pub static TEST_EDDSA_PRIVKEY_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    [env!("CARGO_MANIFEST_DIR"), "config", "ed25519.private.pem"]
-        .iter()
-        .collect::<PathBuf>()
-});
+pub const TEST_EDDSA_PRIVKEY_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/config/ed25519.private.pem");
 
 /// PEM-encoded Ed25519 private key used to sign JWTs in tests.
-pub static TEST_EDDSA_PRIVKEY: LazyLock<String> =
-    LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PRIVKEY_PATH).unwrap());
+pub const TEST_EDDSA_PRIVKEY: &str = include_str!("../config/ed25519.private.pem");
 
 /// Filesystem path to the test Ed25519 public key PEM file.
-pub static TEST_EDDSA_PUBKEY_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    [env!("CARGO_MANIFEST_DIR"), "config", "ed25519.public.pem"]
-        .iter()
-        .collect::<PathBuf>()
-});
+pub const TEST_EDDSA_PUBKEY_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/config/ed25519.public.pem");
 
 /// PEM-encoded Ed25519 public key registered with the test server for JWT verification.
-pub static TEST_EDDSA_PUBKEY: LazyLock<String> =
-    LazyLock::new(|| std::fs::read_to_string(&*TEST_EDDSA_PUBKEY_PATH).unwrap());
+pub const TEST_EDDSA_PUBKEY: &str = include_str!("../config/ed25519.public.pem");
 
 /// An in-process test server for use in integration tests.
 ///
@@ -84,7 +74,7 @@ impl TestServer {
             TEST_EDDSA_KID.into(),
             AuthZVerificationKey {
                 max_permissions: Permission::rwd(),
-                key_files: vec![TEST_EDDSA_PUBKEY_PATH.clone()],
+                key_files: vec![TEST_EDDSA_PUBKEY_PATH.into()],
             },
         )]);
 

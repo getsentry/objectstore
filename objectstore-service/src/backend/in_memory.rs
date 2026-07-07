@@ -106,7 +106,7 @@ impl super::common::Backend for InMemoryBackend {
         self.name
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 
@@ -469,7 +469,7 @@ impl Entry {
     pub fn expect_not_found(&self) {
         match self {
             Entry::NotFound => (),
-            _ => panic!("expected not found entry, got {:?}", self),
+            _ => panic!("expected not found entry, got {self:?}"),
         }
     }
 
@@ -477,7 +477,7 @@ impl Entry {
     pub fn expect_object(&self) -> (Metadata, Bytes) {
         match self {
             Entry::Object(metadata, bytes) => (metadata.clone(), bytes.clone()),
-            _ => panic!("expected object entry, got {:?}", self),
+            _ => panic!("expected object entry, got {self:?}"),
         }
     }
 
@@ -485,7 +485,7 @@ impl Entry {
     pub fn expect_tombstone(&self) -> Tombstone {
         match self {
             Entry::Tombstone(tombstone) => tombstone.clone(),
-            _ => panic!("expected tombstone entry, got {:?}", self),
+            _ => panic!("expected tombstone entry, got {self:?}"),
         }
     }
 }
@@ -516,7 +516,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
             ..Default::default()
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(meta.content_type, "text/plain".to_string());
         assert_eq!(
             meta.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(meta.origin, Some("203.0.113.42".into()));
         assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());

@@ -7,8 +7,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
-use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode};
+use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
+use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
@@ -63,7 +64,7 @@ const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 /// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
 const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
 /// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {
@@ -127,9 +128,8 @@ fn metadata_to_gcs_headers(
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
     // GCS custom-time for lifecycle expiration
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let expires_at =
-            humantime::format_rfc3339_seconds(std::time::SystemTime::now() + expires_in);
+    if let Some(expires_at) = metadata.time_expires {
+        let expires_at = humantime::format_rfc3339_seconds(expires_at);
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -165,7 +165,7 @@ where
         method: Method,
         id: &ObjectId,
         range: Option<ByteRange>,
-    ) -> Result<Option<(Metadata, Option<ContentRange>, reqwest::Response)>> {
+    ) -> Result<Option<(Metadata, Option<ContentRange>, Response)>> {
         let object_url = self.object_url(id);
 
         let mut builder = self.request(method, &object_url).await?;
@@ -179,6 +179,7 @@ where
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
+            response.drain_body().await;
             return Ok(None);
         }
 
@@ -188,20 +189,17 @@ where
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok());
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-            match total {
-                Some(total) => return Err(Error::RangeNotSatisfiable { total }),
-                None => {
-                    return Err(Error::Generic {
-                        context: format!("S3: 416 response with invalid Content-Range: {:?}", raw),
-                        cause: None,
-                    });
-                }
-            }
+            let err = match total {
+                Some(total) => Error::RangeNotSatisfiable { total },
+                None => Error::generic(format!(
+                    "S3: 416 response with invalid Content-Range: {raw:?}"
+                )),
+            };
+            response.drain_body().await;
+            return Err(err);
         }
 
-        let response = response
-            .error_for_status()
-            .map_err(|cause| Error::reqwest("S3: failed to get object", cause))?;
+        let response = response.check_error("S3: failed to get object").await?;
 
         let headers = response.headers();
         let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)
@@ -227,6 +225,7 @@ where
             None
         };
 
+        // TODO: extract into dedicated call from service
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
             // TODO: Inject the access time from the request.
@@ -239,7 +238,11 @@ where
                 .unwrap_or(access_time);
 
             if expire_at < access_time + tti - TTI_DEBOUNCE {
-                self.update_metadata(id, &metadata).await?;
+                // The write helper persists `time_expires` verbatim, so refresh it to the bumped
+                // deadline here. The returned `metadata` keeps the pre-access value.
+                let mut bumped = metadata.clone();
+                bumped.time_expires = Some(access_time + tti);
+                self.update_metadata(id, &bumped).await?;
             }
         }
 
@@ -267,14 +270,10 @@ where
             )
             .send()
             .await
-            .map_err(|cause| Error::reqwest("S3: failed to send TTI update request", cause))?
-            .error_for_status()
-            .map_err(|cause| {
-                Error::reqwest(
-                    "S3: failed to update expiration time for object with TTI",
-                    cause,
-                )
-            })?;
+            .check_error("S3: update expiration time")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -326,8 +325,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .body(Body::wrap_stream(stream))
             .send()
             .await
-            .and_then(|response| response.error_for_status())
-            .map_err(|cause| Error::reqwest("S3: failed to put object", cause))?;
+            .check_error("S3: failed to put object")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -364,12 +365,16 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .map_err(|cause| Error::reqwest("S3: failed to send delete request", cause))?;
 
         // Do not error for objects that do not exist.
-        if response.status() != StatusCode::NOT_FOUND {
-            objectstore_log::debug!("Object not found");
-            response
-                .error_for_status()
-                .map_err(|cause| Error::reqwest("S3: failed to delete object", cause))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            response.drain_body().await;
+            return Ok(());
         }
+
+        response
+            .check_error("S3: failed to delete object")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -401,6 +406,23 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    #[test]
+    fn metadata_to_gcs_headers_uses_time_expires() {
+        let expires = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+
+        // The lifecycle custom-time is the server-resolved expiry (second precision).
+        let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
+        let expected = humantime::format_rfc3339_seconds(expires).to_string();
+        assert_eq!(custom_time, expected);
     }
 
     #[tokio::test]

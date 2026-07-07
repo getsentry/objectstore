@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
@@ -16,6 +15,7 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
+use super::response::ResponseExt;
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
@@ -79,7 +79,7 @@ const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 /// Permission scopes required for accessing GCS.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read_write"];
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// How many times to retry failed operations.
 const REQUEST_RETRY_COUNT: usize = 2;
 
@@ -146,9 +146,7 @@ impl GcsObject {
         // For time-based expiration, set the `customTime` field. The bucket must have a
         // `daysSinceCustomTime` lifecycle rule configured to delete objects with this field set.
         // This rule automatically skips objects without `customTime` set.
-        if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-            gcs_object.custom_time = Some(SystemTime::now() + expires_in);
-        }
+        gcs_object.custom_time = metadata.time_expires;
 
         if let Some(compression) = metadata.compression {
             gcs_object.content_encoding = Some(compression.to_string());
@@ -165,6 +163,12 @@ impl GcsObject {
             gcs_object
                 .metadata
                 .insert(GcsMetaKey::Origin, origin.clone());
+        }
+
+        if let Some(filename) = &metadata.filename {
+            gcs_object
+                .metadata
+                .insert(GcsMetaKey::Filename, filename.clone());
         }
 
         for (key, value) in &metadata.custom {
@@ -195,6 +199,7 @@ impl GcsObject {
             .unwrap_or_default();
 
         let origin = self.metadata.remove(&GcsMetaKey::Origin);
+        let filename = self.metadata.remove(&GcsMetaKey::Filename);
 
         let content_type = self.content_type;
         let compression = self
@@ -225,8 +230,7 @@ impl GcsObject {
             } else {
                 return Err(Error::Generic {
                     context: format!(
-                        "GCS: unexpected built-in metadata key in object metadata: {}",
-                        key
+                        "GCS: unexpected built-in metadata key in object metadata: {key}"
                     ),
                     cause: None,
                 });
@@ -238,6 +242,7 @@ impl GcsObject {
             expiration_policy,
             compression,
             origin,
+            filename,
             size,
             custom,
             time_created,
@@ -253,6 +258,8 @@ enum GcsMetaKey {
     Expiration,
     /// Built-in metadata key for [`Metadata::origin`].
     Origin,
+    /// Built-in metadata key for [`Metadata::filename`].
+    Filename,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
     /// User-defined custom metadata key.
@@ -270,6 +277,7 @@ impl std::str::FromStr for GcsMetaKey {
         Ok(match s.strip_prefix(BUILTIN_META_PREFIX) {
             Some("expiration") => GcsMetaKey::Expiration,
             Some("origin") => GcsMetaKey::Origin,
+            Some("filename") => GcsMetaKey::Filename,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
                 Some(key) => GcsMetaKey::Custom(key.to_string()),
@@ -284,13 +292,14 @@ impl fmt::Display for GcsMetaKey {
         match self {
             Self::Expiration => write!(f, "{BUILTIN_META_PREFIX}expiration"),
             Self::Origin => write!(f, "{BUILTIN_META_PREFIX}origin"),
+            Self::Filename => write!(f, "{BUILTIN_META_PREFIX}filename"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
             Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
         }
     }
 }
 
-impl<'de> serde::Deserialize<'de> for GcsMetaKey {
+impl<'de> Deserialize<'de> for GcsMetaKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -300,7 +309,7 @@ impl<'de> serde::Deserialize<'de> for GcsMetaKey {
     }
 }
 
-impl serde::Serialize for GcsMetaKey {
+impl Serialize for GcsMetaKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -313,8 +322,7 @@ impl serde::Serialize for GcsMetaKey {
 fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
-    if let Some(expires_in) = metadata.expiration_policy.expires_in() {
-        let custom_time = SystemTime::now() + expires_in;
+    if let Some(custom_time) = metadata.time_expires {
         let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
@@ -350,6 +358,10 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
         insert_gcs_meta_header(&mut headers, &GcsMetaKey::Origin, origin)?;
     }
 
+    if let Some(filename) = &metadata.filename {
+        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Filename, filename)?;
+    }
+
     for (key, value) in &metadata.custom {
         insert_gcs_meta_header(&mut headers, &GcsMetaKey::Custom(key.clone()), value)?;
     }
@@ -376,20 +388,20 @@ fn insert_gcs_meta_header(
     Ok(())
 }
 
-/// Returns `true` if the error is a transient reqwest failure worth retrying.
-fn is_retryable(error: &Error) -> bool {
-    let Error::Reqwest(error) = error else {
+/// Returns `true` if the error is a transient backend failure worth retrying.
+fn error_is_retryable(error: &Error) -> bool {
+    let Error::Backend(e) = error else {
         return false;
     };
-    let cause = error.cause();
-
-    if cause.is_timeout() || cause.is_connect() || cause.is_request() {
-        return true;
+    match e.status() {
+        Some(status) => status_is_retryable(status),
+        None => e
+            .cause()
+            .is_some_and(|c| c.is_timeout() || c.is_connect() || c.is_request()),
     }
+}
 
-    let Some(status) = cause.status() else {
-        return false;
-    };
+fn status_is_retryable(status: StatusCode) -> bool {
     // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
         status,
@@ -513,7 +525,7 @@ impl GcsBackend {
         loop {
             match f().await {
                 Ok(res) => return Ok(res),
-                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && is_retryable(e) => {
+                Err(ref e) if retry_count < REQUEST_RETRY_COUNT && error_is_retryable(e) => {
                     retry_count += 1;
                     objectstore_metrics::count!("gcs.retries", action = action);
                     objectstore_log::warn!(!!e, retry_count, action, "Retrying request");
@@ -539,12 +551,13 @@ impl GcsBackend {
                     .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
+                    resp.drain_body().await;
                     return Ok(None);
                 }
 
                 let metadata: GcsObject = resp
-                    .error_for_status()
-                    .map_err(|e| Error::reqwest("GCS: get metadata status", e))?
+                    .check_error("GCS: get metadata status")
+                    .await?
                     .json()
                     .await
                     .map_err(|e| Error::reqwest("GCS: get metadata parse", e))?;
@@ -596,8 +609,10 @@ impl GcsBackend {
                 .json(&CustomTimeRequest { custom_time })
                 .send()
                 .await
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| Error::reqwest("GCS: update custom time", e))?;
+                .check_error("GCS: update custom time")
+                .await?
+                .drain_body()
+                .await;
             Ok(())
         })
         .await
@@ -619,7 +634,7 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 
@@ -666,8 +681,10 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: upload object", e))?;
+            .check_error("GCS: upload object")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -701,22 +718,17 @@ impl Backend for GcsBackend {
                         .get(header::CONTENT_RANGE)
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-                    match total {
-                        Some(total) => return Err(Error::RangeNotSatisfiable { total }),
-                        None => {
-                            return Err(Error::Generic {
-                                context: format!(
-                                    "GCS: 416 response with invalid Content-Range: {:?}",
-                                    raw
-                                ),
-                                cause: None,
-                            });
-                        }
-                    }
+                    let err = match total {
+                        Some(total) => Error::RangeNotSatisfiable { total },
+                        None => Error::generic(format!(
+                            "GCS: 416 response with invalid Content-Range: {raw:?}"
+                        )),
+                    };
+                    resp.drain_body().await;
+                    return Err(err);
                 }
 
-                resp.error_for_status()
-                    .map_err(|e| Error::reqwest("GCS: get payload", e))
+                resp.check_error("GCS: get payload").await
             })
             .await?;
 
@@ -766,11 +778,14 @@ impl Backend for GcsBackend {
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
+                resp.drain_body().await;
                 return Ok(());
             }
 
-            resp.error_for_status()
-                .map_err(|e| Error::reqwest("GCS: delete object", e))?;
+            resp.check_error("GCS: delete object")
+                .await?
+                .drain_body()
+                .await;
 
             Ok(())
         })
@@ -785,9 +800,9 @@ struct XmlInitiateMultipartUploadResponse {
 }
 
 impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
-    type Error = crate::error::Error;
+    type Error = Error;
 
-    fn try_from(r: XmlInitiateMultipartUploadResponse) -> crate::error::Result<Self> {
+    fn try_from(r: XmlInitiateMultipartUploadResponse) -> Result<Self> {
         Ok(UploadId::new(r.upload_id)?)
     }
 }
@@ -911,8 +926,8 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = builder
             .send()
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: initiate multipart upload", e))?;
+            .check_error("GCS: initiate multipart upload")
+            .await?;
 
         let body = resp
             .bytes()
@@ -954,11 +969,7 @@ impl MultipartUploadBackend for GcsBackend {
             builder = builder.header("content-md5", md5);
         }
 
-        let resp = builder
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: upload part", e))?;
+        let resp = builder.send().await.check_error("GCS: upload part").await?;
 
         let etag = resp
             .headers()
@@ -966,6 +977,8 @@ impl MultipartUploadBackend for GcsBackend {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned())
             .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
+
+        resp.drain_body().await;
 
         Ok(etag)
     }
@@ -996,8 +1009,8 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: list parts", e))?;
+            .check_error("GCS: list parts")
+            .await?;
 
         let body = resp
             .bytes()
@@ -1027,8 +1040,10 @@ impl MultipartUploadBackend for GcsBackend {
             .await?
             .send()
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
+            .check_error("GCS: abort multipart upload")
+            .await?
+            .drain_body()
+            .await;
 
         Ok(())
     }
@@ -1057,8 +1072,8 @@ impl MultipartUploadBackend for GcsBackend {
             .body(xml)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::reqwest("GCS: complete multipart upload", e))?;
+            .check_error("GCS: complete multipart upload")
+            .await?;
 
         let body = resp
             .bytes()
@@ -1116,6 +1131,7 @@ mod tests {
             expiration_policy: ExpirationPolicy::Manual,
             compression: None,
             origin: Some("203.0.113.42".into()),
+            filename: Some("hello.txt".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             time_created: Some(SystemTime::now()),
             time_expires: None,
@@ -1133,10 +1149,27 @@ mod tests {
         assert_eq!(str_payload, "hello, world");
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.origin, metadata.origin);
+        assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
         assert!(metadata.time_created.is_some());
 
         Ok(())
+    }
+
+    #[test]
+    fn from_metadata_uses_provided_time_expires() {
+        let expires = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+
+        let gcs_object = GcsObject::from_metadata(&metadata);
+        assert_eq!(gcs_object.custom_time, Some(expires));
+
+        let roundtripped = gcs_object.into_metadata().unwrap();
+        assert_eq!(roundtripped.time_expires, Some(expires));
     }
 
     #[tokio::test]
@@ -1222,6 +1255,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1245,6 +1279,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1299,10 +1334,11 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(SystemTime::now() + tti),
             ..Default::default()
         };
 
@@ -1313,7 +1349,7 @@ mod tests {
         // Manually set custom_time to just inside the bump window.
         // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
         let object_url = backend.object_url(&id)?;
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
         backend.update_custom_time(object_url, old_deadline).await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
@@ -1342,10 +1378,11 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(SystemTime::now() + tti),
             ..Default::default()
         };
 
@@ -1743,6 +1780,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 
@@ -1760,6 +1798,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
             ..Default::default()
         };
 

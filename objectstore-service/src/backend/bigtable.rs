@@ -38,7 +38,7 @@ use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
-use objectstore_types::range::ByteRange;
+use objectstore_types::range::{ByteRange, ContentRange};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 
@@ -136,7 +136,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// reconnection, resulting in increased latency for those requests.
 const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
 /// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 3600); // 1 day
+const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// Permission scopes required for accessing the BigTable data API.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"];
 
@@ -213,11 +213,7 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
 
 /// Wraps `inner` so that it only matches live (non-expired) cells.
 fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
-    let now_micros = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-        * 1000;
+    let now_micros = time_to_micros_saturating(SystemTime::now());
 
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
@@ -442,20 +438,28 @@ fn delete_row_mutation() -> v2::Mutation {
     ))
 }
 
+/// Returns a clone of `metadata` with `time_expires` refreshed for a TTI bump.
+///
+/// [`object_mutations`] persists `time_expires` verbatim, so the bumped deadline must be applied
+/// to the metadata before rewriting the row.
+fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
+    let mut metadata = metadata.clone();
+    metadata.time_expires = metadata
+        .expiration_policy
+        .expires_in()
+        .map(|tti| SystemTime::now() + tti);
+    metadata
+}
+
 /// Builds the three mutations that write an object row: clear existing data,
 /// then set the payload and metadata cells.
 ///
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
-fn object_mutations(
-    mut metadata: Metadata,
-    payload: Vec<u8>,
-    now: SystemTime,
-) -> Result<[v2::Mutation; 3]> {
-    let (family, timestamp_micros) = match metadata.expiration_policy {
-        ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-        ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-        ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mutation; 3]> {
+    let (family, timestamp_micros) = match metadata.time_expires {
+        None => (FAMILY_MANUAL, -1),
+        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
     };
 
     // Record the payload size in the metadata before persisting it.
@@ -796,11 +800,11 @@ impl BigTableBackend {
     async fn put_row(
         &self,
         path: Vec<u8>,
-        metadata: &Metadata,
+        metadata: Metadata,
         payload: Vec<u8>,
         action: &'static str,
     ) -> Result<v2::MutateRowResponse> {
-        let mutations = object_mutations(metadata.clone(), payload, SystemTime::now())?;
+        let mutations = object_mutations(metadata, payload)?;
         self.mutate(path, mutations, action).await
     }
 
@@ -837,8 +841,9 @@ impl BigTableBackend {
                 let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
             }
             RowData::Object { metadata, payload } if loaded => {
+                let bumped = bumped_tti_metadata(metadata);
                 let _ = self
-                    .put_row(path, metadata, payload.clone(), "tti-bump")
+                    .put_row(path, bumped, payload.clone(), "tti-bump")
                     .await;
             }
             RowData::Object { metadata, .. } => {
@@ -847,7 +852,8 @@ impl BigTableBackend {
                     .await;
 
                 if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
-                    let _ = self.put_row(path, metadata, payload, "tti-bump").await;
+                    let bumped = bumped_tti_metadata(metadata);
+                    let _ = self.put_row(path, bumped, payload, "tti-bump").await;
                 }
             }
         }
@@ -907,8 +913,9 @@ impl Backend for BigTableBackend {
             payload.push(chunk);
         }
 
-        self.put_row(path, metadata, payload.into_bytes().into(), "put")
+        self.put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
+
         Ok(())
     }
 
@@ -955,7 +962,7 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata.clone(), payload.to_vec(), SystemTime::now())?;
+        let mutations = object_mutations(metadata.clone(), payload.to_vec())?;
 
         for _ in 0..CAS_RETRY_COUNT {
             let write_succeeded = self
@@ -997,7 +1004,7 @@ impl HighVolumeBackend for BigTableBackend {
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
-        _range: Option<ByteRange>,
+        range: Option<ByteRange>,
     ) -> Result<TieredGet> {
         objectstore_log::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1006,6 +1013,7 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredGet::NotFound);
         };
 
+        // TODO: extract into dedicated call from service
         if row.needs_tti_bump() {
             self.bump_tti(path.clone(), &row, true, id).await;
         }
@@ -1017,11 +1025,14 @@ impl HighVolumeBackend for BigTableBackend {
             }),
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
+                let payload = Bytes::from(payload);
                 if metadata.size.is_none() {
                     // If object size wasn't written into the metadata, re-compute it now
                     metadata.size = Some(payload.len());
                 }
-                TieredGet::Object(metadata, None, crate::stream::single(payload))
+
+                let (content_range, payload) = apply_range(payload, range)?;
+                TieredGet::Object(metadata, content_range, crate::stream::single(payload))
             }
         })
     }
@@ -1041,6 +1052,7 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredMetadata::NotFound);
         };
 
+        // TODO: extract into dedicated call from service
         if row.needs_tti_bump() {
             self.bump_tti(path.clone(), &row, false, id).await;
         }
@@ -1119,7 +1131,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         let mutations = match write {
             TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
-            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec(), now)?.into(),
+            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec())?.into(),
             TieredWrite::Delete => vec![delete_row_mutation()],
         };
 
@@ -1142,6 +1154,15 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
         ),
         cause: None,
     })?;
+
+    system_time_to_micros(deadline)
+}
+
+/// Converts a [`SystemTime`] to a microsecond-precision unix timestamp.
+///
+/// As required by BigTable, the resulting timestamp has millisecond precision, with the last digits
+/// at 0.
+fn system_time_to_micros(deadline: SystemTime) -> Result<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| Error::Generic {
@@ -1152,10 +1173,21 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
             cause: Some(Box::new(e)),
         })?
         .as_millis();
+
     (millis * 1000).try_into().map_err(|e| Error::Generic {
-        context: format!("failed to convert {}ms to i64 microseconds", millis),
+        context: format!("failed to convert {millis}ms to i64 microseconds"),
         cause: Some(Box::new(e)),
     })
+}
+
+/// Converts a wall-clock time to Bigtable's microsecond timestamp, saturating at `i64::MAX`
+/// (unreachable until approximately year 294,247).
+fn time_to_micros_saturating(t: SystemTime) -> i64 {
+    let millis = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis * 1000).unwrap_or(i64::MAX)
 }
 
 /// Converts a microsecond-precision unix timestamp to a `SystemTime`.
@@ -1221,6 +1253,25 @@ fn is_retryable(error: &BigTableError) -> bool {
     }
 }
 
+/// Resolves an optional byte range against a payload buffer, returning the
+/// applicable content range and the (potentially narrowed) payload.
+///
+/// When `range` is `None`, returns the full payload unchanged. Uses
+/// `Bytes::slice` to avoid copying data.
+fn apply_range(payload: Bytes, range: Option<ByteRange>) -> Result<(Option<ContentRange>, Bytes)> {
+    let Some(byte_range) = range else {
+        return Ok((None, payload));
+    };
+
+    let total = payload.len() as u64;
+    let content_range = byte_range
+        .resolve(total)
+        .ok_or(Error::RangeNotSatisfiable { total })?;
+
+    let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
+    Ok((Some(content_range), sliced))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1263,7 +1314,13 @@ mod tests {
         now: SystemTime,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata.clone(), payload.to_vec(), now)?;
+        // Resolve `time_expires` from `now` (as `from_insert_headers` does) unless the test set
+        // it explicitly, so `object_mutations` has an expiration to persist.
+        let mut metadata = metadata.clone();
+        if metadata.time_expires.is_none() {
+            metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+        }
+        let mutations = object_mutations(metadata, payload.to_vec())?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -1299,11 +1356,7 @@ mod tests {
         } else {
             let t =
                 time_expires.unwrap_or(SystemTime::now() + expiration_policy.expires_in().unwrap());
-            let timestamp = t
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            (FAMILY_GC, timestamp as i64 * 1000)
+            (FAMILY_GC, time_to_micros_saturating(t))
         };
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1378,6 +1431,34 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies that a server-resolved `time_expires` is persisted verbatim, not recomputed.
+    #[tokio::test]
+    async fn test_time_expires_roundtrip() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let ttl = Duration::from_hours(2 * 24);
+        let expires = SystemTime::now() + ttl;
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &metadata, b"data", SystemTime::now()).await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        // Bigtable stores the deadline as the GC cell timestamp at millisecond precision.
+        let stored_ms = meta
+            .time_expires
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_millis();
+        let expected_ms = expires.duration_since(SystemTime::UNIX_EPOCH)?.as_millis();
+        assert_eq!(stored_ms, expected_ms);
+
+        Ok(())
+    }
+
     /// Verifies that absent rows return None or succeed silently for all read/delete operations.
     #[tokio::test]
     async fn test_nonexistent() -> Result<()> {
@@ -1441,7 +1522,7 @@ mod tests {
     async fn test_tti_bump() -> Result<()> {
         let backend = create_test_backend().await?;
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
@@ -1449,7 +1530,7 @@ mod tests {
 
         // Pass a backdated `now` so the written expiry is inside the bump window:
         // expire_at = past_now + tti = now - TTI_DEBOUNCE - 60s (stale but not yet expired).
-        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_secs(60);
+        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_mins(1);
 
         // Sub-sequence 1: get_object triggers bump (loaded=true path).
         let id1 = make_id();
@@ -1494,7 +1575,7 @@ mod tests {
 
         let id = make_id();
         // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
-        let tti = Duration::from_secs(2 * 24 * 3600); // 2 days
+        let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
@@ -1734,7 +1815,7 @@ mod tests {
 
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(3600));
+        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy,
@@ -1971,7 +2052,7 @@ mod tests {
         // A future cell timestamp (now + TTL) is required so `expires_before` does not
         // immediately filter the row.
         let id = make_id();
-        let ttl = Duration::from_secs(2 * 24 * 3600);
+        let ttl = Duration::from_hours(2 * 24);
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
@@ -1992,11 +2073,11 @@ mod tests {
         let id = make_id();
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let tti = Duration::from_secs(2 * 24 * 3600); // must exceed TTI_DEBOUNCE (1 day)
+        let tti = Duration::from_hours(2 * 24); // must exceed TTI_DEBOUNCE (1 day)
 
         // Place time_expires just inside the bump window: past `now + tti - TTI_DEBOUNCE`
         // but still in the future so `expires_before(now)` does not filter the row.
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_secs(60);
+        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
         write_legacy_tombstone(
             &backend,
             &id,
@@ -2113,7 +2194,7 @@ mod tests {
         let new_lt_id = ObjectId::random(id.context().clone());
         let new_tombstone = Tombstone {
             target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
         };
         let committed = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
@@ -2155,6 +2236,108 @@ mod tests {
 
         let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"data");
+
+        Ok(())
+    }
+
+    // --- Range Request Tests ---
+
+    async fn put_range_test_object(backend: &BigTableBackend) -> Result<ObjectId> {
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            ..Default::default()
+        };
+        let payload = b"Hello, range requests!";
+        backend
+            .put_object(&id, &metadata, stream::single(payload.as_slice()))
+            .await?;
+        Ok(id)
+    }
+
+    #[tokio::test]
+    async fn get_object_range_bounded() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = put_range_test_object(&backend).await?;
+
+        let (_, content_range, stream) = backend
+            .get_object(&id, Some(ByteRange::Bounded(7, 11)))
+            .await?
+            .unwrap();
+        let data = stream::read_to_vec(stream).await?;
+        assert_eq!(&data, b"range");
+
+        let content_range = content_range.unwrap();
+        assert_eq!(content_range.start, 7);
+        assert_eq!(content_range.end, 11);
+        assert_eq!(content_range.total, 22);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_object_range_from() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = put_range_test_object(&backend).await?;
+
+        let (_, content_range, stream) = backend
+            .get_object(&id, Some(ByteRange::From(7)))
+            .await?
+            .unwrap();
+        let data = stream::read_to_vec(stream).await?;
+        assert_eq!(&data, b"range requests!");
+
+        let content_range = content_range.unwrap();
+        assert_eq!(content_range.start, 7);
+        assert_eq!(content_range.end, 21);
+        assert_eq!(content_range.total, 22);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_object_range_last() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = put_range_test_object(&backend).await?;
+
+        let (_, content_range, stream) = backend
+            .get_object(&id, Some(ByteRange::Last(9)))
+            .await?
+            .unwrap();
+        let data = stream::read_to_vec(stream).await?;
+        assert_eq!(&data, b"requests!");
+
+        let content_range = content_range.unwrap();
+        assert_eq!(content_range.start, 13);
+        assert_eq!(content_range.end, 21);
+        assert_eq!(content_range.total, 22);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_object_range_unsatisfiable() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = put_range_test_object(&backend).await?;
+
+        match backend.get_object(&id, Some(ByteRange::From(100))).await {
+            Err(Error::RangeNotSatisfiable { total }) => assert_eq!(total, 22),
+            Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
+            Err(e) => panic!("expected RangeNotSatisfiable, got {e:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_object_no_range_returns_full_payload() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = put_range_test_object(&backend).await?;
+
+        let (_, content_range, stream) = backend.get_object(&id, None).await?.unwrap();
+        let data = stream::read_to_vec(stream).await?;
+        assert_eq!(&data, b"Hello, range requests!");
+        assert!(content_range.is_none());
 
         Ok(())
     }

@@ -163,7 +163,7 @@ impl Scopes {
 
     /// Returns the value of the scope with the given key, if it exists.
     pub fn get_value(&self, key: &str) -> Option<&str> {
-        self.get(key).map(|s| s.value())
+        self.get(key).map(Scope::value)
     }
 
     /// Returns an iterator over all scopes.

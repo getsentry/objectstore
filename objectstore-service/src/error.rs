@@ -8,6 +8,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::fmt;
 
 use objectstore_log::Level;
 use reqwest::StatusCode;
@@ -46,6 +47,38 @@ pub enum ErrorKind {
     Internal,
 }
 
+/// Structured error detail parsed from a backend HTTP error response.
+///
+/// Formats conditionally: includes only the fields that are non-empty.
+#[derive(Debug)]
+pub struct BackendDetail {
+    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
+    pub code: String,
+    /// Human-readable error message from the response body.
+    pub message: String,
+}
+
+impl BackendDetail {
+    /// Creates a new [`BackendDetail`] with empty code and message.
+    pub fn none() -> Self {
+        Self {
+            code: String::new(),
+            message: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for BackendDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
+            (true, false) => write!(f, "{}", self.message),
+            (false, true) => write!(f, "backend code {}", self.code),
+            (true, true) => Ok(()),
+        }
+    }
+}
+
 /// Error type for service operations.
 #[derive(Debug, ThisError, derive_error_kind::ErrorKind)]
 #[error_kind(ErrorKind)]
@@ -65,10 +98,10 @@ pub enum Error {
     #[error_kind(transparent)]
     Serde(#[from] SerdeError),
 
-    /// Reqwest errors from storage backend HTTP calls.
+    /// Errors from storage backend HTTP calls, transport-level or application-level.
     #[error(transparent)]
     #[error_kind(transparent)]
-    Reqwest(#[from] ReqwestError),
+    Backend(#[from] BackendError),
 
     /// Errors related to de/serialization and parsing of object metadata.
     #[error(transparent)]
@@ -150,26 +183,14 @@ impl Error {
         Self::Panic(msg)
     }
 
-    /// Creates an [`Error`] from a reqwest error with context, categorizing it as an internal
-    /// error.
+    /// Creates an [`Error`] from a reqwest error with context, categorizing it by status code or
+    /// transport-level failure signal.
     pub fn reqwest(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
         if let Some(client_error) = stream::unpack_client_error(&cause) {
             return Self::ClientStream(client_error);
         }
 
-        Self::Reqwest(ReqwestError::internal(context, cause))
-    }
-
-    /// Creates an [`Error`] from a reqwest error, categorizing it according to its status code.
-    pub fn reqwest_transparent(
-        context: impl Into<Cow<'static, str>>,
-        cause: reqwest::Error,
-    ) -> Self {
-        if let Some(client_error) = stream::unpack_client_error(&cause) {
-            return Self::ClientStream(client_error);
-        }
-
-        Self::Reqwest(ReqwestError::transparent(context, cause))
+        Self::Backend(BackendError::from_reqwest(context, cause))
     }
 
     /// Creates an [`Error::Serde`] from a serde error with context, categorizing it as an internal
@@ -250,61 +271,108 @@ impl From<std::io::Error> for Error {
     }
 }
 
-/// Reqwest error with context and kind.
-#[derive(Debug, ThisError)]
-#[error("reqwest error: {context}")]
-pub struct ReqwestError {
+/// A backend HTTP or transport-level error.
+///
+/// Unifies transport-level failures (no response received, e.g. connection reset or timeout) and
+/// HTTP error responses (4xx/5xx), with or without a structured error body, under a single kind
+/// classification.
+#[derive(Debug)]
+pub struct BackendError {
     kind: ErrorKind,
     context: Cow<'static, str>,
-    #[source]
-    cause: reqwest::Error,
+    status: Option<StatusCode>,
+    detail: BackendDetail,
+    cause: Option<reqwest::Error>,
 }
 
-impl ReqwestError {
-    fn internal(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
+impl BackendError {
+    /// Creates a [`BackendError`] for an HTTP error response, categorizing it by status code.
+    pub(crate) fn from_status(
+        context: impl Into<Cow<'static, str>>,
+        status: StatusCode,
+        detail: BackendDetail,
+    ) -> Self {
         Self {
-            kind: ErrorKind::Internal,
+            kind: kind_for_status(status),
             context: context.into(),
-            cause,
+            status: Some(status),
+            detail,
+            cause: None,
         }
     }
 
-    fn transparent(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
-        let kind = if let Some(status) = cause.status() {
-            match status {
-                StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
-                StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
-                    ErrorKind::BackendTimeout
-                }
-                StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
-                status if status.is_client_error() => ErrorKind::InvalidInput,
-                _ => ErrorKind::Internal,
-            }
-        } else if cause.is_timeout() {
-            ErrorKind::BackendTimeout
-        } else if cause.is_connect() || cause.is_request() {
-            ErrorKind::BackendUnavailable
-        } else {
-            ErrorKind::Internal
+    /// Creates a [`BackendError`] from a reqwest error, categorizing it by status code if the
+    /// error carries one, or by transport-level failure signal otherwise.
+    fn from_reqwest(context: impl Into<Cow<'static, str>>, cause: reqwest::Error) -> Self {
+        let status = cause.status();
+        let kind = match status {
+            Some(status) => kind_for_status(status),
+            None if cause.is_timeout() => ErrorKind::BackendTimeout,
+            None if cause.is_connect() || cause.is_request() => ErrorKind::BackendUnavailable,
+            None => ErrorKind::Internal,
         };
 
         Self {
             kind,
             context: context.into(),
-            cause,
+            status,
+            detail: BackendDetail::none(),
+            cause: Some(cause),
         }
     }
 
-    /// Returns the service-level category for this reqwest error.
+    /// Returns the service-level category for this backend error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
-    /// Returns the underlying reqwest error.
-    pub fn cause(&self) -> &reqwest::Error {
-        &self.cause
+    /// Returns the HTTP status code, if a response was received.
+    pub fn status(&self) -> Option<StatusCode> {
+        self.status
+    }
+
+    /// Returns the parsed error code and message from the response body, if any.
+    pub fn detail(&self) -> &BackendDetail {
+        &self.detail
+    }
+
+    /// Returns the underlying reqwest error, if this is a transport-level failure.
+    pub fn cause(&self) -> Option<&reqwest::Error> {
+        self.cause.as_ref()
+    }
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.context)?;
+        if let Some(status) = self.status {
+            write!(f, " ({status})")?;
+        }
+        if !self.detail.code.is_empty() || !self.detail.message.is_empty() {
+            write!(f, ". {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BackendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause
+            .as_ref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Maps an HTTP status code from a storage backend to a service-level [`ErrorKind`].
+fn kind_for_status(status: StatusCode) -> ErrorKind {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ErrorKind::BackendTimeout,
+        StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
+        status if status.is_client_error() => ErrorKind::InvalidInput,
+        _ => ErrorKind::Internal,
     }
 }
 

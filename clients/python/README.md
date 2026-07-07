@@ -32,7 +32,7 @@ Within a Usecase, Scopes provide further isolation — typically keyed by organi
 and project IDs. A Session ties a Client to a specific Usecase + Scope for operations.
 
 Scope components form a hierarchical path, so their order matters:
-`org=42/project=1337` and `project=1337/org=42` are different scopes. We recommend
+`org=42;project=1337` and `project=1337;org=42` are different scopes. We recommend
 using `org` and `project` as the first two components.
 
 ```python
@@ -118,7 +118,7 @@ chunks = [b"part1", b"part2", b"part3", b"part4"]
 
 def upload_part(part_number: int, data: bytes):
     compressed = compressor.compress(data)
-    return upload.upload_part(
+    return upload.put_part(
         compressed, part_number=part_number, content_length=len(compressed)
     )
 

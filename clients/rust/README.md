@@ -38,7 +38,7 @@ Within a Usecase, [`Scope`]s provide further isolation — typically keyed by or
 and project IDs. A [`Session`] ties a Client to a specific Usecase + Scope for operations.
 
 Scope components form a hierarchical path, so their order matters:
-`org=42/project=1337` and `project=1337/org=42` are different scopes. The convenience
+`org=42;project=1337` and `project=1337;org=42` are different scopes. The convenience
 method [`Usecase::for_project`] pushes `org` then `project` in the recommended order.
 
 ```rust,ignore
@@ -129,6 +129,13 @@ session.put("payload")
 ```
 
 ### Multipart Upload API
+
+> **Feature flag required:** Enable the `multipart` Cargo feature to use this API.
+> It is not included in the default feature set.
+>
+> ```toml
+> objectstore-client = { version = "...", features = ["multipart"] }
+> ```
 
 For large objects, use multipart uploads to upload parts concurrently with bounded
 parallelism.
@@ -266,7 +273,7 @@ session
     .await
     .error_for_failures()
     .await
-    .map_err(|errors| { /* errors: Vec<Error> */ })?;
+    .map_err(|errors| { /* Iterator<Item = objectstore_client::Error> */ })?;
 ```
 
 ### Authentication
@@ -279,6 +286,7 @@ via [`ClientBuilder::token`]. It accepts either:
   and scope being accessed.
 - A **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
   Use this for external services that receive a token from another source.
+- An `Option` of any of the above — useful for chained builder calls.
 
 ```rust,ignore
 use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};

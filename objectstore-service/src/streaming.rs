@@ -84,7 +84,7 @@ pub struct Head {
 #[derive(Debug)]
 pub enum Operation {
     /// Insert a new object.
-    Insert(Insert),
+    Insert(Box<Insert>),
     /// Get an existing object.
     Get(Get),
     /// Delete an object.
@@ -219,13 +219,13 @@ impl std::fmt::Debug for OpResponse {
 #[derive(Debug)]
 pub struct StreamExecutor {
     pub(crate) backend: Arc<dyn Backend>,
-    pub(crate) window: usize,
+    pub(crate) window: u32,
     pub(crate) reservation: ConcurrencyPermit,
 }
 
 impl StreamExecutor {
     /// Returns the concurrency window computed at construction.
-    pub fn window(&self) -> usize {
+    pub fn window(&self) -> u32 {
         self.window
     }
 
@@ -277,7 +277,7 @@ impl StreamExecutor {
                     (idx, spawn.await.map_err(E::from))
                 }
             })
-            .buffer_unordered(window)
+            .buffer_unordered(window as usize)
     }
 }
 
@@ -342,7 +342,7 @@ mod tests {
         }
     }
 
-    fn make_service_with_limit(limit: usize) -> StorageService {
+    fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
             .with_concurrency_limit(limit)
     }
@@ -352,9 +352,7 @@ mod tests {
     }
 
     // Wraps a plain `Vec<Operation>` as an indexed `Ok`-stream for `execute`.
-    fn indexed_ok(
-        ops: Vec<Operation>,
-    ) -> impl futures_util::Stream<Item = (usize, Result<Operation, Error>)> {
+    fn indexed_ok(ops: Vec<Operation>) -> impl Stream<Item = (usize, Result<Operation, Error>)> {
         futures_util::stream::iter(ops.into_iter().enumerate().map(|(i, op)| (i, Ok(op))))
     }
 
@@ -426,11 +424,11 @@ mod tests {
             Operation::Get(Get {
                 key: "nonexistent".into(),
             }),
-            Operation::Insert(Insert {
+            Operation::Insert(Box::new(Insert {
                 key: Some("key2".into()),
                 metadata: Metadata::default(),
                 payload: Bytes::from("world"),
-            }),
+            })),
             Operation::Delete(Delete { key: "key1".into() }),
         ];
 
@@ -549,11 +547,11 @@ mod tests {
         // Submit 10 inserts. With window=10, all should be in-flight simultaneously.
         let ops: Vec<Operation> = (0..10)
             .map(|i| {
-                Operation::Insert(Insert {
+                Operation::Insert(Box::new(Insert {
                     key: Some(format!("key{i}")),
                     metadata: Metadata::default(),
                     payload: Bytes::from(format!("data{i}")),
-                })
+                }))
             })
             .collect();
 
@@ -578,8 +576,7 @@ mod tests {
         for (_, result) in &outcomes {
             assert!(
                 matches!(result, Ok(OpResponse::Inserted { .. })),
-                "unexpected result: {:?}",
-                result
+                "unexpected result: {result:?}",
             );
         }
     }

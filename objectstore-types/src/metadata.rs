@@ -1,8 +1,11 @@
 //! Per-object metadata types and HTTP header serialization.
 //!
 //! This module defines [`Metadata`], the per-object metadata structure that
-//! accompanies every stored object, along with [`ExpirationPolicy`] and
-//! [`Compression`].
+//! travels through the entire system: clients set it via HTTP headers, the
+//! server parses and validates it, the service passes it to backends, and
+//! backends persist it alongside the stored object.
+//!
+//! The module also defines further types used in metadata.
 //!
 //! # Serialization
 //!
@@ -45,6 +48,8 @@ pub const HEADER_TIME_CREATED: &str = "x-sn-time-created";
 pub const HEADER_TIME_EXPIRES: &str = "x-sn-time-expires";
 /// The custom HTTP header that contains the origin of the object.
 pub const HEADER_ORIGIN: &str = "x-sn-origin";
+/// The custom HTTP header that contains the filename of the object.
+pub const HEADER_FILENAME: &str = "x-sn-filename";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -69,19 +74,22 @@ pub enum Error {
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
+    /// An internal consistency invariant on the metadata was violated.
+    #[error("invariant violation: {0}")]
+    Invariant(&'static str),
 }
-impl From<http::header::InvalidHeaderValue> for Error {
-    fn from(err: http::header::InvalidHeaderValue) -> Self {
+impl From<header::InvalidHeaderValue> for Error {
+    fn from(err: header::InvalidHeaderValue) -> Self {
         Self::Header(Some(err.into()))
     }
 }
-impl From<http::header::InvalidHeaderName> for Error {
-    fn from(err: http::header::InvalidHeaderName) -> Self {
+impl From<header::InvalidHeaderName> for Error {
+    fn from(err: header::InvalidHeaderName) -> Self {
         Self::Header(Some(err.into()))
     }
 }
-impl From<http::header::ToStrError> for Error {
-    fn from(_err: http::header::ToStrError) -> Self {
+impl From<header::ToStrError> for Error {
+    fn from(_err: header::ToStrError) -> Self {
         // the error happens when converting a header value back to a `str`
         Self::Header(None)
     }
@@ -259,6 +267,14 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 
+    /// An optional filename associated with this object (header: `x-sn-filename`).
+    ///
+    /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
+    /// header in GET responses, prompting browsers and download tools to save the file
+    /// under this name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
     /// Size of the data in bytes, if known.
     ///
     /// Not transmitted via HTTP headers; set by backends when the object is
@@ -274,10 +290,57 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Parses the metadata headers accepted from writing endpoints.
+    ///
+    /// Unlike [`from_headers`](Self::from_headers), this skips parsing read-only attributes so
+    /// clients cannot set them via headers.
+    ///
+    /// This materializes the following attributes:
+    /// - [`time_created`](Self::time_created)
+    /// - [`time_expires`](Self::time_expires)
+    ///
+    /// A prefix can also be provided which is stripped from custom non-standard headers.
+    pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
+        let mut metadata = Self::parse_headers(headers, prefix, true)?;
+
+        let now = SystemTime::now();
+        metadata.time_created = Some(now);
+        metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+
+        Ok(metadata)
+    }
+
+    /// Validates internal consistency of the metadata.
+    ///
+    /// A time-based [`expiration_policy`](Self::expiration_policy) must carry a resolved
+    /// [`time_expires`](Self::time_expires); backends rely on this to persist a concrete
+    /// expiration.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.expiration_policy.is_timeout() && self.time_expires.is_none() {
+            return Err(Error::Invariant(
+                "expiration policy requires a resolved expiration time",
+            ));
+        }
+        Ok(())
+    }
+
     /// Extracts public API metadata from the given [`HeaderMap`].
     ///
     /// A prefix can be also be provided which is being stripped from custom non-standard headers.
     pub fn from_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
+        Self::parse_headers(headers, prefix, false)
+    }
+
+    /// Parses metadata from the given [`HeaderMap`].
+    ///
+    /// When `skip_read_only` is set, read-only attributes are not parsed off the headers, so a
+    /// malformed client-supplied value cannot fail the parse. A prefix can also be provided which
+    /// is stripped from custom non-standard headers.
+    fn parse_headers(
+        headers: &HeaderMap,
+        prefix: &str,
+        skip_read_only: bool,
+    ) -> Result<Self, Error> {
         let mut metadata = Metadata::default();
 
         for (name, value) in headers {
@@ -304,18 +367,21 @@ impl Metadata {
                             metadata.expiration_policy =
                                 ExpirationPolicy::from_str(expiration_policy)?;
                         }
-                        HEADER_TIME_CREATED => {
+                        HEADER_TIME_CREATED if !skip_read_only => {
                             let timestamp = value.to_str()?;
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_created = Some(time);
                         }
-                        HEADER_TIME_EXPIRES => {
+                        HEADER_TIME_EXPIRES if !skip_read_only => {
                             let timestamp = value.to_str()?;
                             let time = parse_rfc3339(timestamp)?;
                             metadata.time_expires = Some(time);
                         }
                         HEADER_ORIGIN => {
                             metadata.origin = Some(value.to_str()?.to_owned());
+                        }
+                        HEADER_FILENAME => {
+                            metadata.filename = Some(value.to_str()?.to_owned());
                         }
                         _ => {
                             // customer-provided metadata
@@ -341,6 +407,7 @@ impl Metadata {
             content_type,
             compression,
             origin,
+            filename,
             expiration_policy,
             time_created,
             time_expires,
@@ -375,6 +442,10 @@ impl Metadata {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_ORIGIN}"))?;
             headers.append(name, origin.parse()?);
         }
+        if let Some(filename) = filename {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_FILENAME}"))?;
+            headers.append(name, filename.parse()?);
+        }
 
         // customer-provided metadata
         for (key, value) in custom {
@@ -402,6 +473,7 @@ impl Default for Metadata {
             content_type: DEFAULT_CONTENT_TYPE.into(),
             compression: None,
             origin: None,
+            filename: None,
             size: None,
             custom: BTreeMap::new(),
         }
@@ -463,6 +535,52 @@ mod tests {
     }
 
     #[test]
+    fn from_headers_with_filename() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_FILENAME, "report.pdf".parse().unwrap());
+
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.filename.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn from_headers_without_filename() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert!(metadata.filename.is_none());
+    }
+
+    #[test]
+    fn to_headers_with_filename() {
+        let metadata = Metadata {
+            filename: Some("report.pdf".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        assert_eq!(headers.get(HEADER_FILENAME).unwrap(), "report.pdf");
+    }
+
+    #[test]
+    fn to_headers_without_filename() {
+        let metadata = Metadata::default();
+        let headers = metadata.to_headers("").unwrap();
+        assert!(headers.get(HEADER_FILENAME).is_none());
+    }
+
+    #[test]
+    fn filename_header_roundtrip() {
+        let metadata = Metadata {
+            filename: Some("report.pdf".into()),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        let roundtripped = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(roundtripped.filename, metadata.filename);
+    }
+
+    #[test]
     fn from_headers_content_type_and_encoding() {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", "application/json".parse().unwrap());
@@ -503,6 +621,98 @@ mod tests {
     }
 
     #[test]
+    fn from_insert_headers_ignores_read_only_fields() {
+        // Read-only and output attributes must never be taken from an untrusted
+        // client request, even if the client supplies the headers.
+        let forged_created = "2024-01-15T12:00:00.000000Z";
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        headers.insert(HEADER_TIME_CREATED, forged_created.parse().unwrap());
+        headers.insert(
+            HEADER_TIME_EXPIRES,
+            "2024-01-16T12:00:00.000000Z".parse().unwrap(),
+        );
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        // `time_created` is stamped by the server, not the client's forged value.
+        let created = metadata.time_created.unwrap();
+        assert_ne!(created, parse_rfc3339(forged_created).unwrap());
+        assert!(metadata.time_expires.is_none());
+        assert!(metadata.size.is_none());
+        // Client-settable fields are still parsed.
+        assert_eq!(metadata.content_type, "text/plain");
+    }
+
+    #[test]
+    fn from_insert_headers_ignores_malformed_read_only_fields() {
+        // A malformed read-only header must not fail the write: it is skipped, not parsed.
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TIME_CREATED, "not-a-timestamp".parse().unwrap());
+        headers.insert(HEADER_TIME_EXPIRES, "not-a-timestamp".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        assert!(metadata.time_created.is_some());
+        assert!(metadata.time_expires.is_none());
+    }
+
+    #[test]
+    fn from_insert_headers_resolves_time_expires_for_ttl() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "ttl:30s".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let created = metadata.time_created.unwrap();
+        let expires = metadata.time_expires.unwrap();
+        // Both timestamps derive from the same `now`, so the expiry is exact.
+        assert_eq!(expires, created + Duration::from_secs(30));
+    }
+
+    #[test]
+    fn from_insert_headers_resolves_time_expires_for_tti() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "tti:1h".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let created = metadata.time_created.unwrap();
+        let expires = metadata.time_expires.unwrap();
+        assert_eq!(expires, created + Duration::from_hours(1));
+    }
+
+    #[test]
+    fn from_insert_headers_manual_leaves_time_expires_none() {
+        let headers = HeaderMap::new();
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
+        assert!(metadata.time_expires.is_none());
+    }
+
+    #[test]
+    fn validate_accepts_resolved_timeout() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(30)),
+            ..Default::default()
+        };
+        assert!(metadata.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_manual_without_expiry() {
+        let metadata = Metadata::default();
+        assert!(metadata.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_timeout_without_expiry() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: None,
+            ..Default::default()
+        };
+        assert!(matches!(metadata.validate(), Err(Error::Invariant(_))));
+    }
+
+    #[test]
     fn from_headers_custom_metadata_with_prefix() {
         let mut headers = HeaderMap::new();
         // Simulate a backend that prefixes headers, e.g. "x-goog-meta-"
@@ -518,7 +728,7 @@ mod tests {
         let metadata = Metadata::from_headers(&headers, prefix).unwrap();
         assert_eq!(
             metadata.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(metadata.custom.get("my-key").unwrap(), "my-value");
     }
@@ -562,12 +772,13 @@ mod tests {
     #[test]
     fn to_headers_all_fields() {
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(1)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
             content_type: "text/html".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
+            filename: Some("report.pdf".into()),
             size: None,
             custom: BTreeMap::from([("foo".into(), "bar".into())]),
         };
@@ -583,6 +794,7 @@ mod tests {
             "content-encoding": "zstd",
             "content-type": "text/html",
             "pfx-x-sn-expiration": "ttl:1m",
+            "pfx-x-sn-filename": "report.pdf",
             "pfx-x-sn-origin": "10.0.0.1",
             "pfx-x-sn-time-created": "2023-11-14T22:13:20.000000Z",
             "pfx-x-sn-time-expires": "2023-11-14T22:14:20.000000Z",
@@ -595,12 +807,13 @@ mod tests {
     fn full_roundtrip_all_fields() {
         let prefix = "x-test-";
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(7200)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(2)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
             content_type: "image/png".into(),
             compression: Some(Compression::Zstd),
             origin: Some("192.168.1.1".into()),
+            filename: Some("image.png".into()),
             size: None,
             custom: BTreeMap::from([
                 ("key1".into(), "value1".into()),
@@ -615,6 +828,7 @@ mod tests {
         assert_eq!(roundtripped.content_type, metadata.content_type);
         assert_eq!(roundtripped.compression, metadata.compression);
         assert_eq!(roundtripped.origin, metadata.origin);
+        assert_eq!(roundtripped.filename, metadata.filename);
         assert_eq!(roundtripped.time_created, metadata.time_created);
         assert_eq!(roundtripped.time_expires, metadata.time_expires);
         assert_eq!(roundtripped.custom, metadata.custom);
@@ -651,12 +865,13 @@ mod tests {
     #[test]
     fn serde_roundtrip_all_fields() {
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
             content_type: "application/json".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
+            filename: Some("data.json".into()),
             size: Some(1024),
             custom: BTreeMap::from([("key".into(), "value".into())]),
         };
@@ -685,6 +900,7 @@ mod tests {
         assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.compression.is_none());
         assert!(metadata.origin.is_none());
+        assert!(metadata.filename.is_none());
         assert!(metadata.time_created.is_none());
         assert!(metadata.time_expires.is_none());
         assert!(metadata.size.is_none());
@@ -696,7 +912,7 @@ mod tests {
         let cases = [
             ExpirationPolicy::Manual,
             ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
         ];
 
         for policy in cases {
@@ -719,13 +935,13 @@ mod tests {
         assert!(ExpirationPolicy::Manual.is_manual());
         assert!(!ExpirationPolicy::Manual.is_timeout());
 
-        let ttl = ExpirationPolicy::TimeToLive(Duration::from_secs(60));
-        assert_eq!(ttl.expires_in(), Some(Duration::from_secs(60)));
+        let ttl = ExpirationPolicy::TimeToLive(Duration::from_mins(1));
+        assert_eq!(ttl.expires_in(), Some(Duration::from_mins(1)));
         assert!(ttl.is_timeout());
         assert!(!ttl.is_manual());
 
-        let tti = ExpirationPolicy::TimeToIdle(Duration::from_secs(120));
-        assert_eq!(tti.expires_in(), Some(Duration::from_secs(120)));
+        let tti = ExpirationPolicy::TimeToIdle(Duration::from_mins(2));
+        assert_eq!(tti.expires_in(), Some(Duration::from_mins(2)));
         assert!(tti.is_timeout());
         assert!(!tti.is_manual());
     }

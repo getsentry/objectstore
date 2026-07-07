@@ -3,7 +3,6 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -73,7 +72,7 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
 
@@ -145,9 +144,8 @@ impl Backend for LocalFsBackend {
                         .ok_or(Error::RangeNotSatisfiable {
                             total: payload_size,
                         })?;
-                reader
-                    .seek(std::io::SeekFrom::Current(content_range.start as i64))
-                    .await?;
+                let payload_start = metadata_line.len() as u64 + content_range.start;
+                reader.seek(std::io::SeekFrom::Start(payload_start)).await?;
                 let limited = reader.take(content_range.len());
                 (Some(content_range), ReaderStream::new(limited).boxed())
             }
@@ -443,11 +441,12 @@ mod tests {
 
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_created: Some(SystemTime::now()),
-            time_expires: None,
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
             compression: Some(Compression::Zstd),
             origin: Some("203.0.113.42".into()),
+            filename: Some("hello.txt".into()),
             custom: [("foo".into(), "bar".into())].into(),
             size: None,
         };
@@ -540,7 +539,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             origin: Some("203.0.113.42".into()),
             custom: [("foo".into(), "bar".into())].into(),
             ..Default::default()
@@ -565,7 +564,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
@@ -580,7 +579,7 @@ mod tests {
         assert_eq!(meta.content_type, "text/plain".to_string());
         assert_eq!(
             meta.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_secs(3600))
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(meta.origin, Some("203.0.113.42".into()));
         assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());
@@ -637,15 +636,15 @@ mod tests {
                 &id,
                 &upload_id,
                 vec![
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(1).unwrap(),
                         etag: etag1,
                     },
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(2).unwrap(),
                         etag: etag2,
                     },
-                    crate::multipart::CompletedPart {
+                    CompletedPart {
                         part_number: NonZeroU32::new(3).unwrap(),
                         etag: etag3,
                     },
@@ -872,7 +871,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: "wrong-etag".into(),
                 }],
@@ -887,7 +886,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
@@ -921,7 +920,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(99).unwrap(),
                     etag: "whatever".into(),
                 }],
@@ -936,7 +935,7 @@ mod tests {
             .complete_multipart(
                 &id,
                 &upload_id,
-                vec![crate::multipart::CompletedPart {
+                vec![CompletedPart {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],

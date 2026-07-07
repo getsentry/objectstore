@@ -7,11 +7,12 @@ use objectstore_types::auth::Permission;
 
 use crate::config::{AuthZ, AuthZVerificationKey};
 
-fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
-    let key_content = std::fs::read_to_string(filename)
-        .with_context(|| format!("reading key from {:?}", filename))?;
+async fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
+    let key_content = tokio::fs::read_to_string(filename)
+        .await
+        .with_context(|| format!("reading key from {filename:?}"))?;
     DecodingKey::from_ed_pem(key_content.as_bytes())
-        .with_context(|| format!("parsing key from {:?}", filename))
+        .with_context(|| format!("parsing key from {filename:?}"))
 }
 
 /// Configures the EdDSA public key(s) and permissions used to verify tokens from a single `kid`.
@@ -34,19 +35,20 @@ pub struct PublicKeyConfig {
     pub max_permissions: HashSet<Permission>,
 }
 
-impl TryFrom<&AuthZVerificationKey> for PublicKeyConfig {
-    type Error = anyhow::Error;
+impl PublicKeyConfig {
+    /// Loads key material and permissions from an [`AuthZVerificationKey`] configuration.
+    pub async fn from_config(key_config: &AuthZVerificationKey) -> anyhow::Result<Self> {
+        let mut key_versions = Vec::with_capacity(key_config.key_files.len());
+        for filename in &key_config.key_files {
+            let key = read_key_from_file(filename)
+                .await
+                .inspect_err(|e| objectstore_log::error!("{:?}", e))?;
+            key_versions.push(key);
+        }
 
-    fn try_from(key_config: &AuthZVerificationKey) -> Result<Self, anyhow::Error> {
         Ok(Self {
             max_permissions: key_config.max_permissions.clone(),
-            key_versions: key_config
-                .key_files
-                .iter()
-                .map(|filename| {
-                    read_key_from_file(filename).inspect_err(|e| objectstore_log::error!("{:?}", e))
-                })
-                .collect::<anyhow::Result<Vec<DecodingKey>>>()?,
+            key_versions,
         })
     }
 }
@@ -63,16 +65,15 @@ pub struct PublicKeyDirectory {
     pub keys: BTreeMap<String, PublicKeyConfig>,
 }
 
-impl TryFrom<&AuthZ> for PublicKeyDirectory {
-    type Error = anyhow::Error;
+impl PublicKeyDirectory {
+    /// Loads the full key directory from an [`AuthZ`] configuration.
+    pub async fn from_config(auth_config: &AuthZ) -> anyhow::Result<Self> {
+        let mut keys = BTreeMap::new();
+        for (kid, key_config) in &auth_config.keys {
+            let config = PublicKeyConfig::from_config(key_config).await?;
+            keys.insert(kid.clone(), config);
+        }
 
-    fn try_from(auth_config: &AuthZ) -> Result<Self, Self::Error> {
-        Ok(Self {
-            keys: auth_config
-                .keys
-                .iter()
-                .map(|(kid, key)| Ok((kid.clone(), key.try_into()?)))
-                .collect::<Result<BTreeMap<String, PublicKeyConfig>, anyhow::Error>>()?,
-        })
+        Ok(Self { keys })
     }
 }

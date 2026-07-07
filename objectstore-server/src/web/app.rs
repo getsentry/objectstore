@@ -35,6 +35,7 @@ impl App {
             .layer(axum::middleware::from_fn(m::emit_request_metrics))
             .layer(NewSentryLayer::new_from_top())
             .layer(SentryHttpLayer::new().enable_transaction())
+            .layer(axum::middleware::from_fn(m::bind_sentry_body))
             .layer(axum::middleware::from_fn_with_state(
                 state.request_counter.clone(),
                 m::limit_web_concurrency,

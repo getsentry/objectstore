@@ -1,7 +1,6 @@
 //! Shared trait definition and types for all backends.
 
 use std::fmt;
-use std::sync::Arc;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
@@ -66,11 +65,11 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// to wait for those tasks to complete.
     async fn join(&self) {}
 
-    /// Casts this backend into an [`Arc<dyn MultipartUploadBackend>`] if supported.
+    /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
     ///
     /// The default returns [`Error::NotImplemented`]. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
-    fn as_multipart_upload_backend(self: Arc<Self>) -> Result<Arc<dyn MultipartUploadBackend>> {
+    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Err(Error::NotImplemented)
     }
 }
@@ -197,7 +196,7 @@ pub trait HighVolumeBackend: Backend {
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tombstone {
     /// The [`ObjectId`] of the object in the long-term backend.
     ///

@@ -106,6 +106,26 @@ waits for outstanding cleanup during graceful shutdown.
 See the [`backend::tiered`] module documentation for the per-operation
 sequences.
 
+# Cost of Goods Sold (COGS) Accounting
+
+[`StorageService::new`] wraps the configured backend in a
+[`CountingBackend`](backend::counting::CountingBackend), a
+[`Backend`](backend::common::Backend) decorator that increments the
+`objectstore.cogs.usage` counter (tagged with an `app_feature` derived from the
+usecase) once per operation. Multipart operations are also counted.
+
+For COGS purposes we use operation count as a proxy for compute cost under the
+assumption that each operation we serve has a basically flat CPU cost. Large
+payloads take longer, but they can be streamed in the background while other
+operations are served so they don't really cost more.
+
+Wrapping the outermost backend owned by `StorageService` covers every operation
+called by `StorageService` itself as well as batched operations that are run
+through [`StreamExecutor`](crate::streaming::StreamExecutor).
+
+Notably, operations that fail before reaching `StorageService` (e.g. auth or
+rate-limiting failures at a higher layer) are not counted.
+
 # Metadata and Payload
 
 Every object consists of structured **metadata** and a binary **payload**.
@@ -148,6 +168,10 @@ implementation, allowing each backend to leverage its underlying system's native
 capabilities. For example, BigTable has built-in TTL via garbage collection
 policies, and GCS supports object lifecycle management. The service does not
 perform active garbage collection.
+
+Apart from the expiration policy, metadata during object creation must carry a
+`time_expires` field with the correct expiration timestamp. This is ensured
+during metadata creation by the server.
 
 # Backpressure
 

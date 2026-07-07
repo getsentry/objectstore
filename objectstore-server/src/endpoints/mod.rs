@@ -12,10 +12,12 @@ pub mod health;
 mod keda;
 mod multipart;
 mod objects;
+#[cfg(all(target_os = "linux", feature = "profiling"))]
+mod profiling;
 
 /// Returns `true` for internal endpoints that are exempt from metrics and concurrency limits.
 pub fn is_internal_route(route: &str) -> bool {
-    matches!(route, "/health" | "/ready" | "/keda")
+    matches!(route, "/health" | "/ready" | "/keda") || route.starts_with("/debug/")
 }
 
 /// Returns a router with all objectstore HTTP endpoints mounted.
@@ -28,8 +30,15 @@ pub fn routes() -> Router<ServiceState> {
         .merge(batch::router())
         .merge(multipart::router());
 
-    Router::new()
+    let router = Router::new()
         .merge(health::router())
         .merge(keda::router())
-        .nest("/v1/", routes_v1)
+        .nest("/v1/", routes_v1);
+
+    std::cfg_select! {
+        all(target_os = "linux", feature = "profiling") => {
+            router.merge(profiling::router())
+        }
+        _ => { router }
+    }
 }

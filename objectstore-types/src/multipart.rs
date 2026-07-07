@@ -1,4 +1,15 @@
 //! Types for the multipart upload protocol.
+//!
+//! Multipart uploads split large objects into independently uploaded parts that
+//! are assembled server-side on completion. This module defines the request and
+//! response types exchanged between clients and the server during each phase of
+//! the protocol: initiation, part upload, part listing, and completion.
+//!
+//! Key types:
+//! - [`UploadId`] — opaque, path-safe identifier for an in-progress upload.
+//! - [`InitiateResponse`] — returned when a new upload is created.
+//! - [`CompletePart`] / [`CompleteRequest`] — part manifest sent to finalize.
+//! - [`PartInfo`] / [`ListPartsResponse`] — used to resume interrupted uploads.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -61,7 +72,7 @@ impl fmt::Display for UploadId {
 }
 
 impl<'de> Deserialize<'de> for UploadId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
