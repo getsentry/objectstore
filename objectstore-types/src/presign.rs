@@ -16,6 +16,7 @@
 //! ```
 //!
 //! The signature covers a **canonical form** (see below) of the request.
+//! The X-Os-Alg is currently ignored, and intended for potential future use.
 //!
 //! # Canonical form
 //!
@@ -75,110 +76,110 @@ pub enum Error {
     /// Ed25519 signature.
     #[error("invalid signature encoding")]
     InvalidSignatureEncoding,
-    /// An unknown signature algorithm was specified.
-    #[error("unknown algorithm")]
-    UnknownAlgorithm,
     /// The signature did not match the canonical request for the given key.
     #[error("signature verification failed")]
     VerificationFailed,
 }
 
-/// Builds the canonical string that gets signed for a pre-signed request.
-///
-/// See the [module-level documentation](self) for the exact format.
-///
-/// Note that header values must come from a validated HTTP header map (i.e., they must not contain
-/// CR/LF).
-pub fn canonical_request(
-    method: &Method,
-    path: &str,
-    query: &[(&str, &str)],
-    signed_headers: &[(&str, &str)],
-) -> String {
-    let canonical_method = if *method == Method::HEAD {
-        "GET"
-    } else {
-        method.as_str()
-    };
+/// The canonical form of a request to be signed or verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRequest(String);
 
-    let canonical_path = percent_encode(path.as_bytes(), NON_ALPHANUMERIC).to_string();
+impl CanonicalRequest {
+    /// Builds the canonical form of a request.
+    ///
+    /// See the [module-level documentation](self) for the exact format.
+    ///
+    /// Note that header values must come from a validated HTTP header map (i.e.,
+    /// they must not contain CR/LF).
+    pub fn new(
+        method: &Method,
+        path: &str,
+        query: &[(&str, &str)],
+        signed_headers: &[(&str, &str)],
+    ) -> Self {
+        let canonical_method = if *method == Method::HEAD {
+            "GET"
+        } else {
+            method.as_str()
+        };
 
-    let mut pairs: Vec<(String, String)> = query
-        .iter()
-        .filter(|&&(key, _)| key != X_OS_SIG)
-        .map(|&(key, value)| {
-            (
-                percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string(),
-                percent_encode(value.as_bytes(), NON_ALPHANUMERIC).to_string(),
-            )
-        })
-        .collect();
-    pairs.sort();
+        let canonical_path = percent_encode(path.as_bytes(), NON_ALPHANUMERIC).to_string();
 
-    let canonical_query = pairs
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&");
+        let mut pairs: Vec<(String, String)> = query
+            .iter()
+            .filter(|&&(key, _)| key != X_OS_SIG)
+            .map(|&(key, value)| {
+                (
+                    percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string(),
+                    percent_encode(value.as_bytes(), NON_ALPHANUMERIC).to_string(),
+                )
+            })
+            .collect();
+        pairs.sort();
 
-    let mut headers: Vec<(String, &str)> = signed_headers
-        .iter()
-        .map(|&(name, value)| (name.to_ascii_lowercase(), value.trim()))
-        .collect();
-    headers.sort();
+        let canonical_query = pairs
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
 
-    let canonical_headers = headers
-        .iter()
-        .map(|(name, value)| format!("{name}:{value}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        let mut headers: Vec<(String, &str)> = signed_headers
+            .iter()
+            .map(|&(name, value)| (name.to_ascii_lowercase(), value.trim()))
+            .collect();
+        headers.sort();
 
-    format!("{canonical_method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}")
-}
+        let canonical_headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}:{value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-/// Signs a canonical request string with Ed25519.
-///
-/// Returns the base64url-encoded (no padding) signature, suitable as the value
-/// of the [`X_OS_SIG`] query parameter.
-pub fn sign(signing_key: &SigningKey, canonical: &str) -> String {
-    let signature = signing_key.sign(canonical.as_bytes());
-    URL_SAFE_NO_PAD.encode(signature.to_bytes())
-}
+        Self(format!(
+            "{canonical_method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}"
+        ))
+    }
 
-/// Verifies a base64url-encoded Ed25519 signature over a canonical request
-/// string.
-///
-/// Returns [`PresignError::InvalidSignatureEncoding`] if `signature_b64` is not
-/// valid base64url or not a 64-byte signature, and
-/// [`PresignError::VerificationFailed`] if the signature does not match.
-pub fn verify(
-    verifying_key: &VerifyingKey,
-    canonical: &str,
-    signature_b64: &str,
-) -> Result<(), Error> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(signature_b64)
-        .map_err(|_| Error::InvalidSignatureEncoding)?;
-    let signature = Signature::from_slice(&bytes).map_err(|_| Error::InvalidSignatureEncoding)?;
-    verifying_key
-        .verify_strict(canonical.as_bytes(), &signature)
-        .map_err(|_| Error::VerificationFailed)
+    /// Returns the canonical form as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Signs this canonical form with Ed25519.
+    ///
+    /// Returns the base64url-encoded (no padding) signature, suitable as the value
+    /// of the [`X_OS_SIG`] query parameter.
+    pub fn sign(&self, key: &SigningKey) -> String {
+        let signature = key.sign(self.0.as_bytes());
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    }
+
+    /// Verifies a base64url-encoded Ed25519 signature against this canonical form.
+    ///
+    /// Returns [`Error::InvalidSignatureEncoding`] if `signature_b64` is not valid
+    /// base64url or not a 64-byte signature, and [`Error::VerificationFailed`] if
+    /// the signature does not match.
+    pub fn verify(&self, key: &VerifyingKey, signature_b64: &str) -> Result<(), Error> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(signature_b64)
+            .map_err(|_| Error::InvalidSignatureEncoding)?;
+        let signature =
+            Signature::from_slice(&bytes).map_err(|_| Error::InvalidSignatureEncoding)?;
+        key.verify_strict(self.0.as_bytes(), &signature)
+            .map_err(|_| Error::VerificationFailed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Deterministic signing key for tests (a fixed 32-byte Ed25519 seed).
-    ///
-    /// Avoids depending on `objectstore-test` (which would be a dependency cycle)
-    /// or on a random source.
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[0x42; 32])
     }
 
     fn sample_query() -> Vec<(&'static str, &'static str)> {
-        // Intentionally unsorted, and includes X-Os-Sig which must be excluded.
         vec![
             (X_OS_TIMESTAMP, "1985-04-12T23:20:50.52Z"),
             (X_OS_KEY_ID, "relay"),
@@ -189,136 +190,35 @@ mod tests {
 
     #[test]
     fn canonical_form_is_stable() {
-        let canonical = canonical_request(
+        let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/org=17;project=42/foo/bar",
             &sample_query(),
             &[],
         );
 
-        // Known-answer test that pins the exact bytes: path fully percent-encoded
-        // (slashes too), X-Os-Sig excluded, params sorted by encoded key, and a
-        // trailing empty header line (no signed headers).
         assert_eq!(
-            canonical,
+            canonical.as_str(),
             "GET\n\
              %2Fv1%2Fobjects%2Ftesting%2Forg%3D17%3Bproject%3D42%2Ffoo%2Fbar\n\
              X%2DOs%2DExpires=3600&\
              X%2DOs%2DKey%2DId=relay&\
              X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n"
         );
-    }
 
-    #[test]
-    fn head_is_normalized_to_get() {
-        let path = "/v1/objects/testing/_/key";
-        let query = sample_query();
-        assert_eq!(
-            canonical_request(&Method::HEAD, path, &query, &[]),
-            canonical_request(&Method::GET, path, &query, &[]),
-        );
-    }
-
-    #[test]
-    fn sign_and_verify_roundtrip() {
-        let sk = test_signing_key();
-        let vk = sk.verifying_key();
-
-        let canonical = canonical_request(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            &sample_query(),
-            &[("Content-Type", "application/json")],
-        );
-        let signature = sign(&sk, &canonical);
-
-        assert_eq!(verify(&vk, &canonical, &signature), Ok(()));
-    }
-
-    #[test]
-    fn verify_rejects_tampered_canonical() {
-        let sk = test_signing_key();
-        let vk = sk.verifying_key();
-
-        let canonical = canonical_request(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            &sample_query(),
-            &[],
-        );
-        let signature = sign(&sk, &canonical);
-
-        let tampered = canonical_request(
-            &Method::GET,
-            "/v1/objects/testing/_/other",
-            &sample_query(),
-            &[],
-        );
-        assert_eq!(
-            verify(&vk, &tampered, &signature),
-            Err(Error::VerificationFailed)
-        );
-    }
-
-    #[test]
-    fn verify_rejects_wrong_key() {
-        let sk = test_signing_key();
-        let other_vk = SigningKey::from_bytes(&[0x01; 32]).verifying_key();
-
-        let canonical = canonical_request(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            &sample_query(),
-            &[],
-        );
-        let signature = sign(&sk, &canonical);
-
-        assert_eq!(
-            verify(&other_vk, &canonical, &signature),
-            Err(Error::VerificationFailed)
-        );
-    }
-
-    #[test]
-    fn verify_rejects_bad_signature_encoding() {
-        let vk = test_signing_key().verifying_key();
-        let canonical = canonical_request(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            &sample_query(),
-            &[],
-        );
-
-        // Not valid base64url.
-        assert_eq!(
-            verify(&vk, &canonical, "not valid base64!!"),
-            Err(Error::InvalidSignatureEncoding)
-        );
-        // Valid base64url but not a 64-byte signature.
-        assert_eq!(
-            verify(&vk, &canonical, &URL_SAFE_NO_PAD.encode([0u8; 10])),
-            Err(Error::InvalidSignatureEncoding)
-        );
-    }
-
-    #[test]
-    fn canonical_headers_are_lowercased_trimmed_and_sorted() {
-        // Intentionally unsorted, mixed-case names, padded values.
         let headers = [
             ("Host", "objectstore.example.com"),
             ("Content-Type", "  application/json  "),
         ];
-        let canonical = canonical_request(
+        let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/_/key",
             &sample_query(),
             &headers,
         );
 
-        // The canonical headers replace the previously-empty final component:
-        // names lowercased, values trimmed, sorted by name, joined with `\n`.
         assert_eq!(
-            canonical,
+            canonical.as_str(),
             "GET\n\
              %2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\n\
              X%2DOs%2DExpires=3600&\
@@ -330,13 +230,94 @@ mod tests {
     }
 
     #[test]
-    fn empty_signed_headers_matches_trailing_newline_form() {
-        // Passing no signed headers must be byte-identical to the historical
-        // three-component form, so existing GET/HEAD signatures keep verifying.
+    fn head_is_normalized_to_get() {
         let path = "/v1/objects/testing/_/key";
         let query = sample_query();
-        let canonical = canonical_request(&Method::GET, path, &query, &[]);
-        assert!(canonical.ends_with("\n"));
-        assert!(!canonical.contains(':'));
+        assert_eq!(
+            CanonicalRequest::new(&Method::HEAD, path, &query, &[]),
+            CanonicalRequest::new(&Method::GET, path, &query, &[]),
+        );
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[("Content-Type", "application/json")],
+        );
+        let signature = canonical.sign(&sk);
+
+        assert_eq!(canonical.verify(&vk, &signature), Ok(()));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_canonical() {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
+        let signature = canonical.sign(&sk);
+
+        let tampered = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/other",
+            &sample_query(),
+            &[],
+        );
+        assert_eq!(
+            tampered.verify(&vk, &signature),
+            Err(Error::VerificationFailed)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let sk = test_signing_key();
+        let other_vk = SigningKey::from_bytes(&[0x01; 32]).verifying_key();
+
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
+        let signature = canonical.sign(&sk);
+
+        assert_eq!(
+            canonical.verify(&other_vk, &signature),
+            Err(Error::VerificationFailed)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_bad_signature_encoding() {
+        let vk = test_signing_key().verifying_key();
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &sample_query(),
+            &[],
+        );
+
+        // Not valid base64url.
+        assert_eq!(
+            canonical.verify(&vk, "not valid base64!!"),
+            Err(Error::InvalidSignatureEncoding)
+        );
+        // Valid base64url but not a 64-byte signature.
+        assert_eq!(
+            canonical.verify(&vk, &URL_SAFE_NO_PAD.encode([0u8; 10])),
+            Err(Error::InvalidSignatureEncoding)
+        );
     }
 }
