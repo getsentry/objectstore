@@ -71,6 +71,9 @@ pub enum Error {
     /// Ed25519 signature.
     #[error("invalid signature encoding")]
     InvalidSignatureEncoding,
+    /// A header listed in `signed_headers` was not present in the request.
+    #[error("signed header `{0}` is missing from the request")]
+    MissingSignedHeader(HeaderName),
     /// A signed header's value was not valid text (i.e. not printable ASCII).
     #[error("signed header value is not valid text")]
     InvalidHeaderValue,
@@ -90,7 +93,9 @@ impl CanonicalRequest {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidHeaderValue`] if a signed header's value is not
+    /// Returns [`Error::MissingSignedHeader`] if a header listed in
+    /// `signed_headers` is not present in `headers`, and
+    /// [`Error::InvalidHeaderValue`] if a signed header's value is not
     /// printable ASCII.
     pub fn new(
         method: &Method,
@@ -117,10 +122,11 @@ impl CanonicalRequest {
 
         let mut header_pairs: Vec<(&str, &str)> = Vec::with_capacity(signed_headers.len());
         for name in signed_headers {
-            if let Some(value) = headers.get(*name) {
-                let value = value.to_str().map_err(|_| Error::InvalidHeaderValue)?;
-                header_pairs.push((name.as_str(), value.trim()));
-            }
+            let value = headers
+                .get(*name)
+                .ok_or_else(|| Error::MissingSignedHeader((*name).clone()))?;
+            let value = value.to_str().map_err(|_| Error::InvalidHeaderValue)?;
+            header_pairs.push((name.as_str(), value.trim()));
         }
         header_pairs.sort();
 
@@ -390,6 +396,21 @@ mod tests {
         assert_eq!(
             canonical.verify(&vk, &URL_SAFE_NO_PAD.encode([0u8; 10])),
             Err(Error::InvalidSignatureEncoding)
+        );
+    }
+
+    #[test]
+    fn canonical_rejects_missing_signed_header() {
+        let host = HeaderName::from_static("host");
+        assert_eq!(
+            CanonicalRequest::new(
+                &Method::GET,
+                "/v1/objects/testing/_/key",
+                None,
+                &HeaderMap::new(),
+                &[&host],
+            ),
+            Err(Error::MissingSignedHeader(host))
         );
     }
 
