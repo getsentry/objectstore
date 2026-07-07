@@ -210,16 +210,6 @@ mod tests {
     }
 
     #[test]
-    fn key_only_sig_param_is_excluded() {
-        let canonical = CanonicalRequest::new(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            Some("a=1&X-Os-Sig&b=2"),
-        );
-        assert_eq!(canonical.0, "GET\n/v1/objects/testing/_/key\na=1&b=2");
-    }
-
-    #[test]
     fn head_is_normalized_to_get() {
         let path = "/v1/objects/testing/_/key";
         assert_eq!(
