@@ -190,13 +190,15 @@ mod tests {
 
     #[test]
     fn canonical_form_is_stable() {
+        // Base case: full query, no signed headers. Pins path encoding (slashes
+        // too), X-Os-Sig exclusion, query sort order, and the trailing empty header
+        // line.
         let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/org=17;project=42/foo/bar",
             &sample_query(),
             &[],
         );
-
         assert_eq!(
             canonical.as_str(),
             "GET\n\
@@ -206,9 +208,34 @@ mod tests {
              X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n"
         );
 
+        // Empty query: both the query and header components are empty, so the form
+        // ends with two consecutive newlines.
+        let canonical = CanonicalRequest::new(&Method::GET, "/v1/objects/testing/_/key", &[], &[]);
+        assert_eq!(
+            canonical.as_str(),
+            "GET\n%2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\n\n"
+        );
+
+        // Duplicate query keys are preserved (not deduplicated) and ordered by
+        // (key, value).
+        let canonical = CanonicalRequest::new(
+            &Method::GET,
+            "/v1/objects/testing/_/key",
+            &[("dup", "b"), ("dup", "a"), ("x", "1")],
+            &[],
+        );
+        assert_eq!(
+            canonical.as_str(),
+            "GET\n%2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\ndup=a&dup=b&x=1\n"
+        );
+
+        // Multiple signed headers, unsorted with mixed-case names and padded
+        // values: names lowercased, values trimmed, sorted by name, joined with
+        // `\n`.
         let headers = [
             ("Host", "objectstore.example.com"),
             ("Content-Type", "  application/json  "),
+            ("X-Trace-Id", " abc "),
         ];
         let canonical = CanonicalRequest::new(
             &Method::GET,
@@ -216,7 +243,6 @@ mod tests {
             &sample_query(),
             &headers,
         );
-
         assert_eq!(
             canonical.as_str(),
             "GET\n\
@@ -225,7 +251,8 @@ mod tests {
              X%2DOs%2DKey%2DId=relay&\
              X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n\
              content-type:application/json\n\
-             host:objectstore.example.com"
+             host:objectstore.example.com\n\
+             x-trace-id:abc"
         );
     }
 
