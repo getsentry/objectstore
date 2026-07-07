@@ -9,42 +9,33 @@
 //! GET /v1/objects/<usecase>/<scopes>/<key>
 //!     ?X-Os-Timestamp=2026-04-20T13:37:00.00Z
 //!     &X-Os-Expires=3600
-//!     &X-Os-Signed-Headers=host
 //!     &X-Os-Key-Id=relay
-//!     &X-Os-Alg=Ed25519
 //!     &X-Os-Sig=<signature>
 //! ```
 //!
 //! The signature covers a **canonical form** (see below) of the request.
-//! `X-Os-Alg` is currently ignored, and intended for potential future use.
 //!
 //! # Canonical form
 //!
-//! The canonical form is comprised of four newline-separated components:
+//! The canonical form is comprised of three newline-separated components:
 //!
 //! ```text
 //! <normalized method>\n
 //! <path>\n
-//! <canonical query string>\n
-//! <canonical headers>
+//! <canonical query string>
 //! ```
 //!
 //! - normalized method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
-//! - path: the request path;
-//! - canonical query string: every query parameter except `X-Os-Sig`, sorted
-//!   lexicographically, joined with `&`.
-//! - canonical headers: the request headers named in `X-Os-Signed-Headers`, each
-//!   rendered as `name:value` with a lowercase name and its value's surrounding
-//!   whitespace stripped, sorted by name, and joined with a `\n` separator.
-//!   When no headers are signed this component is empty, so the canonical form ends
-//!   with a trailing newline.
+//! - path: the request path, included verbatim as transmitted/received on the wire;
+//! - canonical query string: every query parameter except `X-Os-Sig`, with keys
+//!   lowercased, sorted lexicographically by name and value, joined with `&`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer};
-use http::{HeaderMap, HeaderName, Method};
+use http::Method;
 
-pub use ed25519_dalek::{SigningKey, VerifyingKey};
+pub use ed25519_dalek::{SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey};
 
 /// Query parameter carrying the time at which the request was signed.
 pub const X_OS_TIMESTAMP: &str = "X-Os-Timestamp";
@@ -52,14 +43,8 @@ pub const X_OS_TIMESTAMP: &str = "X-Os-Timestamp";
 /// Query parameter carrying the validity duration, in seconds.
 pub const X_OS_EXPIRES: &str = "X-Os-Expires";
 
-/// Query parameter carrying the list of signed headers.
-pub const X_OS_SIGNED_HEADERS: &str = "X-Os-Signed-Headers";
-
 /// Query parameter naming the key ID used to sign the request.
 pub const X_OS_KEY_ID: &str = "X-Os-Key-Id";
-
-/// Query parameter carrying the signing algorithm specifier.
-pub const X_OS_ALG: &str = "X-Os-Alg";
 
 /// Query parameter carrying the base64url-encoded signature.
 pub const X_OS_SIG: &str = "X-Os-Sig";
@@ -67,16 +52,13 @@ pub const X_OS_SIG: &str = "X-Os-Sig";
 /// Errors returned when verifying a pre-signed request signature.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    /// The signature was not valid base64url or did not decode to a 64-byte
+    /// The user supplied a sequence of bytes that's not a valid Ed25519 key.
+    #[error("invalid key")]
+    InvalidKey,
+    /// The signature is not valid base64url or doesn't decode to a 64-byte
     /// Ed25519 signature.
     #[error("invalid signature encoding")]
     InvalidSignatureEncoding,
-    /// A header listed in `signed_headers` was not present in the request.
-    #[error("signed header `{0}` is missing from the request")]
-    MissingSignedHeader(HeaderName),
-    /// A signed header's value was not valid text (i.e. not printable ASCII).
-    #[error("signed header value is not valid text")]
-    InvalidHeaderValue,
     /// The signature did not match the canonical request for the given key.
     #[error("signature verification failed")]
     VerificationFailed,
@@ -86,71 +68,56 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalRequest(String);
 
+/// An Ed25519 signing key.
+pub type SigningKey = [u8; 32];
+
+/// An Ed25519 verifying key.
+pub type VerifyingKey = [u8; 32];
+
 impl CanonicalRequest {
     /// Builds the canonical form of a request.
     ///
-    /// See the [module-level documentation](self) for the exact format.
+    /// `path` and `query` MUST be the raw request path and query string as transmitted/received
+    /// on the wire, which means that servers should pass the raw contents of these components, and
+    /// clients should ensure that the encoding used to compute the signature matches exactly the
+    /// encoding used by their HTTP client.
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::MissingSignedHeader`] if a header listed in
-    /// `signed_headers` is not present in `headers`, and
-    /// [`Error::InvalidHeaderValue`] if a signed header's value is not
-    /// printable ASCII.
-    pub fn new(
-        method: &Method,
-        path: &str,
-        query: Option<&str>,
-        headers: &HeaderMap,
-        signed_headers: &[&HeaderName],
-    ) -> Result<Self, Error> {
-        let canonical_method = if *method == Method::HEAD {
+    /// This is important to avoid any signature verification failures due to different
+    /// encoding/decoding implementations between the client and server, and is based on the
+    /// assumption that any intermediate proxies will never re-encode the URL, but always pass it
+    /// through with the original encoding.
+    pub fn new(method: &Method, path: &str, query: Option<&str>) -> Self {
+        let normalized_method = if *method == Method::HEAD {
             "GET"
         } else {
             method.as_str()
         };
 
-        let mut pairs: Vec<&str> = query
+        let mut pairs: Vec<String> = query
             .unwrap_or_default()
             .split('&')
             .filter(|pair| !pair.is_empty())
-            .filter(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key) != X_OS_SIG)
+            .filter_map(|pair| {
+                if let Some((key, value)) = pair.split_once('=') {
+                    let key = key.to_ascii_lowercase();
+                    (key != "x-os-sig").then(|| format!("{key}={value}"))
+                } else {
+                    Some(pair.to_ascii_lowercase())
+                }
+            })
             .collect();
         pairs.sort_unstable();
-
         let canonical_query = pairs.join("&");
 
-        let mut header_pairs: Vec<(&str, &str)> = Vec::with_capacity(signed_headers.len());
-        for name in signed_headers {
-            let value = headers
-                .get(*name)
-                .ok_or_else(|| Error::MissingSignedHeader((*name).clone()))?;
-            let value = value.to_str().map_err(|_| Error::InvalidHeaderValue)?;
-            header_pairs.push((name.as_str(), value.trim()));
-        }
-        header_pairs.sort();
-
-        let canonical_headers = header_pairs
-            .iter()
-            .map(|(name, value)| format!("{name}:{value}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(Self(format!(
-            "{canonical_method}\n{path}\n{canonical_query}\n{canonical_headers}"
-        )))
-    }
-
-    /// Returns the canonical form as a string.
-    pub fn as_str(&self) -> &str {
-        &self.0
+        Self(format!("{normalized_method}\n{path}\n{canonical_query}"))
     }
 
     /// Signs this canonical form with Ed25519.
     ///
-    /// Returns the base64url-encoded  signature, suitable as the value of the
+    /// Returns the base64url-encoded signature, suitable as the value of the
     /// [`X_OS_SIG`] query parameter.
     pub fn sign(&self, key: &SigningKey) -> String {
+        let key = DalekSigningKey::from_bytes(key);
         let signature = key.sign(self.0.as_bytes());
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     }
@@ -159,10 +126,12 @@ impl CanonicalRequest {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidSignatureEncoding`] if `signature_b64` is not valid
-    /// base64url or not a 64-byte signature, and [`Error::VerificationFailed`] if
-    /// the signature does not match.
+    /// Returns [`Error::InvalidKey`] if `key` is not a valid Ed25519 verifying key,
+    /// [`Error::InvalidSignatureEncoding`] if `signature_b64` is not valid base64url
+    /// or not a 64-byte signature, and [`Error::VerificationFailed`] if the signature
+    /// does not match.
     pub fn verify(&self, key: &VerifyingKey, signature_b64: &str) -> Result<(), Error> {
+        let key = DalekVerifyingKey::from_bytes(key).map_err(|_| Error::InvalidKey)?;
         let bytes = URL_SAFE_NO_PAD
             .decode(signature_b64)
             .map_err(|_| Error::InvalidSignatureEncoding)?;
@@ -177,10 +146,8 @@ impl CanonicalRequest {
 mod tests {
     use super::*;
 
-    use http::HeaderValue;
-
-    fn test_signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[0x42; 32])
+    fn test_signing_key() -> DalekSigningKey {
+        DalekSigningKey::from_bytes(&[0x42; 32])
     }
 
     /// Raw query string as it would appear on the wire (unsorted, includes the
@@ -192,50 +159,27 @@ mod tests {
          &X-Os-Sig=should-be-excluded"
     }
 
-    fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
-        let mut map = HeaderMap::new();
-        for (name, value) in pairs {
-            map.insert(
-                HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                HeaderValue::from_str(value).unwrap(),
-            );
-        }
-        map
-    }
-
     #[test]
     fn canonical_form_is_stable() {
-        // Base case: full query, no signed headers. Pins path encoding (slashes
-        // too), X-Os-Sig exclusion, query sort order, and the trailing empty header
-        // line.
+        // Base case: full query. Pins path encoding (slashes too), X-Os-Sig
+        // exclusion, key lowercasing, and query sort order.
         let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/org=17;project=42/foo/bar",
             Some(sample_query()),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
+        );
         assert_eq!(
-            canonical.as_str(),
+            canonical.0,
             "GET\n\
              /v1/objects/testing/org=17;project=42/foo/bar\n\
-             X-Os-Expires=3600&\
-             X-Os-Key-Id=relay&\
-             X-Os-Timestamp=1985-04-12T23:20:50.52Z\n"
+             x-os-expires=3600&\
+             x-os-key-id=relay&\
+             x-os-timestamp=1985-04-12T23:20:50.52Z"
         );
 
-        // Empty query: both the query and header components are empty, so the form
-        // ends with two consecutive newlines.
-        let canonical = CanonicalRequest::new(
-            &Method::GET,
-            "/v1/objects/testing/_/key",
-            None,
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(canonical.as_str(), "GET\n/v1/objects/testing/_/key\n\n");
+        // Empty query: the canonical query component is empty.
+        let canonical = CanonicalRequest::new(&Method::GET, "/v1/objects/testing/_/key", None);
+        assert_eq!(canonical.0, "GET\n/v1/objects/testing/_/key\n");
 
         // Duplicate query keys are preserved (not deduplicated) and ordered by
         // (key, value).
@@ -243,44 +187,24 @@ mod tests {
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some("dup=b&dup=a&x=1"),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
+        );
         assert_eq!(
-            canonical.as_str(),
-            "GET\n/v1/objects/testing/_/key\ndup=a&dup=b&x=1\n"
+            canonical.0,
+            "GET\n/v1/objects/testing/_/key\ndup=a&dup=b&x=1"
         );
 
-        // Multiple signed headers, passed unsorted with padded values: names are
-        // already lowercase (the `HeaderName` type guarantees it), values trimmed,
-        // sorted by name, joined with `\n`.
-        let headers = header_map(&[
-            ("Host", "objectstore.example.com"),
-            ("Content-Type", "  application/json  "),
-            ("X-Trace-Id", " abc "),
-        ]);
-        let host = HeaderName::from_static("host");
-        let content_type = HeaderName::from_static("content-type");
-        let x_trace_id = HeaderName::from_static("x-trace-id");
         let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some(sample_query()),
-            &headers,
-            &[&host, &content_type, &x_trace_id],
-        )
-        .unwrap();
+        );
         assert_eq!(
-            canonical.as_str(),
+            canonical.0,
             "GET\n\
              /v1/objects/testing/_/key\n\
-             X-Os-Expires=3600&\
-             X-Os-Key-Id=relay&\
-             X-Os-Timestamp=1985-04-12T23:20:50.52Z\n\
-             content-type:application/json\n\
-             host:objectstore.example.com\n\
-             x-trace-id:abc"
+             x-os-expires=3600&\
+             x-os-key-id=relay&\
+             x-os-timestamp=1985-04-12T23:20:50.52Z"
         );
     }
 
@@ -288,20 +212,8 @@ mod tests {
     fn head_is_normalized_to_get() {
         let path = "/v1/objects/testing/_/key";
         assert_eq!(
-            CanonicalRequest::new(
-                &Method::HEAD,
-                path,
-                Some(sample_query()),
-                &HeaderMap::new(),
-                &[]
-            ),
-            CanonicalRequest::new(
-                &Method::GET,
-                path,
-                Some(sample_query()),
-                &HeaderMap::new(),
-                &[]
-            ),
+            CanonicalRequest::new(&Method::HEAD, path, Some(sample_query()),),
+            CanonicalRequest::new(&Method::GET, path, Some(sample_query()),),
         );
     }
 
@@ -310,19 +222,14 @@ mod tests {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
 
-        let headers = header_map(&[("Content-Type", "application/json")]);
-        let content_type = HeaderName::from_static("content-type");
         let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some(sample_query()),
-            &headers,
-            &[&content_type],
-        )
-        .unwrap();
-        let signature = canonical.sign(&sk);
+        );
+        let signature = canonical.sign(&sk.as_bytes());
 
-        assert_eq!(canonical.verify(&vk, &signature), Ok(()));
+        assert_eq!(canonical.verify(&vk.as_bytes(), &signature), Ok(()));
     }
 
     #[test]
@@ -334,22 +241,16 @@ mod tests {
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some(sample_query()),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
-        let signature = canonical.sign(&sk);
+        );
+        let signature = canonical.sign(&sk.as_bytes());
 
         let tampered = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/_/other",
             Some(sample_query()),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
+        );
         assert_eq!(
-            tampered.verify(&vk, &signature),
+            tampered.verify(&vk.as_bytes(), &signature),
             Err(Error::VerificationFailed)
         );
     }
@@ -357,20 +258,17 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_key() {
         let sk = test_signing_key();
-        let other_vk = SigningKey::from_bytes(&[0x01; 32]).verifying_key();
+        let other_vk = DalekSigningKey::from_bytes(&[0x01; 32]).verifying_key();
 
         let canonical = CanonicalRequest::new(
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some(sample_query()),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
-        let signature = canonical.sign(&sk);
+        );
+        let signature = canonical.sign(&sk.as_bytes());
 
         assert_eq!(
-            canonical.verify(&other_vk, &signature),
+            canonical.verify(&other_vk.as_bytes(), &signature),
             Err(Error::VerificationFailed)
         );
     }
@@ -382,55 +280,17 @@ mod tests {
             &Method::GET,
             "/v1/objects/testing/_/key",
             Some(sample_query()),
-            &HeaderMap::new(),
-            &[],
-        )
-        .unwrap();
+        );
 
         // Not valid base64url.
         assert_eq!(
-            canonical.verify(&vk, "not valid base64!!"),
+            canonical.verify(&vk.as_bytes(), "not valid base64!!"),
             Err(Error::InvalidSignatureEncoding)
         );
         // Valid base64url but not a 64-byte signature.
         assert_eq!(
-            canonical.verify(&vk, &URL_SAFE_NO_PAD.encode([0u8; 10])),
+            canonical.verify(&vk.as_bytes(), &URL_SAFE_NO_PAD.encode([0u8; 10])),
             Err(Error::InvalidSignatureEncoding)
-        );
-    }
-
-    #[test]
-    fn canonical_rejects_missing_signed_header() {
-        let host = HeaderName::from_static("host");
-        assert_eq!(
-            CanonicalRequest::new(
-                &Method::GET,
-                "/v1/objects/testing/_/key",
-                None,
-                &HeaderMap::new(),
-                &[&host],
-            ),
-            Err(Error::MissingSignedHeader(host))
-        );
-    }
-
-    #[test]
-    fn canonical_rejects_non_text_header_value() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-binary"),
-            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
-        );
-        let x_binary = HeaderName::from_static("x-binary");
-        assert_eq!(
-            CanonicalRequest::new(
-                &Method::GET,
-                "/v1/objects/testing/_/key",
-                None,
-                &headers,
-                &[&x_binary],
-            ),
-            Err(Error::InvalidHeaderValue)
         );
     }
 }
