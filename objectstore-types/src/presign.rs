@@ -227,9 +227,9 @@ mod tests {
             "/v1/objects/testing/_/key",
             Some(sample_query()),
         );
-        let signature = canonical.sign(&sk.as_bytes());
+        let signature = canonical.sign(sk.as_bytes());
 
-        assert_eq!(canonical.verify(&vk.as_bytes(), &signature), Ok(()));
+        assert_eq!(canonical.verify(vk.as_bytes(), &signature), Ok(()));
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             "/v1/objects/testing/_/key",
             Some(sample_query()),
         );
-        let signature = canonical.sign(&sk.as_bytes());
+        let signature = canonical.sign(sk.as_bytes());
 
         let tampered = CanonicalRequest::new(
             &Method::GET,
@@ -250,7 +250,7 @@ mod tests {
             Some(sample_query()),
         );
         assert_eq!(
-            tampered.verify(&vk.as_bytes(), &signature),
+            tampered.verify(vk.as_bytes(), &signature),
             Err(Error::VerificationFailed)
         );
     }
@@ -265,10 +265,10 @@ mod tests {
             "/v1/objects/testing/_/key",
             Some(sample_query()),
         );
-        let signature = canonical.sign(&sk.as_bytes());
+        let signature = canonical.sign(sk.as_bytes());
 
         assert_eq!(
-            canonical.verify(&other_vk.as_bytes(), &signature),
+            canonical.verify(other_vk.as_bytes(), &signature),
             Err(Error::VerificationFailed)
         );
     }
@@ -284,12 +284,12 @@ mod tests {
 
         // Not valid base64url.
         assert_eq!(
-            canonical.verify(&vk.as_bytes(), "not valid base64!!"),
+            canonical.verify(vk.as_bytes(), "not valid base64!!"),
             Err(Error::InvalidSignatureEncoding)
         );
         // Valid base64url but not a 64-byte signature.
         assert_eq!(
-            canonical.verify(&vk.as_bytes(), &URL_SAFE_NO_PAD.encode([0u8; 10])),
+            canonical.verify(vk.as_bytes(), &URL_SAFE_NO_PAD.encode([0u8; 10])),
             Err(Error::InvalidSignatureEncoding)
         );
     }
