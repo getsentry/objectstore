@@ -1,15 +1,45 @@
-//! HTTP response status checking with error body parsing.
+//! Extension traits for `reqwest` requests and responses.
 //!
-//! Provides [`ResponseExt`], an extension trait that replaces
-//! [`reqwest::Response::error_for_status`] with a version that reads the
-//! response body on 4xx/5xx errors and parses the structured error code and
-//! message from it (JSON for GCS JSON API, XML for GCS XML API and S3).
+//! Provides [`SendTraced`], which sends a request inside a tracing span, and
+//! [`ResponseExt`], which replaces [`reqwest::Response::error_for_status`] with a
+//! version that reads the response body on 4xx/5xx errors and parses the
+//! structured error code and message from it (JSON for GCS JSON API, XML for GCS
+//! XML API and S3).
 
 use reqwest::{Response, header};
 use serde::Deserialize;
+use tracing::Instrument;
 
 use crate::error::{BackendDetail, Error, Result};
 use crate::stream;
+
+/// Extension trait that sends a request inside a tracing span.
+pub trait SendTraced {
+    /// Sends the request, wrapping it in a span that covers the full request
+    /// duration and records the response status code.
+    async fn send_traced(self) -> reqwest::Result<reqwest::Response>;
+}
+
+impl SendTraced for reqwest::RequestBuilder {
+    async fn send_traced(self) -> reqwest::Result<reqwest::Response> {
+        let (client, request) = self.build_split();
+        let request = request?;
+        let span = tracing::debug_span!(
+            "http.request",
+            method = %request.method(),
+            url = %request.url(),
+            http.status_code = tracing::field::Empty,
+        );
+        let send_future = async {
+            let response = client.execute(request).await;
+            if let Ok(response) = &response {
+                tracing::Span::current().record("http.status_code", response.status().as_u16());
+            }
+            response
+        };
+        send_future.instrument(span).await
+    }
+}
 
 /// GCS JSON API error envelope (`{"error": {"message": "...", ...}}`).
 #[derive(Deserialize)]

@@ -41,6 +41,7 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
+use tracing::Instrument;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
@@ -740,6 +741,7 @@ impl BigTableBackend {
     /// Reads a single row by key, returning parsed row data.
     ///
     /// Returns `None` if the row is absent or has expired.
+    #[tracing::instrument(level = "debug", fields(action), skip_all)]
     async fn read_row(
         &self,
         path: &[u8],
@@ -776,6 +778,7 @@ impl BigTableBackend {
         })
     }
 
+    #[tracing::instrument(level = "debug", fields(action), skip_all)]
     async fn mutate(
         &self,
         path: Vec<u8>,
@@ -821,6 +824,7 @@ impl BigTableBackend {
     /// Best-effort TTI bump for a row.
     ///
     /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
+    #[tracing::instrument(level = "debug", fields(?hv_id, loaded), skip_all)]
     async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
         let expiration_policy = row.expiration_policy();
 
@@ -860,6 +864,7 @@ impl BigTableBackend {
     }
 
     /// Executes a `CheckAndMutateRow` request.
+    #[tracing::instrument(level = "debug", fields(action = context), skip_all)]
     async fn check_and_mutate(
         &self,
         row_key: Vec<u8>,
@@ -898,7 +903,7 @@ impl Backend for BigTableBackend {
         "bigtable"
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -919,7 +924,7 @@ impl Backend for BigTableBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         match self.get_tiered_object(id, range).await? {
             TieredGet::Object(metadata, content_range, payload) => {
@@ -930,7 +935,7 @@ impl Backend for BigTableBackend {
         }
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         match self.get_tiered_metadata(id).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
@@ -939,7 +944,7 @@ impl Backend for BigTableBackend {
         }
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from Bigtable backend");
 
@@ -952,7 +957,7 @@ impl Backend for BigTableBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for BigTableBackend {
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -1000,7 +1005,7 @@ impl HighVolumeBackend for BigTableBackend {
         Err(Error::generic("BigTable: race loop in put_non_tombstone"))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
@@ -1037,7 +1042,7 @@ impl HighVolumeBackend for BigTableBackend {
         })
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
         objectstore_log::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1066,7 +1071,7 @@ impl HighVolumeBackend for BigTableBackend {
         })
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         objectstore_log::debug!("Conditional delete from Bigtable backend");
 
@@ -1110,7 +1115,7 @@ impl HighVolumeBackend for BigTableBackend {
         ))
     }
 
-    #[tracing::instrument(level = "trace", fields(?id), skip_all)]
+    #[tracing::instrument(level = "debug", skip(self, write))]
     async fn compare_and_write(
         &self,
         id: &ObjectId,
@@ -1205,7 +1210,26 @@ where
     let mut retry_count = 0usize;
 
     loop {
-        match f().await {
+        let attempt_span = tracing::debug_span!(
+            "bigtable.request",
+            action = context,
+            grpc.status = tracing::field::Empty,
+        );
+        let attempt = async {
+            let result = f().await;
+            let span = tracing::Span::current();
+            match &result {
+                Ok(_) => span.record("grpc.status", "ok"),
+                Err(BigTableError::RpcError(status)) => {
+                    span.record("grpc.status", tracing::field::debug(status.code()))
+                }
+                // Non-RPC error; the error event carries the details.
+                Err(_) => &span,
+            };
+            result
+        };
+
+        match attempt.instrument(attempt_span).await {
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
                 objectstore_metrics::count!("bigtable.failures", action = context);
