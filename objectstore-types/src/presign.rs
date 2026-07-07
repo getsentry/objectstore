@@ -16,7 +16,7 @@
 //! ```
 //!
 //! The signature covers a **canonical form** (see below) of the request.
-//! The X-Os-Alg is currently ignored, and intended for potential future use.
+//! `X-Os-Alg` is currently ignored, and intended for potential future use.
 //!
 //! # Canonical form
 //!
