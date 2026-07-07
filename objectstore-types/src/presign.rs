@@ -23,31 +23,26 @@
 //! The canonical form is comprised of four newline-separated components:
 //!
 //! ```text
-//! <canonical method>\n
-//! <canonical path>\n
+//! <normalized method>\n
+//! <path>\n
 //! <canonical query string>\n
 //! <canonical headers>
 //! ```
 //!
-//! - canonical method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
-//! - canonical path: the percent-encoded request path;
-//! - canonical query string: every query parameter except `X-Os-Sig`,
-//!   with keys and values percent-encoded, sorted by encoded key then
-//!   encoded value, joined as `key=value` pairs with `&` separator.
+//! - normalized method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
+//! - path: the request path;
+//! - canonical query string: every query parameter except `X-Os-Sig`, sorted
+//!   lexicographically, joined with `&`.
 //! - canonical headers: the request headers named in `X-Os-Signed-Headers`, each
 //!   rendered as `name:value` with a lowercase name and its value's surrounding
 //!   whitespace stripped, sorted by name, and joined with a `\n` separator.
 //!   When no headers are signed this component is empty, so the canonical form ends
 //!   with a trailing newline.
-//!
-//! Percent encoding of the path and query is always performed using the
-//! [`NON_ALPHANUMERIC`] character set into uppercase hex digits.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer};
 use http::{HeaderMap, HeaderName, Method};
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -110,31 +105,15 @@ impl CanonicalRequest {
             method.as_str()
         };
 
-        let canonical_path = percent_encode(path.as_bytes(), NON_ALPHANUMERIC).to_string();
+        let mut pairs: Vec<&str> = query
+            .unwrap_or_default()
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .filter(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key) != X_OS_SIG)
+            .collect();
+        pairs.sort_unstable();
 
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for pair in query.unwrap_or_default().split('&') {
-            if pair.is_empty() {
-                continue;
-            }
-            let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-            let key = percent_decode_str(raw_key).decode_utf8_lossy();
-            if key.as_ref() == X_OS_SIG {
-                continue;
-            }
-            let value = percent_decode_str(raw_value).decode_utf8_lossy();
-            pairs.push((
-                percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string(),
-                percent_encode(value.as_bytes(), NON_ALPHANUMERIC).to_string(),
-            ));
-        }
-        pairs.sort();
-
-        let canonical_query = pairs
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join("&");
+        let canonical_query = pairs.join("&");
 
         let mut header_pairs: Vec<(&str, &str)> = Vec::with_capacity(signed_headers.len());
         for name in signed_headers {
@@ -152,7 +131,7 @@ impl CanonicalRequest {
             .join("\n");
 
         Ok(Self(format!(
-            "{canonical_method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}"
+            "{canonical_method}\n{path}\n{canonical_query}\n{canonical_headers}"
         )))
     }
 
@@ -234,10 +213,10 @@ mod tests {
         assert_eq!(
             canonical.as_str(),
             "GET\n\
-             %2Fv1%2Fobjects%2Ftesting%2Forg%3D17%3Bproject%3D42%2Ffoo%2Fbar\n\
-             X%2DOs%2DExpires=3600&\
-             X%2DOs%2DKey%2DId=relay&\
-             X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n"
+             /v1/objects/testing/org=17;project=42/foo/bar\n\
+             X-Os-Expires=3600&\
+             X-Os-Key-Id=relay&\
+             X-Os-Timestamp=1985-04-12T23:20:50.52Z\n"
         );
 
         // Empty query: both the query and header components are empty, so the form
@@ -250,10 +229,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(
-            canonical.as_str(),
-            "GET\n%2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\n\n"
-        );
+        assert_eq!(canonical.as_str(), "GET\n/v1/objects/testing/_/key\n\n");
 
         // Duplicate query keys are preserved (not deduplicated) and ordered by
         // (key, value).
@@ -267,7 +243,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             canonical.as_str(),
-            "GET\n%2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\ndup=a&dup=b&x=1\n"
+            "GET\n/v1/objects/testing/_/key\ndup=a&dup=b&x=1\n"
         );
 
         // Multiple signed headers, passed unsorted with padded values: names are
@@ -292,10 +268,10 @@ mod tests {
         assert_eq!(
             canonical.as_str(),
             "GET\n\
-             %2Fv1%2Fobjects%2Ftesting%2F%5F%2Fkey\n\
-             X%2DOs%2DExpires=3600&\
-             X%2DOs%2DKey%2DId=relay&\
-             X%2DOs%2DTimestamp=1985%2D04%2D12T23%3A20%3A50%2E52Z\n\
+             /v1/objects/testing/_/key\n\
+             X-Os-Expires=3600&\
+             X-Os-Key-Id=relay&\
+             X-Os-Timestamp=1985-04-12T23:20:50.52Z\n\
              content-type:application/json\n\
              host:objectstore.example.com\n\
              x-trace-id:abc"

@@ -16,7 +16,6 @@ http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 mediatype = { workspace = true }
-percent-encoding = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
