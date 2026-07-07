@@ -2,23 +2,20 @@
 //!
 //! A pre-signed URL lets a client that owns an Ed25519 keypair hand out a
 //! time-limited URL that authorizes a specific request.
+//!
 //! Example:
 //!
 //! ```text
 //! GET /v1/objects/<usecase>/<scopes>/<key>
-//!     ?X-Os-Key-Id=relay
-//!     &X-Os-Timestamp=2026-04-20T13:37:00.00Z
-//!     &X-Os-Expires=<duration in seconds>
+//!     ?X-Os-Timestamp=2026-04-20T13:37:00.00Z
+//!     &X-Os-Expires=3600
+//!     &X-Os-Signed-Headers=host
+//!     &X-Os-Key-Id=relay
+//!     &X-Os-Alg=Ed25519
 //!     &X-Os-Sig=<signature>
 //! ```
 //!
 //! The signature covers a **canonical form** (see below) of the request.
-//!
-//! In addition to the above query parameters, the following query
-//! parameters are intended to be introduced in future if/when needed:
-//! - `X-Os-Alg`: specifies the signing algorithm. When unspecified, defaults to
-//!   Ed25519.
-//! - `X-Os-Signed-Headers`: specifies the request headers that are signed (see below).
 //!
 //! # Canonical form
 //!
@@ -53,31 +50,34 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
-/// Query parameter naming the key ID used to sign the request.
-///
-/// Its value selects the public key the verifier uses (the same `kid` mechanism
-/// as JWT auth).
-pub const X_OS_KEY_ID: &str = "X-Os-Key-Id";
-
 /// Query parameter carrying the time at which the request was signed.
 pub const X_OS_TIMESTAMP: &str = "X-Os-Timestamp";
 
 /// Query parameter carrying the validity duration, in seconds.
 pub const X_OS_EXPIRES: &str = "X-Os-Expires";
 
+/// Query parameter carrying the list of signed headers.
+pub const X_OS_SIGNED_HEADERS: &str = "X-Os-Signed-Headers";
+
+/// Query parameter naming the key ID used to sign the request.
+pub const X_OS_KEY_ID: &str = "X-Os-Key-Id";
+
+/// Query parameter carrying the signing algorithm specifier.
+pub const X_OS_ALG: &str = "X-Os-Alg";
+
 /// Query parameter carrying the base64url-encoded signature.
-///
-/// This parameter is excluded from the canonical query string, since it is the
-/// output of signing that string.
 pub const X_OS_SIG: &str = "X-Os-Sig";
 
 /// Errors returned when verifying a pre-signed request signature.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum PresignError {
+pub enum Error {
     /// The signature was not valid base64url or did not decode to a 64-byte
     /// Ed25519 signature.
     #[error("invalid signature encoding")]
     InvalidSignatureEncoding,
+    /// An unknown signature algorithm was specified.
+    #[error("unknown algorithm")]
+    UnknownAlgorithm,
     /// The signature did not match the canonical request for the given key.
     #[error("signature verification failed")]
     VerificationFailed,
@@ -85,35 +85,17 @@ pub enum PresignError {
 
 /// Builds the canonical string that gets signed for a pre-signed request.
 ///
-/// See the [module-level documentation](self) for the exact format. `HEAD` is
-/// normalized to `GET`, and [`X_OS_SIG`] is excluded from the canonical query
-/// string.
+/// See the [module-level documentation](self) for the exact format.
 ///
-/// `path` is percent-encoded wholesale here (the `/` separators are deliberately
-/// not treated specially). This function is oblivious to the path's contents;
-/// correctness only requires that the signer and verifier pass **byte-identical**
-/// path strings. The natural choice is the raw path exactly as it appears in the
-/// request line — `uri.path()` on the server, and the equivalent from the built URL
-/// on the client. Do **not** percent-decode it first: decoding is lossy (`%2F` and a
-/// literal `/` collapse to the same byte), which would weaken the signature and risk
-/// a signer/verifier mismatch.
-///
-/// `query` is the list of decoded query parameter key/value pairs; they are
-/// re-encoded canonically here, so ordering of the input does not matter.
-///
-/// `signed_headers` is the list of request headers named by `X-Os-Signed-Headers`
-/// (name/value pairs); names are lowercased, values are whitespace-trimmed, and
-/// the entries are sorted by name here, so input ordering does not matter. Pass an
-/// empty slice when no headers are signed. Values must come from a validated HTTP
-/// header map (they must not contain CR/LF); see the
-/// [module-level documentation](self).
+/// Note that header values must come from a validated HTTP header map (i.e., they must not contain
+/// CR/LF).
 pub fn canonical_request(
     method: &Method,
     path: &str,
     query: &[(&str, &str)],
     signed_headers: &[(&str, &str)],
 ) -> String {
-    let method = if *method == Method::HEAD {
+    let canonical_method = if *method == Method::HEAD {
         "GET"
     } else {
         method.as_str()
@@ -151,7 +133,7 @@ pub fn canonical_request(
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!("{method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}")
+    format!("{canonical_method}\n{canonical_path}\n{canonical_query}\n{canonical_headers}")
 }
 
 /// Signs a canonical request string with Ed25519.
@@ -173,15 +155,14 @@ pub fn verify(
     verifying_key: &VerifyingKey,
     canonical: &str,
     signature_b64: &str,
-) -> Result<(), PresignError> {
+) -> Result<(), Error> {
     let bytes = URL_SAFE_NO_PAD
         .decode(signature_b64)
-        .map_err(|_| PresignError::InvalidSignatureEncoding)?;
-    let signature =
-        Signature::from_slice(&bytes).map_err(|_| PresignError::InvalidSignatureEncoding)?;
+        .map_err(|_| Error::InvalidSignatureEncoding)?;
+    let signature = Signature::from_slice(&bytes).map_err(|_| Error::InvalidSignatureEncoding)?;
     verifying_key
         .verify_strict(canonical.as_bytes(), &signature)
-        .map_err(|_| PresignError::VerificationFailed)
+        .map_err(|_| Error::VerificationFailed)
 }
 
 #[cfg(test)]
@@ -275,7 +256,7 @@ mod tests {
         );
         assert_eq!(
             verify(&vk, &tampered, &signature),
-            Err(PresignError::VerificationFailed)
+            Err(Error::VerificationFailed)
         );
     }
 
@@ -294,7 +275,7 @@ mod tests {
 
         assert_eq!(
             verify(&other_vk, &canonical, &signature),
-            Err(PresignError::VerificationFailed)
+            Err(Error::VerificationFailed)
         );
     }
 
@@ -311,12 +292,12 @@ mod tests {
         // Not valid base64url.
         assert_eq!(
             verify(&vk, &canonical, "not valid base64!!"),
-            Err(PresignError::InvalidSignatureEncoding)
+            Err(Error::InvalidSignatureEncoding)
         );
         // Valid base64url but not a 64-byte signature.
         assert_eq!(
             verify(&vk, &canonical, &URL_SAFE_NO_PAD.encode([0u8; 10])),
-            Err(PresignError::InvalidSignatureEncoding)
+            Err(Error::InvalidSignatureEncoding)
         );
     }
 
