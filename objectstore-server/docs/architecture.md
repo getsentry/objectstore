@@ -108,6 +108,34 @@ the token's scopes and permissions cover the requested
 [`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
 Scope values in the token can use wildcards to grant broad access.
 
+Its [`AuthContext`](auth::AuthContext) is one of `Disabled` (auth inactive — all
+operations permitted), `Preauthorized` (a valid pre-signed URL already authorized
+the exact request), or `Scoped` (a verified JWT, checked per operation).
+
+### Pre-signed URLs
+
+Instead of a JWT, a request may authorize itself with a **pre-signed URL**: a
+key holder signs a canonical form of the request with its Ed25519 key and encodes
+the signature and parameters entirely in the query string
+(`X-Os-Sig`, `X-Os-Key-Id`, `X-Os-Timestamp`, `X-Os-Expires`, and an optional
+`;`-separated `X-Os-Signed-Headers`). See [`objectstore_types::presign`] for the
+canonical form.
+
+When the extractor sees an `X-Os-Sig` query parameter it takes the pre-signed
+path instead of looking for a JWT:
+
+- Only `GET`, `HEAD`, and `DELETE` are supported. Other methods are rejected
+  (currently `401`; see the `PresignUnsupportedMethod` mapping for the intended
+  `501`).
+- The signature is verified against the request's canonical form using the
+  `X-Os-Key-Id` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
+- The validity window (`X-Os-Timestamp` + `X-Os-Expires`) is enforced, capped at
+  **one week** so a URL cannot be minted to be effectively immortal.
+
+A verified pre-signed request yields an `AuthContext::Preauthorized`, which permits
+the request as-is — the signature already binds it to the specific method, path,
+and signed headers.
+
 ## Configuration
 
 Configuration uses [figment](https://docs.rs/figment) for layered merging with

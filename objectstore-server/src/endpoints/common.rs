@@ -86,6 +86,9 @@ impl ApiError {
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
+            // TODO: this should ideally be `501 Not Implemented`, but returning `401` keeps the
+            // rejection within the existing `AuthError` status mapping for now.
+            ApiError::Auth(AuthError::PresignUnsupportedMethod) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => {
                 objectstore_log::error!(!!self, "auth system error");

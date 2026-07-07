@@ -21,6 +21,12 @@ pub enum AuthError {
     #[error("failed to verify token")]
     VerificationFailure,
 
+    /// Indicates that a pre-signed URL was used with an unsupported HTTP method.
+    ///
+    /// Pre-signed URLs are only accepted for `GET`, `HEAD`, and `DELETE`.
+    #[error("presigned URLs are not supported for this method")]
+    PresignUnsupportedMethod,
+
     /// Indicates that the requested operation is not permitted on the resource.
     #[error("operation not allowed")]
     NotPermitted,
@@ -34,6 +40,7 @@ impl AuthError {
             Self::InternalError(_) => "internal_error",
             Self::ValidationFailure(_) => "validation_failure",
             Self::VerificationFailure => "verification_failure",
+            Self::PresignUnsupportedMethod => "presign_unsupported_method",
             Self::NotPermitted => "not_permitted",
         }
     }

@@ -36,7 +36,7 @@ use crate::endpoints::common::ApiResult;
 #[derive(Debug)]
 pub struct AuthAwareService {
     service: StorageService,
-    context: Option<AuthContext>,
+    context: AuthContext,
     enforce: bool,
 }
 
@@ -44,12 +44,12 @@ impl AuthAwareService {
     /// Creates a new `AuthAwareService` using the given [`StorageService`], [`AuthContext`], and
     /// enforcement setting.
     ///
-    /// If a `context` is provided, it will be used to check whether each operation is authorized.
-    /// `enforce` controls whether authorization failures will result in an error response or be
-    /// ignored.
+    /// The `context` is used to check whether each operation is authorized. `enforce` controls
+    /// whether authorization failures will result in an error response or be ignored.
     ///
-    /// Without a `context`, all operations are permitted.
-    pub fn new(service: StorageService, context: Option<AuthContext>, enforce: bool) -> Self {
+    /// With an [`AuthContext::Disabled`] or [`AuthContext::Preauthorized`] context, all operations
+    /// are permitted.
+    pub fn new(service: StorageService, context: AuthContext, enforce: bool) -> Self {
         Self {
             service,
             context,
@@ -61,9 +61,7 @@ impl AuthAwareService {
     ///
     /// Returns `Ok(())` if authorized, or an error indicating the reason.
     pub fn check_permission(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
-        if let Some(auth) = &self.context
-            && let Err(error) = auth.assert_authorized(perm, context)
-        {
+        if let Err(error) = self.context.assert_authorized(perm, context) {
             sentry::with_scope(
                 |s| s.set_tag("perm", perm.to_string()),
                 || error.log(!self.enforce),

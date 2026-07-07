@@ -1,13 +1,25 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
+use std::time::{Duration, SystemTime};
 
+use http::{HeaderMap, HeaderName, Method};
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
+use objectstore_types::presign::{
+    CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_SIGNED_HEADERS, X_OS_TIMESTAMP,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
+
+/// Maximum validity window for a pre-signed URL.
+///
+/// Requests whose `X-Os-Expires` claims a longer window are rejected so that a URL cannot be
+/// minted to be effectively immortal.
+const MAX_PRESIGN_VALIDITY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
@@ -32,13 +44,10 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
     validation
 }
 
-/// `AuthContext` encapsulates the verified content of things like authorization tokens.
-///
-/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
-/// perform certain operations on a given resource.
+/// The verified authorization details carried by a scoped JWT.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
-pub struct AuthContext {
+pub struct ScopedContext {
     /// The objectstore usecase that this request may act on.
     ///
     /// See also: [`ObjectContext::usecase`].
@@ -51,6 +60,25 @@ pub struct AuthContext {
 
     /// The permissions that this request has been granted.
     pub permissions: HashSet<Permission>,
+}
+
+/// `AuthContext` encapsulates the verified authorization details of a request.
+///
+/// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
+/// perform certain operations on a given resource.
+#[derive(Debug, PartialEq)]
+pub enum AuthContext {
+    /// Authorization is inactive; every operation is permitted.
+    Disabled,
+
+    /// A valid pre-signed signature already authorized this exact request.
+    ///
+    /// The signature covers the request's method, path, query, and signed headers, so the
+    /// request is permitted as-is without any further scope or permission checks.
+    Preauthorized,
+
+    /// A verified JWT; each operation is checked against these scopes and permissions.
+    Scoped(ScopedContext),
 }
 
 impl AuthContext {
@@ -94,10 +122,10 @@ impl AuthContext {
         }
 
         let mut verified_claims: Option<TokenData<JwtClaims>> = None;
-        for decoding_key in &key_config.key_versions {
+        for key_version in &key_config.key_versions {
             let decode_result = decode::<JwtClaims>(
                 encoded_token,
-                decoding_key,
+                &key_version.decoding_key,
                 &jwt_validation_params(&jwt_header),
             );
 
@@ -127,29 +155,117 @@ impl AuthContext {
             .copied()
             .collect();
 
-        Ok(AuthContext {
+        Ok(AuthContext::Scoped(ScopedContext {
             usecase,
             scopes: scope,
             permissions,
-        })
+        }))
+    }
+
+    /// Construct an `AuthContext` from a pre-signed request.
+    ///
+    /// A pre-signed URL carries its signature and parameters in the query string (see
+    /// [`objectstore_types::presign`]). This verifies the signature against the request's
+    /// canonical form and enforces the validity window, returning [`AuthContext::Preauthorized`]
+    /// on success.
+    ///
+    /// The caller is responsible for restricting the set of methods for which pre-signed URLs
+    /// are accepted; `now` is the current time, injected for testability.
+    pub fn from_presigned_request(
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: &HeaderMap,
+        key_directory: &PublicKeyDirectory,
+        now: SystemTime,
+    ) -> Result<AuthContext, AuthError> {
+        let query = query.unwrap_or_default();
+
+        let signature = find_query_param(query, X_OS_SIG)
+            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Sig"))?;
+
+        let key_id = find_query_param(query, X_OS_KEY_ID)
+            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Key-Id"))?;
+        // An unknown key ID is treated as a verification failure (rather than leaking which
+        // keys are configured), matching the failure mode of a bad signature.
+        let key_config = key_directory
+            .keys
+            .get(key_id.as_ref())
+            .ok_or(AuthError::VerificationFailure)?;
+
+        // `X-Os-Signed-Headers` is an optional `;`-separated list of header names that the
+        // signature covers.
+        let signed_header_names = match find_query_param(query, X_OS_SIGNED_HEADERS) {
+            Some(value) if !value.is_empty() => value
+                .split(';')
+                .map(|name| HeaderName::from_bytes(name.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    AuthError::BadRequest("presigned URL has an invalid signed header name")
+                })?,
+            _ => Vec::new(),
+        };
+        let signed_headers: Vec<&HeaderName> = signed_header_names.iter().collect();
+
+        // Enforce the validity window before spending time on signature verification.
+        let timestamp = find_query_param(query, X_OS_TIMESTAMP).ok_or(AuthError::BadRequest(
+            "presigned URL missing X-Os-Timestamp",
+        ))?;
+        let timestamp = humantime::parse_rfc3339(timestamp.as_ref())
+            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid X-Os-Timestamp"))?;
+        let expires: u64 = find_query_param(query, X_OS_EXPIRES)
+            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Expires"))?
+            .parse()
+            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid X-Os-Expires"))?;
+        let expires = Duration::from_secs(expires);
+        if expires > MAX_PRESIGN_VALIDITY {
+            return Err(AuthError::BadRequest(
+                "presigned URL validity exceeds the maximum of 1 week",
+            ));
+        }
+        if now < timestamp || now > timestamp + expires {
+            objectstore_log::debug!("presigned URL is outside its validity window");
+            return Err(AuthError::VerificationFailure);
+        }
+
+        let canonical = CanonicalRequest::new(method, path, Some(query), headers, &signed_headers)
+            .map_err(|_| AuthError::BadRequest("presigned URL has invalid signed headers"))?;
+
+        // Any configured key version verifying the signature is sufficient (supports rotation).
+        let verified = key_config.key_versions.iter().any(|key| {
+            canonical
+                .verify(&key.verifying_key, signature.as_ref())
+                .is_ok()
+        });
+        if !verified {
+            return Err(AuthError::VerificationFailure);
+        }
+
+        Ok(AuthContext::Preauthorized)
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
     /// `Err(AuthError::NotPermitted)` is returned.
     ///
-    /// The passed-in `perm` is checked against this `AuthContext`'s `permissions`. If it is not
-    /// present, then the operation is not authorized.
+    /// [`AuthContext::Disabled`] and [`AuthContext::Preauthorized`] permit every operation. For
+    /// [`AuthContext::Scoped`], the passed-in `perm` is checked against the granted permissions
+    /// and the request's usecase and scopes are checked against the granted ones.
     pub fn assert_authorized(
         &self,
         perm: Permission,
         context: &ObjectContext,
     ) -> Result<(), AuthError> {
-        if !self.permissions.contains(&perm) || self.usecase != context.usecase {
+        let scoped = match self {
+            AuthContext::Disabled | AuthContext::Preauthorized => return Ok(()),
+            AuthContext::Scoped(scoped) => scoped,
+        };
+
+        if !scoped.permissions.contains(&perm) || scoped.usecase != context.usecase {
             return Err(AuthError::NotPermitted);
         }
 
         for scope in &context.scopes {
-            let authorized = match self.scopes.get(scope.name()) {
+            let authorized = match scoped.scopes.get(scope.name()) {
                 Some(StringOrWildcard::String(s)) => s == scope.value(),
                 Some(StringOrWildcard::Wildcard) => true,
                 None => false,
@@ -163,10 +279,23 @@ impl AuthContext {
     }
 }
 
+/// Finds a query parameter by name in a raw query string, percent-decoding its value.
+///
+/// Returns the first match. Parameter names in the pre-signing scheme are never
+/// percent-encoded, so the name is compared verbatim.
+fn find_query_param<'a>(query: &'a str, name: &str) -> Option<Cow<'a, str>> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| percent_encoding::percent_decode_str(value).decode_utf8_lossy())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::PublicKeyConfig;
+    use crate::auth::{PublicKey, PublicKeyConfig};
+    use ed25519_dalek::VerifyingKey;
+    use ed25519_dalek::pkcs8::DecodePublicKey;
     use jsonwebtoken::DecodingKey;
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
@@ -190,7 +319,10 @@ mod tests {
 
     fn test_key_config(max_permissions: HashSet<Permission>) -> PublicKeyDirectory {
         let public_key = PublicKeyConfig {
-            key_versions: vec![DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap()],
+            key_versions: vec![PublicKey {
+                decoding_key: DecodingKey::from_ed_pem(TEST_EDDSA_PUBKEY.as_bytes()).unwrap(),
+                verifying_key: VerifyingKey::from_public_key_pem(TEST_EDDSA_PUBKEY).unwrap(),
+            }],
             max_permissions,
         };
         PublicKeyDirectory {
@@ -232,11 +364,11 @@ mod tests {
     }
 
     fn sample_auth_context(org: &str, proj: &str, permissions: HashSet<Permission>) -> AuthContext {
-        AuthContext {
+        AuthContext::Scoped(ScopedContext {
             usecase: "attachments".into(),
             permissions,
             scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
-        }
+        })
     }
 
     #[test]
@@ -414,8 +546,12 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
     #[test]
     fn test_assert_authorized_wrong_usecase_fails() -> Result<(), AuthError> {
-        let mut auth_context = sample_auth_context("123", "456", max_permission());
-        auth_context.usecase = "debug-files".into();
+        let AuthContext::Scoped(mut scoped) = sample_auth_context("123", "456", max_permission())
+        else {
+            panic!("expected a scoped auth context");
+        };
+        scoped.usecase = "debug-files".into();
+        let auth_context = AuthContext::Scoped(scoped);
         let object = sample_object_context("123", "456");
 
         let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
