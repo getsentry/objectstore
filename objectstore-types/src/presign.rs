@@ -7,10 +7,10 @@
 //!
 //! ```text
 //! GET /v1/objects/<usecase>/<scopes>/<key>
-//!     ?X-Os-Timestamp=2026-04-20T13:37:00.00Z
-//!     &X-Os-Expires=3600
-//!     &X-Os-Key-Id=relay
-//!     &X-Os-Sig=<signature>
+//!     ?os-timestamp=2026-04-20T13:37:00.00Z
+//!     &os-duration=3600
+//!     &os-kid=relay
+//!     &os-sig=<signature>
 //! ```
 //!
 //! The signature covers a **canonical form** (see below) of the request.
@@ -27,7 +27,7 @@
 //!
 //! - normalized method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
 //! - path: the request path, included verbatim as transmitted/received on the wire;
-//! - canonical query string: every query parameter except `X-Os-Sig`, with keys
+//! - canonical query string: every query parameter except `os-sig`, with keys
 //!   lowercased, sorted lexicographically by name and value, joined with `&`.
 
 use base64::Engine as _;
@@ -38,16 +38,16 @@ use http::Method;
 pub use ed25519_dalek::{SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey};
 
 /// Query parameter carrying the time at which the request was signed.
-pub const X_OS_TIMESTAMP: &str = "X-Os-Timestamp";
+pub const PARAM_TIMESTAMP: &str = "os-timestamp";
 
 /// Query parameter carrying the validity duration, in seconds.
-pub const X_OS_EXPIRES: &str = "X-Os-Expires";
+pub const PARAM_DURATION: &str = "os-duration";
 
 /// Query parameter naming the key ID used to sign the request.
-pub const X_OS_KEY_ID: &str = "X-Os-Key-Id";
+pub const PARAM_KID: &str = "os-kid";
 
 /// Query parameter carrying the base64url-encoded signature.
-pub const X_OS_SIG: &str = "X-Os-Sig";
+pub const PARAM_SIG: &str = "os-sig";
 
 /// Errors returned when verifying a pre-signed request signature.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -100,10 +100,10 @@ impl CanonicalRequest {
             .filter_map(|pair| {
                 if let Some((key, value)) = pair.split_once('=') {
                     let key = key.to_ascii_lowercase();
-                    (key != "x-os-sig").then(|| format!("{key}={value}"))
+                    (key != PARAM_SIG).then(|| format!("{key}={value}"))
                 } else {
                     let key = pair.to_ascii_lowercase();
-                    (key != "x-os-sig").then_some(key)
+                    (key != PARAM_SIG).then_some(key)
                 }
             })
             .collect();
@@ -116,7 +116,7 @@ impl CanonicalRequest {
     /// Signs this canonical form with Ed25519.
     ///
     /// Returns the base64url-encoded signature, suitable as the value of the
-    /// [`X_OS_SIG`] query parameter.
+    /// [`PARAM_SIG`] query parameter.
     pub fn sign(&self, key: &SigningKey) -> String {
         let key = DalekSigningKey::from_bytes(key);
         let signature = key.sign(self.0.as_bytes());
@@ -152,17 +152,17 @@ mod tests {
     }
 
     /// Raw query string as it would appear on the wire (unsorted, includes the
-    /// X-Os-Sig that must be excluded).
+    /// os-sig that must be excluded).
     fn sample_query() -> &'static str {
-        "X-Os-Timestamp=1985-04-12T23:20:50.52Z\
-         &X-Os-Key-Id=relay\
-         &X-Os-Expires=3600\
-         &X-Os-Sig=should-be-excluded"
+        "os-timestamp=1985-04-12T23:20:50.52Z\
+         &os-kid=relay\
+         &os-duration=3600\
+         &os-sig=should-be-excluded"
     }
 
     #[test]
     fn canonical_form_is_stable() {
-        // Base case: full query. Pins path encoding (slashes too), X-Os-Sig
+        // Base case: full query. Pins path encoding (slashes too), os-sig
         // exclusion, key lowercasing, and query sort order.
         let canonical = CanonicalRequest::new(
             &Method::GET,
@@ -173,9 +173,9 @@ mod tests {
             canonical.0,
             "GET\n\
              /v1/objects/testing/org=17;project=42/foo/bar\n\
-             x-os-expires=3600&\
-             x-os-key-id=relay&\
-             x-os-timestamp=1985-04-12T23:20:50.52Z"
+             os-duration=3600&\
+             os-kid=relay&\
+             os-timestamp=1985-04-12T23:20:50.52Z"
         );
 
         // Empty query: the canonical query component is empty.
@@ -203,9 +203,9 @@ mod tests {
             canonical.0,
             "GET\n\
              /v1/objects/testing/_/key\n\
-             x-os-expires=3600&\
-             x-os-key-id=relay&\
-             x-os-timestamp=1985-04-12T23:20:50.52Z"
+             os-duration=3600&\
+             os-kid=relay&\
+             os-timestamp=1985-04-12T23:20:50.52Z"
         );
     }
 
