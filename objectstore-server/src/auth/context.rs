@@ -74,10 +74,10 @@ pub enum AuthContext {
     /// A valid pre-signed signature already authorized this exact request.
     ///
     /// The signature covers the request's method, path, query, and signed headers, so no scope
-    /// check is required. The wrapped set is the signing key's `max_permissions`: the operation's
-    /// permission must still be within it, so a restricted (e.g. read-only) key cannot be used to
-    /// pre-sign a more privileged operation.
-    Preauthorized(HashSet<Permission>),
+    /// check is required. The wrapped value is the ID of the signing key: at authorization time
+    /// the operation's permission is checked against that key's `max_permissions`, so a restricted
+    /// (e.g. read-only) key cannot be used to pre-sign a more privileged operation.
+    Preauthorized(String),
 
     /// A verified JWT; each operation is checked against these scopes and permissions.
     Scoped(ScopedContext),
@@ -243,29 +243,36 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        // The `Preauthorized` context carries the signing key's `max_permissions` so that
-        // `assert_authorized` can still reject operations the key was never allowed to grant.
-        Ok(AuthContext::Preauthorized(
-            key_config.max_permissions.clone(),
-        ))
+        // The `Preauthorized` context carries the signing key's ID; its `max_permissions` are
+        // resolved at authorization time (see `assert_authorized`). `key_config` was only needed
+        // here to verify the signature.
+        Ok(AuthContext::Preauthorized(key_id.into_owned()))
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
     /// `Err(AuthError::NotPermitted)` is returned.
     ///
     /// [`AuthContext::Disabled`] permits every operation. [`AuthContext::Preauthorized`] permits
-    /// the operation as long as `perm` is within the signing key's `max_permissions` (the
-    /// signature already binds the request's usecase and scopes). For [`AuthContext::Scoped`], the
-    /// passed-in `perm` is checked against the granted permissions and the request's usecase and
-    /// scopes are checked against the granted ones.
+    /// the operation as long as `perm` is within the signing key's `max_permissions`, resolved
+    /// from `key_directory` (the signature already binds the request's usecase and scopes). For
+    /// [`AuthContext::Scoped`], the passed-in `perm` is checked against the granted permissions and
+    /// the request's usecase and scopes are checked against the granted ones.
     pub fn assert_authorized(
         &self,
         perm: Permission,
         context: &ObjectContext,
+        key_directory: &PublicKeyDirectory,
     ) -> Result<(), AuthError> {
         let scoped = match self {
             AuthContext::Disabled => return Ok(()),
-            AuthContext::Preauthorized(max_permissions) => {
+            AuthContext::Preauthorized(key_id) => {
+                // Resolve the signing key's permissions at authorization time. A missing key
+                // (e.g. removed since verification) denies the operation.
+                let max_permissions = key_directory
+                    .keys
+                    .get(key_id)
+                    .map(|config| &config.max_permissions)
+                    .ok_or(AuthError::NotPermitted)?;
                 return if max_permissions.contains(&perm) {
                     Ok(())
                 } else {
@@ -494,6 +501,13 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         }
     }
 
+    /// A directory with no keys, for scoped/disabled cases where key resolution is not exercised.
+    fn empty_key_directory() -> PublicKeyDirectory {
+        PublicKeyDirectory {
+            keys: BTreeMap::new(),
+        }
+    }
+
     // Allowed:
     //   auth_context: org.123 / proj.123
     //         object: org.123 / proj.123
@@ -502,7 +516,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
 
         Ok(())
     }
@@ -515,7 +529,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "*", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
 
         Ok(())
     }
@@ -531,7 +545,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
 
         Ok(())
     }
@@ -547,13 +561,15 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "999");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result =
+            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("999", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result =
+            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -569,7 +585,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = AuthContext::Scoped(scoped);
         let object = sample_object_context("123", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
+        let result =
+            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -581,7 +598,11 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
         let object = sample_object_context("123", "456");
 
-        let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
+        let result = auth_context.assert_authorized(
+            Permission::ObjectWrite,
+            &object,
+            &empty_key_directory(),
+        );
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -591,29 +612,42 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     // read-only key cannot authorize a delete even though the signature is valid.
     #[test]
     fn test_preauthorized_respects_max_permissions() {
-        let context = AuthContext::Preauthorized(HashSet::from([Permission::ObjectRead]));
+        let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
+        let context = AuthContext::Preauthorized(TEST_EDDSA_KID.into());
         let object = sample_object_context("123", "456");
 
         assert_eq!(
-            context.assert_authorized(Permission::ObjectRead, &object),
+            context.assert_authorized(Permission::ObjectRead, &object, &key_directory),
             Ok(())
         );
         assert_eq!(
-            context.assert_authorized(Permission::ObjectDelete, &object),
+            context.assert_authorized(Permission::ObjectDelete, &object, &key_directory),
+            Err(AuthError::NotPermitted)
+        );
+    }
+
+    // An unknown key ID in a `Preauthorized` context (e.g. the key was removed after the URL was
+    // signed) denies the operation rather than allowing it.
+    #[test]
+    fn test_preauthorized_unknown_key_denied() {
+        let context = AuthContext::Preauthorized("some-removed-key".into());
+        let object = sample_object_context("123", "456");
+
+        assert_eq!(
+            context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory()),
             Err(AuthError::NotPermitted)
         );
     }
 
     // Verifying a pre-signed request yields a `Preauthorized` context carrying the signing key's
-    // `max_permissions`, which is what enforces the limit above end-to-end.
+    // ID, which is what drives the `max_permissions` check above end-to-end.
     #[test]
-    fn test_from_presigned_request_carries_max_permissions() {
+    fn test_from_presigned_request_carries_key_id() {
         use objectstore_types::presign::{
             CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_TIMESTAMP,
         };
 
-        let read_only = HashSet::from([Permission::ObjectRead]);
-        let key_directory = test_key_config(read_only.clone());
+        let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
 
         let path = "/v1/objects/test/org=1/key";
         let timestamp = humantime::format_rfc3339(SystemTime::now()).to_string();
@@ -636,6 +670,6 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         )
         .unwrap();
 
-        assert_eq!(context, AuthContext::Preauthorized(read_only));
+        assert_eq!(context, AuthContext::Preauthorized(TEST_EDDSA_KID.into()));
     }
 }

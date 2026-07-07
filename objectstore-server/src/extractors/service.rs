@@ -29,6 +29,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 state.service.clone(),
                 AuthContext::Disabled,
                 enforce,
+                state.key_directory.clone(),
             ));
         }
 
@@ -48,6 +49,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                         state.service.clone(),
                         AuthContext::Disabled,
                         enforce,
+                        state.key_directory.clone(),
                     ))
                 };
             }
@@ -88,7 +90,12 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             Err(_) => AuthContext::Disabled,
         };
 
-        Ok(AuthAwareService::new(state.service.clone(), auth, enforce))
+        Ok(AuthAwareService::new(
+            state.service.clone(),
+            auth,
+            enforce,
+            state.key_directory.clone(),
+        ))
     }
 }
 

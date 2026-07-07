@@ -4,12 +4,14 @@ use objectstore_service::multipart::{
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use std::sync::Arc;
+
 use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, PublicKeyDirectory};
 use crate::endpoints::common::ApiResult;
 
 /// Wrapper around [`StorageService`] that ensures each operation is authorized.
@@ -38,22 +40,29 @@ pub struct AuthAwareService {
     service: StorageService,
     context: AuthContext,
     enforce: bool,
+    key_directory: Arc<PublicKeyDirectory>,
 }
 
 impl AuthAwareService {
-    /// Creates a new `AuthAwareService` using the given [`StorageService`], [`AuthContext`], and
-    /// enforcement setting.
+    /// Creates a new `AuthAwareService` using the given [`StorageService`], [`AuthContext`],
+    /// enforcement setting, and key directory.
     ///
     /// The `context` is used to check whether each operation is authorized. `enforce` controls
-    /// whether authorization failures will result in an error response or be ignored.
+    /// whether authorization failures will result in an error response or be ignored. The
+    /// `key_directory` is used to resolve the signing key's permissions for pre-signed requests.
     ///
-    /// With an [`AuthContext::Disabled`] or [`AuthContext::Preauthorized`] context, all operations
-    /// are permitted.
-    pub fn new(service: StorageService, context: AuthContext, enforce: bool) -> Self {
+    /// With an [`AuthContext::Disabled`] context, all operations are permitted.
+    pub fn new(
+        service: StorageService,
+        context: AuthContext,
+        enforce: bool,
+        key_directory: Arc<PublicKeyDirectory>,
+    ) -> Self {
         Self {
             service,
             context,
             enforce,
+            key_directory,
         }
     }
 
@@ -61,7 +70,10 @@ impl AuthAwareService {
     ///
     /// Returns `Ok(())` if authorized, or an error indicating the reason.
     pub fn check_permission(&self, perm: Permission, context: &ObjectContext) -> ApiResult<()> {
-        if let Err(error) = self.context.assert_authorized(perm, context) {
+        if let Err(error) = self
+            .context
+            .assert_authorized(perm, context, &self.key_directory)
+        {
             sentry::with_scope(
                 |s| s.set_tag("perm", perm.to_string()),
                 || error.log(!self.enforce),

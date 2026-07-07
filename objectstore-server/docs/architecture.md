@@ -133,10 +133,12 @@ path instead of looking for a JWT:
   **one week** so a URL cannot be minted to be effectively immortal.
 
 A verified pre-signed request yields an `AuthContext::Preauthorized` carrying the
-signing key's `max_permissions`. The signature already binds the request's method,
-path, and signed headers, so no scope check is needed — but the operation's
-permission is still checked against `max_permissions`, so a restricted (e.g.
-read-only) key cannot pre-sign a more privileged operation such as `DELETE`.
+signing key's ID. The signature already binds the request's method, path, and
+signed headers, so no scope check is needed — but at authorization time the
+operation's permission is resolved against that key's `max_permissions`, so a
+restricted (e.g. read-only) key cannot pre-sign a more privileged operation such
+as `DELETE`. Keeping only the key ID in the context leaves the permission lookup a
+service-level concern rather than baking it in at extraction time.
 
 ## Configuration
 
