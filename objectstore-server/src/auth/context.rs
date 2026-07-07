@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, SystemTime};
 
-use http::{HeaderMap, HeaderName, Method};
+use http::Method;
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
 use objectstore_types::presign::{
-    CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_SIGNED_HEADERS, X_OS_TIMESTAMP,
+    CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
 };
 use serde::{Deserialize, Serialize};
 
@@ -177,17 +177,16 @@ impl AuthContext {
         method: &Method,
         path: &str,
         query: Option<&str>,
-        headers: &HeaderMap,
         key_directory: &PublicKeyDirectory,
         now: SystemTime,
     ) -> Result<AuthContext, AuthError> {
         let query = query.unwrap_or_default();
 
-        let signature = find_query_param(query, X_OS_SIG)
-            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Sig"))?;
+        let signature = find_query_param(query, PARAM_SIG)
+            .ok_or(AuthError::BadRequest("presigned URL missing os-sig"))?;
 
-        let key_id = find_query_param(query, X_OS_KEY_ID)
-            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Key-Id"))?;
+        let key_id = find_query_param(query, PARAM_KID)
+            .ok_or(AuthError::BadRequest("presigned URL missing os-kid"))?;
         // An unknown key ID is treated as a verification failure (rather than leaking which
         // keys are configured), matching the failure mode of a bad signature.
         let key_config = key_directory
@@ -195,48 +194,32 @@ impl AuthContext {
             .get(key_id.as_ref())
             .ok_or(AuthError::VerificationFailure)?;
 
-        // `X-Os-Signed-Headers` is an optional `;`-separated list of header names that the
-        // signature covers.
-        let signed_header_names = match find_query_param(query, X_OS_SIGNED_HEADERS) {
-            Some(value) if !value.is_empty() => value
-                .split(';')
-                .map(|name| HeaderName::from_bytes(name.as_bytes()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| {
-                    AuthError::BadRequest("presigned URL has an invalid signed header name")
-                })?,
-            _ => Vec::new(),
-        };
-        let signed_headers: Vec<&HeaderName> = signed_header_names.iter().collect();
-
         // Enforce the validity window before spending time on signature verification.
-        let timestamp = find_query_param(query, X_OS_TIMESTAMP).ok_or(AuthError::BadRequest(
-            "presigned URL missing X-Os-Timestamp",
-        ))?;
+        let timestamp = find_query_param(query, PARAM_TIMESTAMP)
+            .ok_or(AuthError::BadRequest("presigned URL missing os-timestamp"))?;
         let timestamp = humantime::parse_rfc3339(timestamp.as_ref())
-            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid X-Os-Timestamp"))?;
-        let expires: u64 = find_query_param(query, X_OS_EXPIRES)
-            .ok_or(AuthError::BadRequest("presigned URL missing X-Os-Expires"))?
+            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-timestamp"))?;
+        let duration: u64 = find_query_param(query, PARAM_DURATION)
+            .ok_or(AuthError::BadRequest("presigned URL missing os-duration"))?
             .parse()
-            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid X-Os-Expires"))?;
-        let expires = Duration::from_secs(expires);
-        if expires > MAX_PRESIGN_VALIDITY {
+            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-duration"))?;
+        let duration = Duration::from_secs(duration);
+        if duration > MAX_PRESIGN_VALIDITY {
             return Err(AuthError::BadRequest(
                 "presigned URL validity exceeds the maximum of 1 week",
             ));
         }
-        if now < timestamp || now > timestamp + expires {
+        if now < timestamp || now > timestamp + duration {
             objectstore_log::debug!("presigned URL is outside its validity window");
             return Err(AuthError::VerificationFailure);
         }
 
-        let canonical = CanonicalRequest::new(method, path, Some(query), headers, &signed_headers)
-            .map_err(|_| AuthError::BadRequest("presigned URL has invalid signed headers"))?;
+        let canonical = CanonicalRequest::new(method, path, Some(query));
 
         // Any configured key version verifying the signature is sufficient (supports rotation).
         let verified = key_config.key_versions.iter().any(|key| {
             canonical
-                .verify(&key.verifying_key, signature.as_ref())
+                .verify(key.verifying_key.as_bytes(), signature.as_ref())
                 .is_ok()
         });
         if !verified {
@@ -644,7 +627,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     #[test]
     fn test_from_presigned_request_carries_key_id() {
         use objectstore_types::presign::{
-            CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_TIMESTAMP,
+            CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
         };
 
         let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
@@ -652,19 +635,20 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let path = "/v1/objects/test/org=1/key";
         let timestamp = humantime::format_rfc3339(SystemTime::now()).to_string();
         let base = format!(
-            "{X_OS_KEY_ID}={TEST_EDDSA_KID}&{X_OS_TIMESTAMP}={timestamp}&{X_OS_EXPIRES}=3600"
+            "{PARAM_KID}={TEST_EDDSA_KID}&{PARAM_TIMESTAMP}={timestamp}&{PARAM_DURATION}=3600"
         );
 
         let signing_key = SigningKey::from_pkcs8_pem(TEST_EDDSA_PRIVKEY).unwrap();
-        let canonical =
-            CanonicalRequest::new(&Method::GET, path, Some(&base), &HeaderMap::new(), &[]).unwrap();
-        let query = format!("{base}&{X_OS_SIG}={}", canonical.sign(&signing_key));
+        let canonical = CanonicalRequest::new(&Method::GET, path, Some(&base));
+        let query = format!(
+            "{base}&{PARAM_SIG}={}",
+            canonical.sign(signing_key.as_bytes())
+        );
 
         let context = AuthContext::from_presigned_request(
             &Method::GET,
             path,
             Some(&query),
-            &HeaderMap::new(),
             &key_directory,
             SystemTime::now(),
         )

@@ -9,11 +9,11 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, header};
+use http::{Method, header};
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY, TestServer};
 use objectstore_types::presign::{
-    CanonicalRequest, X_OS_EXPIRES, X_OS_KEY_ID, X_OS_SIG, X_OS_SIGNED_HEADERS, X_OS_TIMESTAMP,
+    CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
 };
 use serde::Serialize;
 
@@ -87,47 +87,29 @@ async fn seed_object(server: &TestServer, body: &'static str) -> Result<()> {
     Ok(())
 }
 
-/// Signs a pre-signed request and returns the full query string (including `X-Os-Sig`), signed
-/// with the given `key`. When `host` is set, the `host` header is included in the signature.
+/// Signs a pre-signed request and returns the full query string (including `os-sig`), signed
+/// with the given `key`.
 fn presign_query_with_key(
     key: &SigningKey,
     method: &Method,
     path: &str,
     timestamp: SystemTime,
     expires: Duration,
-    host: Option<&str>,
 ) -> String {
     let ts = humantime::format_rfc3339(timestamp).to_string();
-    let mut base = format!(
-        "{X_OS_KEY_ID}={TEST_EDDSA_KID}&{X_OS_TIMESTAMP}={ts}&{X_OS_EXPIRES}={}",
+    let base = format!(
+        "{PARAM_KID}={TEST_EDDSA_KID}&{PARAM_TIMESTAMP}={ts}&{PARAM_DURATION}={}",
         expires.as_secs()
     );
 
-    let mut headers = HeaderMap::new();
-    let mut signed_headers = Vec::new();
-    if let Some(host) = host {
-        base.push_str(&format!("&{X_OS_SIGNED_HEADERS}=host"));
-        headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
-        signed_headers.push(HeaderName::from_static("host"));
-    }
-    let signed_refs: Vec<&HeaderName> = signed_headers.iter().collect();
-
-    let canonical =
-        CanonicalRequest::new(method, path, Some(&base), &headers, &signed_refs).unwrap();
-    let signature = canonical.sign(key);
-    format!("{base}&{X_OS_SIG}={signature}")
+    let canonical = CanonicalRequest::new(method, path, Some(&base));
+    let signature = canonical.sign(key.as_bytes());
+    format!("{base}&{PARAM_SIG}={signature}")
 }
 
 /// Signs a valid pre-signed request with the test key.
 fn presign_query(method: &Method, path: &str, expires: Duration) -> String {
-    presign_query_with_key(
-        &signing_key(),
-        method,
-        path,
-        SystemTime::now(),
-        expires,
-        None,
-    )
+    presign_query_with_key(&signing_key(), method, path, SystemTime::now(), expires)
 }
 
 /// Builds a full request URL for `path` with the given query string.
@@ -189,40 +171,6 @@ async fn presigned_delete_succeeds_then_object_is_gone() -> Result<()> {
 }
 
 #[tokio::test]
-async fn presigned_get_with_signed_host_succeeds() -> Result<()> {
-    let server = test_server().await;
-    seed_object(&server, "hello").await?;
-
-    // `server.url` renders `http://localhost:<port>/...`; the authority is what reqwest sends
-    // as the `Host` header, so sign that exact value.
-    let url = server.url(OBJECT_PATH);
-    let host = url
-        .strip_prefix("http://")
-        .unwrap()
-        .split('/')
-        .next()
-        .unwrap()
-        .to_string();
-
-    let query = presign_query_with_key(
-        &signing_key(),
-        &Method::GET,
-        OBJECT_PATH,
-        SystemTime::now(),
-        ONE_HOUR,
-        Some(&host),
-    );
-    let resp = reqwest::Client::new()
-        .get(presigned_url(&server, OBJECT_PATH, &query))
-        .send()
-        .await?;
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    assert_eq!(resp.text().await?, "hello");
-    Ok(())
-}
-
-#[tokio::test]
 async fn presigned_get_with_tampered_signature_is_unauthorized() -> Result<()> {
     let server = test_server().await;
 
@@ -253,7 +201,6 @@ async fn presigned_get_with_wrong_key_is_unauthorized() -> Result<()> {
         OBJECT_PATH,
         SystemTime::now(),
         ONE_HOUR,
-        None,
     );
 
     let resp = reqwest::Client::new()
@@ -277,7 +224,6 @@ async fn presigned_get_expired_is_unauthorized() -> Result<()> {
         OBJECT_PATH,
         timestamp,
         ONE_HOUR,
-        None,
     );
 
     let resp = reqwest::Client::new()

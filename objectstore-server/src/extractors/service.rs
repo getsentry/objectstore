@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use axum::extract::{FromRequestParts, OriginalUri};
 use axum::http::{Method, header, request::Parts};
-use objectstore_types::presign::X_OS_SIG;
+use objectstore_types::presign::PARAM_SIG;
 
 use crate::auth::{AuthAwareService, AuthContext, AuthError};
 use crate::endpoints::common::ApiError;
@@ -65,7 +65,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 &parts.method,
                 path,
                 parts.uri.query(),
-                &parts.headers,
                 &state.key_directory,
                 SystemTime::now(),
             )
@@ -99,12 +98,12 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
     }
 }
 
-/// Returns whether the query string carries a pre-signed URL signature (`X-Os-Sig`).
+/// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
 fn has_presign_signature(query: Option<&str>) -> bool {
     query.is_some_and(|query| {
         query
             .split('&')
-            .any(|pair| pair.split_once('=').map_or(pair, |(key, _)| key) == X_OS_SIG)
+            .any(|pair| pair.split_once('=').map_or(pair, |(key, _)| key) == PARAM_SIG)
     })
 }
 
