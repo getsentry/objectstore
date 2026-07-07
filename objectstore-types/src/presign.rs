@@ -78,7 +78,7 @@ pub enum Error {
     InvalidSignatureEncoding,
     /// A signed header's value was not valid text (i.e. not printable ASCII).
     #[error("signed header value is not valid text")]
-    NonTextHeaderValue,
+    InvalidHeaderValue,
     /// The signature did not match the canonical request for the given key.
     #[error("signature verification failed")]
     VerificationFailed,
@@ -91,17 +91,11 @@ pub struct CanonicalRequest(String);
 impl CanonicalRequest {
     /// Builds the canonical form of a request.
     ///
-    /// `path` and `query` are the raw request-line components, taken verbatim from
-    /// `uri.path()` / `uri.query()` on the server or the built `url::Url` on the
-    /// client — both signer and verifier must pass the same bytes. `signed_headers`
-    /// names the headers to sign; each is looked up in `headers`, and missing ones
-    /// are skipped (so a signed-but-absent header simply fails verification).
-    ///
     /// See the [module-level documentation](self) for the exact format.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NonTextHeaderValue`] if a signed header's value is not
+    /// Returns [`Error::InvalidHeaderValue`] if a signed header's value is not
     /// printable ASCII.
     pub fn new(
         method: &Method,
@@ -118,10 +112,6 @@ impl CanonicalRequest {
 
         let canonical_path = percent_encode(path.as_bytes(), NON_ALPHANUMERIC).to_string();
 
-        // Re-encode each query parameter canonically (decode the raw pair, then
-        // encode with `NON_ALPHANUMERIC`) and sort, so signer and verifier agree
-        // regardless of how the raw query was encoded on the wire. `X-Os-Sig` is
-        // excluded since it is the output of signing.
         let mut pairs: Vec<(String, String)> = Vec::new();
         for pair in query.unwrap_or_default().split('&') {
             if pair.is_empty() {
@@ -146,12 +136,10 @@ impl CanonicalRequest {
             .collect::<Vec<_>>()
             .join("&");
 
-        // Header names are already lowercase (`HeaderName`), and header values
-        // cannot contain CR/LF (`HeaderValue`), so no encoding is needed.
         let mut header_pairs: Vec<(&str, &str)> = Vec::with_capacity(signed_headers.len());
         for name in signed_headers {
             if let Some(value) = headers.get(*name) {
-                let value = value.to_str().map_err(|_| Error::NonTextHeaderValue)?;
+                let value = value.to_str().map_err(|_| Error::InvalidHeaderValue)?;
                 header_pairs.push((name.as_str(), value.trim()));
             }
         }
@@ -175,14 +163,16 @@ impl CanonicalRequest {
 
     /// Signs this canonical form with Ed25519.
     ///
-    /// Returns the base64url-encoded (no padding) signature, suitable as the value
-    /// of the [`X_OS_SIG`] query parameter.
+    /// Returns the base64url-encoded  signature, suitable as the value of the
+    /// [`X_OS_SIG`] query parameter.
     pub fn sign(&self, key: &SigningKey) -> String {
         let signature = key.sign(self.0.as_bytes());
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     }
 
     /// Verifies a base64url-encoded Ed25519 signature against this canonical form.
+    ///
+    /// # Errors
     ///
     /// Returns [`Error::InvalidSignatureEncoding`] if `signature_b64` is not valid
     /// base64url or not a 64-byte signature, and [`Error::VerificationFailed`] if
@@ -428,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn non_text_header_value_is_rejected() {
+    fn canonical_rejects_non_text_header_value() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("x-binary"),
@@ -443,7 +433,7 @@ mod tests {
                 &headers,
                 &[&x_binary],
             ),
-            Err(Error::NonTextHeaderValue)
+            Err(Error::InvalidHeaderValue)
         );
     }
 }
