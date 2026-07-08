@@ -221,7 +221,7 @@ mod tests {
     // --- Extractor integration tests ---
 
     use std::collections::BTreeMap;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
 
     use axum::Router;
     use axum::body::Body;
@@ -373,11 +373,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -402,11 +401,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_context_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -433,11 +431,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched_with_service() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: None,
                 scopes: BTreeMap::new(),
                 service: Some("test-*".into()),
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };

@@ -19,10 +19,13 @@ The platform is split into the following core components:
   more information.
 - `objectstore-types`: Shared type definitions for the client and server,
   including metadata, scopes, expiration, and permissions.
-- `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
-  across service components.
 - `objectstore-log`: Logging macros and subscriber initialization shared across
   service components.
+- `objectstore-metrics`: Metrics macros and DogStatsD initialization shared
+  across service components.
+- `objectstore-options`: Runtime options backed by
+  [`sentry-options`](https://crates.io/crates/sentry-options), providing
+  dynamic configuration to service components.
 - `objectstore-test`: Test utilities shared across the workspace.
 - `clients`: The Rust and Python client library SDKs, which expose
   high-performance blob storage access.
