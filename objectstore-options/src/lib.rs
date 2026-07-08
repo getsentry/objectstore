@@ -16,9 +16,11 @@ pub use objectstore_typed_options::Error;
 /// Obtain a snapshot of the current options via [`Options::get`]. Before calling `get`,
 /// the global instance must be initialized with [`Options::init`].
 #[derive(Debug, SentryOptions)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[sentry_options(namespace = "objectstore", path = "../../sentry-options")]
 pub struct Options {
     /// Active killswitches that may disable access to specific object contexts.
+    #[cfg_attr(test, schemars(default))]
     killswitches: Vec<Killswitch>,
 }
 
@@ -34,6 +36,7 @@ impl Options {
 /// Note that at least one of the fields should be set, or else the killswitch will match all
 /// contexts and discard all requests.
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Killswitch {
     /// Optional usecase to match.
     ///
@@ -61,6 +64,8 @@ pub struct Killswitch {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     // Required for schema validation.
@@ -70,5 +75,14 @@ mod tests {
     #[test]
     fn schema_is_valid() {
         let _ = Options::get();
+    }
+
+    #[test]
+    fn schema_matches_golden_file() {
+        let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sentry-options/schemas/objectstore/schema.json");
+        objectstore_typed_options::schema::assert_schema_matches_golden_file::<Options>(
+            &schema_path,
+        );
     }
 }
