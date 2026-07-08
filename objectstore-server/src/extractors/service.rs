@@ -33,61 +33,48 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             ));
         }
 
-        // A pre-signed URL carries its signature in the query string. If present, verify it
-        // instead of looking for a JWT.
-        let auth_result = if has_presign_signature(parts.uri.query()) {
-            // Pre-signed URLs are only accepted for read-like methods. Other methods are
-            // rejected outright (see the `PresignUnsupportedMethod` status mapping for the
-            // 501-vs-401 note).
-            if !matches!(parts.method, Method::GET | Method::HEAD | Method::DELETE) {
-                let error = AuthError::PresignUnsupportedMethod;
-                error.log(!enforce);
-                return if enforce {
-                    Err(ApiError::Auth(error))
-                } else {
-                    Ok(AuthAwareService::new(
-                        state.service.clone(),
-                        AuthContext::Disabled,
-                        enforce,
-                        state.key_directory.clone(),
-                    ))
-                };
+        let has_presign = has_presign_signature(parts.uri.query());
+        let auth_result = match (has_presign, &parts.method) {
+            (true, &Method::GET | &Method::HEAD | &Method::DELETE) => {
+                let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
+                    .await
+                    .map_err(|_| {
+                        AuthError::BadRequest("presigned URL has missing or invalid parameters")
+                    })?;
+
+                // The client signs the full public path, but `Router::nest` strips the `/v1`
+                // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
+                let path = parts
+                    .extensions
+                    .get::<OriginalUri>()
+                    .ok_or(AuthError::InternalError(
+                        "OriginalUri extension missing".into(),
+                    ))?
+                    .0
+                    .path();
+
+                AuthContext::from_presigned_request(
+                    &parts.method,
+                    path,
+                    parts.uri.query(),
+                    &params,
+                    &state.key_directory,
+                    SystemTime::now(),
+                )
             }
+            (true, _) => Err(AuthError::PresignUnsupportedMethod),
+            (false, _) => {
+                let token = parts
+                    .headers
+                    .get(OBJECTSTORE_AUTH_HEADER)
+                    .or_else(|| parts.headers.get(header::AUTHORIZATION))
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(strip_bearer);
 
-            let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| {
-                    AuthError::BadRequest("presigned URL has missing or invalid parameters")
-                })?;
-
-            // The client signs the full public path, but `Router::nest` strips the `/v1`
-            // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
-            let path = match parts.extensions.get::<OriginalUri>() {
-                Some(original) => original.0.path(),
-                None => parts.uri.path(),
-            };
-
-            AuthContext::from_presigned_request(
-                &parts.method,
-                path,
-                parts.uri.query(),
-                &params,
-                &state.key_directory,
-                SystemTime::now(),
-            )
-            .inspect_err(|e| e.log(!enforce))
-        } else {
-            let token = parts
-                .headers
-                .get(OBJECTSTORE_AUTH_HEADER)
-                .or_else(|| parts.headers.get(header::AUTHORIZATION))
-                .and_then(|v| v.to_str().ok())
-                .and_then(strip_bearer);
-
-            // Attempt to decode / verify the JWT, logging failure
-            AuthContext::from_encoded_jwt(token, &state.key_directory)
-                .inspect_err(|e| e.log(!enforce))
-        };
+                AuthContext::from_encoded_jwt(token, &state.key_directory)
+            }
+        }
+        .inspect_err(|e| e.log(!enforce));
 
         // If enforcement is disabled, proceed without an auth context even on failure
         let auth = match auth_result {
