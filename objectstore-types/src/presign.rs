@@ -7,10 +7,10 @@
 //!
 //! ```text
 //! GET /v1/objects/<usecase>/<scopes>/<key>
-//!     ?os-timestamp=2026-04-20T13:37:00.00Z
-//!     &os-duration=3600
-//!     &os-kid=relay
-//!     &os-sig=<signature>
+//!     ?os_timestamp=2026-04-20T13:37:00.00Z
+//!     &os_duration=3600
+//!     &os_kid=relay
+//!     &os_sig=<signature>
 //! ```
 //!
 //! The signature covers a canonical form of the request.
@@ -27,7 +27,7 @@
 //!
 //! - normalized method: the uppercase HTTP method, with `HEAD` mapped to `GET`;
 //! - path: the request path, included verbatim as transmitted/received on the wire;
-//! - canonical query string: every query parameter except `os-sig`, with keys
+//! - canonical query string: every query parameter except `os_sig`, with keys
 //!   lowercased, sorted lexicographically by name and value, joined with `&`.
 
 use base64::Engine as _;
@@ -38,16 +38,16 @@ use http::Method;
 pub use ed25519_dalek::{SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey};
 
 /// Query parameter carrying the time at which the request was signed.
-pub const PARAM_TIMESTAMP: &str = "os-timestamp";
+pub const PARAM_TIMESTAMP: &str = "os_timestamp";
 
 /// Query parameter carrying the validity duration, in seconds.
-pub const PARAM_DURATION: &str = "os-duration";
+pub const PARAM_DURATION: &str = "os_duration";
 
 /// Query parameter naming the key ID used to sign the request.
-pub const PARAM_KID: &str = "os-kid";
+pub const PARAM_KID: &str = "os_kid";
 
 /// Query parameter carrying the base64url-encoded signature.
-pub const PARAM_SIG: &str = "os-sig";
+pub const PARAM_SIG: &str = "os_sig";
 
 /// Errors returned when verifying a pre-signed request signature.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -152,17 +152,17 @@ mod tests {
     }
 
     /// Raw query string as it would appear on the wire (unsorted, includes the
-    /// os-sig that must be excluded).
+    /// os_sig that must be excluded).
     fn sample_query() -> &'static str {
-        "os-timestamp=1985-04-12T23:20:50.52Z\
-         &os-kid=relay\
-         &os-duration=3600\
-         &os-sig=should-be-excluded"
+        "os_timestamp=1985-04-12T23:20:50.52Z\
+         &os_kid=relay\
+         &os_duration=3600\
+         &os_sig=should-be-excluded"
     }
 
     #[test]
     fn canonical_form_is_stable() {
-        // Base case: full query. Pins path encoding (slashes too), os-sig
+        // Base case: full query. Pins path encoding (slashes too), os_sig
         // exclusion, key lowercasing, and query sort order.
         let canonical = CanonicalRequest::new(
             &Method::GET,
@@ -173,9 +173,9 @@ mod tests {
             canonical.0,
             "GET\n\
              /v1/objects/testing/org=17;project=42/foo/bar\n\
-             os-duration=3600&\
-             os-kid=relay&\
-             os-timestamp=1985-04-12T23:20:50.52Z"
+             os_duration=3600&\
+             os_kid=relay&\
+             os_timestamp=1985-04-12T23:20:50.52Z"
         );
 
         // Empty query: the canonical query component is empty.
@@ -203,9 +203,9 @@ mod tests {
             canonical.0,
             "GET\n\
              /v1/objects/testing/_/key\n\
-             os-duration=3600&\
-             os-kid=relay&\
-             os-timestamp=1985-04-12T23:20:50.52Z"
+             os_duration=3600&\
+             os_kid=relay&\
+             os_timestamp=1985-04-12T23:20:50.52Z"
         );
     }
 
