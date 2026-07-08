@@ -8,6 +8,7 @@ use objectstore_types::auth::Permission;
 use objectstore_types::presign::CanonicalRequest;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::KeyId;
 use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
@@ -18,22 +19,21 @@ use crate::auth::util::StringOrWildcard;
 /// minted to be effectively immortal.
 const MAX_PRESIGN_VALIDITY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// The reserved pre-signing query parameters, extracted from the query string via
-/// axum's `Query` extractor.
+/// The pre-signing query parameters.
 #[derive(Debug, Deserialize)]
 pub struct PresignParams {
-    /// Base64url-encoded Ed25519 signature.
-    #[serde(rename = "os-sig")]
-    pub sig: String,
     /// Key ID identifying which signing key was used.
-    #[serde(rename = "os-kid")]
-    pub kid: String,
+    #[serde(rename = "os_kid")]
+    pub key_id: KeyId,
+    /// Base64url-encoded Ed25519 signature.
+    #[serde(rename = "os_sig")]
+    pub signature: String,
     /// RFC 3339 timestamp of when the URL was signed.
-    #[serde(rename = "os-timestamp")]
+    #[serde(rename = "os_timestamp")]
     pub timestamp: String,
     /// Validity duration in seconds from `timestamp`.
-    #[serde(rename = "os-duration")]
-    pub duration: u64,
+    #[serde(rename = "os_duration")]
+    pub duration_secs: u64,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -59,7 +59,7 @@ fn jwt_validation_params(jwt_header: &Header) -> Validation {
     validation
 }
 
-/// The verified authorization details carried by a scoped JWT.
+/// The verified authorization details obtained from a JWT.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ScopedContext {
@@ -86,13 +86,8 @@ pub enum AuthContext {
     /// Authorization is inactive; every operation is permitted.
     Disabled,
 
-    /// A valid pre-signed signature already authorized this exact request.
-    ///
-    /// The signature covers the request's method, path, query, and signed headers, so no scope
-    /// check is required. The wrapped value is the ID of the signing key: at authorization time
-    /// the operation's permission is checked against that key's `max_permissions`, so a restricted
-    /// (e.g. read-only) key cannot be used to pre-sign a more privileged operation.
-    Preauthorized(String),
+    /// A valid signature already authorized this exact request.
+    Preauthorized(KeyId),
 
     /// A verified JWT; each operation is checked against these scopes and permissions.
     Scoped(ScopedContext),
@@ -200,13 +195,13 @@ impl AuthContext {
         // keys are configured), matching the failure mode of a bad signature.
         let key_config = key_directory
             .keys
-            .get(&params.kid)
+            .get(&params.key_id)
             .ok_or(AuthError::VerificationFailure)?;
 
         // Enforce the validity window before spending time on signature verification.
         let timestamp = humantime::parse_rfc3339(&params.timestamp)
             .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-timestamp"))?;
-        let duration = Duration::from_secs(params.duration);
+        let duration = Duration::from_secs(params.duration_secs);
         if duration > MAX_PRESIGN_VALIDITY {
             return Err(AuthError::BadRequest(
                 "presigned URL validity exceeds the maximum of 1 week",
@@ -222,7 +217,7 @@ impl AuthContext {
         // Any configured key version verifying the signature is sufficient (supports rotation).
         let verified = key_config.key_versions.iter().any(|key| {
             canonical
-                .verify(key.verifying_key.as_bytes(), &params.sig)
+                .verify(key.verifying_key.as_bytes(), &params.signature)
                 .is_ok()
         });
         if !verified {
@@ -232,7 +227,7 @@ impl AuthContext {
         // The `Preauthorized` context carries the signing key's ID; its `max_permissions` are
         // resolved at authorization time (see `assert_authorized`). `key_config` was only needed
         // here to verify the signature.
-        Ok(AuthContext::Preauthorized(params.kid.clone()))
+        Ok(AuthContext::Preauthorized(params.key_id.clone()))
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
@@ -636,10 +631,10 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let query = format!("{base}&{PARAM_SIG}={signature}");
 
         let params = PresignParams {
-            sig: signature,
-            kid: TEST_EDDSA_KID.to_string(),
+            signature,
+            key_id: TEST_EDDSA_KID.to_string(),
             timestamp: timestamp.clone(),
-            duration: 3600,
+            duration_secs: 3600,
         };
 
         let context = AuthContext::from_presigned_request(
