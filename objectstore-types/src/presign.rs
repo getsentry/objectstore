@@ -88,9 +88,9 @@ impl CanonicalRequest {
     /// through with the original encoding.
     pub fn new(method: &Method, path: &str, query: Option<&str>) -> Self {
         let normalized_method = if *method == Method::HEAD {
-            "GET"
+            String::from("GET")
         } else {
-            method.as_str()
+            method.as_str().to_uppercase()
         };
 
         let mut pairs: Vec<String> = query
