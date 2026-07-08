@@ -179,6 +179,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
+        #[automatically_derived]
         impl ::objectstore_typed_options::SentryOptions for #name {
             const NAMESPACE: &str = #namespace_str;
             const SCHEMA: &str = include_str!(

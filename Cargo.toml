@@ -26,10 +26,10 @@ objectstore-log = { path = "objectstore-log" }
 objectstore-metrics = { path = "objectstore-metrics" }
 objectstore-options = { path = "objectstore-options" }
 objectstore-server = { path = "objectstore-server" }
-objectstore-typed-options = { path = "objectstore-typed-options" }
-objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
 objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
+objectstore-typed-options = { path = "objectstore-typed-options" }
+objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
 objectstore-types = { path = "objectstore-types", version = "0.1.12" }
 stresstest = { path = "stresstest" }
 
