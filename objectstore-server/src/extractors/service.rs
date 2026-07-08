@@ -106,9 +106,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 }
 
 /// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
-///
-/// Objectstore query parameter keys are always matched case-insensitively (see
-/// [`objectstore_types::presign`]), so this also detects `OS-SIG`, `Os-Sig`, etc.
 fn has_presign_signature(query: Option<&str>) -> bool {
     query.is_some_and(|query| {
         query.split('&').any(|pair| {

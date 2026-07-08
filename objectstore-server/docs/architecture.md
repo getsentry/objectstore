@@ -120,13 +120,6 @@ the signature and parameters entirely in the query string (`os-sig`, `os-kid`,
 `os-timestamp`, `os-duration`). See [`objectstore_types::presign`] for the
 canonical form.
 
-Query parameter keys in the pre-signing scheme are always matched
-case-insensitively, both for these reserved parameters and for any other
-parameter folded into the canonical query string — this is a deliberate
-design choice. It does not extend to unrelated query parameters used
-elsewhere in the API (e.g. multipart upload parameters), which remain
-case-sensitive.
-
 When the extractor sees an `os-sig` query parameter it takes the pre-signed
 path instead of looking for a JWT:
 
