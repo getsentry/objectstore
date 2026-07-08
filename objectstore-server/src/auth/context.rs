@@ -565,10 +565,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         Ok(())
     }
 
-    // Verifying a pre-signed request yields a `Preauthorized` context carrying the signing key's
-    // ID, which is what drives the `max_permissions` check above end-to-end.
     #[test]
-    fn test_from_presigned_request_carries_key_id() {
+    fn test_auth_context_from_presigned() {
         let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
 
         let path = "/v1/objects/test/org=1/key";
@@ -602,10 +600,8 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         assert_eq!(context, AuthContext::Preauthorized(TEST_EDDSA_KID.into()));
     }
 
-    // A `Preauthorized` context must still honor the signing key's `max_permissions`, so a
-    // read-only key cannot authorize a delete even though the signature is valid.
     #[test]
-    fn test_preauthorized_respects_max_permissions() {
+    fn test_assert_authorized_preauthorized_respects_max_permissions() {
         let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
         let context = AuthContext::Preauthorized(TEST_EDDSA_KID.into());
         let object = sample_object_context("123", "456");
