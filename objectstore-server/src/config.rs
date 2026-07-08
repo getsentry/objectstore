@@ -984,19 +984,16 @@ mod tests {
                     usecase: Some("broken_usecase".into()),
                     scopes: BTreeMap::new(),
                     service: None,
-                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: None,
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
                     service: None,
-                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: None,
                     scopes: BTreeMap::new(),
                     service: Some("test-*".into()),
-                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: None,
@@ -1005,18 +1002,16 @@ mod tests {
                         ("project".into(), "4711".into()),
                     ]),
                     service: None,
-                    service_matcher: std::sync::OnceLock::new(),
                 },
                 Killswitch {
                     usecase: Some("attachments".into()),
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
                     service: Some("test-*".into()),
-                    service_matcher: std::sync::OnceLock::new(),
                 },
             ];
 
             let config = Config::load(Some(tempfile.path())).unwrap();
-            assert_eq!(&config.killswitches.0, &expected,);
+            assert_eq!(config.killswitches.as_slice(), &expected);
 
             Ok(())
         });

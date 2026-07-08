@@ -115,6 +115,7 @@ pub fn execute() -> Result<()> {
     objectstore_log::debug!(?config);
 
     objectstore_metrics::init(&config.metrics)?;
+    objectstore_options::init()?;
 
     runtime.block_on(async move {
         match args.command {

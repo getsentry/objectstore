@@ -26,9 +26,11 @@ http-body = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 jsonwebtoken = { workspace = true }
+lru = { workspace = true }
 num_cpus = { workspace = true }
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
+objectstore-options = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
@@ -42,6 +44,7 @@ sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+thread_local = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
@@ -56,6 +59,7 @@ profiling = ["dep:jemalloc_pprof", "tikv-jemallocator/profiling"]
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }
+objectstore-options = { workspace = true, features = ["testing"] }
 objectstore-test = { workspace = true }
 stresstest = { workspace = true }
 tempfile = { workspace = true }

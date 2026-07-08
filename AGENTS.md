@@ -109,5 +109,6 @@ Do these checks after completing changes and before responding to the user.
 - `objectstore-server/` - Web server application
 - `objectstore-service/` - Core service logic and backends
 - `objectstore-types/` - Shared type definitions
+- `objectstore-options/` - Runtime options backed by sentry-options
 - `clients/rust/` - Rust client library
 - `clients/python/` - Python client library
