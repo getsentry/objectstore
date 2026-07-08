@@ -10,6 +10,8 @@ edition = "2024"
 publish = true
 
 [dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
 http = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
