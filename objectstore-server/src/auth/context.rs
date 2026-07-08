@@ -55,7 +55,7 @@ pub struct ScopedContext {
 }
 
 /// Maximum duration for a pre-signed URL.
-const MAX_PRESIGN_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_PRESIGN_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60); // 7 days
 
 /// The pre-signing query parameters.
 #[derive(Debug, Deserialize)]
