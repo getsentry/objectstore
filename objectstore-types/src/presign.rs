@@ -29,6 +29,17 @@
 //! - path: the request path, included verbatim as transmitted/received on the wire;
 //! - canonical query string: every query parameter except `os_sig`, with keys
 //!   lowercased, sorted lexicographically by name and value, joined with `&`.
+//!
+//! # Case-insensitive query parameter keys
+//!
+//! Within the pre-signing scheme, query parameter keys are treated as
+//! case-insensitive, by design. This applies both to the reserved parameters
+//! (`os-sig`, `os-kid`, `os-timestamp`, `os-duration`) and to arbitrary
+//! parameters folded into the canonical query string above. Any code that looks
+//! up or compares a pre-signing query parameter key must do so
+//! case-insensitively (e.g. `eq_ignore_ascii_case`), not with a plain `==`.
+//! This does not extend to other, unrelated query parameters used elsewhere in
+//! the API (e.g. multipart upload parameters), which remain case-sensitive.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

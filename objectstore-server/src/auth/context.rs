@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, SystemTime};
 
@@ -6,9 +5,7 @@ use http::Method;
 use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_header};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
-use objectstore_types::presign::{
-    CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
-};
+use objectstore_types::presign::CanonicalRequest;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::error::AuthError;
@@ -17,9 +14,27 @@ use crate::auth::util::StringOrWildcard;
 
 /// Maximum validity window for a pre-signed URL.
 ///
-/// Requests whose `X-Os-Expires` claims a longer window are rejected so that a URL cannot be
+/// Requests whose `os-duration` claims a longer window are rejected so that a URL cannot be
 /// minted to be effectively immortal.
 const MAX_PRESIGN_VALIDITY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The reserved pre-signing query parameters, extracted from the query string via
+/// axum's `Query` extractor.
+#[derive(Debug, Deserialize)]
+pub struct PresignParams {
+    /// Base64url-encoded Ed25519 signature.
+    #[serde(rename = "os-sig")]
+    pub sig: String,
+    /// Key ID identifying which signing key was used.
+    #[serde(rename = "os-kid")]
+    pub kid: String,
+    /// RFC 3339 timestamp of when the URL was signed.
+    #[serde(rename = "os-timestamp")]
+    pub timestamp: String,
+    /// Validity duration in seconds from `timestamp`.
+    #[serde(rename = "os-duration")]
+    pub duration: u64,
+}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
@@ -176,34 +191,22 @@ impl AuthContext {
     pub fn from_presigned_request(
         method: &Method,
         path: &str,
-        query: Option<&str>,
+        raw_query: Option<&str>,
+        params: &PresignParams,
         key_directory: &PublicKeyDirectory,
         now: SystemTime,
     ) -> Result<AuthContext, AuthError> {
-        let query = query.unwrap_or_default();
-
-        let signature = find_query_param(query, PARAM_SIG)
-            .ok_or(AuthError::BadRequest("presigned URL missing os-sig"))?;
-
-        let key_id = find_query_param(query, PARAM_KID)
-            .ok_or(AuthError::BadRequest("presigned URL missing os-kid"))?;
         // An unknown key ID is treated as a verification failure (rather than leaking which
         // keys are configured), matching the failure mode of a bad signature.
         let key_config = key_directory
             .keys
-            .get(key_id.as_ref())
+            .get(&params.kid)
             .ok_or(AuthError::VerificationFailure)?;
 
         // Enforce the validity window before spending time on signature verification.
-        let timestamp = find_query_param(query, PARAM_TIMESTAMP)
-            .ok_or(AuthError::BadRequest("presigned URL missing os-timestamp"))?;
-        let timestamp = humantime::parse_rfc3339(timestamp.as_ref())
+        let timestamp = humantime::parse_rfc3339(&params.timestamp)
             .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-timestamp"))?;
-        let duration: u64 = find_query_param(query, PARAM_DURATION)
-            .ok_or(AuthError::BadRequest("presigned URL missing os-duration"))?
-            .parse()
-            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-duration"))?;
-        let duration = Duration::from_secs(duration);
+        let duration = Duration::from_secs(params.duration);
         if duration > MAX_PRESIGN_VALIDITY {
             return Err(AuthError::BadRequest(
                 "presigned URL validity exceeds the maximum of 1 week",
@@ -214,12 +217,12 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        let canonical = CanonicalRequest::new(method, path, Some(query));
+        let canonical = CanonicalRequest::new(method, path, raw_query);
 
         // Any configured key version verifying the signature is sufficient (supports rotation).
         let verified = key_config.key_versions.iter().any(|key| {
             canonical
-                .verify(key.verifying_key.as_bytes(), signature.as_ref())
+                .verify(key.verifying_key.as_bytes(), &params.sig)
                 .is_ok()
         });
         if !verified {
@@ -229,7 +232,7 @@ impl AuthContext {
         // The `Preauthorized` context carries the signing key's ID; its `max_permissions` are
         // resolved at authorization time (see `assert_authorized`). `key_config` was only needed
         // here to verify the signature.
-        Ok(AuthContext::Preauthorized(key_id.into_owned()))
+        Ok(AuthContext::Preauthorized(params.kid.clone()))
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
@@ -282,17 +285,6 @@ impl AuthContext {
 
         Ok(())
     }
-}
-
-/// Finds a query parameter by name in a raw query string, percent-decoding its value.
-///
-/// Returns the first match. Parameter names in the pre-signing scheme are never
-/// percent-encoded, so the name is compared verbatim.
-fn find_query_param<'a>(query: &'a str, name: &str) -> Option<Cow<'a, str>> {
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then(|| percent_encoding::percent_decode_str(value).decode_utf8_lossy())
-    })
 }
 
 #[cfg(test)]
@@ -640,15 +632,21 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
         let signing_key = SigningKey::from_pkcs8_pem(TEST_EDDSA_PRIVKEY).unwrap();
         let canonical = CanonicalRequest::new(&Method::GET, path, Some(&base));
-        let query = format!(
-            "{base}&{PARAM_SIG}={}",
-            canonical.sign(signing_key.as_bytes())
-        );
+        let signature = canonical.sign(signing_key.as_bytes());
+        let query = format!("{base}&{PARAM_SIG}={signature}");
+
+        let params = PresignParams {
+            sig: signature,
+            kid: TEST_EDDSA_KID.to_string(),
+            timestamp: timestamp.clone(),
+            duration: 3600,
+        };
 
         let context = AuthContext::from_presigned_request(
             &Method::GET,
             path,
             Some(&query),
+            &params,
             &key_directory,
             SystemTime::now(),
         )

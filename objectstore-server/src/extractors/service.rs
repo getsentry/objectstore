@@ -1,10 +1,10 @@
 use std::time::SystemTime;
 
-use axum::extract::{FromRequestParts, OriginalUri};
+use axum::extract::{FromRequestParts, OriginalUri, Query};
 use axum::http::{Method, header, request::Parts};
 use objectstore_types::presign::PARAM_SIG;
 
-use crate::auth::{AuthAwareService, AuthContext, AuthError};
+use crate::auth::{AuthAwareService, AuthContext, AuthError, PresignParams};
 use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
 
@@ -54,6 +54,12 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 };
             }
 
+            let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| {
+                    AuthError::BadRequest("presigned URL has missing or invalid parameters")
+                })?;
+
             // The client signs the full public path, but `Router::nest` strips the `/v1`
             // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
             let path = match parts.extensions.get::<OriginalUri>() {
@@ -65,6 +71,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 &parts.method,
                 path,
                 parts.uri.query(),
+                &params,
                 &state.key_directory,
                 SystemTime::now(),
             )
@@ -99,11 +106,16 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 }
 
 /// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
+///
+/// Objectstore query parameter keys are always matched case-insensitively (see
+/// [`objectstore_types::presign`]), so this also detects `OS-SIG`, `Os-Sig`, etc.
 fn has_presign_signature(query: Option<&str>) -> bool {
     query.is_some_and(|query| {
-        query
-            .split('&')
-            .any(|pair| pair.split_once('=').map_or(pair, |(key, _)| key) == PARAM_SIG)
+        query.split('&').any(|pair| {
+            pair.split_once('=')
+                .map_or(pair, |(key, _)| key)
+                .eq_ignore_ascii_case(PARAM_SIG)
+        })
     })
 }
 
@@ -133,5 +145,16 @@ mod tests {
 
         // No character boundary at end of expected prefix
         assert_eq!(strip_bearer("Bearer⚠️tokenvalue"), None);
+    }
+
+    #[test]
+    fn test_has_presign_signature_case_insensitive() {
+        assert!(has_presign_signature(Some("os-sig=abc")));
+        assert!(has_presign_signature(Some("OS-SIG=abc")));
+        assert!(has_presign_signature(Some("Os-Sig=abc")));
+        assert!(has_presign_signature(Some("os-kid=relay&OS-SIG=abc")));
+
+        assert!(!has_presign_signature(None));
+        assert!(!has_presign_signature(Some("os-kid=relay")));
     }
 }

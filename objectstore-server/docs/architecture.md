@@ -116,20 +116,26 @@ the exact request), or `Scoped` (a verified JWT, checked per operation).
 
 Instead of a JWT, a request may authorize itself with a **pre-signed URL**: a
 key holder signs a canonical form of the request with its Ed25519 key and encodes
-the signature and parameters entirely in the query string
-(`X-Os-Sig`, `X-Os-Key-Id`, `X-Os-Timestamp`, `X-Os-Expires`, and an optional
-`;`-separated `X-Os-Signed-Headers`). See [`objectstore_types::presign`] for the
+the signature and parameters entirely in the query string (`os-sig`, `os-kid`,
+`os-timestamp`, `os-duration`). See [`objectstore_types::presign`] for the
 canonical form.
 
-When the extractor sees an `X-Os-Sig` query parameter it takes the pre-signed
+Query parameter keys in the pre-signing scheme are always matched
+case-insensitively, both for these reserved parameters and for any other
+parameter folded into the canonical query string — this is a deliberate
+design choice. It does not extend to unrelated query parameters used
+elsewhere in the API (e.g. multipart upload parameters), which remain
+case-sensitive.
+
+When the extractor sees an `os-sig` query parameter it takes the pre-signed
 path instead of looking for a JWT:
 
 - Only `GET`, `HEAD`, and `DELETE` are supported. Other methods are rejected
   (currently `401`; see the `PresignUnsupportedMethod` mapping for the intended
   `501`).
 - The signature is verified against the request's canonical form using the
-  `X-Os-Key-Id` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
-- The validity window (`X-Os-Timestamp` + `X-Os-Expires`) is enforced, capped at
+  `os-kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
+- The validity window (`os-timestamp` + `os-duration`) is enforced, capped at
   **one week** so a URL cannot be minted to be effectively immortal.
 
 A verified pre-signed request yields an `AuthContext::Preauthorized` carrying the
