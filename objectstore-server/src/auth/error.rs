@@ -13,23 +13,23 @@ pub enum AuthError {
     #[error("internal error: {0}")]
     InternalError(String),
 
-    /// Indicates that the provided authorization token is invalid (e.g. expired or malformed).
+    /// Indicates that the provided authorization token/signature is invalid (e.g. expired or malformed).
     #[error("failed to decode token: {0}")]
     ValidationFailure(#[from] jsonwebtoken::errors::Error),
 
-    /// Indicates that an otherwise-valid token was unable to be verified with configured keys.
+    /// Indicates that an otherwise-valid token/signature was unable to be verified with configured keys.
     #[error("failed to verify token")]
     VerificationFailure,
+
+    /// Indicates that the requested operation is not permitted on the resource.
+    #[error("operation not allowed")]
+    NotPermitted,
 
     /// Indicates that a pre-signed URL was used with an unsupported HTTP method.
     ///
     /// Pre-signed URLs are only accepted for `GET`, `HEAD`, and `DELETE`.
     #[error("presigned URLs are not supported for this method")]
     PresignUnsupportedMethod,
-
-    /// Indicates that the requested operation is not permitted on the resource.
-    #[error("operation not allowed")]
-    NotPermitted,
 }
 
 impl AuthError {

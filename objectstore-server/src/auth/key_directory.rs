@@ -26,9 +26,9 @@ async fn read_key_from_file(filename: &Path) -> anyhow::Result<PublicKey> {
         .await
         .with_context(|| format!("reading key from {filename:?}"))?;
     let decoding_key = DecodingKey::from_ed_pem(key_content.as_bytes())
-        .with_context(|| format!("parsing JWT key from {filename:?}"))?;
+        .with_context(|| format!("parsing decoding key from {filename:?}"))?;
     let verifying_key = VerifyingKey::from_public_key_pem(&key_content)
-        .with_context(|| format!("parsing pre-sign key from {filename:?}"))?;
+        .with_context(|| format!("parsing verifying key from {filename:?}"))?;
     Ok(PublicKey {
         decoding_key,
         verifying_key,

@@ -16,7 +16,7 @@ argh = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 bytes = { workspace = true }
-ed25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pem"] }
 elegant-departure = { workspace = true, features = ["tokio"] }
 figment = { workspace = true, features = ["env", "test", "yaml"] }
 futures = { workspace = true }

@@ -123,9 +123,7 @@ canonical form.
 When the extractor sees an `os-sig` query parameter it takes the pre-signed
 path instead of looking for a JWT:
 
-- Only `GET`, `HEAD`, and `DELETE` are supported. Other methods are rejected
-  (currently `401`; see the `PresignUnsupportedMethod` mapping for the intended
-  `501`).
+- Only `GET`, `HEAD`, and `DELETE` are currently supported.
 - The signature is verified against the request's canonical form using the
   `os-kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
 - The validity window (`os-timestamp` + `os-duration`) is enforced, capped at
@@ -136,8 +134,7 @@ signing key's ID. The signature already binds the request's method, path, and
 signed headers, so no scope check is needed — but at authorization time the
 operation's permission is resolved against that key's `max_permissions`, so a
 restricted (e.g. read-only) key cannot pre-sign a more privileged operation such
-as `DELETE`. Keeping only the key ID in the context leaves the permission lookup a
-service-level concern rather than baking it in at extraction time.
+as `DELETE`.
 
 ## Configuration
 

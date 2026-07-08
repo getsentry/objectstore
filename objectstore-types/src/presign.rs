@@ -29,7 +29,6 @@
 //! - path: the request path, included verbatim as transmitted/received on the wire;
 //! - canonical query string: every query parameter except `os_sig`, with keys
 //!   lowercased, sorted lexicographically by name and value, joined with `&`.
-//!
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
