@@ -13,9 +13,18 @@ from pathlib import Path
 import pytest
 import urllib3
 import zstandard
-from objectstore_client import Client, Usecase
+from objectstore_client import (
+    Client,
+    Usecase,
+)
 from objectstore_client.auth import Permission, TokenGenerator
 from objectstore_client.errors import RequestError
+from objectstore_client.many import (
+    DeleteResult,
+    GetResult,
+    HeadResult,
+    PutResult,
+)
 from objectstore_client.metadata import TimeToLive
 from objectstore_client.multipart import CompletePart, MultipartCompleteError
 from objectstore_client.scope import Scope
@@ -648,6 +657,123 @@ def test_multipart_resume(server_url: str) -> None:
 
     retrieved = session.get(final_key)
     assert retrieved.payload.read() == b"firstsecond"
+
+
+def test_batch_operations(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=12345, project=1337)
+
+    # First batch: 4 PUTs. key-2 uses zstd, the rest are uncompressed.
+    results = (
+        session.many()
+        .put(b"first object", key="key-1", compression="none", filename="report.pdf")
+        .put(b"second object", key="key-2", compression="zstd")
+        .put(b"third object", key="key-3", compression="none")
+        .put(b"fourth object", key="key-4", compression="none")
+        .send()
+    )
+    assert len(results) == 4
+    assert all(isinstance(r, PutResult) and r.error is None for r in results)
+    assert sorted(r.key for r in results if isinstance(r, PutResult)) == [
+        "key-1",
+        "key-2",
+        "key-3",
+        "key-4",
+    ]
+
+    # Second batch: GET key-1, GET key-2 (auto-decompress), HEAD key-3, DELETE key-4.
+    results = (
+        session.many().get("key-1").get("key-2").head("key-3").delete("key-4").send()
+    )
+    assert len(results) == 4
+
+    gets = {r.key: r for r in results if isinstance(r, GetResult)}
+    heads = {r.key: r for r in results if isinstance(r, HeadResult)}
+    deletes = {r.key: r for r in results if isinstance(r, DeleteResult)}
+
+    get1 = gets["key-1"]
+    assert get1.response is not None
+    assert get1.response.metadata.compression is None
+    assert get1.response.metadata.filename == "report.pdf"
+    assert get1.response.payload.read() == b"first object"
+
+    get2 = gets["key-2"]
+    assert get2.response is not None
+    assert get2.response.metadata.compression is None  # transparently decompressed
+    assert get2.response.payload.read() == b"second object"
+
+    assert heads["key-3"].metadata is not None
+    assert deletes["key-4"].error is None
+
+    # key-4 is gone.
+    assert session.head("key-4") is None
+
+
+def test_batch_insert_without_key(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=12345, project=1337)
+
+    results = session.many().put(b"keyless object", compression="none").send()
+    assert len(results) == 1
+    put = results[0]
+    assert isinstance(put, PutResult)
+    assert put.error is None
+    assert put.key
+
+    retrieved = session.get(put.key)
+    assert retrieved.payload.read() == b"keyless object"
+
+
+def test_batch_partial_failures(server_url: str) -> None:
+    # A read-only token: writes/deletes fail with 403, reads 404 for missing keys.
+    client = Client(
+        server_url,
+        token=TestTokenGenerator.create(permissions=[Permission.OBJECT_READ]),
+    )
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=12345, project=1337)
+
+    results = (
+        session.many()
+        .get("nonexistent-1")
+        .put(b"should fail", key="write-key", compression="none")
+        .delete("delete-key")
+        .get("nonexistent-2")
+        .send()
+    )
+    assert len(results) == 4
+
+    puts = [r for r in results if isinstance(r, PutResult)]
+    deletes = [r for r in results if isinstance(r, DeleteResult)]
+    gets = [r for r in results if isinstance(r, GetResult)]
+
+    assert isinstance(puts[0].error, RequestError)
+    assert puts[0].error.status == 403
+    assert isinstance(deletes[0].error, RequestError)
+    assert deletes[0].error.status == 403
+    # Missing objects come back as successful "not found" results, not errors.
+    assert all(g.error is None and g.response is None for g in gets)
+
+
+def test_batch_oversized_insert_falls_back_to_individual(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=12345, project=1337)
+
+    big = b"x" * (2 * 1024 * 1024)  # 2 MB > per-part batch limit
+    results = (
+        session.many()
+        .put(big, key="big", compression="none")
+        .put(b"small", key="small", compression="none")
+        .send()
+    )
+    assert len(results) == 2
+    assert all(isinstance(r, PutResult) and r.error is None for r in results)
+
+    assert session.get("big").payload.read() == big
+    assert session.get("small").payload.read() == b"small"
 
 
 def test_multipart_concurrent_part_uploads(server_url: str) -> None:
