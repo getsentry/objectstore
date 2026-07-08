@@ -184,6 +184,29 @@ token = TokenGenerator(
 client = Client("http://localhost:8888", token=token)
 ```
 
+### Pre-signed URLs
+
+A **pre-signed URL** is a time-limited URL that authorizes a single request on
+one object without the recipient needing an auth token. This is useful for
+handing a download link to a browser or an external service.
+
+`Session.presigned_url` signs the URL with the session's `TokenGenerator`
+keypair, so it requires a `TokenGenerator` (a static token string cannot sign)
+and raises `ValueError` otherwise. Only `GET`, `HEAD`, and `DELETE` may be
+pre-signed, the granted permissions are those configured server-side for the
+signing key, and the validity may not exceed one week.
+
+```python
+from datetime import timedelta
+
+# The recipient can fetch this with any HTTP client, no auth header needed.
+url = session.presigned_url("GET", "my-key", duration=timedelta(hours=1))
+
+import urllib.request
+with urllib.request.urlopen(url) as resp:
+    content = resp.read()
+```
+
 ## Configuration
 
 In production, store the `Client` and `Usecase` at module level and reuse them.

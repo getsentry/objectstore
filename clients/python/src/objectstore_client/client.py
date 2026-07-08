@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
@@ -11,7 +12,7 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
-from objectstore_client import utils
+from objectstore_client import presign, utils
 from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
@@ -445,6 +446,78 @@ class Session:
         in particular in relation to `Accept-Encoding`.
         """
         return self._make_url(key, full=True)
+
+    def presigned_url(
+        self,
+        method: Literal["GET", "HEAD", "DELETE"],
+        key: str,
+        duration: timedelta,
+    ) -> str:
+        """
+        Generates a pre-signed URL authorizing a single ``method`` request on the
+        object with the given ``key``, valid for ``duration``.
+
+        The returned URL carries an Ed25519 signature in its query string, so the
+        recipient can perform the request without an auth token. It can be handed
+        to any HTTP client (``urllib``, ``requests``, a browser, ...); the URL is
+        already percent-encoded and must be transmitted verbatim.
+
+        Only ``GET``, ``HEAD`` and ``DELETE`` may be pre-signed. The permissions
+        granted are those configured server-side for the signing key, so a
+        read-only key cannot produce a working ``DELETE`` URL. ``duration`` must
+        not exceed one week.
+
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
+        session (a static token string cannot sign), if ``method`` is not
+        supported, or if ``duration`` is not a positive whole number of seconds
+        up to the one-week maximum.
+        """
+        normalized_method = method.upper()
+        if normalized_method not in presign.SUPPORTED_METHODS:
+            raise ValueError(
+                f"unsupported pre-signed method {method!r}, "
+                f"expected one of {presign.SUPPORTED_METHODS}"
+            )
+
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
+
+        if duration > presign.MAX_PRESIGN_DURATION:
+            raise ValueError(
+                f"duration {duration} exceeds the maximum of "
+                f"{presign.MAX_PRESIGN_DURATION}"
+            )
+        # The validity is transmitted as whole seconds, so anything that
+        # truncates to zero (or less) would yield an already-expired URL.
+        duration_secs = int(duration.total_seconds())
+        if duration_secs < 1:
+            raise ValueError(
+                f"duration {duration} is too short; must be at least one second"
+            )
+
+        encoded_path = presign.encode_path(self._make_url(key))
+        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        encoded_query = presign.encode_query(
+            f"{presign.PARAM_KID}={self._token.kid}"
+            f"&{presign.PARAM_TIMESTAMP}={timestamp}"
+            f"&{presign.PARAM_DURATION}={duration_secs}"
+        )
+
+        canonical = presign.build_canonical(
+            normalized_method, encoded_path, encoded_query
+        )
+        signature = presign.sign_canonical(self._token.secret_key, canonical)
+
+        # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
+        # result is a valid absolute URL.
+        host = self._pool.host
+        if ":" in host:
+            host = f"[{host}]"
+
+        return (
+            f"{self._pool.scheme}://{host}:{self._pool.port}"
+            f"{encoded_path}?{encoded_query}&{presign.PARAM_SIG}={signature}"
+        )
 
     def head(self, key: str) -> Metadata | None:
         """

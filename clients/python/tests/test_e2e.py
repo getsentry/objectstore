@@ -5,6 +5,8 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
@@ -13,7 +15,7 @@ from pathlib import Path
 import pytest
 import urllib3
 import zstandard
-from objectstore_client import Client, Usecase
+from objectstore_client import Client, Session, Usecase
 from objectstore_client.auth import Permission, TokenGenerator
 from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
@@ -678,3 +680,155 @@ def test_multipart_concurrent_part_uploads(server_url: str) -> None:
 
     retrieved = session.get(final_key)
     assert retrieved.payload.read() == b"".join(chunks)
+
+
+def _fetch(url: str, method: str = "GET") -> tuple[int, bytes]:
+    """Fetches ``url`` with plain urllib (no auth header), returning (status, body).
+
+    Using stdlib urllib proves the pre-signed URL is transmitted verbatim by an
+    HTTP client other than the objectstore client itself.
+    """
+    req = urllib.request.Request(url, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _presign_session(server_url: str) -> Session:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    # Store uncompressed so a raw (non-decompressing) urllib GET of the
+    # pre-signed URL returns the original bytes verbatim.
+    usecase = Usecase(
+        "test-usecase",
+        compression="none",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+    return client.session(usecase, org=42, project=1337)
+
+
+def test_presigned_get_succeeds(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"presigned hello", key="presigned-get")
+
+    url = session.presigned_url("GET", "presigned-get", duration=timedelta(hours=1))
+    status, body = _fetch(url)
+
+    assert status == 200
+    assert body == b"presigned hello"
+
+
+def test_presigned_head_succeeds(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"presigned hello", key="presigned-head")
+
+    url = session.presigned_url("HEAD", "presigned-head", duration=timedelta(hours=1))
+    status, _ = _fetch(url, method="HEAD")
+
+    assert status == 204
+
+
+def test_presigned_delete_succeeds_then_gone(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"presigned hello", key="presigned-delete")
+
+    delete_url = session.presigned_url(
+        "DELETE", "presigned-delete", duration=timedelta(hours=1)
+    )
+    status, _ = _fetch(delete_url, method="DELETE")
+    assert status == 204
+
+    # A subsequent pre-signed GET should now 404.
+    get_url = session.presigned_url(
+        "GET", "presigned-delete", duration=timedelta(hours=1)
+    )
+    status, _ = _fetch(get_url)
+    assert status == 404
+
+
+def test_presigned_case_insensitive_method(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"lowercase method", key="presigned-lower")
+
+    # Lowercase method is normalized to uppercase at runtime.
+    url = session.presigned_url("get", "presigned-lower", duration=timedelta(hours=1))  # type: ignore[arg-type]
+    status, body = _fetch(url)
+
+    assert status == 200
+    assert body == b"lowercase method"
+
+
+def test_presigned_requires_token_generator(server_url: str) -> None:
+    # A static token string cannot sign pre-signed URLs.
+    token = TestTokenGenerator.get().sign_for_scope(
+        "test-usecase", Scope(org=42, project=1337)
+    )
+    client = Client(server_url, token=token)
+    usecase = Usecase("test-usecase")
+    session = client.session(usecase, org=42, project=1337)
+
+    with pytest.raises(ValueError, match="no token generator"):
+        session.presigned_url("GET", "whatever", duration=timedelta(hours=1))
+
+
+def test_presigned_rejects_unsupported_method(server_url: str) -> None:
+    session = _presign_session(server_url)
+    with pytest.raises(ValueError, match="unsupported pre-signed method"):
+        session.presigned_url("PUT", "whatever", duration=timedelta(hours=1))  # type: ignore[arg-type]
+
+
+def test_presigned_rejects_duration_over_max(server_url: str) -> None:
+    session = _presign_session(server_url)
+    with pytest.raises(ValueError, match="exceeds the maximum"):
+        session.presigned_url("GET", "whatever", duration=timedelta(days=8))
+
+
+def test_presigned_tampered_signature_unauthorized(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"presigned hello", key="presigned-tamper")
+
+    url = session.presigned_url("GET", "presigned-tamper", duration=timedelta(hours=1))
+    # Flip the last character of the signature.
+    last = url[-1]
+    tampered = url[:-1] + ("A" if last != "A" else "B")
+
+    status, _ = _fetch(tampered)
+    assert status == 401
+
+
+# Object keys exercising URL-encoding corner cases. Each must round-trip: the
+# normal urllib3 `put` and the pre-signed `urllib` GET encode the path
+# identically, so they resolve to the same stored object. `?`/`#` are excluded
+# because urllib3's `put` path treats them as query/fragment delimiters.
+ENCODING_CORNER_CASE_KEYS = [
+    "plain-key",
+    "with space",
+    "café-unicode",
+    "emoji-😀",
+    "plus+sign",
+    "sub!$'()*+,=delims",
+    "tilde~dot.key",
+    "100%literal-percent",
+    "looks%20encoded",
+    "nested/path/segments",
+    "quote'apostrophe",
+    "at@sign",
+    "colon:separated",
+    "ampersand&inside",
+    "semi;colon",
+    "equals=sign",
+]
+
+
+@pytest.mark.parametrize("key", ENCODING_CORNER_CASE_KEYS)
+def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
+    session = _presign_session(server_url)
+    payload = f"payload for {key}".encode()
+    session.put(payload, key=key)
+
+    url = session.presigned_url("GET", key, duration=timedelta(hours=1))
+    status, body = _fetch(url)
+
+    assert status == 200, f"key {key!r} failed with status {status}"
+    assert body == payload
