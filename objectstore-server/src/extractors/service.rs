@@ -33,9 +33,12 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             ));
         }
 
-        let has_presign = has_presign_signature(parts.uri.query());
-        let auth_result = match (has_presign, &parts.method) {
-            (true, &Method::GET | &Method::HEAD | &Method::DELETE) => {
+        let auth_result = match has_signature(parts.uri.query()) {
+            true if matches!(
+                &parts.method,
+                &Method::GET | &Method::HEAD | &Method::DELETE
+            ) =>
+            {
                 let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
                     .await
                     .map_err(|_| {
@@ -62,8 +65,8 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                     SystemTime::now(),
                 )
             }
-            (true, _) => Err(AuthError::PresignUnsupportedMethod),
-            (false, _) => {
+            true => Err(AuthError::PresignUnsupportedMethod),
+            false => {
                 let token = parts
                     .headers
                     .get(OBJECTSTORE_AUTH_HEADER)
@@ -93,7 +96,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 }
 
 /// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
-fn has_presign_signature(query: Option<&str>) -> bool {
+fn has_signature(query: Option<&str>) -> bool {
     query.is_some_and(|query| {
         query
             .split('&')
@@ -131,11 +134,11 @@ mod tests {
 
     #[test]
     fn test_has_presign_signature() {
-        assert!(has_presign_signature(Some("os_sig=abc")));
-        assert!(has_presign_signature(Some("os_kid=relay&os_sig=abc")));
+        assert!(has_signature(Some("os_sig=abc")));
+        assert!(has_signature(Some("os_kid=relay&os_sig=abc")));
 
-        assert!(!has_presign_signature(Some("OS_SIG=abc")));
-        assert!(!has_presign_signature(None));
-        assert!(!has_presign_signature(Some("os_kid=relay")));
+        assert!(!has_signature(Some("OS_SIG=abc")));
+        assert!(!has_signature(None));
+        assert!(!has_signature(Some("os_kid=relay")));
     }
 }
