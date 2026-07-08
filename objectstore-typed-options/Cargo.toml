@@ -1,0 +1,22 @@
+[package]
+name = "objectstore-typed-options"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Runtime typed options trait and support machinery, backed by sentry-options"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+arc-swap = { workspace = true }
+objectstore-log = { workspace = true }
+objectstore-typed-options-derive = { workspace = true, optional = true }
+sentry-options = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+derive = ["dep:objectstore-typed-options-derive"]
