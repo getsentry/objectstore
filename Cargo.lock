@@ -4164,8 +4164,9 @@ dependencies = [
 
 [[package]]
 name = "sentry-options"
-version = "1.2.0"
-source = "git+https://github.com/getsentry/sentry-options?branch=feat%2Fexpose-builder-build#1594fe5ff3365e7dcca2cc1dccf17d182c3ce142"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43de0ef77feb227951c1d3eda86e84469389ec2805d7f27eee68e38fe20f2e40"
 dependencies = [
  "arc-swap",
  "num",
@@ -4177,8 +4178,9 @@ dependencies = [
 
 [[package]]
 name = "sentry-options-validation"
-version = "1.2.0"
-source = "git+https://github.com/getsentry/sentry-options?branch=feat%2Fexpose-builder-build#1594fe5ff3365e7dcca2cc1dccf17d182c3ce142"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60660c98c3ef950d6ac6986792a55280fe3fa38c2846389b2a4ca99676c1efd0"
 dependencies = [
  "anyhow",
  "arc-swap",
