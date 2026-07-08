@@ -21,6 +21,17 @@ pub enum Error {
     /// Error when creating auth tokens, such as invalid keys.
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
+    /// Error when the permissions requested for a token exceed those granted to the
+    /// [`TokenGenerator`](crate::TokenGenerator).
+    #[error("requested permissions not granted to this token generator: {escalated:?}")]
+    PermissionEscalation {
+        /// The requested permissions that are not granted to the generator.
+        escalated: Vec<objectstore_types::auth::Permission>,
+    },
+    /// Error when per-token permission or expiry overrides are requested for a static
+    /// (pre-signed) token, which cannot be re-scoped.
+    #[error("static tokens cannot be re-scoped with custom permissions or expiry")]
+    StaticTokenOverride,
     /// Error when URL manipulation fails.
     #[error("{message}")]
     InvalidUrl {

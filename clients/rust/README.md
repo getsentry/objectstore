@@ -315,6 +315,19 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 ```
 
+To mint a token with narrower permissions or a different expiry than the generator's
+defaults, use [`TokenGenerator::sign_with`] (for a standalone token) or
+[`Session::mint_token_with`] (scoped to a session). The requested permissions must be a
+subset of those granted to the generator, otherwise an `Error::PermissionEscalation` is
+returned:
+
+```rust,ignore
+use objectstore_client::auth::Permission;
+
+// A read-only token that expires in 30 seconds, from a fully-privileged generator.
+let read_only = session.mint_token_with(Some(&[Permission::ObjectRead]), Some(30))?;
+```
+
 ## Configuration
 
 In production, store the [`Client`] and [`Usecase`] in a `static` and reuse them.
