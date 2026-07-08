@@ -7,7 +7,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 
 use bytes::Bytes;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -67,10 +67,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
     ///
-    /// The default returns [`Error::NotImplemented`]. Backends that implement
-    /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
+    /// The default returns an [`ErrorKind::NotImplemented`] error. Backends that
+    /// implement [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Err(Error::NotImplemented)
+        Err(Error::new(ErrorKind::NotImplemented))
     }
 }
 

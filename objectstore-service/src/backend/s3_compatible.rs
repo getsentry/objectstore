@@ -13,7 +13,7 @@ use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result, ResultExt};
 use crate::id::ObjectId;
 use crate::stream::ClientStream;
 
@@ -147,10 +147,7 @@ where
                 provider
                     .get_token()
                     .await
-                    .map_err(|err| Error::Generic {
-                        context: "S3: failed to get authentication token".to_owned(),
-                        cause: Some(err.into()),
-                    })?
+                    .context("S3: failed to get authentication token")?
                     .as_str(),
             );
         }
@@ -175,10 +172,7 @@ where
         let response = builder
             .send_traced()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send request".to_string(),
-                cause,
-            })?;
+            .context("S3: failed to send request")?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -193,8 +187,8 @@ where
                 .and_then(|v| v.to_str().ok());
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
             let err = match total {
-                Some(total) => Error::RangeNotSatisfiable { total },
-                None => Error::generic(format!(
+                Some(total) => RangeNotSatisfiableError { total }.into(),
+                None => Error::new(ErrorKind::Internal).context(format!(
                     "S3: 416 response with invalid Content-Range: {raw:?}"
                 )),
             };
@@ -212,9 +206,9 @@ where
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
-                .ok_or_else(|| Error::Generic {
-                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
-                    cause: None,
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::Internal)
+                        .context("S3: 206 response missing valid Content-Range header")
                 })?;
             metadata.size = Some(range.total as usize);
             Some(range)
@@ -353,10 +347,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send_traced()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send delete request".to_string(),
-                cause,
-            })?;
+            .context("S3: failed to send delete request")?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {

@@ -534,9 +534,10 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_batch_at_capacity_returns_429() -> Result<()> {
+async fn test_batch_at_capacity_returns_503() -> Result<()> {
     // With max_concurrency=0 the service has no permits available, so
-    // BatchExecutor::new() returns AtCapacity and the endpoint responds 429.
+    // BatchExecutor::new() returns AtCapacity and the endpoint responds 503:
+    // local load-shedding is surfaced as a temporary Service Unavailable.
     let server = TestServer::with_config(Config {
         service: Service { max_concurrency: 0 },
         auth: AuthZ {
@@ -566,8 +567,8 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
 
     assert_eq!(
         response.status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS,
-        "expected 429 when service has no available permits"
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503 when service has no available permits"
     );
 
     Ok(())

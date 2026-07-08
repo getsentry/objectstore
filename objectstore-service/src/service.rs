@@ -14,7 +14,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::{ObjectContext, ObjectId};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -62,7 +62,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 /// blocked. Call [`join`](StorageService::join) during shutdown to wait for
 /// outstanding cleanup. Operations are also isolated from panics in backend
 /// code — a failure in one operation does not bring down other in-flight work.
-/// See [`Error::Panic`].
+/// See an [`ErrorKind::Internal`] error.
 ///
 /// # Concurrency Limit
 ///
@@ -70,7 +70,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 /// configured via [`with_concurrency_limit`](StorageService::with_concurrency_limit);
 /// without an explicit value the default is [`DEFAULT_CONCURRENCY_LIMIT`].
 /// Operations that exceed the limit are rejected immediately with
-/// [`Error::AtCapacity`].
+/// [`ErrorKind::AtCapacity`].
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
@@ -94,7 +94,7 @@ impl StorageService {
     /// Sets the maximum number of concurrent backend operations.
     ///
     /// Must be called before [`start`](Self::start). Operations beyond this
-    /// limit are rejected with [`Error::AtCapacity`].
+    /// limit are rejected with [`ErrorKind::AtCapacity`].
     pub fn with_concurrency_limit(mut self, max: u32) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
         self
@@ -120,13 +120,13 @@ impl StorageService {
     /// Operations are executed concurrently up to a window derived from the
     /// service's current capacity. The permits for that window are reserved
     /// upfront — if the service is at capacity, this returns
-    /// [`Error::AtCapacity`] immediately before any operations are read.
+    /// [`ErrorKind::AtCapacity`] immediately before any operations are read.
     pub fn stream(&self) -> Result<StreamExecutor> {
         let available = self.tasks_available();
         let window = available.div_ceil(10);
 
         let acquire_result = match window {
-            0 => Err(Error::AtCapacity),
+            0 => Err(Error::new(ErrorKind::AtCapacity)),
             _ => self.concurrency.try_acquire_many(window),
         };
         let reservation = acquire_result.inspect_err(|_| {
@@ -160,9 +160,9 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
-    /// [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
+    /// Returns [`ErrorKind::AtCapacity`] if the concurrency limit is reached,
+    /// an [`ErrorKind::Internal`] error if the spawned task panics (the panic message
+    /// is captured for diagnostics), or an [`ErrorKind::Internal`] error if the task is
     /// dropped before sending its result.
     ///
     /// Emits `service.task.start` (counter) after acquiring a permit and
@@ -375,7 +375,7 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
-    use crate::error::Error;
+    use crate::error::ErrorKind;
     use crate::stream::{self, ClientStream};
 
     fn make_context() -> ObjectContext {
@@ -571,9 +571,11 @@ mod tests {
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id, None).await;
 
-        let Err(Error::Panic(msg)) = result else {
-            panic!("expected Panic error");
+        let Err(err) = result else {
+            panic!("expected panic error");
         };
+        assert_eq!(err.kind(), ErrorKind::Internal);
+        let msg = err.context_str().unwrap_or_default();
         assert!(msg.contains("intentional panic in get_object"), "{msg}");
     }
 
@@ -712,7 +714,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(Error::AtCapacity)),
+            matches!(&result, Err(e) if e.kind() == ErrorKind::AtCapacity),
             "expected AtCapacity, got {result:?}"
         );
 
@@ -765,13 +767,16 @@ mod tests {
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
-        let result = service.get_object(id.clone(), None).await;
-        assert!(matches!(result, Err(Error::Panic(_))));
+        let Err(err) = service.get_object(id.clone(), None).await else {
+            panic!("expected panic error");
+        };
+        assert_eq!(err.kind(), ErrorKind::Internal);
+        assert!(err.context_str().unwrap_or_default().contains("panicked"));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
         let result = service.get_object(id, None).await;
         assert!(
-            !matches!(result, Err(Error::AtCapacity)),
+            !matches!(&result, Err(e) if e.kind() == ErrorKind::AtCapacity),
             "permit was not released after panic"
         );
     }

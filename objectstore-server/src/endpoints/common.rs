@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::ErrorKind as ServiceErrorKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -92,18 +93,21 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
-            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
-                StatusCode::RANGE_NOT_SATISFIABLE
-            }
-            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => {
-                objectstore_log::error!(!!self, "error handling request");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Service(error) => match error.kind() {
+                ServiceErrorKind::ClientStream | ServiceErrorKind::InvalidInput => {
+                    StatusCode::BAD_REQUEST
+                }
+                ServiceErrorKind::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+                ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::AtCapacity
+                | ServiceErrorKind::BackendTimeout
+                | ServiceErrorKind::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                ServiceErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+                ServiceErrorKind::Internal => {
+                    objectstore_log::error!(!!self, "error handling request");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
 
             ApiError::Internal(_) => {
                 objectstore_log::error!(!!self, "internal error");

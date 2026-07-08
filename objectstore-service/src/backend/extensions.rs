@@ -6,12 +6,58 @@
 //! structured error code and message from it (JSON for GCS JSON API, XML for GCS
 //! XML API and S3).
 
-use reqwest::{Response, header};
+use std::fmt;
+
+use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
 use tracing::Instrument;
 
-use crate::error::{BackendDetail, Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::stream;
+
+/// Structured error detail parsed from a backend HTTP error response.
+///
+/// Formats conditionally: includes only the fields that are non-empty.
+#[derive(Debug)]
+struct BackendDetail {
+    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
+    code: String,
+    /// Human-readable error message from the response body.
+    message: String,
+}
+
+impl BackendDetail {
+    /// Creates a new [`BackendDetail`] with empty code and message.
+    fn none() -> Self {
+        Self {
+            code: String::new(),
+            message: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for BackendDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
+            (true, false) => write!(f, "{}", self.message),
+            (false, true) => write!(f, "backend code {}", self.code),
+            (true, true) => Ok(()),
+        }
+    }
+}
+
+/// Classifies a backend HTTP error status into an [`ErrorKind`].
+fn status_to_kind(status: StatusCode) -> ErrorKind {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ErrorKind::BackendTimeout,
+        StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
+        _ => ErrorKind::Internal,
+    }
+}
 
 /// Extension trait that sends a request inside a tracing span.
 pub trait SendTraced {
@@ -81,7 +127,7 @@ struct XmlApiError {
 /// Use [`check_error`](Self::check_error) instead of
 /// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
 /// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
-/// [`Error::BackendResponse`] with the extracted error code and message.
+/// error classified by status ([`status_to_kind`]) with the extracted code and message as context.
 ///
 /// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
 /// chained directly.
@@ -94,7 +140,7 @@ pub trait ResponseExt {
     /// [`reqwest::Response::error_for_status`].
     ///
     /// When called on `Result<Response, reqwest::Error>`, transport errors are
-    /// wrapped as [`Error::Reqwest`] with the same context string.
+    /// wrapped as an [`ErrorKind::Internal`] error with the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
 
     /// Drains the response body of a response we are otherwise done with.
@@ -127,14 +173,19 @@ impl ResponseExt for Response {
                 return Ok(self);
             };
             self.drain_body().await;
-            return Err(Error::reqwest(context, e));
+            let mut err = Error::from(e);
+            err.kind = status_to_kind(status);
+            err.context = Some(context.into());
+            return Err(err);
         };
 
-        Err(Error::BackendResponse {
-            context,
-            status,
-            detail,
-        })
+        let detail = detail.to_string();
+        let message = if detail.is_empty() {
+            format!("{context} ({status})")
+        } else {
+            format!("{context} ({status}). {detail}")
+        };
+        Err(Error::new(status_to_kind(status)).context(message))
     }
 
     async fn drain_body(mut self) {
@@ -147,8 +198,20 @@ impl ResponseExt for Result<Response, reqwest::Error> {
         match self {
             Ok(resp) => resp.check_error(context).await,
             Err(e) => Err(match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => Error::reqwest(context, e),
+                Some(ce) => Error::from(ce),
+                None => {
+                    let kind = if e.is_timeout() {
+                        ErrorKind::BackendTimeout
+                    } else if e.is_connect() || e.is_request() {
+                        ErrorKind::BackendUnavailable
+                    } else {
+                        ErrorKind::Internal
+                    };
+                    let mut err = Error::from(e);
+                    err.kind = kind;
+                    err.context = Some(context.into());
+                    err
+                }
             }),
         }
     }

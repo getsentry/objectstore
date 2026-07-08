@@ -24,10 +24,11 @@
 //!         _inner: &InMemoryBackend,
 //!         _id: &ObjectId,
 //!     ) -> Result<DeleteResponse> {
-//!         Err(crate::error::Error::Io(std::io::Error::new(
+//!         Err(std::io::Error::new(
 //!             std::io::ErrorKind::ConnectionRefused,
 //!             "simulated delete failure",
-//!         )))
+//!         )
+//!         .into())
 //!     }
 //! }
 //!

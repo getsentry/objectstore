@@ -16,7 +16,7 @@ use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -47,13 +47,13 @@ impl ConcurrencyLimiter {
     /// Returns a [`ConcurrencyPermit`] that releases all `count` permits and
     /// notifies waiters on drop, just like single-permit acquisition.
     ///
-    /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
+    /// Returns an [`ErrorKind::AtCapacity`] error when fewer than `count` permits are available.
     pub fn try_acquire_many(&self, count: u32) -> Result<ConcurrencyPermit> {
         let permit = self
             .semaphore
             .clone()
             .try_acquire_many_owned(count)
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?;
         Ok(ConcurrencyPermit {
             permit: Some(permit),
             released: Arc::clone(&self.released),
@@ -64,7 +64,7 @@ impl ConcurrencyLimiter {
     ///
     /// Convenience shorthand for `try_acquire_many(1)`.
     ///
-    /// Returns [`Error::AtCapacity`] when all permits are held.
+    /// Returns an [`ErrorKind::AtCapacity`] error when all permits are held.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
         self.try_acquire_many(1)
     }
@@ -193,7 +193,8 @@ where
         }
         .bind_hub(new_hub),
     );
-    rx.await.map_err(|_| Error::Dropped)?
+    rx.await
+        .map_err(|_| Error::new(ErrorKind::Internal).context("task dropped"))?
 }
 
 #[cfg(test)]
@@ -201,7 +202,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::error::Error;
+    use crate::error::ErrorKind;
 
     #[test]
     fn available_permits_tracks_held() {
@@ -251,7 +252,7 @@ mod tests {
         let _permit = limiter.try_acquire().unwrap();
 
         let result = limiter.try_acquire();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::AtCapacity);
     }
 
     #[test]

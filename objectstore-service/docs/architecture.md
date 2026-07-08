@@ -185,7 +185,7 @@ A semaphore caps the total number of in-flight backend operations across all
 callers. A permit is acquired before each operation is spawned and held until
 the task completes — including on panic — so the limit counts *running*
 operations, not queued ones. When no permits are available, the operation fails
-with [`Error::AtCapacity`](error::Error::AtCapacity).
+with an [`ErrorKind::AtCapacity`](error::ErrorKind::AtCapacity) error.
 
 The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
 [`StorageService::with_concurrency_limit`].
@@ -211,3 +211,30 @@ reservation, lazy pulling, memory bounds, and concurrency model.
 
 More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may
 be added here in the future.
+
+# Error Model
+
+Service and backend failures use a single [`Error`](error::Error) type shaped
+like `anyhow::Error`: it carries an [`ErrorKind`](error::ErrorKind) (the
+*classification* of the failure), an optional boxed `source` error, and an
+optional `context` message. The [`ErrorKind`](error::ErrorKind) is deliberately
+independent of HTTP semantics — the server maps each kind onto a status code
+(see the server architecture docs), and [`Error::level`](error::Error::level)
+maps each kind onto a log level.
+
+Construction follows two paths:
+
+- **Default (`?`)**: a foreign error converts through one of the `From` impls
+  into an [`ErrorKind::Internal`](error::ErrorKind::Internal) error that keeps
+  the original as its `source`.
+- **Override**: the [`ResultExt`](error::ResultExt) extension trait's `.kind(…)`
+  and `.context(…)` methods reclassify and annotate without a `map_err`.
+  Chaining `.kind(k).context(c)` boxes the original error as `source` exactly
+  once — an already-converted `Error` passes through unchanged.
+
+Backends classify transport and HTTP failures into the `Backend*` kinds in
+[`check_error`](backend), so retryability is a simple check on
+[`kind`](error::Error::kind). The object's total size for a
+[`RangeNotSatisfiable`](error::ErrorKind::RangeNotSatisfiable) response is
+carried as a downcastable [`RangeNotSatisfiableError`](error::RangeNotSatisfiableError)
+`source` so the server can emit the `Content-Range` header.
