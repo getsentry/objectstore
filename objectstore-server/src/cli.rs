@@ -115,11 +115,15 @@ pub fn execute() -> Result<()> {
     objectstore_log::debug!(?config);
 
     objectstore_metrics::init(&config.metrics)?;
-    objectstore_options::init()?;
 
     runtime.block_on(async move {
         match args.command {
-            Command::Run(RunCommand {}) => web::server(config).await,
+            Command::Run(RunCommand {}) => {
+                // Initialize sentry-options only when starting the server. This prevents
+                // healthcheck failures due to invalid options.
+                objectstore_options::init()?;
+                web::server(config).await
+            }
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
             Command::Version(VersionCommand {})
             | Command::Sleep(SleepCommand { .. })
