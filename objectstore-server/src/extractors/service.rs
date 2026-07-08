@@ -108,11 +108,9 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
 /// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
 fn has_presign_signature(query: Option<&str>) -> bool {
     query.is_some_and(|query| {
-        query.split('&').any(|pair| {
-            pair.split_once('=')
-                .map_or(pair, |(key, _)| key)
-                .eq_ignore_ascii_case(PARAM_SIG)
-        })
+        query
+            .split('&')
+            .any(|pair| pair.split_once('=').map_or(pair, |(key, _)| key) == PARAM_SIG)
     })
 }
 
@@ -145,13 +143,12 @@ mod tests {
     }
 
     #[test]
-    fn test_has_presign_signature_case_insensitive() {
-        assert!(has_presign_signature(Some("os-sig=abc")));
-        assert!(has_presign_signature(Some("OS-SIG=abc")));
-        assert!(has_presign_signature(Some("Os-Sig=abc")));
-        assert!(has_presign_signature(Some("os-kid=relay&OS-SIG=abc")));
+    fn test_has_presign_signature() {
+        assert!(has_presign_signature(Some("os_sig=abc")));
+        assert!(has_presign_signature(Some("os_kid=relay&os_sig=abc")));
 
+        assert!(!has_presign_signature(Some("OS_SIG=abc")));
         assert!(!has_presign_signature(None));
-        assert!(!has_presign_signature(Some("os-kid=relay")));
+        assert!(!has_presign_signature(Some("os_kid=relay")));
     }
 }

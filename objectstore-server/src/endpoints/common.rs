@@ -86,7 +86,7 @@ impl ApiError {
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
             | ApiError::Auth(AuthError::VerificationFailure) => StatusCode::UNAUTHORIZED,
-            ApiError::Auth(AuthError::PresignUnsupportedMethod) => StatusCode::NOT_IMPLEMENTED,
+            ApiError::Auth(AuthError::PresignUnsupportedMethod) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => {
                 objectstore_log::error!(!!self, "auth system error");

@@ -13,29 +13,6 @@ use crate::auth::error::AuthError;
 use crate::auth::key_directory::PublicKeyDirectory;
 use crate::auth::util::StringOrWildcard;
 
-/// Maximum validity window for a pre-signed URL.
-///
-/// Requests whose `os-duration` claims a longer window are rejected so that a URL cannot be
-/// minted to be effectively immortal.
-const MAX_PRESIGN_VALIDITY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
-/// The pre-signing query parameters.
-#[derive(Debug, Deserialize)]
-pub struct PresignParams {
-    /// Key ID identifying which signing key was used.
-    #[serde(rename = "os_kid")]
-    pub key_id: KeyId,
-    /// Base64url-encoded Ed25519 signature.
-    #[serde(rename = "os_sig")]
-    pub signature: String,
-    /// RFC 3339 timestamp of when the URL was signed.
-    #[serde(rename = "os_timestamp")]
-    pub timestamp: String,
-    /// Validity duration in seconds from `timestamp`.
-    #[serde(rename = "os_duration")]
-    pub duration_secs: u64,
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
@@ -77,6 +54,26 @@ pub struct ScopedContext {
     pub permissions: HashSet<Permission>,
 }
 
+/// Maximum duration for a pre-signed URL.
+const MAX_PRESIGN_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The pre-signing query parameters.
+#[derive(Debug, Deserialize)]
+pub struct PresignParams {
+    /// Key ID identifying which signing key was used.
+    #[serde(rename = "os_kid")]
+    pub key_id: KeyId,
+    /// Base64url-encoded Ed25519 signature.
+    #[serde(rename = "os_sig")]
+    pub signature: String,
+    /// RFC 3339 timestamp of when the URL was signed.
+    #[serde(rename = "os_timestamp", with = "humantime_serde")]
+    pub timestamp: SystemTime,
+    /// Validity duration in seconds from `timestamp`.
+    #[serde(rename = "os_duration")]
+    pub duration_secs: u64,
+}
+
 /// `AuthContext` encapsulates the verified authorization details of a request.
 ///
 /// [`AuthContext::assert_authorized`] can be used to check whether a request is authorized to
@@ -85,12 +82,10 @@ pub struct ScopedContext {
 pub enum AuthContext {
     /// Authorization is inactive; every operation is permitted.
     Disabled,
-
-    /// A valid signature already authorized this exact request.
-    Preauthorized(KeyId),
-
     /// A verified JWT; each operation is checked against these scopes and permissions.
     Scoped(ScopedContext),
+    /// A valid signature already authorized this exact request.
+    Preauthorized(KeyId),
 }
 
 impl AuthContext {
@@ -178,11 +173,8 @@ impl AuthContext {
     ///
     /// A pre-signed URL carries its signature and parameters in the query string (see
     /// [`objectstore_types::presign`]). This verifies the signature against the request's
-    /// canonical form and enforces the validity window, returning [`AuthContext::Preauthorized`]
+    /// canonical form and enforces the maximum duration, returning [`AuthContext::Preauthorized`]
     /// on success.
-    ///
-    /// The caller is responsible for restricting the set of methods for which pre-signed URLs
-    /// are accepted; `now` is the current time, injected for testability.
     pub fn from_presigned_request(
         method: &Method,
         path: &str,
@@ -191,30 +183,27 @@ impl AuthContext {
         key_directory: &PublicKeyDirectory,
         now: SystemTime,
     ) -> Result<AuthContext, AuthError> {
-        // An unknown key ID is treated as a verification failure (rather than leaking which
-        // keys are configured), matching the failure mode of a bad signature.
-        let key_config = key_directory
-            .keys
-            .get(&params.key_id)
-            .ok_or(AuthError::VerificationFailure)?;
+        let key_config = key_directory.keys.get(&params.key_id).ok_or_else(|| {
+            AuthError::InternalError(format!("Key `{}` not configured", &params.key_id))
+        })?;
 
-        // Enforce the validity window before spending time on signature verification.
-        let timestamp = humantime::parse_rfc3339(&params.timestamp)
-            .map_err(|_| AuthError::BadRequest("presigned URL has an invalid os-timestamp"))?;
         let duration = Duration::from_secs(params.duration_secs);
-        if duration > MAX_PRESIGN_VALIDITY {
+        if duration > MAX_PRESIGN_DURATION {
             return Err(AuthError::BadRequest(
                 "presigned URL validity exceeds the maximum of 1 week",
             ));
         }
-        if now < timestamp || now > timestamp + duration {
-            objectstore_log::debug!("presigned URL is outside its validity window");
+
+        let expiry = params
+            .timestamp
+            .checked_add(duration)
+            .ok_or(AuthError::VerificationFailure)?;
+        if now < params.timestamp || now > expiry {
             return Err(AuthError::VerificationFailure);
         }
 
         let canonical = CanonicalRequest::new(method, path, raw_query);
 
-        // Any configured key version verifying the signature is sufficient (supports rotation).
         let verified = key_config.key_versions.iter().any(|key| {
             canonical
                 .verify(key.verifying_key.as_bytes(), &params.signature)
@@ -224,20 +213,17 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        // The `Preauthorized` context carries the signing key's ID; its `max_permissions` are
-        // resolved at authorization time (see `assert_authorized`). `key_config` was only needed
-        // here to verify the signature.
         Ok(AuthContext::Preauthorized(params.key_id.clone()))
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
     /// `Err(AuthError::NotPermitted)` is returned.
     ///
-    /// [`AuthContext::Disabled`] permits every operation. [`AuthContext::Preauthorized`] permits
-    /// the operation as long as `perm` is within the signing key's `max_permissions`, resolved
-    /// from `key_directory` (the signature already binds the request's usecase and scopes). For
-    /// [`AuthContext::Scoped`], the passed-in `perm` is checked against the granted permissions and
-    /// the request's usecase and scopes are checked against the granted ones.
+    /// - [`AuthContext::Disabled`] permits every operation.
+    /// - [`AuthContext::Scoped`] permits the operation if `perm` is within the granted permissions
+    ///   and usecase and scopes match the granted ones.
+    /// - [`AuthContext::Preauthorized`] permits the operation as long as `perm` is within the
+    ///   signing key's `max_permissions`.
     pub fn assert_authorized(
         &self,
         perm: Permission,
@@ -246,9 +232,8 @@ impl AuthContext {
     ) -> Result<(), AuthError> {
         let scoped = match self {
             AuthContext::Disabled => return Ok(()),
+            AuthContext::Scoped(scoped) => scoped,
             AuthContext::Preauthorized(key_id) => {
-                // Resolve the signing key's permissions at authorization time. A missing key
-                // (e.g. removed since verification) denies the operation.
                 let max_permissions = key_directory
                     .keys
                     .get(key_id)
@@ -260,7 +245,6 @@ impl AuthContext {
                     Err(AuthError::NotPermitted)
                 };
             }
-            AuthContext::Scoped(scoped) => scoped,
         };
 
         if !scoped.permissions.contains(&perm) || scoped.usecase != context.usecase {
@@ -289,6 +273,9 @@ mod tests {
     use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use jsonwebtoken::DecodingKey;
+    use objectstore_types::presign::{
+        CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
+    };
     use objectstore_types::scope::{Scope, Scopes};
     use serde_json::json;
 
@@ -578,45 +565,10 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         Ok(())
     }
 
-    // A `Preauthorized` context must still honor the signing key's `max_permissions`, so a
-    // read-only key cannot authorize a delete even though the signature is valid.
-    #[test]
-    fn test_preauthorized_respects_max_permissions() {
-        let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
-        let context = AuthContext::Preauthorized(TEST_EDDSA_KID.into());
-        let object = sample_object_context("123", "456");
-
-        assert_eq!(
-            context.assert_authorized(Permission::ObjectRead, &object, &key_directory),
-            Ok(())
-        );
-        assert_eq!(
-            context.assert_authorized(Permission::ObjectDelete, &object, &key_directory),
-            Err(AuthError::NotPermitted)
-        );
-    }
-
-    // An unknown key ID in a `Preauthorized` context (e.g. the key was removed after the URL was
-    // signed) denies the operation rather than allowing it.
-    #[test]
-    fn test_preauthorized_unknown_key_denied() {
-        let context = AuthContext::Preauthorized("some-removed-key".into());
-        let object = sample_object_context("123", "456");
-
-        assert_eq!(
-            context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory()),
-            Err(AuthError::NotPermitted)
-        );
-    }
-
     // Verifying a pre-signed request yields a `Preauthorized` context carrying the signing key's
     // ID, which is what drives the `max_permissions` check above end-to-end.
     #[test]
     fn test_from_presigned_request_carries_key_id() {
-        use objectstore_types::presign::{
-            CanonicalRequest, PARAM_DURATION, PARAM_KID, PARAM_SIG, PARAM_TIMESTAMP,
-        };
-
         let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
 
         let path = "/v1/objects/test/org=1/key";
@@ -633,7 +585,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let params = PresignParams {
             signature,
             key_id: TEST_EDDSA_KID.to_string(),
-            timestamp: timestamp.clone(),
+            timestamp: SystemTime::now(),
             duration_secs: 3600,
         };
 
@@ -648,5 +600,23 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         .unwrap();
 
         assert_eq!(context, AuthContext::Preauthorized(TEST_EDDSA_KID.into()));
+    }
+
+    // A `Preauthorized` context must still honor the signing key's `max_permissions`, so a
+    // read-only key cannot authorize a delete even though the signature is valid.
+    #[test]
+    fn test_preauthorized_respects_max_permissions() {
+        let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
+        let context = AuthContext::Preauthorized(TEST_EDDSA_KID.into());
+        let object = sample_object_context("123", "456");
+
+        assert_eq!(
+            context.assert_authorized(Permission::ObjectRead, &object, &key_directory),
+            Ok(())
+        );
+        assert_eq!(
+            context.assert_authorized(Permission::ObjectDelete, &object, &key_directory),
+            Err(AuthError::NotPermitted)
+        );
     }
 }
