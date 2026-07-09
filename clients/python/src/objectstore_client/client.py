@@ -504,7 +504,7 @@ class Session:
         canonical = presign.build_canonical_form(
             normalized_method, encoded_path, encoded_query
         )
-        signature = self._token.sign_canonical_form(canonical)
+        signature = self._token.signature_for_canonical_form(canonical)
 
         # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
         # result is a valid absolute URL.

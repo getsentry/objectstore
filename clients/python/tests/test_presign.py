@@ -66,7 +66,7 @@ def test_sign_canonical_form_roundtrips_with_public_key() -> None:
         presign.encode_path("/v1/objects/testing/_/key"),
         presign.encode_query(SAMPLE_QUERY),
     )
-    signature_b64 = key.sign_canonical_form(canonical)
+    signature_b64 = key.signature_for_canonical_form(canonical)
 
     # Decode the base64url-no-pad signature and verify with the public key.
     padding = "=" * (-len(signature_b64) % 4)

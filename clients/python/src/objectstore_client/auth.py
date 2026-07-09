@@ -91,7 +91,7 @@ class SecretKey:
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
-    def sign_canonical_form(self, canonical_form: str) -> str:
+    def signature_for_canonical_form(self, canonical_form: str) -> str:
         """Signs a canonical request form with the Ed25519 private key.
 
         Returns the base64url-encoded (no padding) signature, suitable as the
