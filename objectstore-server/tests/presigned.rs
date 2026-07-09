@@ -236,6 +236,30 @@ async fn presigned_get_expired_is_unauthorized() -> Result<()> {
 }
 
 #[tokio::test]
+async fn presigned_get_slightly_in_future_succeeds() -> Result<()> {
+    let server = test_server().await;
+    seed_object(&server, "hello").await?;
+
+    // Signed 30 seconds in the future: within the clock skew leeway.
+    let timestamp = SystemTime::now() + Duration::from_secs(30);
+    let query = presign_query_with_key(
+        &signing_key(),
+        &Method::GET,
+        OBJECT_PATH,
+        timestamp,
+        ONE_HOUR,
+    );
+
+    let resp = reqwest::Client::new()
+        .get(presigned_url(&server, OBJECT_PATH, &query))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
 async fn presigned_get_over_one_week_validity_is_bad_request() -> Result<()> {
     let server = test_server().await;
 
