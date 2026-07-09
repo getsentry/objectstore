@@ -149,24 +149,18 @@ async fn presigned_head_succeeds() -> Result<()> {
 }
 
 #[tokio::test]
-async fn presigned_delete_succeeds_then_object_is_gone() -> Result<()> {
+async fn presigned_delete_is_rejected() -> Result<()> {
     let server = test_server().await;
     seed_object(&server, "hello").await?;
 
-    let delete_query = presign_query(&Method::DELETE, OBJECT_PATH, ONE_HOUR);
+    let query = presign_query(&Method::DELETE, OBJECT_PATH, ONE_HOUR);
     let resp = reqwest::Client::new()
-        .delete(presigned_url(&server, OBJECT_PATH, &delete_query))
+        .delete(presigned_url(&server, OBJECT_PATH, &query))
         .send()
         .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
 
-    // A subsequent pre-signed GET should now 404.
-    let get_query = presign_query(&Method::GET, OBJECT_PATH, ONE_HOUR);
-    let resp = reqwest::Client::new()
-        .get(presigned_url(&server, OBJECT_PATH, &get_query))
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    // Pre-signed URLs only support GET and HEAD.
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     Ok(())
 }
 
@@ -287,7 +281,7 @@ async fn presigned_put_is_rejected() -> Result<()> {
         .send()
         .await?;
 
-    // Pre-signed URLs are only supported for GET/HEAD/DELETE.
+    // Pre-signed URLs are only supported for GET/HEAD.
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     Ok(())
 }

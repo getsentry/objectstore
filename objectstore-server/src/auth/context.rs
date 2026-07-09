@@ -85,7 +85,7 @@ pub enum AuthContext {
     /// A verified JWT; each operation is checked against these scopes and permissions.
     Scoped(ScopedContext),
     /// A valid signature already authorized this exact request.
-    Preauthorized(KeyId),
+    Preauthorized,
 }
 
 impl AuthContext {
@@ -219,7 +219,13 @@ impl AuthContext {
             return Err(AuthError::VerificationFailure);
         }
 
-        Ok(AuthContext::Preauthorized(params.key_id.clone()))
+        // Pre-signed URLs currently only support read operations (GET/HEAD).
+        // Verify the signing key is allowed to read.
+        if !key_config.max_permissions.contains(&Permission::ObjectRead) {
+            return Err(AuthError::NotPermitted);
+        }
+
+        Ok(AuthContext::Preauthorized)
     }
 
     /// Ensures that an operation requiring `perm` and applying to `path` is authorized. If not,
@@ -228,29 +234,17 @@ impl AuthContext {
     /// - [`AuthContext::Disabled`] permits every operation.
     /// - [`AuthContext::Scoped`] permits the operation if `perm` is within the granted permissions
     ///   and usecase and scopes match the granted ones.
-    /// - [`AuthContext::Preauthorized`] permits the operation as long as `perm` is within the
-    ///   signing key's `max_permissions`.
+    /// - [`AuthContext::Preauthorized`] always permits the operation — the signing key's
+    ///   permissions were already verified when the pre-signed URL was validated.
     pub fn assert_authorized(
         &self,
         perm: Permission,
         context: &ObjectContext,
-        key_directory: &PublicKeyDirectory,
     ) -> Result<(), AuthError> {
         let scoped = match self {
             AuthContext::Disabled => return Ok(()),
             AuthContext::Scoped(scoped) => scoped,
-            AuthContext::Preauthorized(key_id) => {
-                let max_permissions = key_directory
-                    .keys
-                    .get(key_id)
-                    .map(|config| &config.max_permissions)
-                    .ok_or(AuthError::NotPermitted)?;
-                return if max_permissions.contains(&perm) {
-                    Ok(())
-                } else {
-                    Err(AuthError::NotPermitted)
-                };
-            }
+            AuthContext::Preauthorized => return Ok(()),
         };
 
         if !scoped.permissions.contains(&perm) || scoped.usecase != context.usecase {
@@ -464,13 +458,6 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         }
     }
 
-    /// A directory with no keys, for scoped/disabled cases where key resolution is not exercised.
-    fn empty_key_directory() -> PublicKeyDirectory {
-        PublicKeyDirectory {
-            keys: BTreeMap::new(),
-        }
-    }
-
     // Allowed:
     //   auth_context: org.123 / proj.123
     //         object: org.123 / proj.123
@@ -479,7 +466,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -492,7 +479,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "*", max_permission());
         let object = sample_object_context("123", "456");
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -508,7 +495,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
 
-        auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory())?;
+        auth_context.assert_authorized(Permission::ObjectRead, &object)?;
 
         Ok(())
     }
@@ -524,15 +511,13 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("123", "999");
 
-        let result =
-            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = sample_object_context("999", "456");
 
-        let result =
-            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -548,8 +533,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         let auth_context = AuthContext::Scoped(scoped);
         let object = sample_object_context("123", "456");
 
-        let result =
-            auth_context.assert_authorized(Permission::ObjectRead, &object, &empty_key_directory());
+        let result = auth_context.assert_authorized(Permission::ObjectRead, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -561,11 +545,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
             sample_auth_context("123", "456", HashSet::from([Permission::ObjectRead]));
         let object = sample_object_context("123", "456");
 
-        let result = auth_context.assert_authorized(
-            Permission::ObjectWrite,
-            &object,
-            &empty_key_directory(),
-        );
+        let result = auth_context.assert_authorized(Permission::ObjectWrite, &object);
         assert_eq!(result, Err(AuthError::NotPermitted));
 
         Ok(())
@@ -603,22 +583,58 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         )
         .unwrap();
 
-        assert_eq!(context, AuthContext::Preauthorized(TEST_EDDSA_KID.into()));
+        assert_eq!(context, AuthContext::Preauthorized);
     }
 
     #[test]
-    fn test_assert_authorized_preauthorized_respects_max_permissions() {
-        let key_directory = test_key_config(HashSet::from([Permission::ObjectRead]));
-        let context = AuthContext::Preauthorized(TEST_EDDSA_KID.into());
+    fn test_presigned_request_rejected_without_read_permission() {
+        let key_directory = test_key_config(HashSet::from([
+            Permission::ObjectWrite,
+            Permission::ObjectDelete,
+        ]));
+
+        let path = "/v1/objects/test/org=1/key";
+        let timestamp = humantime::format_rfc3339(SystemTime::now()).to_string();
+        let base = format!(
+            "{PARAM_KID}={TEST_EDDSA_KID}&{PARAM_TIMESTAMP}={timestamp}&{PARAM_DURATION}=3600"
+        );
+
+        let signing_key = SigningKey::from_pkcs8_pem(TEST_EDDSA_PRIVKEY).unwrap();
+        let canonical = CanonicalRequest::new(&Method::GET, path, Some(&base));
+        let signature = canonical.sign(signing_key.as_bytes());
+        let query = format!("{base}&{PARAM_SIG}={signature}");
+
+        let params = PresignParams {
+            signature,
+            key_id: TEST_EDDSA_KID.to_string(),
+            timestamp: SystemTime::now(),
+            duration_secs: 3600,
+        };
+
+        let result = AuthContext::from_presigned_request(
+            &Method::GET,
+            path,
+            Some(&query),
+            &params,
+            &key_directory,
+            SystemTime::now(),
+        );
+
+        assert_eq!(result, Err(AuthError::NotPermitted));
+    }
+
+    #[test]
+    fn test_assert_authorized_preauthorized_always_permits() {
+        let context = AuthContext::Preauthorized;
         let object = sample_object_context("123", "456");
 
         assert_eq!(
-            context.assert_authorized(Permission::ObjectRead, &object, &key_directory),
+            context.assert_authorized(Permission::ObjectRead, &object),
             Ok(())
         );
         assert_eq!(
-            context.assert_authorized(Permission::ObjectDelete, &object, &key_directory),
-            Err(AuthError::NotPermitted)
+            context.assert_authorized(Permission::ObjectWrite, &object),
+            Ok(())
         );
     }
 }

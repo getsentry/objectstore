@@ -32,10 +32,7 @@ impl AuthAwareService {
         parts: &mut Parts,
         state: &ServiceState,
     ) -> Result<AuthContext, AuthError> {
-        if !matches!(
-            &parts.method,
-            &Method::GET | &Method::HEAD | &Method::DELETE
-        ) {
+        if !matches!(&parts.method, &Method::GET | &Method::HEAD) {
             return Err(AuthError::UnsupportedPresignedMethod);
         }
 
@@ -80,7 +77,6 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                 state.service.clone(),
                 AuthContext::Disabled,
                 enforce,
-                state.key_directory.clone(),
             ));
         }
 
@@ -98,12 +94,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             Err(_) => AuthContext::Disabled,
         };
 
-        Ok(AuthAwareService::new(
-            state.service.clone(),
-            auth,
-            enforce,
-            state.key_directory.clone(),
-        ))
+        Ok(AuthAwareService::new(state.service.clone(), auth, enforce))
     }
 }
 

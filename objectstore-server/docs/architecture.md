@@ -110,7 +110,7 @@ Scope values in the token can use wildcards to grant broad access.
 
 Its [`AuthContext`](auth::AuthContext) is one of `Disabled` (auth inactive — all
 operations permitted), `Preauthorized` (a valid pre-signed URL already authorized
-the exact request), or `Scoped` (a verified JWT, checked per operation).
+the exact read request), or `Scoped` (a verified JWT, checked per operation).
 
 ### Pre-signed URLs
 
@@ -123,18 +123,17 @@ canonical form.
 When the extractor sees an `os_sig` query parameter it takes the pre-signed
 path instead of looking for a JWT:
 
-- Only `GET`, `HEAD`, and `DELETE` are currently supported.
+- Only `GET` and `HEAD` are currently supported.
 - The signature is verified against the request's canonical form using the
   `os_kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
+- The signing key must have `ObjectRead` in its `max_permissions`.
 - The validity window (`os_timestamp` + `os_duration`) is enforced, capped at
   **one week** so a URL cannot be minted to be effectively immortal.
 
-A verified pre-signed request yields an `AuthContext::Preauthorized` carrying the
-signing key's ID. The signature already binds the request's method, path, and
-signed headers, so no scope check is needed — but at authorization time the
-operation's permission is resolved against that key's `max_permissions`, so a
-restricted (e.g. read-only) key cannot pre-sign a more privileged operation such
-as `DELETE`.
+A verified pre-signed request yields an `AuthContext::Preauthorized`. The
+signature already binds the request's method, path, and parameters, so no scope
+or permission check is needed at operation time — the key's read permission was
+verified when the pre-signed URL was validated.
 
 ## Configuration
 
