@@ -121,7 +121,7 @@ pub fn execute() -> Result<()> {
             Command::Run(RunCommand {}) => {
                 // Initialize sentry-options only when starting the server. This prevents
                 // healthcheck failures due to invalid options.
-                objectstore_options::Options::init()?;
+                objectstore_options::init()?;
                 web::server(config).await
             }
             Command::Healthcheck(HealthcheckCommand {}) => healthcheck::healthcheck(config).await,
