@@ -195,11 +195,16 @@ impl AuthContext {
             ));
         }
 
-        let expiry = params
+        let start = params
+            .timestamp
+            // Subtract 60 secs to account for possible clock skew.
+            .checked_sub(Duration::from_secs(60))
+            .ok_or(AuthError::VerificationFailure)?;
+        let end = params
             .timestamp
             .checked_add(duration)
             .ok_or(AuthError::VerificationFailure)?;
-        if now < params.timestamp || now > expiry {
+        if now < start || now > end {
             return Err(AuthError::VerificationFailure);
         }
 
