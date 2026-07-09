@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from io import BytesIO
-from typing import IO, Any, Literal, NamedTuple, cast
+from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
 import sentry_sdk
@@ -31,6 +31,9 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
+
+if TYPE_CHECKING:
+    from objectstore_client.many import ManyBuilder
 
 
 class GetResponse(NamedTuple):
@@ -274,6 +277,23 @@ class Session:
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
+
+    def _make_batch_url(self) -> str:
+        relative_path = f"/v1/objects:batch/{self._usecase.name}/{self._scope}/"
+        return self._base_path.rstrip("/") + relative_path
+
+    def many(self) -> ManyBuilder:
+        """
+        Creates a [ManyBuilder] associated with this session.
+
+        A [ManyBuilder] enqueues multiple operations, which the client sends as
+        batch requests via a dedicated endpoint (minimizing network overhead),
+        falling back to individual requests for operations too large to batch.
+        """
+        # Imported lazily to avoid a circular import at module load time.
+        from objectstore_client.many import ManyBuilder
+
+        return ManyBuilder(self)
 
     def _make_multipart_url(
         self,

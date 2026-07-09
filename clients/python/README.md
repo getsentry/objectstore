@@ -151,6 +151,54 @@ existing_parts = resumed.list_parts()
 key = resumed.complete(new_parts + existing_parts)
 ```
 
+### Many API (batch operations)
+
+The Many API lets you enqueue multiple operations that the client executes using
+Objectstore's batch endpoint, minimizing network overhead. Operations too large
+to batch (oversized inserts) automatically fall back to individual requests, and
+batch and individual requests run concurrently.
+
+`send()` returns an `OperationResults` list. Results are **not** guaranteed to be
+in the order they were enqueued, since operations execute concurrently. Each
+result is a `GetResult`, `PutResult`, `DeleteResult`, `HeadResult`, or (for errors
+that can't be attributed to a specific operation) an `ErrorResult`.
+
+```python
+from objectstore_client import Client, Usecase
+from objectstore_client.many import GetResult, PutResult
+
+client = Client("http://localhost:8888")
+session = client.session(Usecase("attachments"), org=42, project=1337)
+
+results = (
+    session.many()
+    .put(b"file1 contents", key="file1")
+    .put(b"file2 contents", key="file2")
+    .get("file3")
+    .delete("file4")
+    .send()
+)
+
+for result in results:
+    if result.error is not None:
+        ...  # handle per-operation error
+    elif isinstance(result, GetResult):
+        payload = result.response.payload if result.response else None  # None => 404
+    elif isinstance(result, PutResult):
+        stored_key = result.key
+```
+
+If you don't need to inspect individual results and just want to raise if any
+operation failed, use `raise_for_failures()`, which raises an `ExceptionGroup` of
+all per-operation errors:
+
+```python
+session.many().put(b"file1", key="file1").put(b"file2", key="file2").send().raise_for_failures()
+```
+
+Concurrency is configurable via `.max_individual_concurrency(n)` (default 5) and
+`.max_batch_concurrency(n)` (default 3).
+
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication
