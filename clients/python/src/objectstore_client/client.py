@@ -271,12 +271,6 @@ class Session:
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
         relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
-        # Percent-encode the path ourselves so the key is treated as a literal
-        # string (a literal "%" becomes "%25"). This keeps every request path
-        # consistent with pre-signed URLs, which encode the same way; see
-        # `utils.encode_path`. urllib3 leaves our already-encoded output on the
-        # wire verbatim, so this only changes bytes for keys containing a literal
-        # "%XX" (which urllib3 would otherwise mistake for an existing escape).
         path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
@@ -296,8 +290,6 @@ class Session:
             resource = "objects:multipart"
 
         relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
-        # Encode the path (with the literal key); see `_make_url`. `query` is
-        # already percent-encoded by the caller via `urlencode`, so leave it.
         path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if query:
             return f"{path}?{query}"
