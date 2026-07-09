@@ -220,7 +220,6 @@ impl AuthContext {
         }
 
         // Pre-signed URLs currently only support read operations (GET/HEAD).
-        // Verify the signing key is allowed to read.
         if !key_config.max_permissions.contains(&Permission::ObjectRead) {
             return Err(AuthError::NotPermitted);
         }
@@ -243,7 +242,15 @@ impl AuthContext {
     ) -> Result<(), AuthError> {
         let scoped = match self {
             AuthContext::Disabled => return Ok(()),
-            AuthContext::Preauthorized => return Ok(()),
+            AuthContext::Preauthorized =>
+            // Pre-signed URLs currently only support read operations (GET/HEAD).
+            {
+                return if perm == Permission::ObjectRead {
+                    Ok(())
+                } else {
+                    Err(AuthError::NotPermitted)
+                };
+            }
             AuthContext::Scoped(scoped) => scoped,
         };
 
