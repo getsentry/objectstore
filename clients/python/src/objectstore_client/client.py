@@ -470,8 +470,7 @@ class Session:
         supported, or if ``duration`` is not a positive whole number of seconds
         up to the one-week maximum.
         """
-        normalized_method = method.upper()
-        if normalized_method not in presign.SUPPORTED_METHODS:
+        if method not in presign.SUPPORTED_METHODS:
             raise ValueError(
                 f"unsupported pre-signed method {method!r}, "
                 f"expected one of {presign.SUPPORTED_METHODS}"
@@ -485,8 +484,6 @@ class Session:
                 f"duration {duration} exceeds the maximum of "
                 f"{presign.MAX_PRESIGN_DURATION}"
             )
-        # The validity is transmitted as whole seconds, so anything that
-        # truncates to zero (or less) would yield an already-expired URL.
         duration_secs = int(duration.total_seconds())
         if duration_secs < 1:
             raise ValueError(
@@ -501,9 +498,7 @@ class Session:
             f"&{presign.PARAM_DURATION}={duration_secs}"
         )
 
-        canonical = presign.build_canonical_form(
-            normalized_method, encoded_path, encoded_query
-        )
+        canonical = presign.build_canonical_form(method, encoded_path, encoded_query)
         signature = self._token.signature_for_canonical_form(canonical)
 
         # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
