@@ -8,25 +8,19 @@ use syn::{DeriveInput, Fields, LitStr, parse_macro_input};
 
 /// Derives the `SentryOptions` trait and generates runtime option machinery.
 ///
+/// The struct must also derive `serde::Deserialize` — deserialization is handled by
+/// the default trait method, which builds a map from schema properties and delegates to
+/// serde. Use `#[serde(rename = "...")]` when a field name differs from its schema key.
+///
 /// # Container attributes
 ///
 /// - `namespace` — the sentry-options namespace (e.g. `"objectstore"`)
 /// - `path` — relative path to the `sentry-options/` directory; the schema is resolved as
 ///   `{path}/schemas/{namespace}/schema.json`
 ///
-/// # Field attributes
-///
-/// - `rename` — the option key to look up for this field, overriding the default (the field's
-///   Rust identifier). Use it when the schema key differs from the field name, e.g.
-///   `#[sentry_options(rename = "max-retries")] max_retries: u32`.
-///
 /// # Generated code
 ///
-/// For each struct field, `deserialize` calls `Deserialize::deserialize(options.get(NAMESPACE,
-/// "<key>")?)`, where `<key>` is the `rename` value if present and otherwise the field name.
-///
-/// Additionally generates:
-/// - `SentryOptions` trait impl with `NAMESPACE`, `SCHEMA`, and `deserialize`
+/// - `SentryOptions` trait impl with `NAMESPACE` and `SCHEMA` constants
 /// - Inherent `get() -> Arc<Self>`, `init() -> Result<(), Error>`, `refresh()`, and (under
 ///   `testing` feature) `override_with()`
 /// - `OnceLock` statics for the singleton snapshot (`ArcSwap<T>`) and the raw sentry-options
@@ -78,38 +72,13 @@ fn parse_attrs(input: &DeriveInput) -> syn::Result<Attrs> {
     Ok(Attrs { namespace, path })
 }
 
-/// Returns the option key for a field: the `#[sentry_options(rename = "...")]` value if present,
-/// otherwise the field's Rust identifier.
-fn parse_field_key(field: &syn::Field) -> syn::Result<String> {
-    let field_name = field.ident.as_ref().expect("named field");
-    let mut rename: Option<LitStr> = None;
-
-    for attr in &field.attrs {
-        if !attr.path().is_ident("sentry_options") {
-            continue;
-        }
-
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename") {
-                let value = meta.value()?;
-                rename = Some(value.parse::<LitStr>()?);
-                Ok(())
-            } else {
-                Err(meta.error("unknown sentry_options field attribute"))
-            }
-        })?;
-    }
-
-    Ok(rename.map_or_else(|| field_name.to_string(), |lit| lit.value()))
-}
-
 fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let attrs = parse_attrs(&input)?;
     let name = &input.ident;
 
-    let fields = match &input.data {
+    match &input.data {
         syn::Data::Struct(data) => match &data.fields {
-            Fields::Named(named) => &named.named,
+            Fields::Named(_) => {}
             _ => {
                 return Err(syn::Error::new(
                     name.span(),
@@ -128,20 +97,6 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let namespace_str = &attrs.namespace;
     let path_str = &attrs.path;
 
-    // Build deserialize body: one line per field.
-    let field_deserializations = fields
-        .iter()
-        .map(|f| {
-            let field_name = f.ident.as_ref().expect("named field");
-            let field_key = parse_field_key(f)?;
-            Ok(quote! {
-                #field_name: ::objectstore_typed_options::serde::Deserialize::deserialize(
-                    options.get(Self::NAMESPACE, #field_key)?
-                )?
-            })
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
-
     Ok(quote! {
         const _: () = {
         static __OPTIONS: ::std::sync::OnceLock<
@@ -158,14 +113,6 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             const SCHEMA: &str = include_str!(
                 concat!(#path_str, "/schemas/", #namespace_str, "/schema.json")
             );
-
-            fn deserialize(
-                options: &::objectstore_typed_options::sentry_options::Options,
-            ) -> ::std::result::Result<Self, ::objectstore_typed_options::Error> {
-                ::std::result::Result::Ok(Self {
-                    #(#field_deserializations),*
-                })
-            }
         }
 
         impl #name {
@@ -202,9 +149,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     .build()
                     .expect("options schema should be valid");
 
-                ::std::sync::Arc::new(
-                    Self::deserialize(&inner).expect("failed to deserialize options"),
-                )
+                let deserialized =
+                    <#name as ::objectstore_typed_options::SentryOptions>::deserialize(&inner)
+                        .expect("failed to deserialize options");
+                ::std::sync::Arc::new(deserialized)
             }
 
             /// Reloads options from sentry-options and atomically swaps in the new
@@ -251,9 +199,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     .with_schemas(&[(Self::NAMESPACE, Self::SCHEMA)])
                     .build()?;
 
+                let deserialized =
+                    <#name as ::objectstore_typed_options::SentryOptions>::deserialize(&inner)?;
                 __OPTIONS
                     .set(::objectstore_typed_options::arc_swap::ArcSwap::from_pointee(
-                        Self::deserialize(&inner)?,
+                        deserialized,
                     ))
                     .map_err(|_| {
                         ::objectstore_typed_options::sentry_options::OptionsError::AlreadyInitialized
