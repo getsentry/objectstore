@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -467,8 +468,7 @@ class Session:
 
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session (a static token string cannot sign), if ``method`` is not
-        supported, or if ``duration`` is not a positive whole number of seconds
-        up to the one-week maximum.
+        supported, or if ``duration`` is above the one-week maximum.
         """
         if method not in presign.SUPPORTED_METHODS:
             raise ValueError(
@@ -484,11 +484,7 @@ class Session:
                 f"duration {duration} exceeds the maximum of "
                 f"{presign.MAX_PRESIGN_DURATION}"
             )
-        duration_secs = int(duration.total_seconds())
-        if duration_secs < 1:
-            raise ValueError(
-                f"duration {duration} is too short; must be at least one second"
-            )
+        duration_secs = math.ceil(duration.total_seconds())
 
         encoded_path = presign.encode_path(self._make_url(key))
         timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
