@@ -733,24 +733,6 @@ def test_presigned_head_succeeds(server_url: str) -> None:
     assert status == 204
 
 
-def test_presigned_delete_succeeds_then_gone(server_url: str) -> None:
-    session = _presign_session(server_url)
-    session.put(b"presigned hello", key="presigned-delete")
-
-    delete_url = session.presigned_object_url(
-        "DELETE", "presigned-delete", duration=timedelta(hours=1)
-    )
-    status, _ = _fetch(delete_url, method="DELETE")
-    assert status == 204
-
-    # A subsequent pre-signed GET should now 404.
-    get_url = session.presigned_object_url(
-        "GET", "presigned-delete", duration=timedelta(hours=1)
-    )
-    status, _ = _fetch(get_url)
-    assert status == 404
-
-
 def test_presigned_case_insensitive_method(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"lowercase method", key="presigned-lower")

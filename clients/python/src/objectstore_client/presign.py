@@ -57,7 +57,7 @@ PARAM_SIG = "os_sig"
 MAX_PRESIGN_DURATION = timedelta(days=7)
 
 # HTTP methods that may be pre-signed. The server rejects all others.
-SUPPORTED_METHODS = ("GET", "HEAD", "DELETE")
+SUPPORTED_METHODS = ("GET", "HEAD")
 
 
 def encode_path(path: str) -> str:

@@ -449,7 +449,7 @@ class Session:
 
     def presigned_object_url(
         self,
-        method: Literal["GET", "HEAD", "DELETE"],
+        method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta,
     ) -> str:
@@ -462,10 +462,9 @@ class Session:
         to any HTTP client (``urllib``, ``requests``, a browser, ...); the URL is
         already percent-encoded and must be transmitted verbatim.
 
-        Only ``GET``, ``HEAD`` and ``DELETE`` may be pre-signed. The permissions
-        granted are those configured server-side for the signing key, so a
-        read-only key cannot produce a working ``DELETE`` URL. ``duration`` must
-        not exceed one week.
+        Only ``GET`` and ``HEAD`` may be pre-signed. The permissions granted
+        are those configured server-side for the signing key. ``duration``
+        must not exceed one week.
 
         Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
         session (a static token string cannot sign), if ``method`` is not

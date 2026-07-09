@@ -192,9 +192,9 @@ handing a download link to a browser or an external service.
 
 `Session.presigned_object_url` signs the URL with the session's `TokenGenerator`
 keypair, so it requires a `TokenGenerator` (a static token string cannot sign)
-and raises `ValueError` otherwise. Only `GET`, `HEAD`, and `DELETE` may be
-pre-signed, the granted permissions are those configured server-side for the
-signing key, and the validity may not exceed one week.
+and raises `ValueError` otherwise. Only `GET` and `HEAD` may be pre-signed,
+the granted permissions are those configured server-side for the signing key,
+and the validity may not exceed one week.
 
 ```python
 from datetime import timedelta
