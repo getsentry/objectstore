@@ -13,7 +13,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import presign, utils
-from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
+from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
@@ -118,9 +118,9 @@ class Client:
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
             timeouts).
-        token: A ``TokenGenerator`` that signs a fresh JWT for each request
+        token: A ``SecretKey`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
-            as-is for every request. Use a ``TokenGenerator`` for internal
+            as-is for every request. Use a ``SecretKey`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
     """
@@ -238,13 +238,12 @@ class Session:
         When ``expiry_seconds`` is ``None``, the generator's default
         expiry is used.
 
-        Raises ``ValueError`` if no ``TokenGenerator`` is configured
-        or if any requested permission is not granted to the
-        generator.
+        Raises ``ValueError`` if no ``SecretKey`` is configured
+        or if any requested permission is not granted to the key.
         """
-        if not isinstance(self._token, TokenGenerator):
-            raise ValueError("no token generator configured on this session")
-        return self._token.sign_for_scope(
+        if not isinstance(self._token, SecretKey):
+            raise ValueError("no secret key configured on this session")
+        return self._token.token_for_scope(
             self._usecase.name,
             self._scope,
             permissions,
@@ -253,8 +252,8 @@ class Session:
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
-        if isinstance(self._token, TokenGenerator):
-            return self._token.sign_for_scope(self._usecase.name, self._scope)
+        if isinstance(self._token, SecretKey):
+            return self._token.token_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
             return self._token
         return None
@@ -466,7 +465,7 @@ class Session:
         are those configured server-side for the signing key. ``duration``
         must not exceed one week.
 
-        Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
+        Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session (a static token string cannot sign), if ``method`` is not
         supported, or if ``duration`` is not a positive whole number of seconds
         up to the one-week maximum.
@@ -478,8 +477,8 @@ class Session:
                 f"expected one of {presign.SUPPORTED_METHODS}"
             )
 
-        if not isinstance(self._token, TokenGenerator):
-            raise ValueError("no token generator configured on this session")
+        if not isinstance(self._token, SecretKey):
+            raise ValueError("no secret key configured on this session")
 
         if duration > presign.MAX_PRESIGN_DURATION:
             raise ValueError(
@@ -502,10 +501,10 @@ class Session:
             f"&{presign.PARAM_DURATION}={duration_secs}"
         )
 
-        canonical = presign.build_canonical(
+        canonical = presign.build_canonical_form(
             normalized_method, encoded_path, encoded_query
         )
-        signature = presign.sign_canonical(self._token.secret_key, canonical)
+        signature = self._token.sign_canonical(canonical)
 
         # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
         # result is a valid absolute URL.

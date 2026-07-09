@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from objectstore_client import presign
+from objectstore_client.auth import SecretKey
 
 # urllib3's real request-target encoder: the ground truth for wire encoding.
 from urllib3.util.url import _encode_target  # type: ignore[attr-defined]
@@ -33,7 +34,7 @@ def test_canonical_form_full_query() -> None:
     # Base case: pins path (slashes, `=`, `;` unencoded), os_sig exclusion,
     # key lowercasing, and query sort order.
     path = "/v1/objects/testing/org=17;project=42/foo/bar"
-    canonical = presign.build_canonical(
+    canonical = presign.build_canonical_form(
         "GET", presign.encode_path(path), presign.encode_query(SAMPLE_QUERY)
     )
     assert canonical == (
@@ -44,14 +45,14 @@ def test_canonical_form_full_query() -> None:
 
 
 def test_canonical_form_empty_query() -> None:
-    canonical = presign.build_canonical(
+    canonical = presign.build_canonical_form(
         "GET", presign.encode_path("/v1/objects/testing/_/key"), ""
     )
     assert canonical == "GET\n/v1/objects/testing/_/key\n"
 
 
 def test_canonical_form_duplicate_keys_preserved_and_sorted() -> None:
-    canonical = presign.build_canonical(
+    canonical = presign.build_canonical_form(
         "GET",
         presign.encode_path("/v1/objects/testing/_/key"),
         presign.encode_query("dup=b&dup=a&x=1"),
@@ -62,9 +63,9 @@ def test_canonical_form_duplicate_keys_preserved_and_sorted() -> None:
 def test_head_is_normalized_to_get() -> None:
     path = presign.encode_path("/v1/objects/testing/_/key")
     query = presign.encode_query(SAMPLE_QUERY)
-    assert presign.build_canonical("HEAD", path, query) == presign.build_canonical(
-        "GET", path, query
-    )
+    assert presign.build_canonical_form(
+        "HEAD", path, query
+    ) == presign.build_canonical_form("GET", path, query)
 
 
 # Keys that round-trip through urllib3's request-target encoder (no `?`/`#`,
@@ -112,17 +113,19 @@ def test_encode_path_encodes_query_and_fragment_delimiters(
 
 def test_sign_canonical_roundtrips_with_public_key() -> None:
     with open(TEST_EDDSA_PRIVKEY_PATH) as f:
-        secret_key = f.read()
+        secret_key_pem = f.read()
     with open(TEST_EDDSA_PUBKEY_PATH, "rb") as f:
         public_key = load_pem_public_key(f.read())
     assert isinstance(public_key, Ed25519PublicKey)
 
-    canonical = presign.build_canonical(
+    key = SecretKey("test_kid", secret_key_pem)
+
+    canonical = presign.build_canonical_form(
         "GET",
         presign.encode_path("/v1/objects/testing/_/key"),
         presign.encode_query(SAMPLE_QUERY),
     )
-    signature_b64 = presign.sign_canonical(secret_key, canonical)
+    signature_b64 = key.sign_canonical(canonical)
 
     # Decode the base64url-no-pad signature and verify with the public key.
     padding = "=" * (-len(signature_b64) % 4)
@@ -145,5 +148,6 @@ def test_sign_canonical_rejects_non_ed25519_key() -> None:
         Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
     ).decode()
 
+    key = SecretKey("test_kid", pem)
     with pytest.raises(ValueError, match="Ed25519"):
-        presign.sign_canonical(pem, "GET\n/x\n")
+        key.sign_canonical("GET\n/x\n")
