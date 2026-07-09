@@ -40,7 +40,7 @@ pub struct Services {
     ///
     /// The `kid` header field from incoming authorization tokens should correspond to a public key
     /// in this directory that can be used to verify the token.
-    pub key_directory: PublicKeyDirectory,
+    pub key_directory: Arc<PublicKeyDirectory>,
     /// Stateful admission-based rate limiter for incoming requests.
     pub rate_limiter: RateLimiter,
     /// In-flight HTTP request counter with the configured limit.
@@ -65,7 +65,7 @@ impl Services {
             StorageService::new(backend).with_concurrency_limit(config.service.max_concurrency);
         service.start();
 
-        let key_directory = PublicKeyDirectory::from_config(&config.auth).await?;
+        let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);
         if config.auth.enforce && key_directory.keys.is_empty() {
             anyhow::bail!(
                 "Auth enforcement is enabled but no keys are configured. Either disable auth enforcement (dev/test environments) or configure a public key."

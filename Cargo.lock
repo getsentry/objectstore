@@ -2808,6 +2808,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
+ "ed25519-dalek",
  "elegant-departure",
  "figment",
  "futures",

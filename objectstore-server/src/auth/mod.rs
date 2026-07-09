@@ -1,6 +1,9 @@
 //! Authorization logic for objectstore.
 #![warn(missing_docs)]
 
+/// Identifier for a public key.
+pub type KeyId = String;
+
 mod context;
 mod error;
 mod key_directory;

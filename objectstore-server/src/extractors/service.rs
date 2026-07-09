@@ -1,7 +1,10 @@
-use axum::extract::FromRequestParts;
-use axum::http::{header, request::Parts};
+use std::time::SystemTime;
 
-use crate::auth::{AuthAwareService, AuthContext};
+use axum::extract::{FromRequestParts, OriginalUri, Query};
+use axum::http::{Method, header, request::Parts};
+use objectstore_types::presign::PARAM_SIG;
+
+use crate::auth::{AuthAwareService, AuthContext, AuthError, PresignParams};
 use crate::endpoints::common::ApiError;
 use crate::state::ServiceState;
 
@@ -13,6 +16,54 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// this header.
 const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
 
+impl AuthAwareService {
+    fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
+        let token = parts
+            .headers
+            .get(OBJECTSTORE_AUTH_HEADER)
+            .or_else(|| parts.headers.get(header::AUTHORIZATION))
+            .and_then(|v| v.to_str().ok())
+            .and_then(strip_bearer);
+
+        AuthContext::from_encoded_jwt(token, &state.key_directory)
+    }
+
+    async fn from_presigned_request(
+        parts: &mut Parts,
+        state: &ServiceState,
+    ) -> Result<AuthContext, AuthError> {
+        if !matches!(&parts.method, &Method::GET | &Method::HEAD) {
+            return Err(AuthError::UnsupportedPresignedMethod);
+        }
+
+        let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                AuthError::BadRequest("presigned URL has missing or invalid parameters")
+            })?;
+
+        // The client signs the full public path, but `Router::nest` strips the `/v1`
+        // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
+        let path = parts
+            .extensions
+            .get::<OriginalUri>()
+            .ok_or(AuthError::InternalError(
+                "OriginalUri extension missing".into(),
+            ))?
+            .0
+            .path();
+
+        AuthContext::from_presigned_request(
+            &parts.method,
+            path,
+            parts.uri.query(),
+            &params,
+            &state.key_directory,
+            SystemTime::now(),
+        )
+    }
+}
+
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;
 
@@ -22,29 +73,38 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
     ) -> Result<Self, Self::Rejection> {
         let enforce = state.config.auth.enforce;
         if !state.config.auth.is_active() {
-            return Ok(AuthAwareService::new(state.service.clone(), None, enforce));
+            return Ok(AuthAwareService::new(
+                state.service.clone(),
+                AuthContext::Disabled,
+                enforce,
+            ));
         }
 
-        let token = parts
-            .headers
-            .get(OBJECTSTORE_AUTH_HEADER)
-            .or_else(|| parts.headers.get(header::AUTHORIZATION))
-            .and_then(|v| v.to_str().ok())
-            .and_then(strip_bearer);
-
-        // Attempt to decode / verify the JWT, logging failure
-        let auth_result = AuthContext::from_encoded_jwt(token, &state.key_directory)
-            .inspect_err(|e| e.log(!enforce));
+        let auth_result = if has_signature(parts.uri.query()) {
+            AuthAwareService::from_presigned_request(parts, state).await
+        } else {
+            AuthAwareService::from_token(parts, state)
+        }
+        .inspect_err(|e| e.log(!enforce));
 
         // If enforcement is disabled, proceed without an auth context even on failure
         let auth = match auth_result {
-            Ok(auth) => Some(auth),
+            Ok(auth) => auth,
             Err(error) if enforce => return Err(ApiError::Auth(error)),
-            Err(_) => None,
+            Err(_) => AuthContext::Disabled,
         };
 
         Ok(AuthAwareService::new(state.service.clone(), auth, enforce))
     }
+}
+
+/// Returns whether the query string carries a pre-signed URL signature (`os-sig`).
+fn has_signature(query: Option<&str>) -> bool {
+    query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair.split_once('=').map_or(pair, |(key, _)| key) == PARAM_SIG)
+    })
 }
 
 fn strip_bearer(header_value: &str) -> Option<&str> {
@@ -73,5 +133,15 @@ mod tests {
 
         // No character boundary at end of expected prefix
         assert_eq!(strip_bearer("Bearer⚠️tokenvalue"), None);
+    }
+
+    #[test]
+    fn test_has_presign_signature() {
+        assert!(has_signature(Some("os_sig=abc")));
+        assert!(has_signature(Some("os_kid=relay&os_sig=abc")));
+
+        assert!(!has_signature(Some("OS_SIG=abc")));
+        assert!(!has_signature(None));
+        assert!(!has_signature(Some("os_kid=relay")));
     }
 }
