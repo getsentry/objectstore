@@ -16,6 +16,57 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// this header.
 const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
 
+impl AuthAwareService {
+    fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
+        let token = parts
+            .headers
+            .get(OBJECTSTORE_AUTH_HEADER)
+            .or_else(|| parts.headers.get(header::AUTHORIZATION))
+            .and_then(|v| v.to_str().ok())
+            .and_then(strip_bearer);
+
+        AuthContext::from_encoded_jwt(token, &state.key_directory)
+    }
+
+    async fn from_presigned_request(
+        parts: &mut Parts,
+        state: &ServiceState,
+    ) -> Result<AuthContext, AuthError> {
+        if !matches!(
+            &parts.method,
+            &Method::GET | &Method::HEAD | &Method::DELETE
+        ) {
+            return Err(AuthError::UnsupportedPresignedMethod);
+        }
+
+        let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                AuthError::BadRequest("presigned URL has missing or invalid parameters")
+            })?;
+
+        // The client signs the full public path, but `Router::nest` strips the `/v1`
+        // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
+        let path = parts
+            .extensions
+            .get::<OriginalUri>()
+            .ok_or(AuthError::InternalError(
+                "OriginalUri extension missing".into(),
+            ))?
+            .0
+            .path();
+
+        AuthContext::from_presigned_request(
+            &parts.method,
+            path,
+            parts.uri.query(),
+            &params,
+            &state.key_directory,
+            SystemTime::now(),
+        )
+    }
+}
+
 impl FromRequestParts<ServiceState> for AuthAwareService {
     type Rejection = ApiError;
 
@@ -33,49 +84,10 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
             ));
         }
 
-        let auth_result = match has_signature(parts.uri.query()) {
-            true if matches!(
-                &parts.method,
-                &Method::GET | &Method::HEAD | &Method::DELETE
-            ) =>
-            {
-                let Query(params) = Query::<PresignParams>::from_request_parts(parts, state)
-                    .await
-                    .map_err(|_| {
-                        AuthError::BadRequest("presigned URL has missing or invalid parameters")
-                    })?;
-
-                // The client signs the full public path, but `Router::nest` strips the `/v1`
-                // prefix from `parts.uri`. Recover the original path from `OriginalUri`.
-                let path = parts
-                    .extensions
-                    .get::<OriginalUri>()
-                    .ok_or(AuthError::InternalError(
-                        "OriginalUri extension missing".into(),
-                    ))?
-                    .0
-                    .path();
-
-                AuthContext::from_presigned_request(
-                    &parts.method,
-                    path,
-                    parts.uri.query(),
-                    &params,
-                    &state.key_directory,
-                    SystemTime::now(),
-                )
-            }
-            true => Err(AuthError::UnsupportedPresignedMethod),
-            false => {
-                let token = parts
-                    .headers
-                    .get(OBJECTSTORE_AUTH_HEADER)
-                    .or_else(|| parts.headers.get(header::AUTHORIZATION))
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(strip_bearer);
-
-                AuthContext::from_encoded_jwt(token, &state.key_directory)
-            }
+        let auth_result = if has_signature(parts.uri.query()) {
+            AuthAwareService::from_presigned_request(parts, state).await
+        } else {
+            AuthAwareService::from_token(parts, state)
         }
         .inspect_err(|e| e.log(!enforce));
 
