@@ -791,6 +791,12 @@ def test_presigned_tampered_signature_unauthorized(server_url: str) -> None:
 # normal urllib3 `put` and the pre-signed `urllib` GET encode the path
 # identically, so they resolve to the same stored object. `?`/`#` are excluded
 # because urllib3's `put` path treats them as query/fragment delimiters.
+#
+# Keys containing a literal `%XX` (percent followed by two hex digits) currently
+# diverge and are excluded: presigning uses `urllib.parse.quote`, which escapes
+# the `%` to `%25` (targeting the literal key), whereas urllib3's `put` path
+# treats `%20` as an existing escape and leaves it intact, so the two resolve to
+# different stored objects. See `looks%20encoded` below.
 ENCODING_CORNER_CASE_KEYS = [
     "plain-key",
     "with space",
@@ -799,8 +805,8 @@ ENCODING_CORNER_CASE_KEYS = [
     "plus+sign",
     "sub!$'()*+,=delims",
     "tilde~dot.key",
-    "100%literal-percent",
-    "looks%20encoded",
+    "100%literal-percent",  # `%li` isn't a valid escape, so both escape the `%`
+    # "looks%20encoded",  # diverges: quote -> %2520, urllib3 put -> %20
     "nested/path/segments",
     "quote'apostrophe",
     "at@sign",

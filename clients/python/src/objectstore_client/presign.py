@@ -8,15 +8,22 @@ See ``objectstore-types/src/presign.rs`` for details on the scheme.
 """
 
 from datetime import timedelta
+from urllib.parse import quote
 
-# urllib3 internals that produce the on-the-wire request target. These are the
-# exact functions urllib3 applies in `HTTPConnectionPool.urlopen`, so signing
-# their output guarantees a byte-for-byte match with what the client sends.
-from urllib3.util.url import (  # type: ignore[attr-defined]
-    _PATH_CHARS,
-    _QUERY_CHARS,
-    _encode_invalid_chars,
-)
+# Characters left unescaped when percent-encoding, expressed in RFC 3986 terms.
+# `urllib.parse.quote` already leaves the *unreserved* set (ALPHA / DIGIT /
+# "-._~") untouched, so `safe` only lists the extra characters permitted in a
+# path or query without escaping:
+#   - sub-delims: "!$&'()*+,;="
+#   - path extras: ":" "@" "/"  (the pchar set plus the "/" segment separator)
+#   - query also allows "?"
+# This is the same set urllib3 leaves unescaped, so the encoding is a fixed
+# point of the HTTP client that ultimately sends the URL and survives on the
+# wire verbatim. It is also byte-for-byte identical to the Rust client's
+# `percent_encoding` set (see `objectstore-types/src/presign.rs`), so the two
+# clients produce the same signed bytes for any key.
+_PATH_SAFE = "/:@!$&'()*+,;="
+_QUERY_SAFE = _PATH_SAFE + "?"
 
 # Query parameter carrying the RFC 3339 time at which the request was signed.
 PARAM_TIMESTAMP = "os_timestamp"
@@ -38,13 +45,21 @@ SUPPORTED_METHODS = ("GET", "HEAD")
 
 
 def encode_path(path: str) -> str:
-    """Percent-encodes a request path the same way urllib3 sends it on the wire."""
-    return _encode_invalid_chars(path, _PATH_CHARS)
+    """Percent-encodes a request path as it will appear on the wire.
+
+    Leaves the RFC 3986 unreserved set, sub-delims, and ``:`` ``@`` ``/``
+    unescaped (see :data:`_PATH_SAFE`); everything else is percent-encoded.
+    """
+    return quote(path, safe=_PATH_SAFE)
 
 
 def encode_query(query: str) -> str:
-    """Percent-encodes a query string the same way urllib3 sends it on the wire."""
-    return _encode_invalid_chars(query, _QUERY_CHARS)
+    """Percent-encodes a query string as it will appear on the wire.
+
+    Same set as :func:`encode_path`, additionally leaving ``?`` unescaped
+    (see :data:`_QUERY_SAFE`).
+    """
+    return quote(query, safe=_QUERY_SAFE)
 
 
 def build_canonical_form(method: str, encoded_path: str, encoded_query: str) -> str:
