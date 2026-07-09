@@ -30,7 +30,7 @@ objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-typed-options = { path = "objectstore-typed-options" }
 objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
-objectstore-types = { path = "objectstore-types", version = "0.1.12" }
+objectstore-types = { path = "objectstore-types", version = "0.1.13" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.102"
