@@ -110,16 +110,3 @@ TokenProvider = SecretKey | str
 Can be either a :class:`SecretKey` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
-
-
-def __getattr__(name: str) -> type:
-    import warnings
-
-    if name == "TokenGenerator":
-        warnings.warn(
-            "TokenGenerator has been renamed to SecretKey",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return SecretKey
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
