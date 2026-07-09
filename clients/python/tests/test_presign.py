@@ -111,7 +111,7 @@ def test_encode_path_encodes_query_and_fragment_delimiters(
     assert presign.encode_path(path) == f"/v1/objects/test/org=1/{encoded}"
 
 
-def test_sign_canonical_roundtrips_with_public_key() -> None:
+def test_sign_canonical_form_roundtrips_with_public_key() -> None:
     with open(TEST_EDDSA_PRIVKEY_PATH) as f:
         secret_key_pem = f.read()
     with open(TEST_EDDSA_PUBKEY_PATH, "rb") as f:
@@ -125,7 +125,7 @@ def test_sign_canonical_roundtrips_with_public_key() -> None:
         presign.encode_path("/v1/objects/testing/_/key"),
         presign.encode_query(SAMPLE_QUERY),
     )
-    signature_b64 = key.sign_canonical(canonical)
+    signature_b64 = key.sign_canonical_form(canonical)
 
     # Decode the base64url-no-pad signature and verify with the public key.
     padding = "=" * (-len(signature_b64) % 4)
@@ -134,7 +134,7 @@ def test_sign_canonical_roundtrips_with_public_key() -> None:
     public_key.verify(signature, canonical.encode())  # raises on mismatch
 
 
-def test_sign_canonical_rejects_non_ed25519_key() -> None:
+def test_sign_canonical_form_rejects_non_ed25519_key() -> None:
     # An RSA key is a valid PEM private key but not Ed25519.
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.hazmat.primitives.serialization import (
@@ -150,4 +150,4 @@ def test_sign_canonical_rejects_non_ed25519_key() -> None:
 
     key = SecretKey("test_kid", pem)
     with pytest.raises(ValueError, match="Ed25519"):
-        key.sign_canonical("GET\n/x\n")
+        key.sign_canonical_form("GET\n/x\n")

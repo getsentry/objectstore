@@ -91,7 +91,7 @@ class SecretKey:
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
-    def sign_canonical(self, canonical_form: str) -> str:
+    def sign_canonical_form(self, canonical_form: str) -> str:
         """Signs a canonical request form with the Ed25519 private key.
 
         Returns the base64url-encoded (no padding) signature, suitable as the
@@ -110,3 +110,16 @@ TokenProvider = SecretKey | str
 Can be either a :class:`SecretKey` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
+
+
+def __getattr__(name: str) -> type:
+    import warnings
+
+    if name == "TokenGenerator":
+        warnings.warn(
+            "TokenGenerator has been renamed to SecretKey",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return SecretKey
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
