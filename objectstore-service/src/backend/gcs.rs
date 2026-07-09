@@ -655,7 +655,7 @@ impl Backend for GcsBackend {
                 multipart::Part::stream(Body::wrap_stream(stream))
                     .mime_str(&metadata.content_type)
                     .map_err(|e| Error::Generic {
-                        context: format!("invalid mime type: {}", &metadata.content_type),
+                        context: format!("invalid mime type: {}", metadata.content_type),
                         cause: Some(Box::new(e)),
                     })?,
             );
