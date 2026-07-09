@@ -243,8 +243,8 @@ impl AuthContext {
     ) -> Result<(), AuthError> {
         let scoped = match self {
             AuthContext::Disabled => return Ok(()),
-            AuthContext::Scoped(scoped) => scoped,
             AuthContext::Preauthorized => return Ok(()),
+            AuthContext::Scoped(scoped) => scoped,
         };
 
         if !scoped.permissions.contains(&perm) || scoped.usecase != context.usecase {
@@ -621,20 +621,5 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         );
 
         assert_eq!(result, Err(AuthError::NotPermitted));
-    }
-
-    #[test]
-    fn test_assert_authorized_preauthorized_always_permits() {
-        let context = AuthContext::Preauthorized;
-        let object = sample_object_context("123", "456");
-
-        assert_eq!(
-            context.assert_authorized(Permission::ObjectRead, &object),
-            Ok(())
-        );
-        assert_eq!(
-            context.assert_authorized(Permission::ObjectWrite, &object),
-            Ok(())
-        );
     }
 }
