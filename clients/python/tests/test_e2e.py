@@ -790,7 +790,7 @@ def test_presigned_tampered_signature_unauthorized(server_url: str) -> None:
 # Object keys exercising URL-encoding corner cases. Each must round-trip: the
 # normal `put` and the pre-signed `urllib` GET percent-encode the path
 # identically (both treat the key as a literal string, see
-# `presign.encode_path`), so they resolve to the same stored object. This
+# `utils.encode_path`), so they resolve to the same stored object. This
 # includes keys containing a literal `%XX`: the `%` is escaped to `%25` rather
 # than mistaken for an existing escape (see `test_put_stores_under_literal_key`).
 ENCODING_CORNER_CASE_KEYS = [

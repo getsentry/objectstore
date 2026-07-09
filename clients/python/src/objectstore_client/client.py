@@ -274,10 +274,10 @@ class Session:
         # Percent-encode the path ourselves so the key is treated as a literal
         # string (a literal "%" becomes "%25"). This keeps every request path
         # consistent with pre-signed URLs, which encode the same way; see
-        # `presign.encode_path`. urllib3 leaves our already-encoded output on the
+        # `utils.encode_path`. urllib3 leaves our already-encoded output on the
         # wire verbatim, so this only changes bytes for keys containing a literal
         # "%XX" (which urllib3 would otherwise mistake for an existing escape).
-        path = presign.encode_path(self._base_path.rstrip("/") + relative_path)
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
@@ -298,7 +298,7 @@ class Session:
         relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
         # Encode the path (with the literal key); see `_make_url`. `query` is
         # already percent-encoded by the caller via `urlencode`, so leave it.
-        path = presign.encode_path(self._base_path.rstrip("/") + relative_path)
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if query:
             return f"{path}?{query}"
         return path
@@ -496,7 +496,7 @@ class Session:
         # `_make_url` already percent-encodes the path identically to the wire.
         encoded_path = self._make_url(key)
         timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        encoded_query = presign.encode_query(
+        encoded_query = utils.encode_query(
             f"{presign.PARAM_KID}={self._token.kid}"
             f"&{presign.PARAM_TIMESTAMP}={timestamp}"
             f"&{presign.PARAM_DURATION}={duration_secs}"
