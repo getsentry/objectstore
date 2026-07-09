@@ -65,7 +65,7 @@ impl FromRequestParts<ServiceState> for AuthAwareService {
                     SystemTime::now(),
                 )
             }
-            true => Err(AuthError::PresignUnsupportedMethod),
+            true => Err(AuthError::UnsupportedPresignedMethod),
             false => {
                 let token = parts
                     .headers

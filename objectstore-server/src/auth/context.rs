@@ -117,7 +117,7 @@ impl AuthContext {
         let key_config = key_directory
             .keys
             .get(key_id)
-            .ok_or_else(|| AuthError::InternalError(format!("Key `{key_id}` not configured")))?;
+            .ok_or(AuthError::UnknownKey)?;
 
         if jwt_header.alg != Algorithm::EdDSA {
             objectstore_log::warn!(
@@ -183,9 +183,10 @@ impl AuthContext {
         key_directory: &PublicKeyDirectory,
         now: SystemTime,
     ) -> Result<AuthContext, AuthError> {
-        let key_config = key_directory.keys.get(&params.key_id).ok_or_else(|| {
-            AuthError::InternalError(format!("Key `{}` not configured", &params.key_id))
-        })?;
+        let key_config = key_directory
+            .keys
+            .get(&params.key_id)
+            .ok_or(AuthError::UnknownKey)?;
 
         let duration = Duration::from_secs(params.duration_secs);
         if duration > MAX_PRESIGN_DURATION {

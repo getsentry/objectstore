@@ -264,6 +264,6 @@ async fn presigned_put_is_rejected() -> Result<()> {
         .await?;
 
     // Pre-signed URLs are only supported for GET/HEAD/DELETE.
-    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     Ok(())
 }

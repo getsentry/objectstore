@@ -26,22 +26,26 @@ pub enum AuthError {
     NotPermitted,
 
     /// Indicates that a pre-signed URL was used with an unsupported HTTP method.
-    ///
-    /// Pre-signed URLs are only accepted for `GET`, `HEAD`, and `DELETE`.
     #[error("presigned URLs are not supported for this method")]
-    PresignUnsupportedMethod,
+    UnsupportedPresignedMethod,
+
+    /// Indicates that the authorization token/signature was signed with a key that is unknown to
+    /// this server.
+    #[error("unknown key")]
+    UnknownKey,
 }
 
 impl AuthError {
     /// Return a shortname for the failure reason that can be used to tag metrics.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::UnknownKey => "unknown_key",
             Self::BadRequest(_) => "bad_request",
+            Self::NotPermitted => "not_permitted",
             Self::InternalError(_) => "internal_error",
             Self::ValidationFailure(_) => "validation_failure",
             Self::VerificationFailure => "verification_failure",
-            Self::PresignUnsupportedMethod => "presign_unsupported_method",
-            Self::NotPermitted => "not_permitted",
+            Self::UnsupportedPresignedMethod => "unsupported_presigned_method",
         }
     }
 
