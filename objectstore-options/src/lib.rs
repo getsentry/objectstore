@@ -11,6 +11,30 @@ use serde::{Deserialize, Serialize};
 
 pub use objectstore_typed_options::Error;
 
+/// Initializes options and spawns a background task that refreshes them periodically.
+///
+/// The refresh interval is 4 seconds, chosen to stay under the 5-second staleness
+/// threshold built into `sentry-options`.
+pub fn init() -> Result<(), Error> {
+    Options::init()?;
+
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
+        loop {
+            interval.tick().await;
+
+            // `spawn_blocking` propagates panics as a JoinError. No need to log them, since the
+            // global panic hook does that already.
+            let result = tokio::task::spawn_blocking(Options::refresh).await;
+            if let Ok(Err(ref err)) = result {
+                objectstore_log::error!(!!err, "failed to refresh options");
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Runtime options for Objectstore, loaded from sentry-options.
 ///
 /// Obtain a snapshot of the current options via [`Options::get`]. Before calling `get`,

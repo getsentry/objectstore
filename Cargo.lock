@@ -2795,8 +2795,10 @@ dependencies = [
 name = "objectstore-options"
 version = "0.1.0"
 dependencies = [
+ "objectstore-log",
  "objectstore-typed-options",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -2901,7 +2903,6 @@ name = "objectstore-typed-options"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "objectstore-log",
  "objectstore-typed-options-derive",
  "sentry-options",
  "serde",
