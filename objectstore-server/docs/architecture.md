@@ -116,17 +116,17 @@ the exact request), or `Scoped` (a verified JWT, checked per operation).
 
 Instead of a JWT, a request may authorize itself with a **pre-signed URL**: a
 key holder signs a canonical form of the request with its Ed25519 key and encodes
-the signature and parameters entirely in the query string (`os-sig`, `os-kid`,
-`os-timestamp`, `os-duration`). See [`objectstore_types::presign`] for the
+the signature and parameters entirely in the query string (`os_sig`, `os_kid`,
+`os_timestamp`, `os_duration`). See [`objectstore_types::presign`] for the
 canonical form.
 
-When the extractor sees an `os-sig` query parameter it takes the pre-signed
+When the extractor sees an `os_sig` query parameter it takes the pre-signed
 path instead of looking for a JWT:
 
 - Only `GET`, `HEAD`, and `DELETE` are currently supported.
 - The signature is verified against the request's canonical form using the
-  `os-kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
-- The validity window (`os-timestamp` + `os-duration`) is enforced, capped at
+  `os_kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
+- The validity window (`os_timestamp` + `os_duration`) is enforced, capped at
   **one week** so a URL cannot be minted to be effectively immortal.
 
 A verified pre-signed request yields an `AuthContext::Preauthorized` carrying the
