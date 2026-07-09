@@ -447,7 +447,7 @@ class Session:
         """
         return self._make_url(key, full=True)
 
-    def presigned_url(
+    def presigned_object_url(
         self,
         method: Literal["GET", "HEAD", "DELETE"],
         key: str,

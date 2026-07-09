@@ -712,7 +712,9 @@ def test_presigned_get_succeeds(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"presigned hello", key="presigned-get")
 
-    url = session.presigned_url("GET", "presigned-get", duration=timedelta(hours=1))
+    url = session.presigned_object_url(
+        "GET", "presigned-get", duration=timedelta(hours=1)
+    )
     status, body = _fetch(url)
 
     assert status == 200
@@ -723,7 +725,9 @@ def test_presigned_head_succeeds(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"presigned hello", key="presigned-head")
 
-    url = session.presigned_url("HEAD", "presigned-head", duration=timedelta(hours=1))
+    url = session.presigned_object_url(
+        "HEAD", "presigned-head", duration=timedelta(hours=1)
+    )
     status, _ = _fetch(url, method="HEAD")
 
     assert status == 204
@@ -733,14 +737,14 @@ def test_presigned_delete_succeeds_then_gone(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"presigned hello", key="presigned-delete")
 
-    delete_url = session.presigned_url(
+    delete_url = session.presigned_object_url(
         "DELETE", "presigned-delete", duration=timedelta(hours=1)
     )
     status, _ = _fetch(delete_url, method="DELETE")
     assert status == 204
 
     # A subsequent pre-signed GET should now 404.
-    get_url = session.presigned_url(
+    get_url = session.presigned_object_url(
         "GET", "presigned-delete", duration=timedelta(hours=1)
     )
     status, _ = _fetch(get_url)
@@ -752,7 +756,9 @@ def test_presigned_case_insensitive_method(server_url: str) -> None:
     session.put(b"lowercase method", key="presigned-lower")
 
     # Lowercase method is normalized to uppercase at runtime.
-    url = session.presigned_url("get", "presigned-lower", duration=timedelta(hours=1))  # type: ignore[arg-type]
+    url = session.presigned_object_url(
+        "GET", "presigned-lower", duration=timedelta(hours=1)
+    )  # type: ignore[arg-type]
     status, body = _fetch(url)
 
     assert status == 200
@@ -769,26 +775,28 @@ def test_presigned_requires_token_generator(server_url: str) -> None:
     session = client.session(usecase, org=42, project=1337)
 
     with pytest.raises(ValueError, match="no token generator"):
-        session.presigned_url("GET", "whatever", duration=timedelta(hours=1))
+        session.presigned_object_url("GET", "whatever", duration=timedelta(hours=1))
 
 
 def test_presigned_rejects_unsupported_method(server_url: str) -> None:
     session = _presign_session(server_url)
     with pytest.raises(ValueError, match="unsupported pre-signed method"):
-        session.presigned_url("PUT", "whatever", duration=timedelta(hours=1))  # type: ignore[arg-type]
+        session.presigned_object_url("PUT", "whatever", duration=timedelta(hours=1))  # type: ignore[arg-type]
 
 
 def test_presigned_rejects_duration_over_max(server_url: str) -> None:
     session = _presign_session(server_url)
     with pytest.raises(ValueError, match="exceeds the maximum"):
-        session.presigned_url("GET", "whatever", duration=timedelta(days=8))
+        session.presigned_object_url("GET", "whatever", duration=timedelta(days=8))
 
 
 def test_presigned_tampered_signature_unauthorized(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"presigned hello", key="presigned-tamper")
 
-    url = session.presigned_url("GET", "presigned-tamper", duration=timedelta(hours=1))
+    url = session.presigned_object_url(
+        "GET", "presigned-tamper", duration=timedelta(hours=1)
+    )
     # Flip the last character of the signature.
     last = url[-1]
     tampered = url[:-1] + ("A" if last != "A" else "B")
@@ -827,7 +835,7 @@ def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
     payload = f"payload for {key}".encode()
     session.put(payload, key=key)
 
-    url = session.presigned_url("GET", key, duration=timedelta(hours=1))
+    url = session.presigned_object_url("GET", key, duration=timedelta(hours=1))
     status, body = _fetch(url)
 
     assert status == 200, f"key {key!r} failed with status {status}"

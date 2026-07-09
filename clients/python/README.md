@@ -190,7 +190,7 @@ A **pre-signed URL** is a time-limited URL that authorizes a single request on
 one object without the recipient needing an auth token. This is useful for
 handing a download link to a browser or an external service.
 
-`Session.presigned_url` signs the URL with the session's `TokenGenerator`
+`Session.presigned_object_url` signs the URL with the session's `TokenGenerator`
 keypair, so it requires a `TokenGenerator` (a static token string cannot sign)
 and raises `ValueError` otherwise. Only `GET`, `HEAD`, and `DELETE` may be
 pre-signed, the granted permissions are those configured server-side for the
@@ -200,7 +200,7 @@ signing key, and the validity may not exceed one week.
 from datetime import timedelta
 
 # The recipient can fetch this with any HTTP client, no auth header needed.
-url = session.presigned_url("GET", "my-key", duration=timedelta(hours=1))
+url = session.presigned_object_url("GET", "my-key", duration=timedelta(hours=1))
 
 import urllib.request
 with urllib.request.urlopen(url) as resp:
