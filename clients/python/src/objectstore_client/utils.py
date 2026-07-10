@@ -23,7 +23,7 @@ _PATH_SAFE = "/:@!$&'()*+,;="
 _QUERY_SAFE = _PATH_SAFE + "?"
 
 
-def encode_path(path: str) -> str:
+def _encode_path(path: str) -> str:
     """Percent-encodes a request path as it will appear on the wire.
 
     Leaves the RFC 3986 unreserved set, sub-delims, and ``:`` ``@`` ``/``
@@ -33,7 +33,7 @@ def encode_path(path: str) -> str:
     return quote(path, safe=_PATH_SAFE)
 
 
-def encode_query(query: str) -> str:
+def _encode_query(query: str) -> str:
     """Percent-encodes a query string as it will appear on the wire.
 
     Same set as :func:`encode_path`, additionally leaving ``?`` unescaped
