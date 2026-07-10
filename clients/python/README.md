@@ -156,32 +156,61 @@ key = resumed.complete(new_parts + existing_parts)
 If your Objectstore instance enforces authorization, you must configure authentication
 via the `token` parameter on `Client`. It accepts either:
 
-- A **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
-  The generator signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed.
+- A **`SecretKey`** — for internal services that have access to an EdDSA keypair.
+  The key signs a fresh JWT for each request, scoped to the specific usecase
+  and scope being accessed, and can also sign pre-signed URLs.
 - A **`str`** — a pre-signed JWT, used as-is for every request.
   Use this for external services that receive a token from another source.
 
 ```python
 from objectstore_client import Client, Usecase
-from objectstore_client.auth import TokenGenerator
+from objectstore_client.auth import SecretKey
 
 # Option 1: Internal service with a keypair
 client = Client(
     "http://localhost:8888",
-    token=TokenGenerator(kid="my-service", secret_key="<private key>"),
+    token=SecretKey(kid="my-service", secret_key="<private key>"),
 )
 
 # Option 2: External service with a pre-signed JWT
-# Use TokenGenerator.sign_for_scope() to obtain a static token from an
+# Use SecretKey.token_for_scope() to obtain a static token from an
 # internal service, then pass it to the external consumer:
 from objectstore_client.scope import Scope
 
-token = TokenGenerator(
+token = SecretKey(
     kid="my-service", secret_key="<private key>",
-).sign_for_scope("my_app", Scope(org=42, project=1337))
+).token_for_scope("my_app", Scope(org=42, project=1337))
 
 client = Client("http://localhost:8888", token=token)
+```
+
+### Pre-signed URLs
+
+A **pre-signed URL** is a time-limited URL that authorizes a single request on
+one object without the recipient needing an auth token. This is useful for
+handing a download link to a browser or an external service, or for returning
+an HTTP redirect so that clients can download objects directly from
+Objectstore.
+
+Pre-signed URLS currently only support `GET` and `HEAD` (a pre-signed URL for
+`GET` authorizes `HEAD` too, and viceversa), so for uploads you should use
+scoped JWTs, as described above.
+
+`Session.presigned_object_url` signs the URL with the session's `SecretKey`,
+so it requires a `SecretKey` and raises `ValueError` otherwise.
+Only `GET` and `HEAD` may be pre-signed, the granted permissions are those
+configured server-side for the signing key, and the
+validity may not exceed one week.
+
+```python
+from datetime import timedelta
+
+# The recipient can fetch this with any HTTP client, no auth header needed.
+url = session.presigned_object_url("GET", "my-key", duration=timedelta(hours=1))
+
+import urllib.request
+with urllib.request.urlopen(url) as resp:
+    content = resp.read()
 ```
 
 ## Configuration
