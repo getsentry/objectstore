@@ -188,12 +188,18 @@ client = Client("http://localhost:8888", token=token)
 
 A **pre-signed URL** is a time-limited URL that authorizes a single request on
 one object without the recipient needing an auth token. This is useful for
-handing a download link to a browser or an external service.
+handing a download link to a browser or an external service, or for returning
+an HTTP redirect so that clients can download objects directly from
+Objectstore.
+
+Pre-signed URLS currently only support `GET` and `HEAD` (a pre-signed URL for
+`GET` authorizes `HEAD` too, and viceversa), so for uploads you should use
+scoped JWTs, as described above.
 
 `Session.presigned_object_url` signs the URL with the session's `SecretKey`,
-so it requires a `SecretKey` (a static token string cannot sign) and raises
-`ValueError` otherwise. Only `GET` and `HEAD` may be pre-signed, the granted
-permissions are those configured server-side for the signing key, and the
+so it requires a `SecretKey` and raises `ValueError` otherwise.
+Only `GET` and `HEAD` may be pre-signed, the granted permissions are those
+configured server-side for the signing key, and the
 validity may not exceed one week.
 
 ```python

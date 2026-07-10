@@ -451,24 +451,23 @@ class Session:
         self,
         method: Literal["GET", "HEAD"],
         key: str,
-        duration: timedelta,
+        duration: timedelta = timedelta(hours=1),
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
         object with the given ``key``, valid for ``duration``.
 
-        The returned URL carries an Ed25519 signature in its query string, so the
-        recipient can perform the request without an auth token. It can be handed
-        to any HTTP client (``urllib``, ``requests``, a browser, ...); the URL is
-        already percent-encoded and must be transmitted verbatim.
-
-        Only ``GET`` and ``HEAD`` may be pre-signed. The permissions granted
-        are those configured server-side for the signing key. ``duration``
-        must not exceed one week.
-
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
-        session (a static token string cannot sign), if ``method`` is not
-        supported, or if ``duration`` is above the one-week maximum.
+        session's client, if ``method`` is not supported, or if ``duration``
+        is above the one-week maximum.
+
+        The returned URL carries a signature that allows the recipient to perform
+        a request without an auth token. It can be handed to any HTTP client;
+        the URL is already percent-encoded, and must be transmitted verbatim.
+
+        Note that `HEAD` and `GET` are considered equivalent from the point of view
+        of signatures, meaning that a signature for `GET` can also be used for
+        `HEAD`, and viceversa.
         """
         if method not in presign.SUPPORTED_METHODS:
             raise ValueError(
