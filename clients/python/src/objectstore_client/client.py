@@ -271,7 +271,7 @@ class Session:
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
         relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = self._base_path.rstrip("/") + relative_path
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
@@ -290,7 +290,7 @@ class Session:
             resource = "objects:multipart"
 
         relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = self._base_path.rstrip("/") + relative_path
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if query:
             return f"{path}?{query}"
         return path
@@ -485,9 +485,10 @@ class Session:
             )
         duration_secs = math.ceil(duration.total_seconds())
 
-        encoded_path = presign.encode_path(self._make_url(key))
+        # `_make_url` already percent-encodes the path identically to the wire.
+        encoded_path = self._make_url(key)
         timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        encoded_query = presign.encode_query(
+        encoded_query = utils.encode_query(
             f"{presign.PARAM_KID}={self._token.kid}"
             f"&{presign.PARAM_TIMESTAMP}={timestamp}"
             f"&{presign.PARAM_DURATION}={duration_secs}"

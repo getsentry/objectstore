@@ -2,9 +2,44 @@ from __future__ import annotations
 
 import io
 from typing import IO, Any
+from urllib.parse import quote
 
 import filetype  # type: ignore[import-untyped]
 from zstandard import ZstdCompressionReader
+
+# Characters left unescaped when percent-encoding a URL path or query, expressed
+# in RFC 3986 terms. `urllib.parse.quote` already leaves the *unreserved* set
+# (ALPHA / DIGIT / "-._~") untouched, so `safe` only lists the extra characters
+# permitted without escaping:
+#   - sub-delims: "!$&'()*+,;="
+#   - path extras: ":" "@" "/"  (the pchar set plus the "/" segment separator)
+#   - query also allows "?"
+# This is the same set urllib3 leaves unescaped, so the encoding is a fixed point
+# of the HTTP client that ultimately sends the URL and survives on the wire
+# verbatim. It is also byte-for-byte identical to the Rust client's
+# `percent_encoding` set (see `objectstore-types/src/presign.rs`), so the two
+# clients produce the same bytes for any key.
+_PATH_SAFE = "/:@!$&'()*+,;="
+_QUERY_SAFE = _PATH_SAFE + "?"
+
+
+def encode_path(path: str) -> str:
+    """Percent-encodes a request path as it will appear on the wire.
+
+    Leaves the RFC 3986 unreserved set, sub-delims, and ``:`` ``@`` ``/``
+    unescaped (see :data:`_PATH_SAFE`); everything else is percent-encoded. This
+    treats the input as a literal string: a literal ``%`` becomes ``%25``.
+    """
+    return quote(path, safe=_PATH_SAFE)
+
+
+def encode_query(query: str) -> str:
+    """Percent-encodes a query string as it will appear on the wire.
+
+    Same set as :func:`encode_path`, additionally leaving ``?`` unescaped
+    (see :data:`_QUERY_SAFE`).
+    """
+    return quote(query, safe=_QUERY_SAFE)
 
 
 def parse_accept_encoding(header: str) -> list[str]:

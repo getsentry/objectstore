@@ -5,7 +5,7 @@ import os
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from objectstore_client import presign
+from objectstore_client import presign, utils
 from objectstore_client.auth import SecretKey
 
 TEST_EDDSA_PRIVKEY_PATH = os.path.join(os.path.dirname(__file__), "ed25519.private.pem")
@@ -26,7 +26,7 @@ def test_canonical_form_full_query() -> None:
     # key lowercasing, and query sort order.
     path = "/v1/objects/testing/org=17;project=42/foo/bar"
     canonical = presign.build_canonical_form(
-        "GET", presign.encode_path(path), presign.encode_query(SAMPLE_QUERY)
+        "GET", utils.encode_path(path), utils.encode_query(SAMPLE_QUERY)
     )
     assert canonical == (
         "GET\n"
@@ -38,15 +38,15 @@ def test_canonical_form_full_query() -> None:
 def test_canonical_form_duplicate_keys_preserved_and_sorted() -> None:
     canonical = presign.build_canonical_form(
         "GET",
-        presign.encode_path("/v1/objects/testing/_/key"),
-        presign.encode_query("dup=b&dup=a&x=1"),
+        utils.encode_path("/v1/objects/testing/_/key"),
+        utils.encode_query("dup=b&dup=a&x=1"),
     )
     assert canonical == "GET\n/v1/objects/testing/_/key\ndup=a&dup=b&x=1"
 
 
 def test_head_is_normalized_to_get() -> None:
-    path = presign.encode_path("/v1/objects/testing/_/key")
-    query = presign.encode_query(SAMPLE_QUERY)
+    path = utils.encode_path("/v1/objects/testing/_/key")
+    query = utils.encode_query(SAMPLE_QUERY)
     assert presign.build_canonical_form(
         "HEAD", path, query
     ) == presign.build_canonical_form("GET", path, query)
@@ -63,8 +63,8 @@ def test_sign_canonical_form_roundtrips_with_public_key() -> None:
 
     canonical = presign.build_canonical_form(
         "GET",
-        presign.encode_path("/v1/objects/testing/_/key"),
-        presign.encode_query(SAMPLE_QUERY),
+        utils.encode_path("/v1/objects/testing/_/key"),
+        utils.encode_query(SAMPLE_QUERY),
     )
     signature_b64 = key.signature_for_canonical_form(canonical)
 

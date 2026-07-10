@@ -788,15 +788,11 @@ def test_presigned_tampered_signature_unauthorized(server_url: str) -> None:
 
 
 # Object keys exercising URL-encoding corner cases. Each must round-trip: the
-# normal urllib3 `put` and the pre-signed `urllib` GET encode the path
-# identically, so they resolve to the same stored object. `?`/`#` are excluded
-# because urllib3's `put` path treats them as query/fragment delimiters.
-#
-# Keys containing a literal `%XX` (percent followed by two hex digits) currently
-# diverge and are excluded: presigning uses `urllib.parse.quote`, which escapes
-# the `%` to `%25` (targeting the literal key), whereas urllib3's `put` path
-# treats `%20` as an existing escape and leaves it intact, so the two resolve to
-# different stored objects. See `looks%20encoded` below.
+# normal `put` and the pre-signed `urllib` GET percent-encode the path
+# identically (both treat the key as a literal string, see
+# `utils.encode_path`), so they resolve to the same stored object. This
+# includes keys containing a literal `%XX`: the `%` is escaped to `%25` rather
+# than mistaken for an existing escape (see `test_put_stores_under_literal_key`).
 ENCODING_CORNER_CASE_KEYS = [
     "plain-key",
     "with space",
@@ -805,8 +801,8 @@ ENCODING_CORNER_CASE_KEYS = [
     "plus+sign",
     "sub!$'()*+,=delims",
     "tilde~dot.key",
-    "100%literal-percent",  # `%li` isn't a valid escape, so both escape the `%`
-    # "looks%20encoded",  # diverges: quote -> %2520, urllib3 put -> %20
+    "100%literal-percent",
+    "looks%20encoded",
     "nested/path/segments",
     "quote'apostrophe",
     "at@sign",
@@ -827,4 +823,25 @@ def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
     status, body = _fetch(url)
 
     assert status == 200, f"key {key!r} failed with status {status}"
+    assert body == payload
+
+
+def test_put_stores_under_literal_key(server_url: str) -> None:
+    # A literal "%XX" in a key must be stored verbatim, not decoded: `put` sends
+    # `looks%2520encoded` on the wire, which the server decodes back to the
+    # literal key `looks%20encoded` rather than `looks encoded`. The server
+    # echoes the stored key in the `put` response body, so we can assert directly
+    # which key the object landed under.
+    session = _presign_session(server_url)
+    key = "looks%20encoded"
+    payload = b"literal percent key"
+
+    stored_key = session.put(payload, key=key)
+    assert stored_key == key
+
+    # Retrievable by that same literal key, both normally and pre-signed.
+    assert session.get(key).payload.read() == payload
+    url = session.presigned_object_url("GET", key, duration=timedelta(hours=1))
+    status, body = _fetch(url)
+    assert status == 200
     assert body == payload
