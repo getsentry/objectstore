@@ -91,6 +91,9 @@ class SecretKey:
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
+    # Deprecated: use token_for_scope() instead.
+    sign_for_scope = token_for_scope
+
     def signature_for_canonical_form(self, canonical_form: str) -> str:
         """Signs a canonical request form with the Ed25519 private key.
 
@@ -110,3 +113,6 @@ TokenProvider = SecretKey | str
 Can be either a :class:`SecretKey` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
+
+# Deprecated: use SecretKey instead.
+TokenGenerator = SecretKey
