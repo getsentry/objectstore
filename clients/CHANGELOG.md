@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.14
+
+### New Features ✨
+
+- (py-client) Support creating pre-signed URLs by @lcian in [#544](https://github.com/getsentry/objectstore/pull/544)
+
+### Bug Fixes 🐛
+
+- (py-client) Treat object keys as literal strings by @lcian in [#548](https://github.com/getsentry/objectstore/pull/548)
+
 ## 0.1.13
 
 ### New Features ✨
