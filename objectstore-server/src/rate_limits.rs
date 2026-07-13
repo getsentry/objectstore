@@ -176,6 +176,13 @@ pub struct BandwidthLimits {
     ///
     /// Value from `0` to `100`. Defaults to `None`, meaning no per-scope bandwidth limit is enforced.
     pub scope_pct: Option<u8>,
+
+    /// When `true`, bandwidth limits are evaluated and reported but never enforced.
+    ///
+    /// All accounting and metrics (EWMA and limit gauges, KEDA metrics) remain active,
+    /// but requests exceeding the limit are not rejected. Defaults to `false`.
+    #[serde(default)]
+    pub report_only: bool,
 }
 
 /// Combined rate limiter that enforces both bandwidth and throughput limits.
@@ -452,7 +459,15 @@ impl BandwidthRateLimiter {
         }
     }
 
+    /// Checks whether the current bandwidth exceeds configured limits.
+    ///
+    /// When [`BandwidthLimits::report_only`] is `true`, returns `None` unconditionally.
+    /// Accounting and metrics remain active regardless.
     fn check(&self, context: &ObjectContext) -> Option<RateLimitRejection> {
+        if self.config.report_only {
+            return None;
+        }
+
         let global_bps = self.config.global_bps?;
 
         // Global check

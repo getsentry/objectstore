@@ -194,7 +194,9 @@ every chunk polled. For non-streamed payloads (e.g., batch INSERT where the
 size is known upfront), bytes are recorded directly via
 [`record_bandwidth`](state::Services::record_bandwidth).
 
-Rate-limited requests receive HTTP 429.
+Rate-limited requests receive HTTP 429. When `report_only` is enabled, all
+accounting and metrics (EWMA and limit gauges, KEDA metrics) remain active, but
+requests exceeding the limit are admitted instead of rejected.
 
 ### Web Concurrency Limit
 

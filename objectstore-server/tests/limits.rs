@@ -402,6 +402,64 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_bandwidth_report_only() -> Result<()> {
+    let server = TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        rate_limits: RateLimits {
+            bandwidth: BandwidthLimits {
+                global_bps: Some(500),
+                report_only: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+    let payload = vec![0xABu8; 4096];
+
+    // Upload a 4KB payload to push the EWMA above the 500 bps limit.
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // Wait for the EWMA to incorporate the bandwidth.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // With report_only, the request should succeed even though EWMA exceeds the limit.
+    let response = client
+        .post(server.url("/v1/objects/test/org=1/"))
+        .body(payload.clone())
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+
+    // KEDA metrics should still report the EWMA and limit.
+    let response = client.get(server.url("/keda")).send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let body = response.text().await?;
+    assert!(
+        body.contains("objectstore_bandwidth_ewma "),
+        "missing bandwidth_ewma"
+    );
+    assert!(
+        body.contains("objectstore_bandwidth_limit 500"),
+        "missing bandwidth_limit"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     let server = TestServer::with_config(Config {
         auth: AuthZ {
