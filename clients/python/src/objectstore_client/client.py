@@ -171,7 +171,7 @@ class Client:
         of key-value pairs passed as kwargs.
         IMPORTANT: the order of the kwargs matters!
 
-        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
+        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+'`.
 
         Users are free to choose the scope structure that best suits their Usecase.
         The combination of Usecase and Scope will determine the physical key/path of the
