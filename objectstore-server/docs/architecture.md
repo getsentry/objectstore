@@ -76,6 +76,17 @@ A request flows through several layers before reaching the storage service:
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back.
 
+The `server.requests.duration` metric is measured **end-to-end**: the timing guard is
+moved into the response body, so it records the full request lifetime including the time
+spent streaming the response body back to the client (e.g. GET payloads, batch and
+multipart responses), not just the time to produce the response headers.
+
+The metric's `status` tag reflects the response status sent in the headers, **except** when
+the response body does not stream to completion, in which case it is tagged `499` (nginx'
+non-standard "client closed request"). This covers two intentionally conflated cases: the
+client disconnecting mid-stream, and a server-side error while streaming the body. Both are
+reported as `499`.
+
 ## Authentication & Authorization
 
 Objectstore uses **JWT tokens with EdDSA signatures** (Ed25519) for

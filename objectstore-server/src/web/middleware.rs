@@ -14,6 +14,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::endpoints::is_internal_route;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::web::RequestCounter;
+use crate::web::metrics_body::MetricsBody;
 use crate::web::sentry_body::SentryBody;
 
 /// The value for the `Server` HTTP header.
@@ -100,6 +101,10 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 ///
+/// The request-duration metric is measured **end-to-end**: the timing guard is moved into
+/// the response body (see [`MetricsBody`]) so it is dropped only once the body has finished
+/// streaming, not when the handler produces the response headers.
+///
 /// Internal routes (see [`is_internal_route`]) are excluded from metrics.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
@@ -111,26 +116,44 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
 
     let response = next.run(request).await;
 
-    if let Some(guard) = guard {
-        guard.finish(response.status());
+    // Record the actual response status, then move the guard into the response body so the
+    // duration metric is emitted only when the body has finished streaming.
+    match guard {
+        Some(mut guard) => {
+            guard.finish(response.status());
+            let (parts, body) = response.into_parts();
+            let body = Body::new(MetricsBody::new(guard, body));
+            Response::from_parts(parts, body)
+        }
+        None => response,
     }
-    response
 }
 
 /// Helper for [`emit_request_metrics`].
 ///
-/// This tracks relevant generic request parameters and emits metrics. If the guard is dropped
-/// without calling [`Self::finish`], it will emit a `499`` status code (derived from nginx'
-/// non-standard "client closed request").
-struct EmitMetricsGuard<'a> {
-    route: &'a str,
+/// This tracks relevant generic request parameters and emits the `server.requests.duration`
+/// metric on drop. It is moved into the response body ([`MetricsBody`]) so timing spans the
+/// full response, including body streaming.
+///
+/// The metric is tagged with a `499` status (derived from nginx' non-standard "client closed
+/// request") whenever the response body did not stream to completion. This conflates two
+/// distinct cases: the client disconnecting mid-stream, and the server-side body stream
+/// erroring out. Both are reported as `499` regardless of the response status set via
+/// [`Self::finish`]. A `499` is also emitted when no response was produced at all (the guard
+/// dropped without [`Self::finish`] being called).
+pub struct EmitMetricsGuard {
+    route: String,
     method: Method,
     start: Instant,
     status: Option<StatusCode>,
+    /// Whether the response body streamed to completion (reached end-of-stream). Set via
+    /// [`Self::mark_completed`] from [`MetricsBody`]. When `false` at drop time, the metric is
+    /// tagged `499` instead of the response status.
+    completed: bool,
 }
 
-impl<'a> EmitMetricsGuard<'a> {
-    fn new(route: &'a str, method: &Method, service: DownstreamService) -> Self {
+impl EmitMetricsGuard {
+    fn new(route: &str, method: &Method, service: DownstreamService) -> Self {
         objectstore_metrics::count!(
             "server.requests",
             route = route.to_owned(),
@@ -139,24 +162,43 @@ impl<'a> EmitMetricsGuard<'a> {
         );
 
         Self {
-            route,
+            route: route.to_owned(),
             method: method.clone(),
             start: Instant::now(),
             status: None,
+            completed: false,
         }
     }
 
-    fn finish(mut self, status: StatusCode) {
+    /// Records the response status to tag the emitted metric with.
+    fn finish(&mut self, status: StatusCode) {
         self.status = Some(status);
+    }
+
+    /// Marks the response body as having streamed to completion.
+    ///
+    /// Called by [`MetricsBody`] when the inner body reaches end-of-stream. If this is never
+    /// called before the guard drops (client disconnect or a server-side stream error), the
+    /// metric is tagged `499`.
+    pub(crate) fn mark_completed(&mut self) {
+        self.completed = true;
     }
 }
 
-impl Drop for EmitMetricsGuard<'_> {
+impl Drop for EmitMetricsGuard {
     fn drop(&mut self) {
-        let status = self.status.map(|s| s.as_u16()).unwrap_or(499).to_string();
+        // A body that never reached end-of-stream is reported as `499` regardless of the
+        // status sent in the headers: the client disconnected mid-stream, or the body stream
+        // errored server-side. These two cases are intentionally conflated.
+        let status = if self.completed {
+            self.status.map(|s| s.as_u16()).unwrap_or(499)
+        } else {
+            499
+        }
+        .to_string();
         objectstore_metrics::record!(
             "server.requests.duration" = self.start.elapsed(),
-            route = self.route.to_owned(),
+            route = self.route.clone(),
             method = self.method.as_str().to_owned(),
             status = status,
             // service omitted to limit cardinality
@@ -252,5 +294,134 @@ mod tests {
 
         resume.notify_one();
         blocking.await.unwrap().unwrap();
+    }
+
+    /// The request-duration metric must be emitted only once the response body has finished
+    /// streaming, not when the handler produces the response headers.
+    ///
+    /// This runs on a current-thread runtime inside [`with_capturing_test_client`] so all
+    /// metric emissions happen on the capturing thread. A sentinel `test.marker` metric is
+    /// emitted after the response headers are received but before the body is consumed; the
+    /// duration metric must appear *after* that sentinel.
+    #[test]
+    fn duration_measured_end_to_end() {
+        use axum::body::{self, Bytes};
+        use axum::middleware::from_fn;
+
+        let captured = objectstore_metrics::with_capturing_test_client(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let app = Router::new()
+                    .route(
+                        "/v1/test/_/key",
+                        get(|| async {
+                            let stream = async_stream::stream! {
+                                yield Ok::<_, std::io::Error>(Bytes::from_static(b"hello"));
+                            };
+                            Body::from_stream(stream).into_response()
+                        }),
+                    )
+                    .layer(from_fn(emit_request_metrics));
+
+                let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+
+                // Headers received. The duration metric must not have been emitted yet.
+                objectstore_metrics::count!("test.marker");
+
+                // Consuming the body drops the wrapping `MetricsBody` and its guard, which
+                // emits the duration metric.
+                let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(&bytes[..], b"hello");
+            });
+        });
+
+        let marker = captured
+            .iter()
+            .position(|m| m.starts_with("test.marker:"))
+            .expect("sentinel marker not captured");
+        let duration = captured
+            .iter()
+            .position(|m| m.starts_with("server.requests.duration:"))
+            .expect("duration metric not captured");
+
+        assert!(
+            duration > marker,
+            "duration metric emitted before body was consumed: {captured:?}"
+        );
+    }
+
+    /// Runs a request whose handler returns `body`, driving it to completion on a
+    /// current-thread runtime, and returns the captured `server.requests.duration` metric
+    /// string. If `consume_body` is false, the response body is dropped without being read,
+    /// simulating a client that disconnects mid-stream.
+    fn capture_duration_metric(body: Body, consume_body: bool) -> String {
+        use axum::body as axum_body;
+        use axum::middleware::from_fn;
+
+        let captured = objectstore_metrics::with_capturing_test_client(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let shared = Arc::new(std::sync::Mutex::new(Some(body)));
+                let app = Router::new()
+                    .route(
+                        "/v1/test/_/key",
+                        get(move || {
+                            let shared = shared.clone();
+                            async move { shared.lock().unwrap().take().unwrap() }
+                        }),
+                    )
+                    .layer(from_fn(emit_request_metrics));
+
+                let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+
+                if consume_body {
+                    axum_body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                } else {
+                    // Drop the response (and its body) without reading it: the wrapping
+                    // `MetricsBody` never reaches end-of-stream, mirroring a client disconnect.
+                    drop(resp);
+                }
+            });
+        });
+
+        captured
+            .into_iter()
+            .find(|m| m.starts_with("server.requests.duration:"))
+            .expect("duration metric not captured")
+    }
+
+    /// A body streamed to completion reports the real response status.
+    #[test]
+    fn completed_stream_reports_real_status() {
+        let stream = async_stream::stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"hello"));
+        };
+        let metric = capture_duration_metric(Body::from_stream(stream), true);
+        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
+    }
+
+    /// A body dropped before end-of-stream (client disconnect) reports `499`, overriding the
+    /// `200` status that was sent in the headers.
+    #[test]
+    fn interrupted_stream_reports_499() {
+        // A stream that yields one chunk then pends forever, so it never reaches end-of-stream.
+        let stream = async_stream::stream! {
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"hello"));
+            std::future::pending::<()>().await;
+        };
+        let metric = capture_duration_metric(Body::from_stream(stream), false);
+        assert!(metric.contains("status:499"), "unexpected metric: {metric}");
     }
 }
