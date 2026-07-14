@@ -472,6 +472,13 @@ impl BandwidthRateLimiter {
             buckets.push(Arc::clone(bucket));
         }
 
+        objectstore_metrics::gauge!(
+            "server.rate_limiter.bandwidth.usecase_map_size" = self.usecases.len()
+        );
+        objectstore_metrics::gauge!(
+            "server.rate_limiter.bandwidth.scope_map_size" = self.scopes.len()
+        );
+
         BandwidthHandle {
             buckets,
             total_bytes: Arc::clone(&self.total_bytes),
