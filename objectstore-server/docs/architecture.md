@@ -177,10 +177,13 @@ Limits can be set at multiple granularities:
 
 ### Bandwidth
 
-Bandwidth limiting uses an **exponentially weighted moving average** (EWMA) to
-estimate current throughput. Payload streams are wrapped in a
-`MeteredPayloadStream` that reports bytes consumed. When the estimated bandwidth
-exceeds the configured limit, new requests are rejected.
+Bandwidth limiting uses **debt-based GCRA** (Generic Cell Rate Algorithm)
+buckets that track a theoretical arrival time. Payload streams are wrapped in a
+`MeteredPayloadStream` that track consumed bytes. When accumulated debt exceeds
+the configured threshold, new requests are rejected.
+
+The `burst_ms` parameter controls how much transient overshoot is tolerated
+before rejection (in milliseconds). Defaults to `1000` (1 second).
 
 Like throughput, bandwidth limits can be set at multiple granularities:
 
@@ -188,15 +191,13 @@ Like throughput, bandwidth limits can be set at multiple granularities:
 - **Per-usecase**: a percentage of the global limit for each usecase
 - **Per-scope**: a percentage of the global limit for each scope value
 
-Each granularity maintains its own EWMA estimator. The `MeteredPayloadStream`
-increments all applicable accumulators (global + per-usecase + per-scope) for
-every chunk polled. For non-streamed payloads (e.g., batch INSERT where the
-size is known upfront), bytes are recorded directly via
-[`record_bandwidth`](state::Services::record_bandwidth).
+Each granularity maintains its own bucket. The `MeteredPayloadStream` charges
+all applicable buckets (global + per-usecase + per-scope) for every chunk
+polled. For non-streamed payloads, bytes are recorded directly.
 
 Rate-limited requests receive HTTP 429. When `report_only` is enabled, all
-accounting and metrics (EWMA and limit gauges, KEDA metrics) remain active, but
-requests exceeding the limit are admitted instead of rejected.
+accounting and metrics remain active, but requests exceeding the limit are
+admitted instead of rejected.
 
 ### Web Concurrency Limit
 
@@ -239,20 +240,14 @@ metrics so that it remains available when the server is at capacity.
 
 ### Exposed Metrics
 
-#### EWMA Gauges
-
-Pre-smoothed rates, self-contained per scrape (no `irate()` arithmetic needed):
+#### Gauges
 
 | Resource | Utilization | Limit |
 |---|---|---|
-| Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
-| Throughput | `objectstore_throughput_ewma` | `objectstore_throughput_limit` (only when `global_rps` is set) |
 | HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
 | Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
 
-Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
-bandwidth estimator. The accumulator counts fully admitted requests (requests
-that pass all throughput checks).
+Limit gauges are emitted only when the corresponding limit is configured.
 
 #### Counters
 
@@ -264,30 +259,10 @@ KEDA queries for an unsmoothed, immediately responsive rate:
 | `objectstore_bytes_total` | Total bytes transferred since startup |
 | `objectstore_requests_total` | Total admitted requests since startup |
 
-### Example KEDA ScaledObject Triggers
+### Example KEDA ScaledObject Trigger
 
-#### Using EWMA gauges (backward-compatible)
-
-Scale on the highest utilization across all four resources:
-
-```yaml
-triggers:
-  - type: prometheus
-    metadata:
-      serverAddress: http://prometheus:9090
-      query: |
-        max(
-          objectstore_bandwidth_ewma / objectstore_bandwidth_limit
-          or objectstore_throughput_ewma / objectstore_throughput_limit
-          or objectstore_requests_in_flight / objectstore_requests_limit
-          or objectstore_tasks_running / objectstore_tasks_limit
-        )
-      threshold: "0.7"
-```
-
-#### Using counters with `irate()` (more responsive)
-
-Uses the last two scraped values for an instantaneous rate with no smoothing lag:
+Scale on the highest utilization across all resources using `irate()` for
+bandwidth/throughput rates:
 
 ```yaml
 triggers:

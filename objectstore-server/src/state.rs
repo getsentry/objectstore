@@ -99,7 +99,7 @@ impl Services {
     where
         S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     {
-        MeteredPayloadStream::new(stream, self.rate_limiter.bytes_accumulators(context))
+        MeteredPayloadStream::new(stream, self.rate_limiter.bandwidth_handle(context))
     }
 
     /// Records bandwidth usage for the given context without wrapping a stream.
