@@ -267,6 +267,7 @@ impl RateLimiter {
         for acc in self.bandwidth.accumulators(context) {
             acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         }
+        objectstore_metrics::count!("server.bandwidth.bytes" += bytes);
     }
 
     /// Returns the current global bandwidth EWMA in bytes per second.
@@ -802,6 +803,7 @@ where
             for acc in &this.accumulators {
                 acc.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
             }
+            objectstore_metrics::count!("server.bandwidth.bytes" += len);
         }
         res
     }
