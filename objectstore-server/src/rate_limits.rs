@@ -405,6 +405,7 @@ impl BandwidthRateLimiter {
 
     /// Returns nanoseconds elapsed since the shared epoch.
     fn now_nanos(&self) -> u64 {
+        // u64 nanos overflow after ~584 years of uptime, accepted.
         self.epoch.elapsed().as_nanos() as u64
     }
 
