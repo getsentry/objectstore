@@ -129,27 +129,39 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     }
 }
 
+/// How the response body streaming ended, which determines the `status` tag on the emitted
+/// metric when it differs from the status sent in the headers.
+#[derive(Clone, Copy)]
+enum BodyOutcome {
+    /// The body has not finished streaming. At drop time this means the client disconnected
+    /// mid-stream (or no response was produced at all), reported as `499`.
+    Pending,
+    /// The body streamed to completion; the real response status is reported.
+    Completed,
+    /// The body stream errored server-side, reported as `500`.
+    Errored,
+}
+
 /// Helper for [`emit_request_metrics`].
 ///
 /// This tracks relevant generic request parameters and emits the `server.requests.duration`
 /// metric on drop. It is moved into the response body ([`MetricsBody`]) so timing spans the
 /// full response, including body streaming.
 ///
-/// The metric is tagged with a `499` status (derived from nginx' non-standard "client closed
-/// request") whenever the response body did not stream to completion. This conflates two
-/// distinct cases: the client disconnecting mid-stream, and the server-side body stream
-/// erroring out. Both are reported as `499` regardless of the response status set via
-/// [`Self::finish`]. A `499` is also emitted when no response was produced at all (the guard
-/// dropped without [`Self::finish`] being called).
+/// The `status` tag reflects how streaming ended (see [`BodyOutcome`]):
+/// - streamed to completion: the response status set via [`Self::finish`];
+/// - client disconnect mid-stream, or no response produced at all: `499` (nginx' non-standard
+///   "client closed request");
+/// - server-side stream error: `500`.
 pub struct EmitMetricsGuard {
     route: String,
     method: Method,
     start: Instant,
     status: Option<StatusCode>,
-    /// Whether the response body streamed to completion (reached end-of-stream). Set via
-    /// [`Self::mark_completed`] from [`MetricsBody`]. When `false` at drop time, the metric is
-    /// tagged `499` instead of the response status.
-    completed: bool,
+    /// How body streaming ended. Updated via [`Self::mark_completed`] / [`Self::mark_errored`]
+    /// from [`MetricsBody`]; stays [`BodyOutcome::Pending`] if the body is dropped before it
+    /// finishes (client disconnect).
+    outcome: BodyOutcome,
 }
 
 impl EmitMetricsGuard {
@@ -166,7 +178,7 @@ impl EmitMetricsGuard {
             method: method.clone(),
             start: Instant::now(),
             status: None,
-            completed: false,
+            outcome: BodyOutcome::Pending,
         }
     }
 
@@ -177,23 +189,29 @@ impl EmitMetricsGuard {
 
     /// Marks the response body as having streamed to completion.
     ///
-    /// Called by [`MetricsBody`] when the inner body reaches end-of-stream. If this is never
-    /// called before the guard drops (client disconnect or a server-side stream error), the
-    /// metric is tagged `499`.
+    /// Called by [`MetricsBody`] when the inner body reaches end-of-stream.
     pub(crate) fn mark_completed(&mut self) {
-        self.completed = true;
+        self.outcome = BodyOutcome::Completed;
+    }
+
+    /// Marks the response body stream as having errored server-side.
+    ///
+    /// Called by [`MetricsBody`] when the inner body yields an error frame.
+    pub(crate) fn mark_errored(&mut self) {
+        self.outcome = BodyOutcome::Errored;
     }
 }
 
 impl Drop for EmitMetricsGuard {
     fn drop(&mut self) {
-        // A body that never reached end-of-stream is reported as `499` regardless of the
-        // status sent in the headers: the client disconnected mid-stream, or the body stream
-        // errored server-side. These two cases are intentionally conflated.
-        let status = if self.completed {
-            self.status.map(|s| s.as_u16()).unwrap_or(499)
-        } else {
-            499
+        // The status tag depends on how streaming ended. A body still `Pending` at drop time
+        // never reached end-of-stream, meaning the client disconnected mid-stream (or no
+        // response was produced), reported as `499`. A server-side stream error is reported
+        // as `500`. Both override the status sent in the headers.
+        let status = match self.outcome {
+            BodyOutcome::Completed => self.status.map(|s| s.as_u16()).unwrap_or(499),
+            BodyOutcome::Errored => 500,
+            BodyOutcome::Pending => 499,
         }
         .to_string();
         objectstore_metrics::record!(
@@ -385,9 +403,9 @@ mod tests {
                 assert_eq!(resp.status(), StatusCode::OK);
 
                 if consume_body {
-                    axum_body::to_bytes(resp.into_body(), usize::MAX)
-                        .await
-                        .unwrap();
+                    // Drain the body to end-of-stream (or until it errors); the result is
+                    // ignored so a server-side stream error does not panic the test.
+                    let _ = axum_body::to_bytes(resp.into_body(), usize::MAX).await;
                 } else {
                     // Drop the response (and its body) without reading it: the wrapping
                     // `MetricsBody` never reaches end-of-stream, mirroring a client disconnect.
@@ -423,5 +441,17 @@ mod tests {
         };
         let metric = capture_duration_metric(Body::from_stream(stream), false);
         assert!(metric.contains("status:499"), "unexpected metric: {metric}");
+    }
+
+    /// A body stream that errors server-side reports `500`, overriding the `200` status that
+    /// was sent in the headers.
+    #[test]
+    fn errored_stream_reports_500() {
+        let stream = async_stream::stream! {
+            yield Ok(axum::body::Bytes::from_static(b"hello"));
+            yield Err(std::io::Error::other("boom"));
+        };
+        let metric = capture_duration_metric(Body::from_stream(stream), true);
+        assert!(metric.contains("status:500"), "unexpected metric: {metric}");
     }
 }

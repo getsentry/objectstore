@@ -82,10 +82,13 @@ spent streaming the response body back to the client (e.g. GET payloads, batch a
 multipart responses), not just the time to produce the response headers.
 
 The metric's `status` tag reflects the response status sent in the headers, **except** when
-the response body does not stream to completion, in which case it is tagged `499` (nginx'
-non-standard "client closed request"). This covers two intentionally conflated cases: the
-client disconnecting mid-stream, and a server-side error while streaming the body. Both are
-reported as `499`.
+the response body does not stream to completion:
+
+- **Client disconnect** mid-stream (the body is dropped before end-of-stream) is tagged
+  `499` (nginx' non-standard "client closed request").
+- **Server-side stream error** (the body yields an error while streaming) is tagged `500`.
+
+Both override the status sent in the headers.
 
 ## Authentication & Authorization
 

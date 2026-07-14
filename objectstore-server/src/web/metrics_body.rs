@@ -9,9 +9,10 @@
 //!
 //! When the body streams to completion, [`MetricsBody`] calls
 //! [`EmitMetricsGuard::mark_completed`] so the metric is tagged with the real
-//! response status. If the body is dropped before end-of-stream — a client
-//! disconnect or a server-side stream error, which are intentionally conflated —
-//! the guard reports a `499` status instead.
+//! response status. A server-side stream error instead calls
+//! [`EmitMetricsGuard::mark_errored`] and is reported as `500`. If the body is
+//! dropped before either happens — a client disconnect — the guard reports a
+//! `499` status.
 //!
 //! Because this delegates [`size_hint`](http_body::Body::size_hint) and
 //! [`is_end_stream`](http_body::Body::is_end_stream) to the inner body,
@@ -61,10 +62,13 @@ impl http_body::Body for MetricsBody {
         let poll = this.inner.poll_frame(cx);
         // `Ready(None)` is the only end-of-stream signal that is uniform across buffered and
         // streamed bodies (`StreamBody` does not override `is_end_stream`). Reaching it means
-        // the body streamed to completion; anything else (client disconnect, stream error)
-        // leaves the guard marked incomplete, so it reports `499` on drop.
-        if let Poll::Ready(None) = poll {
-            this.guard.mark_completed();
+        // the body streamed to completion. A `Ready(Some(Err))` frame is a server-side stream
+        // error. If neither is observed before the body is dropped (client disconnect), the
+        // guard stays pending and reports `499`.
+        match &poll {
+            Poll::Ready(None) => this.guard.mark_completed(),
+            Poll::Ready(Some(Err(_))) => this.guard.mark_errored(),
+            _ => {}
         }
         poll
     }
