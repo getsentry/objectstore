@@ -4,14 +4,15 @@
 //! levels of granularity — global, per-usecase, and per-scope — for both request
 //! throughput (requests/s) and upload/download bandwidth (bytes/s).
 //!
-//! Throughput is enforced using token buckets; bandwidth is estimated with an
-//! exponentially weighted moving average (EWMA) updated by a background task every
-//! 50 ms. All rate-limit checks are synchronous and non-blocking.
+//! Throughput is enforced using token buckets. Bandwidth uses debt-based GCRA
+//! (Generic Cell Rate Algorithm) buckets that track a theoretical arrival time
+//! (TAT). All rate-limit checks are synchronous, non-blocking, and lock-free.
 
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::{Mutex, atomic::AtomicU64};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -159,13 +160,20 @@ impl ThroughputRule {
 /// Bandwidth limits applied at global, per-usecase, and per-scope granularity.
 ///
 /// Bandwidth is measured as bytes transferred per second (upload + download combined)
-/// and estimated using an EWMA updated every 50 ms. All limits are optional.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+/// and tracked using debt-based GCRA buckets. All limits are optional.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct BandwidthLimits {
     /// The overall maximum bandwidth (in bytes per second) per service instance.
     ///
     /// Defaults to `None`, meaning no global bandwidth limit is enforced.
     pub global_bps: Option<u64>,
+
+    /// Burst tolerance in milliseconds.
+    ///
+    /// Allows short traffic spikes up to `burst_ms * bps / 1000` bytes before
+    /// rejection. Defaults to `1000` (1 second).
+    #[serde(default = "default_burst_ms")]
+    pub burst_ms: u64,
 
     /// The maximum percentage of the global bandwidth limit that can be used by any usecase.
     ///
@@ -179,21 +187,36 @@ pub struct BandwidthLimits {
 
     /// When `true`, bandwidth limits are evaluated and reported but never enforced.
     ///
-    /// All accounting and metrics (EWMA and limit gauges, KEDA metrics) remain active,
-    /// but requests exceeding the limit are not rejected. Defaults to `false`.
+    /// All accounting and metrics remain active, but requests exceeding the limit
+    /// are not rejected. Defaults to `false`.
     #[serde(default)]
     pub report_only: bool,
+}
+
+fn default_burst_ms() -> u64 {
+    1000
+}
+
+impl Default for BandwidthLimits {
+    fn default() -> Self {
+        Self {
+            global_bps: None,
+            burst_ms: default_burst_ms(),
+            usecase_pct: None,
+            scope_pct: None,
+            report_only: false,
+        }
+    }
 }
 
 /// Combined rate limiter that enforces both bandwidth and throughput limits.
 ///
 /// Checks are synchronous and non-blocking. Bandwidth is checked before
 /// throughput so that rejected requests are never counted toward the admitted
-/// throughput EWMA. See [`check`](RateLimiter::check) for details.
+/// throughput counter. See [`check`](RateLimiter::check) for details.
 ///
 /// Call [`start`](RateLimiter::start) after construction to launch the background
-/// estimation tasks. Without it, bandwidth EWMAs remain at zero and bandwidth
-/// limits are never triggered.
+/// observability tasks.
 #[derive(Debug)]
 pub struct RateLimiter {
     bandwidth: BandwidthRateLimiter,
@@ -203,7 +226,7 @@ pub struct RateLimiter {
 impl RateLimiter {
     /// Creates a new rate limiter from the given configuration.
     ///
-    /// Background estimation tasks are not started until [`start`](RateLimiter::start) is called.
+    /// Background observability tasks are not started until [`start`](RateLimiter::start) is called.
     pub fn new(config: RateLimits) -> Self {
         Self {
             bandwidth: BandwidthRateLimiter::new(config.bandwidth),
@@ -211,11 +234,10 @@ impl RateLimiter {
         }
     }
 
-    /// Starts background tasks for rate limit estimation and monitoring.
+    /// Starts background tasks for rate limit monitoring.
     ///
     /// Must be called from within a Tokio runtime.
     pub fn start(&self) {
-        self.bandwidth.start();
         self.throughput.start();
     }
 
@@ -226,8 +248,8 @@ impl RateLimiter {
     /// throughput so that rejected requests are never counted toward admitted traffic.
     pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> bool {
         // Bandwidth is checked first because it is a pure read (no token consumption).
-        // Throughput increments the EWMA accumulator only on success, so checking it
-        // second ensures rejected requests are never counted toward admitted traffic.
+        // Throughput counts admitted requests, so checking it second ensures rejected
+        // requests are never counted toward admitted traffic.
         let rejection = self
             .bandwidth
             .check(context)
@@ -252,43 +274,25 @@ impl RateLimiter {
         false
     }
 
-    /// Returns all bandwidth accumulators (global + per-usecase + per-scope) for the given context.
+    /// Returns bandwidth buckets and the total-bytes counter for the given context.
     ///
     /// Creates entries in the per-usecase/per-scope maps if they don't exist yet.
-    pub fn bytes_accumulators(&self, context: &ObjectContext) -> Vec<Arc<AtomicU64>> {
-        self.bandwidth.accumulators(context)
+    pub fn bandwidth_handle(&self, context: &ObjectContext) -> BandwidthHandle {
+        self.bandwidth.handle(context)
     }
 
-    /// Records bandwidth usage across all accumulators for the given context.
+    /// Records bandwidth usage across all buckets for the given context.
     ///
     /// This is used for cases where bytes are known upfront (e.g. batch INSERT) rather than
     /// streamed through a `MeteredPayloadStream`.
     pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
-        for acc in self.bandwidth.accumulators(context) {
-            acc.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.bandwidth.handle(context).record(bytes);
         objectstore_metrics::count!("server.bandwidth.bytes" += bytes);
-    }
-
-    /// Returns the current global bandwidth EWMA in bytes per second.
-    pub fn bandwidth_ewma(&self) -> u64 {
-        self.bandwidth
-            .global
-            .estimate
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the configured global bandwidth limit in bytes/s, if set.
     pub fn bandwidth_limit(&self) -> Option<u64> {
         self.bandwidth.config.global_bps
-    }
-
-    /// Returns the current estimated throughput in requests per second.
-    pub fn throughput_rps(&self) -> u64 {
-        self.throughput
-            .global_estimator
-            .estimate
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the configured global throughput limit in requests/s, if set.
@@ -298,51 +302,59 @@ impl RateLimiter {
 
     /// Returns total bytes transferred since startup.
     pub fn bandwidth_total_bytes(&self) -> u64 {
-        self.bandwidth
-            .total_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.bandwidth.total_bytes.load(Ordering::Relaxed)
     }
 
     /// Returns total admitted requests since startup.
     pub fn throughput_total_admitted(&self) -> u64 {
-        self.throughput
-            .total_admitted
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.throughput.total_admitted.load(Ordering::Relaxed)
     }
 }
 
-/// Shared EWMA estimator state.
+/// Debt-based GCRA bandwidth bucket.
 ///
-/// The accumulator is incremented as events occur, and the estimate is updated
-/// periodically by a background task using an exponentially weighted moving average.
+/// Tracks a theoretical arrival time (TAT) that advances by `nanos_per_byte`
+/// for every byte consumed. Admission is granted while TAT stays within
+/// `burst_ns` nanoseconds ahead of the wall clock (burst tolerance). Recovery is
+/// continuous — no background tick required.
 #[derive(Debug)]
-struct EwmaEstimator {
-    accumulator: Arc<AtomicU64>,
-    estimate: Arc<AtomicU64>,
+struct BandwidthBucket {
+    /// Nanoseconds since `epoch` at which all recorded traffic is paid off.
+    ///
+    /// Saturates at `u64::MAX` after ~584 years of uptime.
+    tat: AtomicU64,
+    /// Nanoseconds of TAT advance per byte: `1e9 / bps`.
+    nanos_per_byte: f64,
+    /// Burst tolerance in nanoseconds: `burst_ms * 1_000_000`.
+    burst_ns: u64,
 }
 
-impl EwmaEstimator {
-    fn new() -> Self {
+impl BandwidthBucket {
+    /// Creates a new bucket for the given rate and burst tolerance.
+    fn new(bps: u64, burst_ms: u64) -> Self {
+        let nanos_per_byte = 1_000_000_000.0 / bps as f64;
+        let burst_ns = burst_ms * 1_000_000;
         Self {
-            accumulator: Arc::new(AtomicU64::new(0)),
-            estimate: Arc::new(AtomicU64::new(0)),
+            tat: AtomicU64::new(0),
+            nanos_per_byte,
+            burst_ns,
         }
     }
 
-    /// Updates the EWMA from the accumulator.
-    ///
-    /// Swaps the accumulator to zero, converts the count to a per-second rate using
-    /// `to_rate` (i.e., `1.0 / tick_duration.as_secs_f64()`), then applies the
-    /// EWMA smoothing and stores the floored result in `estimate`.
-    fn update_ewma(&self, ewma: &mut f64, to_rate: f64) {
-        const ALPHA: f64 = 0.2;
-        let current = self
-            .accumulator
-            .swap(0, std::sync::atomic::Ordering::Relaxed);
-        let rate = (current as f64) * to_rate;
-        *ewma = ALPHA * rate + (1.0 - ALPHA) * *ewma;
-        self.estimate
-            .store(ewma.floor() as u64, std::sync::atomic::Ordering::Relaxed);
+    /// Records `bytes` of consumption unconditionally (debt is allowed).
+    fn spend(&self, now_nanos: u64, bytes: u64) {
+        let weight = (bytes as f64 * self.nanos_per_byte) as u64;
+        // Clamp + advance in one atomic step: never let TAT fall behind `now`
+        // (no credit accumulation), then advance by the byte cost.
+        self.tat
+            .update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                old.max(now_nanos).saturating_add(weight)
+            });
+    }
+
+    /// Returns `true` if the bucket admits new traffic at `now_nanos`.
+    fn check(&self, now_nanos: u64) -> bool {
+        self.tat.load(Ordering::Relaxed) <= now_nanos.saturating_add(self.burst_ns)
     }
 }
 
@@ -361,147 +373,76 @@ fn pct_of_u64(value: u64, pct: u8) -> u64 {
 #[derive(Debug)]
 struct BandwidthRateLimiter {
     config: BandwidthLimits,
-    /// Global accumulator/estimator pair.
-    global: Arc<EwmaEstimator>,
+    /// Global GCRA bucket.
+    global: Option<Arc<BandwidthBucket>>,
+    /// Shared epoch for converting `Instant` to nanos.
+    epoch: Instant,
     /// Cumulative bytes transferred since startup. Never reset.
     total_bytes: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
-    scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
+    usecases: Arc<papaya::HashMap<String, Arc<BandwidthBucket>>>,
+    scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthBucket>>>,
 }
 
 impl BandwidthRateLimiter {
     fn new(config: BandwidthLimits) -> Self {
+        let global = config
+            .global_bps
+            .map(|bps| Arc::new(BandwidthBucket::new(bps, config.burst_ms)));
+
+        if let Some(limit) = config.global_bps {
+            objectstore_metrics::gauge!("server.bandwidth.limit" = limit);
+        }
+
         Self {
-            config,
-            global: Arc::new(EwmaEstimator::new()),
+            global,
+            epoch: Instant::now(),
             total_bytes: Arc::new(AtomicU64::new(0)),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
+            config,
         }
     }
 
-    fn start(&self) {
-        let global = Arc::clone(&self.global);
-        let usecases = Arc::clone(&self.usecases);
-        let scopes = Arc::clone(&self.scopes);
-        let global_limit = self.config.global_bps;
-        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
-        // The task is aborted when the Tokio runtime is dropped on process exit.
-        tokio::task::spawn(async move {
-            Self::estimator(global, usecases, scopes, global_limit).await;
-        });
+    /// Returns nanoseconds elapsed since the shared epoch.
+    fn now_nanos(&self) -> u64 {
+        // u64 nanos overflow after ~584 years of uptime, accepted.
+        self.epoch.elapsed().as_nanos() as u64
     }
 
-    /// Estimates the current bandwidth utilization using an exponentially weighted moving average.
-    ///
-    /// Iterates over the global estimator as well as all per-usecase and per-scope estimators
-    /// on each tick, updating their EWMAs.
-    async fn estimator(
-        global: Arc<EwmaEstimator>,
-        usecases: Arc<papaya::HashMap<String, Arc<EwmaEstimator>>>,
-        scopes: Arc<papaya::HashMap<Scopes, Arc<EwmaEstimator>>>,
-        global_limit: Option<u64>,
-    ) {
-        const TICK: Duration = Duration::from_millis(50); // Recompute EWMA on every TICK
-
-        let mut interval = tokio::time::interval(TICK);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // The first tick of a tokio interval fires immediately. Consume it so the
-        // first real iteration has a full ~50ms of elapsed time.
-        interval.tick().await;
-        let mut last = Instant::now();
-        let mut global_ewma: f64 = 0.0;
-        // Shadow EWMAs for per-usecase/per-scope entries, keyed the same way as the maps.
-        let mut usecase_ewmas: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
-        let mut scope_ewmas: std::collections::HashMap<Scopes, f64> =
-            std::collections::HashMap::new();
-
-        loop {
-            interval.tick().await;
-
-            let now = Instant::now();
-            let to_bps = 1.0 / now.duration_since(last).as_secs_f64();
-            last = now;
-
-            // Global
-            global.update_ewma(&mut global_ewma, to_bps);
-            objectstore_metrics::gauge!("server.bandwidth.ewma" = global_ewma.floor() as u64);
-            if let Some(limit) = global_limit {
-                objectstore_metrics::gauge!("server.bandwidth.limit" = limit);
-            }
-
-            // Per-usecase
-            {
-                let guard = usecases.pin();
-                for (key, estimator) in guard.iter() {
-                    let ewma = usecase_ewmas.entry(key.clone()).or_insert(0.0);
-                    estimator.update_ewma(ewma, to_bps);
-                }
-            }
-
-            // Per-scope
-            {
-                let guard = scopes.pin();
-                for (key, estimator) in guard.iter() {
-                    let ewma = scope_ewmas.entry(key.clone()).or_insert(0.0);
-                    estimator.update_ewma(ewma, to_bps);
-                }
-            }
-
-            objectstore_metrics::gauge!(
-                "server.rate_limiter.bandwidth.scope_map_size" = scopes.len()
-            );
-            objectstore_metrics::gauge!(
-                "server.rate_limiter.bandwidth.usecase_map_size" = usecases.len()
-            );
-        }
-    }
-
-    /// Checks whether the current bandwidth exceeds configured limits.
+    /// Checks whether the current bandwidth debt exceeds configured limits.
     ///
     /// When [`BandwidthLimits::report_only`] is `true`, returns `None` unconditionally.
-    /// Accounting and metrics remain active regardless.
     fn check(&self, context: &ObjectContext) -> Option<RateLimitRejection> {
         if self.config.report_only {
             return None;
         }
 
-        let global_bps = self.config.global_bps?;
+        let now_nanos = self.now_nanos();
 
         // Global check
-        if self
-            .global
-            .estimate
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > global_bps
+        if let Some(ref global) = self.global
+            && !global.check(now_nanos)
         {
             return Some(RateLimitRejection::BandwidthGlobal);
         }
 
         // Per-usecase check
-        if let Some(usecase_bps) = self.usecase_bps() {
+        if self.usecase_bps().is_some() {
             let guard = self.usecases.pin();
-            if let Some(estimator) = guard.get(&context.usecase)
-                && estimator
-                    .estimate
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    > usecase_bps
+            if let Some(bucket) = guard.get(&context.usecase)
+                && !bucket.check(now_nanos)
             {
                 return Some(RateLimitRejection::BandwidthUsecase);
             }
         }
 
         // Per-scope check
-        if let Some(scope_bps) = self.scope_bps() {
+        if self.scope_bps().is_some() {
             let guard = self.scopes.pin();
-            if let Some(estimator) = guard.get(&context.scopes)
-                && estimator
-                    .estimate
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    > scope_bps
+            if let Some(bucket) = guard.get(&context.scopes)
+                && !bucket.check(now_nanos)
             {
                 return Some(RateLimitRejection::BandwidthScope);
             }
@@ -510,31 +451,42 @@ impl BandwidthRateLimiter {
         None
     }
 
-    /// Returns all accumulators (global + per-usecase + per-scope) for the given context.
-    ///
-    /// Creates entries in the per-usecase/per-scope maps if they don't exist yet.
-    /// Always includes `total_bytes` (cumulative, never reset) as the first entry.
-    fn accumulators(&self, context: &ObjectContext) -> Vec<Arc<AtomicU64>> {
-        let mut accs = vec![
-            Arc::clone(&self.total_bytes),
-            Arc::clone(&self.global.accumulator),
-        ];
+    /// Returns a handle containing the bandwidth buckets and total-bytes counter.
+    fn handle(&self, context: &ObjectContext) -> BandwidthHandle {
+        let mut buckets = Vec::new();
 
-        if self.usecase_bps().is_some() {
+        if let Some(ref global) = self.global {
+            buckets.push(Arc::clone(global));
+        }
+
+        if let Some(usecase_bps) = self.usecase_bps() {
             let guard = self.usecases.pin();
-            let estimator = guard
-                .get_or_insert_with(context.usecase.clone(), || Arc::new(EwmaEstimator::new()));
-            accs.push(Arc::clone(&estimator.accumulator));
+            let bucket = guard.get_or_insert_with(context.usecase.clone(), || {
+                Arc::new(BandwidthBucket::new(usecase_bps, self.config.burst_ms))
+            });
+            buckets.push(Arc::clone(bucket));
         }
 
-        if self.scope_bps().is_some() {
+        if let Some(scope_bps) = self.scope_bps() {
             let guard = self.scopes.pin();
-            let estimator =
-                guard.get_or_insert_with(context.scopes.clone(), || Arc::new(EwmaEstimator::new()));
-            accs.push(Arc::clone(&estimator.accumulator));
+            let bucket = guard.get_or_insert_with(context.scopes.clone(), || {
+                Arc::new(BandwidthBucket::new(scope_bps, self.config.burst_ms))
+            });
+            buckets.push(Arc::clone(bucket));
         }
 
-        accs
+        objectstore_metrics::gauge!(
+            "server.rate_limiter.bandwidth.usecase_map_size" = self.usecases.len()
+        );
+        objectstore_metrics::gauge!(
+            "server.rate_limiter.bandwidth.scope_map_size" = self.scopes.len()
+        );
+
+        BandwidthHandle {
+            buckets,
+            total_bytes: Arc::clone(&self.total_bytes),
+            epoch: self.epoch,
+        }
     }
 
     /// Returns the effective BPS for per-usecase limiting, if configured.
@@ -552,12 +504,29 @@ impl BandwidthRateLimiter {
     }
 }
 
+/// Handle for recording bandwidth consumption against GCRA buckets.
+#[derive(Debug, Clone)]
+pub struct BandwidthHandle {
+    buckets: Vec<Arc<BandwidthBucket>>,
+    total_bytes: Arc<AtomicU64>,
+    epoch: Instant,
+}
+
+impl BandwidthHandle {
+    /// Records `bytes` of consumption across all buckets and the total counter.
+    pub fn record(&self, bytes: u64) {
+        let now_nanos = self.epoch.elapsed().as_nanos() as u64;
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+        for bucket in &self.buckets {
+            bucket.spend(now_nanos, bytes);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ThroughputRateLimiter {
     config: ThroughputLimits,
     global: Option<Mutex<TokenBucket>>,
-    /// Global EWMA estimator for admitted request rate.
-    global_estimator: Arc<EwmaEstimator>,
     /// Cumulative admitted requests since startup. Never reset.
     total_admitted: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
@@ -576,7 +545,6 @@ impl ThroughputRateLimiter {
         Self {
             config,
             global,
-            global_estimator: Arc::new(EwmaEstimator::new()),
             total_admitted: Arc::new(AtomicU64::new(0)),
             usecases: Arc::new(papaya::HashMap::new()),
             scopes: Arc::new(papaya::HashMap::new()),
@@ -587,24 +555,14 @@ impl ThroughputRateLimiter {
     fn start(&self) {
         let usecases = Arc::clone(&self.usecases);
         let scopes = Arc::clone(&self.scopes);
-        let global_estimator = Arc::clone(&self.global_estimator);
         let global_limit = self.config.global_rps;
-        // NB: This task has no shutdown mechanism — the rate limiter is only created once.
-        // The task is aborted when the Tokio runtime is dropped on process exit.
         tokio::task::spawn(async move {
-            const TICK: Duration = Duration::from_millis(50);
+            const TICK: Duration = Duration::from_secs(1);
             let mut interval = tokio::time::interval(TICK);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await;
-            let mut last = Instant::now();
-            let mut global_ewma: f64 = 0.0;
             loop {
                 interval.tick().await;
-                let now = Instant::now();
-                let to_rps = 1.0 / now.duration_since(last).as_secs_f64();
-                last = now;
-                global_estimator.update_ewma(&mut global_ewma, to_rps);
-                objectstore_metrics::gauge!("server.throughput.ewma" = global_ewma.floor() as u64);
                 if let Some(limit) = global_limit {
                     objectstore_metrics::gauge!(
                         "server.rate_limiter.throughput.limit" = u64::from(limit)
@@ -666,14 +624,7 @@ impl ThroughputRateLimiter {
             }
         }
 
-        // Count this admitted request in the EWMA accumulator and the cumulative counter.
-        // NB: u64 wrapping is not a practical concern — at 1M rps it takes ~585k years.
-        // Prometheus irate() also handles counter resets gracefully should it ever occur.
-        self.global_estimator
-            .accumulator
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.total_admitted
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_admitted.fetch_add(1, Ordering::Relaxed);
 
         None
     }
@@ -765,26 +716,24 @@ impl TokenBucket {
 
 /// A wrapper around a byte stream that measures bandwidth usage.
 ///
-/// Every time a chunk is polled successfully, all accumulators are incremented
-/// by its size. Generic over both the stream type `S` and its error type.
+/// Every time a chunk is polled successfully, all bandwidth buckets are charged
+/// and the total-bytes counter is incremented. Generic over both the stream
+/// type `S` and its error type.
 pub(crate) struct MeteredPayloadStream<S> {
     inner: S,
-    accumulators: Vec<Arc<AtomicU64>>,
+    handle: BandwidthHandle,
 }
 
 impl<S> MeteredPayloadStream<S> {
-    pub fn new(inner: S, accumulators: Vec<Arc<AtomicU64>>) -> Self {
-        Self {
-            inner,
-            accumulators,
-        }
+    pub fn new(inner: S, handle: BandwidthHandle) -> Self {
+        Self { inner, handle }
     }
 }
 
 impl<S> fmt::Debug for MeteredPayloadStream<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MeteredPayloadStream")
-            .field("accumulators", &self.accumulators)
+            .field("handle", &self.handle)
             .finish()
     }
 }
@@ -800,9 +749,7 @@ where
         let res = Pin::new(&mut this.inner).poll_next(cx);
         if let Poll::Ready(Some(Ok(ref bytes))) = res {
             let len = bytes.len() as u64;
-            for acc in &this.accumulators {
-                acc.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
-            }
+            this.handle.record(len);
             objectstore_metrics::count!("server.bandwidth.bytes" += len);
         }
         res
@@ -823,65 +770,124 @@ mod tests {
         }
     }
 
+    // --- BandwidthBucket unit tests (explicit `now`, no sleeps) ---
+
     #[test]
-    fn ewma_estimator_update_applies_alpha() {
-        let estimator = EwmaEstimator::new();
-        const TICK: f64 = 0.05; // 50ms
-        let to_rate = 1.0 / TICK;
-        let mut ewma: f64 = 0.0;
+    fn bucket_spend_advances_tat() {
+        let bucket = BandwidthBucket::new(1000, 0); // 1000 bps, no burst
+        let now = 1_000_000_000u64; // 1s after epoch
 
-        // Simulate 10 events in one 50ms tick → 200 /s raw rate.
-        // After one step: 0.2 * 200 + 0.8 * 0 = 40.
-        estimator
-            .accumulator
-            .store(10, std::sync::atomic::Ordering::Relaxed);
-        estimator.update_ewma(&mut ewma, to_rate);
-        assert_eq!(
-            estimator
-                .estimate
-                .load(std::sync::atomic::Ordering::Relaxed),
-            40
-        );
+        bucket.spend(now, 500);
 
-        // Accumulator must have been zeroed.
-        assert_eq!(
-            estimator
-                .accumulator
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        // 500 bytes at 1e6 ns/byte = 500_000_000 ns ahead of `now`
+        let expected_tat = now + 500_000_000;
+        assert_eq!(bucket.tat.load(Ordering::Relaxed), expected_tat);
     }
 
     #[test]
-    fn throughput_check_increments_accumulator() {
+    fn bucket_spend_clamps_credit() {
+        let bucket = BandwidthBucket::new(1000, 0);
+        // Set TAT in the past (idle period).
+        bucket.tat.store(100, Ordering::Relaxed);
+        let now = 2_000_000_000u64;
+
+        bucket.spend(now, 100);
+
+        // TAT should have been clamped to `now` first, then advanced.
+        let weight = (100.0 * 1_000_000_000.0 / 1000.0) as u64;
+        let expected = now + weight;
+        assert_eq!(bucket.tat.load(Ordering::Relaxed), expected);
+    }
+
+    #[test]
+    fn bucket_check_admits_within_burst() {
+        let bucket = BandwidthBucket::new(1000, 1000); // 1s burst
+        let now = 1_000_000_000u64;
+
+        // Spend 1500 bytes: 1.5s of debt at 1000 bps
+        bucket.spend(now, 1500);
+
+        // debt = 1.5s, burst = 1s → rejected
+        assert!(!bucket.check(now));
+
+        // debt = 1.5s, but 0.6s have passed → debt = 0.9s < 1s burst → admitted
+        assert!(bucket.check(now + 600_000_000));
+    }
+
+    #[test]
+    fn bucket_check_zero_burst_rejects_any_debt() {
+        let bucket = BandwidthBucket::new(1000, 0);
+        let now = 1_000_000_000u64;
+
+        bucket.spend(now, 1);
+
+        // Any debt with burst=0 should reject
+        assert!(!bucket.check(now));
+
+        // After enough time passes, debt is paid off
+        let weight = (1.0 * 1_000_000_000.0 / 1000.0) as u64;
+        assert!(bucket.check(now + weight));
+    }
+
+    #[test]
+    fn bucket_recovery_after_debt() {
+        let bucket = BandwidthBucket::new(1000, 0);
+        let now = 1_000_000_000u64;
+
+        bucket.spend(now, 2000);
+
+        // 2000 bytes at 1000 bps = 2s of debt
+        assert!(!bucket.check(now));
+        assert!(!bucket.check(now + 1_500_000_000));
+
+        // After 2s, debt is fully paid → admitted
+        assert!(bucket.check(now + 2_000_000_000));
+    }
+
+    #[test]
+    fn bandwidth_check_rejects_correct_variant() {
+        // Use generous burst so only the scope bucket overflows.
+        // Global = 1000 bps, usecase = 500 bps, scope = 250 bps; burst = 2s.
+        // Spending 600 bytes:
+        //   global debt = 600/1000 = 0.6s < 2s → admits
+        //   usecase debt = 600/500 = 1.2s < 2s → admits
+        //   scope debt  = 600/250 = 2.4s > 2s → rejects
+        let limiter = BandwidthRateLimiter::new(BandwidthLimits {
+            global_bps: Some(1000),
+            usecase_pct: Some(50),
+            scope_pct: Some(25),
+            burst_ms: 2000,
+            ..Default::default()
+        });
+
+        let context = make_context();
+        let handle = limiter.handle(&context);
+        handle.record(600);
+
+        let rejection = limiter.check(&context);
+        assert_eq!(rejection, Some(RateLimitRejection::BandwidthScope));
+    }
+
+    // --- Throughput ---
+
+    #[test]
+    fn throughput_check_counts_admitted() {
         let limiter = ThroughputRateLimiter::new(ThroughputLimits {
             global_rps: Some(1000),
             ..Default::default()
         });
 
-        assert_eq!(
-            limiter
-                .global_estimator
-                .accumulator
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(limiter.total_admitted.load(Ordering::Relaxed), 0);
 
         let context = make_context();
         assert!(limiter.check(&context).is_none());
         assert!(limiter.check(&context).is_none());
 
-        assert_eq!(
-            limiter
-                .global_estimator
-                .accumulator
-                .load(std::sync::atomic::Ordering::Relaxed),
-            2
-        );
+        assert_eq!(limiter.total_admitted.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn throughput_rejected_does_not_increment_accumulator() {
+    fn throughput_rejected_does_not_count() {
         let limiter = ThroughputRateLimiter::new(ThroughputLimits {
             global_rps: Some(1),
             burst: 0,
@@ -893,51 +899,31 @@ mod tests {
         assert!(limiter.check(&context).is_none());
         assert!(limiter.check(&context).is_some());
 
-        assert_eq!(
-            limiter
-                .global_estimator
-                .accumulator
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1 // only the admitted request
-        );
+        assert_eq!(limiter.total_admitted.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn bandwidth_rejection_does_not_increment_throughput_accumulator() {
-        // global_bps of 1 means the estimate (0 initially) is not > 1, so the first
-        // call passes the bandwidth check. Use 0 to guarantee an immediate reject.
-        // BandwidthRateLimiter::check rejects when estimate > global_bps, so set
-        // global_bps = 0 to make the bandwidth check always reject.
+    fn bandwidth_rejection_does_not_count_throughput() {
         let limiter = RateLimiter::new(RateLimits {
             throughput: ThroughputLimits {
                 global_rps: Some(1000),
                 ..Default::default()
             },
             bandwidth: BandwidthLimits {
-                global_bps: Some(0),
+                global_bps: Some(1),
+                burst_ms: 0,
                 ..Default::default()
             },
         });
 
-        // Prime the bandwidth EWMA so it exceeds the limit.
-        limiter
-            .bandwidth
-            .global
-            .estimate
-            .store(1, std::sync::atomic::Ordering::Relaxed);
-
+        // Put the bandwidth bucket in debt so the check rejects.
         let context = make_context();
+        let handle = limiter.bandwidth_handle(&context);
+        handle.record(1_000_000);
+
         assert!(!limiter.check(&context, None));
 
-        // The throughput accumulator must still be 0.
-        assert_eq!(
-            limiter
-                .throughput
-                .global_estimator
-                .accumulator
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(limiter.throughput.total_admitted.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -955,9 +941,6 @@ mod tests {
 
         assert_eq!(rate_limiter.bandwidth_limit(), Some(1_000_000));
         assert_eq!(rate_limiter.throughput_limit(), Some(500));
-        // Estimates start at 0 before any background tick.
-        assert_eq!(rate_limiter.bandwidth_ewma(), 0);
-        assert_eq!(rate_limiter.throughput_rps(), 0);
     }
 
     #[test]
@@ -966,7 +949,5 @@ mod tests {
 
         assert_eq!(rate_limiter.bandwidth_limit(), None);
         assert_eq!(rate_limiter.throughput_limit(), None);
-        assert_eq!(rate_limiter.bandwidth_ewma(), 0);
-        assert_eq!(rate_limiter.throughput_rps(), 0);
     }
 }

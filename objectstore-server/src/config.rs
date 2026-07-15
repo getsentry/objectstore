@@ -1040,6 +1040,7 @@ mod tests {
                         pct: 10
                   bandwidth:
                     global_bps: 1048576
+                    burst_ms: 2000
                     usecase_pct: 50
                     scope_pct: 25
                     report_only: true
@@ -1074,6 +1075,7 @@ mod tests {
                 },
                 bandwidth: BandwidthLimits {
                     global_bps: Some(1_048_576),
+                    burst_ms: 2000,
                     usecase_pct: Some(50),
                     scope_pct: Some(25),
                     report_only: true,
