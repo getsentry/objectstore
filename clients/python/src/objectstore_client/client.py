@@ -34,8 +34,7 @@ from objectstore_client.metrics import (
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 
-# Query parameter carrying a JWT, mirroring the `x-os-auth` header. Used by
-# `Session.object_url` to embed an auth token in a URL.
+# Query parameter carrying a JWT, mirroring the `x-os-auth` header.
 PARAM_AUTH = "os_auth"
 
 
