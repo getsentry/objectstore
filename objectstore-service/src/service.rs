@@ -571,7 +571,7 @@ mod tests {
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id, None).await;
 
-        let Err(Error::Panic(msg)) = result else {
+        let Err(Error::Panic(ref msg)) = result else {
             panic!("expected Panic error");
         };
         assert!(msg.contains("intentional panic in get_object"), "{msg}");

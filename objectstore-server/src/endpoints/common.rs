@@ -107,9 +107,13 @@ impl ApiError {
     /// Reports this error to error tracking if it indicates a server fault (5xx status).
     ///
     /// Call this exactly once wherever an `ApiError` is serialized into a client-visible
-    /// response: standalone responses ([`IntoResponse`]) and batch response parts. Errors whose
-    /// results never reach a response are captured in the service's `spawn_metered` instead.
+    /// response: standalone responses ([`IntoResponse`]) and batch response parts.
     pub fn capture(&self) {
+        // Tracked inside ServiceError's Drop implementation.
+        if matches!(self, ApiError::Service(_)) {
+            return;
+        }
+
         if self.status().is_server_error() {
             objectstore_log::error!(!!self, "error handling request");
         }

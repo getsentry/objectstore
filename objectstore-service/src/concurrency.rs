@@ -181,12 +181,7 @@ where
                 outcome = if result.is_ok() { "success" } else { "error" },
             );
 
-            // Errors delivered to the caller are captured once at the response boundary. If the
-            // receiver is gone, nothing downstream can observe the error, so capture it here.
-            if let Err(Err(ref e)) = tx.send(result) {
-                let error = e as &dyn std::error::Error;
-                objectstore_log::event_dyn!(e.level(), error, operation, "Task failed");
-            }
+            let _ = tx.send(result);
 
             drop(guard);
             transaction.finish();
