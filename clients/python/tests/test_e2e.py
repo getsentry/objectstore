@@ -826,6 +826,44 @@ def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
     assert body == payload
 
 
+def test_object_url_read_only_token_succeeds(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"read only hello", key="read-only-url")
+
+    url = session.object_url(
+        "read-only-url", read_only_token_validity=timedelta(minutes=5)
+    )
+    assert "os_auth=" in url
+
+    status, body = _fetch(url)
+    assert status == 200
+    assert body == b"read only hello"
+
+
+def test_object_url_without_token_is_unauthorized(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"needs auth", key="needs-auth")
+
+    # No token embedded: the server enforces auth, so a bare GET is rejected.
+    url = session.object_url("needs-auth")
+    assert "os_auth=" not in url
+
+    status, _ = _fetch(url)
+    assert status == 400
+
+
+def test_object_url_read_only_token_requires_secret_key(server_url: str) -> None:
+    # A static token string cannot mint a re-scoped read-only token.
+    token = TestSecretKey.get().token_for_scope(
+        "test-usecase", Scope(org=42, project=1337)
+    )
+    client = Client(server_url, token=token)
+    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+
+    with pytest.raises(ValueError, match="no secret key"):
+        session.object_url("whatever", read_only_token_validity=timedelta(minutes=5))
+
+
 def test_put_stores_under_literal_key(server_url: str) -> None:
     # A literal "%XX" in a key must be stored verbatim, not decoded: `put` sends
     # `looks%2520encoded` on the wire, which the server decodes back to the

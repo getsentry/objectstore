@@ -93,6 +93,12 @@ Tokens must include:
 - **Permissions**: array of granted operations (`object.read`, `object.write`,
   `object.delete`)
 
+The token is supplied in the `x-os-auth` header (falling back to the standard
+`Authorization` header), optionally prefixed with `Bearer `. It may also be
+supplied as a base64url-encoded `os_auth` query parameter, which lets callers
+embed a token directly in a URL (e.g. a read-only download link); the header
+takes precedence when both are present.
+
 ### Key Management
 
 The [`PublicKeyDirectory`](auth::PublicKeyDirectory) maps key IDs (`kid`) to
