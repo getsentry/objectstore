@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use axum::extract::{FromRequestParts, OriginalUri, Query};
 use axum::http::{Method, header, request::Parts};
 use objectstore_types::presign::PARAM_SIG;
+use serde::Deserialize;
 
 use crate::auth::{AuthAwareService, AuthContext, AuthError, PresignParams};
 use crate::endpoints::common::ApiError;
@@ -16,10 +17,15 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// this header.
 const HEADER_AUTH: &str = "x-os-auth";
 
-/// Query parameter carrying a JWT, as an alternative to the
-/// `x-os-auth`/`Authorization` header.
-/// The header takes precedence when both are present.
-const PARAM_AUTH: &str = "os_auth";
+/// Query parameters carrying authentication, as an alternative to the
+/// `x-os-auth`/`Authorization` header. The header takes precedence when both
+/// are present.
+#[derive(Debug, Deserialize)]
+struct AuthParams {
+    /// A JWT, mirroring the `x-os-auth` header value (without the `Bearer `
+    /// prefix). Lets callers embed a token directly in a URL.
+    os_auth: Option<String>,
+}
 
 impl AuthAwareService {
     fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
@@ -30,8 +36,17 @@ impl AuthAwareService {
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        // Fall back to the `os_auth` query parameter when no header token is present.
-        let token = header_token.or_else(|| token_from_query(parts.uri.query()));
+        let query_token = match header_token {
+            Some(_) => None,
+            None => {
+                Query::<AuthParams>::try_from_uri(&parts.uri)
+                    .map_err(|_| AuthError::BadRequest("invalid query string"))?
+                    .0
+                    .os_auth
+            }
+        };
+
+        let token = header_token.or(query_token.as_deref());
 
         AuthContext::from_encoded_jwt(token, &state.key_directory)
     }
@@ -115,17 +130,6 @@ fn has_signature(query: Option<&str>) -> bool {
     })
 }
 
-/// Extracts the JWT carried in the `os_auth` query parameter, if present.
-///
-/// The value is a bare JWT: its compact serialization is base64url, whose
-/// alphabet is URL-safe, so it needs no further encoding in the query string.
-fn token_from_query(query: Option<&str>) -> Option<&str> {
-    query?.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == PARAM_AUTH).then_some(value)
-    })
-}
-
 fn strip_bearer(header_value: &str) -> Option<&str> {
     let (prefix, tail) = header_value.split_at_checked(BEARER_PREFIX.len())?;
     if prefix.eq_ignore_ascii_case(BEARER_PREFIX) {
@@ -165,22 +169,24 @@ mod tests {
     }
 
     #[test]
-    fn test_token_from_query() {
+    fn test_auth_params_from_query() {
+        fn parse(query: &str) -> Option<String> {
+            let uri = format!("http://localhost/?{query}").parse().unwrap();
+            Query::<AuthParams>::try_from_uri(&uri).unwrap().0.os_auth
+        }
+
         let jwt = "header.payload.signature";
 
-        // Present.
+        // Present, and correctly URL-decoded (a proxy may percent-encode `.`).
+        assert_eq!(parse(&format!("os_auth={jwt}")), Some(jwt.to_owned()));
+        assert_eq!(parse("os_auth=a%2Eb"), Some("a.b".to_owned()));
         assert_eq!(
-            token_from_query(Some(&format!("{PARAM_AUTH}={jwt}"))),
-            Some(jwt)
-        );
-        // Present alongside other params.
-        assert_eq!(
-            token_from_query(Some(&format!("foo=bar&{PARAM_AUTH}={jwt}"))),
-            Some(jwt)
+            parse(&format!("foo=bar&os_auth={jwt}")),
+            Some(jwt.to_owned())
         );
 
-        // Absent.
-        assert_eq!(token_from_query(None), None);
-        assert_eq!(token_from_query(Some("foo=bar")), None);
+        // Absent: gracefully `None`, not an error.
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("foo=bar"), None);
     }
 }
