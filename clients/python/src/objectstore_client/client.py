@@ -442,9 +442,7 @@ class Session:
 
         return GetResponse(metadata, stream)
 
-    def object_url(
-        self, key: str, read_only_token_validity: timedelta | None = None
-    ) -> str:
+    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
@@ -452,27 +450,20 @@ class Session:
         NOTE however that the service does not strictly follow HTTP semantics,
         in particular in relation to `Accept-Encoding`.
 
-        When ``read_only_token_validity`` is provided, a read-only
-        (``object.read``) token scoped to this session's usecase and scope is
-        minted, valid for the given duration, and appended to the URL as the
-        base64url-encoded ``os_auth`` query parameter. The resulting URL is
-        self-contained: the recipient can fetch the object without supplying an
-        auth header.
+        When ``token_validity`` is provided, read-only authorization
+        information is embedded in the returned URL's query string, valid
+        for the given duration.
 
-        Note that unlike a pre-signed URL, which authorizes a single request on
-        one object, this token authorizes reads on any object in this session's
-        usecase and scope for the duration of its validity.
-
-        Raises ``ValueError`` if ``read_only_token_validity`` is provided but no
+        Raises ``ValueError`` if ``token_validity`` is provided but no
         ``SecretKey`` is configured on this session.
         """
         url = self._make_url(key, full=True)
-        if read_only_token_validity is None:
+        if token_validity is None:
             return url
 
         token = self.mint_token(
             permissions=[Permission.OBJECT_READ],
-            expiry_seconds=math.ceil(read_only_token_validity.total_seconds()),
+            expiry_seconds=math.ceil(token_validity.total_seconds()),
         )
         encoded = base64.urlsafe_b64encode(token.encode()).rstrip(b"=").decode()
         return f"{url}?{PARAM_AUTH}={encoded}"

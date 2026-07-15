@@ -187,27 +187,14 @@ client = Client("http://localhost:8888", token=token)
 ### Object URLs
 
 `Session.object_url` returns a GET URL for an object. By default the URL carries
-no auth, so the recipient must supply their own token.
-
-Passing `read_only_token_validity` mints a read-only (`object.read`) token
-scoped to the session's usecase and scope, valid for the given duration, and
-embeds it in the URL as the base64url-encoded `os_auth` query parameter. The
-resulting URL is self-contained — the recipient can fetch the object with any
-HTTP client, no auth header needed. This requires a `SecretKey` and raises
-`ValueError` otherwise.
-
-Unlike a pre-signed URL, which authorizes a single request on one object, this
-token authorizes reads on any object in the session's usecase and scope for the
-duration of its validity.
+no auth, so the recipient needs their own key to generate a token for it. Pass
+`token_validity` to embed a read-only token in the URL instead, valid for the
+given duration (requires a `SecretKey`).
 
 ```python
 from datetime import timedelta
 
-url = session.object_url("my-key", read_only_token_validity=timedelta(hours=1))
-
-import urllib.request
-with urllib.request.urlopen(url) as resp:
-    content = resp.read()
+url = session.object_url("my-key", token_validity=timedelta(hours=1))
 ```
 
 ### Pre-signed URLs

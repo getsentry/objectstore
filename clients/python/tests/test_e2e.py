@@ -830,9 +830,7 @@ def test_object_url_read_only_token_succeeds(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"read only hello", key="read-only-url")
 
-    url = session.object_url(
-        "read-only-url", read_only_token_validity=timedelta(minutes=5)
-    )
+    url = session.object_url("read-only-url", token_validity=timedelta(minutes=5))
     assert "os_auth=" in url
 
     status, body = _fetch(url)
@@ -861,7 +859,7 @@ def test_object_url_read_only_token_requires_secret_key(server_url: str) -> None
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
     with pytest.raises(ValueError, match="no secret key"):
-        session.object_url("whatever", read_only_token_validity=timedelta(minutes=5))
+        session.object_url("whatever", token_validity=timedelta(minutes=5))
 
 
 def test_put_stores_under_literal_key(server_url: str) -> None:
