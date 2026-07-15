@@ -28,10 +28,6 @@ impl AuthAwareService {
         AuthContext::from_encoded_jwt(token, &state.key_directory)
     }
 
-    /// Authorizes a request from a pre-signed URL.
-    ///
-    /// **Experimental:** pre-signed URLs are an experimental feature and this
-    /// behavior may change in a future release.
     async fn from_presigned_request(
         parts: &mut Parts,
         state: &ServiceState,
