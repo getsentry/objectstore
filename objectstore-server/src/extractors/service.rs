@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use axum::extract::{FromRequestParts, OriginalUri, Query};
 use axum::http::{Method, header, request::Parts};
 use objectstore_types::presign::PARAM_SIG;
+use serde::Deserialize;
 
 use crate::auth::{AuthAwareService, AuthContext, AuthError, PresignParams};
 use crate::endpoints::common::ApiError;
@@ -14,16 +15,38 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// `Authorization` header so that proxy setups (e.g. Django) can use
 /// `Authorization` for their own auth while forwarding an Objectstore token in
 /// this header.
-const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
+const HEADER_AUTH: &str = "x-os-auth";
+
+/// Query parameters carrying authentication, as an alternative to the
+/// `x-os-auth`/`Authorization` header. The header takes precedence when both
+/// are present.
+#[derive(Debug, Deserialize)]
+struct AuthParams {
+    /// A JWT, mirroring the `x-os-auth` header value (without the `Bearer `
+    /// prefix). Lets callers embed a token directly in a URL.
+    os_auth: Option<String>,
+}
 
 impl AuthAwareService {
     fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
-        let token = parts
+        let header_token = parts
             .headers
-            .get(OBJECTSTORE_AUTH_HEADER)
+            .get(HEADER_AUTH)
             .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
+
+        let query_token = match header_token {
+            Some(_) => None,
+            None => {
+                Query::<AuthParams>::try_from_uri(&parts.uri)
+                    .map_err(|_| AuthError::BadRequest("invalid query string"))?
+                    .0
+                    .os_auth
+            }
+        };
+
+        let token = header_token.or(query_token.as_deref());
 
         AuthContext::from_encoded_jwt(token, &state.key_directory)
     }
@@ -143,5 +166,27 @@ mod tests {
         assert!(!has_signature(Some("OS_SIG=abc")));
         assert!(!has_signature(None));
         assert!(!has_signature(Some("os_kid=relay")));
+    }
+
+    #[test]
+    fn test_auth_params_from_query() {
+        fn parse(query: &str) -> Option<String> {
+            let uri = format!("http://localhost/?{query}").parse().unwrap();
+            Query::<AuthParams>::try_from_uri(&uri).unwrap().0.os_auth
+        }
+
+        let jwt = "header.payload.signature";
+
+        // Present, and correctly URL-decoded (a proxy may percent-encode `.`).
+        assert_eq!(parse(&format!("os_auth={jwt}")), Some(jwt.to_owned()));
+        assert_eq!(parse("os_auth=a%2Eb"), Some("a.b".to_owned()));
+        assert_eq!(
+            parse(&format!("foo=bar&os_auth={jwt}")),
+            Some(jwt.to_owned())
+        );
+
+        // Absent: gracefully `None`, not an error.
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("foo=bar"), None);
     }
 }

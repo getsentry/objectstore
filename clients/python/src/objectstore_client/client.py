@@ -34,6 +34,9 @@ from objectstore_client.metrics import (
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 
+# Query parameter carrying a JWT, mirroring the `x-os-auth` header.
+PARAM_AUTH = "os_auth"
+
 
 class GetResponse(NamedTuple):
     metadata: Metadata
@@ -437,15 +440,32 @@ class Session:
 
         return GetResponse(metadata, stream)
 
-    def object_url(self, key: str) -> str:
+    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
         This can then be used by downstream services to fetch the given object.
         NOTE however that the service does not strictly follow HTTP semantics,
         in particular in relation to `Accept-Encoding`.
+
+        When ``token_validity`` is provided, read-only authorization
+        information is embedded in the returned URL's query string, valid
+        for the given duration.
+
+        Raises ``ValueError`` if ``token_validity`` is provided but no
+        ``SecretKey`` is configured on this session.
         """
-        return self._make_url(key, full=True)
+        url = self._make_url(key, full=True)
+        if token_validity is None:
+            return url
+
+        token = self.mint_token(
+            permissions=[Permission.OBJECT_READ],
+            expiry_seconds=math.ceil(token_validity.total_seconds()),
+        )
+        # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
+        # so it can go in the query string as-is with no further encoding.
+        return f"{url}?{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,
