@@ -35,10 +35,6 @@ from objectstore_client.metrics import (
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 
-# Query parameter carrying a base64url-encoded JWT, mirroring the `x-os-auth`
-# header. Used by `Session.object_url` to embed an auth token in a URL.
-PARAM_AUTH = "os_auth"
-
 
 class GetResponse(NamedTuple):
     metadata: Metadata
@@ -466,7 +462,7 @@ class Session:
             expiry_seconds=math.ceil(token_validity.total_seconds()),
         )
         encoded = base64.urlsafe_b64encode(token.encode()).rstrip(b"=").decode()
-        return f"{url}?{PARAM_AUTH}={encoded}"
+        return f"{url}?os_auth={encoded}"
 
     def presigned_object_url(
         self,
