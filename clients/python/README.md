@@ -189,7 +189,7 @@ client = Client("http://localhost:8888", token=token)
 `Session.object_url` returns a GET URL for an object. By default the URL carries
 no auth, so the recipient needs their own key to generate a token for it. Pass
 `token_validity` to embed a read-only token in the URL instead, valid for the
-given duration (requires `SecretKey` authentication, see above).
+given duration (requires `SecretKey` authentication - see above section).
 
 ```python
 from datetime import timedelta
