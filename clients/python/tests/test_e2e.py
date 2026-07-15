@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Generator
 from datetime import timedelta
@@ -831,7 +832,14 @@ def test_object_url_read_only_token_succeeds(server_url: str) -> None:
     session.put(b"read only hello", key="read-only-url")
 
     url = session.object_url("read-only-url", token_validity=timedelta(minutes=5))
-    assert "os_auth=" in url
+
+    # Parse the URL like a real HTTP client would, so this also covers structural
+    # breakage such as a duplicate `?` or wrong encoding of the query string.
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query, strict_parsing=True)
+    assert list(query) == ["os_auth"]
+    # The token round-trips verbatim through URL parsing (no encoding applied).
+    (token,) = query["os_auth"]
+    assert token.count(".") == 2  # a JWT is `header.payload.signature`
 
     status, body = _fetch(url)
     assert status == 200
@@ -844,7 +852,7 @@ def test_object_url_without_token_is_unauthorized(server_url: str) -> None:
 
     # No token embedded: the server enforces auth, so a bare GET is rejected.
     url = session.object_url("needs-auth")
-    assert "os_auth=" not in url
+    assert urllib.parse.urlparse(url).query == ""
 
     status, _ = _fetch(url)
     assert status == 400
