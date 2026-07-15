@@ -320,6 +320,8 @@ impl RateLimiter {
 #[derive(Debug)]
 struct BandwidthBucket {
     /// Nanoseconds since `epoch` at which all recorded traffic is paid off.
+    ///
+    /// Saturates at `u64::MAX` after ~584 years of uptime.
     tat: AtomicU64,
     /// Nanoseconds of TAT advance per byte: `1e9 / bps`.
     nanos_per_byte: f64,
@@ -346,13 +348,13 @@ impl BandwidthBucket {
         // (no credit accumulation), then advance by the byte cost.
         self.tat
             .update(Ordering::Relaxed, Ordering::Relaxed, |old| {
-                old.max(now_nanos) + weight
+                old.max(now_nanos).saturating_add(weight)
             });
     }
 
     /// Returns `true` if the bucket admits new traffic at `now_nanos`.
     fn check(&self, now_nanos: u64) -> bool {
-        self.tat.load(Ordering::Relaxed) <= now_nanos + self.burst_ns
+        self.tat.load(Ordering::Relaxed) <= now_nanos.saturating_add(self.burst_ns)
     }
 }
 
