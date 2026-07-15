@@ -175,6 +175,9 @@ impl AuthContext {
     /// [`objectstore_types::presign`]). This verifies the signature against the request's
     /// canonical form and enforces the maximum duration, returning [`AuthContext::Preauthorized`]
     /// on success.
+    ///
+    /// **Experimental:** pre-signed URLs are an experimental feature and this API may change in a
+    /// future release.
     pub fn from_presigned_request(
         method: &Method,
         path: &str,
