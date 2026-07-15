@@ -457,6 +457,10 @@ class Session:
         Generates a pre-signed URL authorizing a single ``method`` request on the
         object with the given ``key``, valid for ``duration``.
 
+        .. warning::
+            Experimental: pre-signed URLs are an experimental feature and this
+            API may change in a future release.
+
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
         is above the one-week maximum.

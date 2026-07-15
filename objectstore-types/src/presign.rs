@@ -3,6 +3,9 @@
 //! A pre-signed URL lets a client that owns an Ed25519 keypair hand out a
 //! time-limited URL that authorizes a specific request.
 //!
+//! **Experimental:** pre-signed URLs are an experimental feature and this API
+//! may change in a future release.
+//!
 //! Example:
 //!
 //! ```text

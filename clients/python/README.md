@@ -186,6 +186,9 @@ client = Client("http://localhost:8888", token=token)
 
 ### Pre-signed URLs
 
+> **Experimental:** pre-signed URLs are an experimental feature and this API may
+> change in a future release.
+
 A **pre-signed URL** is a time-limited URL that authorizes a single request on
 one object without the recipient needing an auth token. This is useful for
 handing a download link to a browser or an external service, or for returning
