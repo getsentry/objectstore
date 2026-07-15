@@ -2,8 +2,6 @@ use std::time::SystemTime;
 
 use axum::extract::{FromRequestParts, OriginalUri, Query};
 use axum::http::{Method, header, request::Parts};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use objectstore_types::presign::PARAM_SIG;
 
 use crate::auth::{AuthAwareService, AuthContext, AuthError, PresignParams};
@@ -16,31 +14,24 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// `Authorization` header so that proxy setups (e.g. Django) can use
 /// `Authorization` for their own auth while forwarding an Objectstore token in
 /// this header.
-const OBJECTSTORE_AUTH_HEADER: &str = "x-os-auth";
+const HEADER_AUTH: &str = "x-os-auth";
 
-/// Query parameter carrying a base64url-encoded JWT, as an alternative to the
-/// `x-os-auth` header. This lets callers embed an auth token directly in a URL
-/// (e.g. a read-only download link). The header takes precedence when both are
-/// present.
-const AUTH_QUERY_PARAM: &str = "os_auth";
+/// Query parameter carrying a JWT, as an alternative to the
+/// `x-os-auth`/`Authorization` header.
+/// The header takes precedence when both are present.
+const PARAM_AUTH: &str = "os_auth";
 
 impl AuthAwareService {
     fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
         let header_token = parts
             .headers
-            .get(OBJECTSTORE_AUTH_HEADER)
+            .get(HEADER_AUTH)
             .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer);
 
-        // Fall back to the `os_auth` query parameter when no header token is
-        // present. The value is a base64url-encoded JWT.
-        let query_token = match header_token {
-            Some(_) => None,
-            None => token_from_query(parts.uri.query())?,
-        };
-
-        let token = header_token.or(query_token.as_deref());
+        // Fall back to the `os_auth` query parameter when no header token is present.
+        let token = header_token.or_else(|| token_from_query(parts.uri.query()));
 
         AuthContext::from_encoded_jwt(token, &state.key_directory)
     }
@@ -124,29 +115,15 @@ fn has_signature(query: Option<&str>) -> bool {
     })
 }
 
-/// Extracts and base64url-decodes the JWT carried in the `os_auth` query
-/// parameter, if present.
+/// Extracts the JWT carried in the `os_auth` query parameter, if present.
 ///
-/// Returns `Ok(None)` when the parameter is absent, and
-/// [`AuthError::BadRequest`] when the value is not valid base64url or does not
-/// decode to a UTF-8 string.
-fn token_from_query(query: Option<&str>) -> Result<Option<String>, AuthError> {
-    let Some(value) = query.and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == AUTH_QUERY_PARAM).then_some(value)
-        })
-    }) else {
-        return Ok(None);
-    };
-
-    let bytes = URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|_| AuthError::BadRequest("os_auth query parameter is not valid base64url"))?;
-    let token = String::from_utf8(bytes)
-        .map_err(|_| AuthError::BadRequest("os_auth query parameter is not a valid token"))?;
-
-    Ok(Some(token))
+/// The value is a bare JWT: its compact serialization is base64url, whose
+/// alphabet is URL-safe, so it needs no further encoding in the query string.
+fn token_from_query(query: Option<&str>) -> Option<&str> {
+    query?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == PARAM_AUTH).then_some(value)
+    })
 }
 
 fn strip_bearer(header_value: &str) -> Option<&str> {
@@ -189,24 +166,21 @@ mod tests {
 
     #[test]
     fn test_token_from_query() {
-        let encoded = URL_SAFE_NO_PAD.encode("header.payload.signature");
+        let jwt = "header.payload.signature";
 
-        // Present, valid base64url.
+        // Present.
         assert_eq!(
-            token_from_query(Some(&format!("{AUTH_QUERY_PARAM}={encoded}"))).unwrap(),
-            Some("header.payload.signature".to_owned())
+            token_from_query(Some(&format!("{PARAM_AUTH}={jwt}"))),
+            Some(jwt)
         );
         // Present alongside other params.
         assert_eq!(
-            token_from_query(Some(&format!("foo=bar&{AUTH_QUERY_PARAM}={encoded}"))).unwrap(),
-            Some("header.payload.signature".to_owned())
+            token_from_query(Some(&format!("foo=bar&{PARAM_AUTH}={jwt}"))),
+            Some(jwt)
         );
 
         // Absent.
-        assert_eq!(token_from_query(None).unwrap(), None);
-        assert_eq!(token_from_query(Some("foo=bar")).unwrap(), None);
-
-        // Present but not valid base64url.
-        assert!(token_from_query(Some(&format!("{AUTH_QUERY_PARAM}=not base64!!"))).is_err());
+        assert_eq!(token_from_query(None), None);
+        assert_eq!(token_from_query(Some("foo=bar")), None);
     }
 }

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -34,6 +33,10 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
+
+# Query parameter carrying a JWT, mirroring the `x-os-auth` header. Used by
+# `Session.object_url` to embed an auth token in a URL.
+PARAM_AUTH = "os_auth"
 
 
 class GetResponse(NamedTuple):
@@ -461,8 +464,9 @@ class Session:
             permissions=[Permission.OBJECT_READ],
             expiry_seconds=math.ceil(token_validity.total_seconds()),
         )
-        encoded = base64.urlsafe_b64encode(token.encode()).rstrip(b"=").decode()
-        return f"{url}?os_auth={encoded}"
+        # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
+        # so it can go in the query string as-is with no further encoding.
+        return f"{url}?{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,

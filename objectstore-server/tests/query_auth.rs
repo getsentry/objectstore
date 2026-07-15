@@ -1,13 +1,10 @@
 //! End-to-end tests for the `os_auth` query parameter authentication path.
 //!
 //! A JWT can be supplied either via the `x-os-auth`/`Authorization` header or,
-//! base64url-encoded, via the `os_auth` query parameter. The header takes
-//! precedence when both are present. (Decoding edge cases are covered by the
-//! `token_from_query` unit tests.)
+//! as-is, via the `os_auth` query parameter. The header takes precedence when
+//! both are present.
 
 use anyhow::Result;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::header;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_server::config::{AuthZ, Config};
@@ -62,7 +59,7 @@ async fn query_auth_get_succeeds() -> Result<()> {
     let server = test_server().await;
     seed_object(&server, "hello").await?;
 
-    let token = URL_SAFE_NO_PAD.encode(jwt(&["object.read"]));
+    let token = jwt(&["object.read"]);
     let url = format!("{}?os_auth={token}", server.url(OBJECT_PATH));
     let resp = reqwest::Client::new().get(url).send().await?;
 
@@ -75,11 +72,10 @@ async fn query_auth_get_succeeds() -> Result<()> {
 async fn query_auth_tampered_token_is_unauthorized() -> Result<()> {
     let server = test_server().await;
 
-    // Valid base64url, but the decoded JWT has a broken signature.
+    // Flip the last character of the JWT signature so verification fails.
     let mut token = jwt(&["object.read"]);
     let last = token.pop().unwrap();
     token.push(if last == 'A' { 'B' } else { 'A' });
-    let token = URL_SAFE_NO_PAD.encode(token);
 
     let url = format!("{}?os_auth={token}", server.url(OBJECT_PATH));
     let resp = reqwest::Client::new().get(url).send().await?;
@@ -95,7 +91,7 @@ async fn header_takes_precedence_over_query() -> Result<()> {
 
     // Valid header token, garbage query token: the header must win, so the
     // request succeeds despite the unusable query value.
-    let url = format!("{}?os_auth=not%20base64%21%21", server.url(OBJECT_PATH));
+    let url = format!("{}?os_auth=not-a-valid-jwt", server.url(OBJECT_PATH));
     let resp = reqwest::Client::new()
         .get(url)
         .header(
