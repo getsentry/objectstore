@@ -71,9 +71,6 @@ struct XmlApiError {
     code: String,
     #[serde(default)]
     message: String,
-    /// GCS XML API includes a `<Details>` element with additional context.
-    #[serde(default)]
-    details: String,
 }
 
 /// Extension trait for [`reqwest::Response`] that preserves error response bodies.
@@ -181,19 +178,9 @@ async fn parse_json_error(resp: Response) -> BackendDetail {
 
 async fn parse_xml_error(resp: Response) -> BackendDetail {
     if let Ok(bytes) = resp.bytes().await
-        && let Ok(XmlApiError {
-            code,
-            message,
-            details,
-        }) = quick_xml::de::from_reader(bytes.as_ref())
+        && let Ok(XmlApiError { code, message }) = quick_xml::de::from_reader(bytes.as_ref())
     {
-        BackendDetail {
-            code,
-            message: match details.as_str() {
-                "" => message,
-                _ => format!("{message}: {details}"),
-            },
-        }
+        BackendDetail { code, message }
     } else {
         BackendDetail::none()
     }
