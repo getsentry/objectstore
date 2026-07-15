@@ -317,6 +317,9 @@ fn create_success_part(
 }
 
 fn create_error_part(idx: usize, error: &ApiError) -> Part {
+    // Capture the error explicitly, as it is not converted via `IntoResponse` here.
+    error.capture();
+
     let mut headers = HeaderMap::new();
     insert_index_header(&mut headers, idx);
     insert_status_header(&mut headers, error.status());

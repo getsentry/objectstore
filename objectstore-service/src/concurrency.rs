@@ -175,18 +175,19 @@ where
                 .await
                 .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
-            if let Err(ref e) = result {
-                let error = e as &dyn std::error::Error;
-                objectstore_log::event_dyn!(e.level(), error, operation, "Task failed");
-            }
-
             objectstore_metrics::record!(
                 "service.task.duration" = start.elapsed(),
                 operation = operation,
                 outcome = if result.is_ok() { "success" } else { "error" },
             );
 
-            let _ = tx.send(result);
+            // Errors delivered to the caller are captured once at the response boundary. If the
+            // receiver is gone, nothing downstream can observe the error, so capture it here.
+            if let Err(Err(ref e)) = tx.send(result) {
+                let error = e as &dyn std::error::Error;
+                objectstore_log::event_dyn!(e.level(), error, operation, "Task failed");
+            }
+
             drop(guard);
             transaction.finish();
             drop(scope_guard);
@@ -194,10 +195,7 @@ where
         .bind_hub(new_hub),
     );
 
-    rx.await.map_err(|_| {
-        objectstore_log::error!(!!&Error::Dropped);
-        Error::Dropped
-    })?
+    rx.await.map_err(|_| Error::Dropped)?
 }
 
 #[cfg(test)]
