@@ -195,7 +195,7 @@ where
     );
     rx.await.map_err(|_| {
         let err = Error::new(ErrorKind::Internal).context("task dropped");
-        objectstore_log::error!(!!err, operation, "Task failed");
+        objectstore_log::error!(!!&err, operation, "Task failed");
         err
     })?
 }
