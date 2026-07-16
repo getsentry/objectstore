@@ -69,8 +69,12 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 /// A semaphore caps the number of in-flight backend operations. The limit is
 /// configured via [`with_concurrency_limit`](StorageService::with_concurrency_limit);
 /// without an explicit value the default is [`DEFAULT_CONCURRENCY_LIMIT`].
-/// Operations that exceed the limit are rejected immediately with
-/// [`Error::AtCapacity`].
+///
+/// Optionally, a bounded queue can be enabled with
+/// [`with_concurrency_queue`](StorageService::with_concurrency_queue) so that
+/// requests exceeding `max` but within `max + queue` wait briefly instead of
+/// being rejected immediately. Operations beyond `max + queue` are rejected
+/// with [`Error::AtCapacity`].
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
@@ -97,6 +101,17 @@ impl StorageService {
     /// limit are rejected with [`Error::AtCapacity`].
     pub fn with_concurrency_limit(mut self, max: u32) -> Self {
         self.concurrency = ConcurrencyLimiter::new(max);
+        self
+    }
+
+    /// Enables a bounded queue for backend concurrency.
+    ///
+    /// When all execution permits are held, up to `queue` additional callers
+    /// wait for a permit, each for at most `timeout`. Must be called after
+    /// [`with_concurrency_limit`](Self::with_concurrency_limit) and before
+    /// [`start`](Self::start).
+    pub fn with_concurrency_queue(mut self, queue: u32, timeout: std::time::Duration) -> Self {
+        self.concurrency = self.concurrency.with_queue(queue, timeout);
         self
     }
 
@@ -143,16 +158,20 @@ impl StorageService {
 
     /// Starts background processes for the storage service.
     ///
-    /// Currently spawns a task that emits the `service.concurrency.in_use`
-    /// and `service.concurrency.limit` gauges once per second.
+    /// Spawns a task that emits concurrency gauges once per second:
+    /// `service.concurrency.in_use`, `service.concurrency.queued`,
+    /// `service.concurrency.limit`, and `service.concurrency.queue_limit`.
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
         let limit = concurrency.total_permits();
+        let queue_limit = concurrency.total_queue();
         tokio::spawn(async move {
             concurrency
-                .run_emitter(|permits| async move {
-                    objectstore_metrics::gauge!("service.concurrency.in_use" = permits);
+                .run_emitter(|in_use, queued| async move {
+                    objectstore_metrics::gauge!("service.concurrency.in_use" = in_use);
+                    objectstore_metrics::gauge!("service.concurrency.queued" = queued);
                     objectstore_metrics::gauge!("service.concurrency.limit" = limit);
+                    objectstore_metrics::gauge!("service.concurrency.queue_limit" = queue_limit);
                 })
                 .await;
         });
@@ -160,10 +179,10 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
-    /// [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
-    /// dropped before sending its result.
+    /// Returns [`Error::AtCapacity`] if the concurrency limit or queue is
+    /// exhausted, [`Error::Panic`] if the spawned task panics (the panic
+    /// message is captured for diagnostics), or [`Error::Dropped`] if the
+    /// task is dropped before sending its result.
     ///
     /// Emits `service.task.start` (counter) after acquiring a permit and
     /// `service.task.duration` (distribution) when the task completes, tagged
@@ -174,10 +193,34 @@ impl StorageService {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        let permit = self.concurrency.try_acquire().inspect_err(|_| {
-            objectstore_metrics::count!("service.concurrency.rejected");
-            objectstore_log::warn!("Request rejected: service at capacity");
-        })?;
+        let start = tokio::time::Instant::now();
+        let permit = self.concurrency.acquire().await;
+        let waited = start.elapsed();
+
+        let permit = match permit {
+            Ok(p) => {
+                if waited > std::time::Duration::from_millis(1) {
+                    objectstore_metrics::record!(
+                        "service.concurrency.wait" = waited,
+                        outcome = "acquired",
+                    );
+                }
+                p
+            }
+            Err(e) => {
+                if waited > std::time::Duration::from_millis(1) {
+                    objectstore_metrics::count!("service.concurrency.queue_timeout");
+                    objectstore_metrics::record!(
+                        "service.concurrency.wait" = waited,
+                        outcome = "timeout",
+                    );
+                } else {
+                    objectstore_metrics::count!("service.concurrency.rejected");
+                }
+                objectstore_log::warn!("Request rejected: service at capacity");
+                return Err(e);
+            }
+        };
 
         crate::concurrency::spawn_metered(operation, permit, f).await
     }

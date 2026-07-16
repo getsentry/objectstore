@@ -629,7 +629,10 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
     // With max_concurrency=0 the service has no permits available, so
     // BatchExecutor::new() returns AtCapacity and the endpoint responds 429.
     let server = TestServer::with_config(Config {
-        service: Service { max_concurrency: 0 },
+        service: Service {
+            max_concurrency: 0,
+            ..Default::default()
+        },
         auth: AuthZ {
             enforce: false,
             ..Default::default()

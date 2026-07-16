@@ -508,6 +508,8 @@ pub struct Config {
 /// # Environment Variables
 ///
 /// - `OS__SERVICE__MAX_CONCURRENCY`
+/// - `OS__SERVICE__CONCURRENCY_QUEUE`
+/// - `OS__SERVICE__CONCURRENCY_QUEUE_TIMEOUT`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -521,12 +523,40 @@ pub struct Service {
     ///
     /// [`DEFAULT_CONCURRENCY_LIMIT`](objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT)
     pub max_concurrency: u32,
+
+    /// Maximum number of requests that may wait for a concurrency permit.
+    ///
+    /// When all `max_concurrency` execution slots are held, up to this many
+    /// additional requests will park and wait (for at most
+    /// `concurrency_queue_timeout`) instead of being rejected immediately.
+    /// Requests beyond `max_concurrency + concurrency_queue` are rejected
+    /// with HTTP 429.
+    ///
+    /// Both this and `concurrency_queue_timeout` are inert while this is `0`
+    /// (the default), preserving the immediate-reject behavior.
+    ///
+    /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
+    /// acceptable_added_latency`. `concurrency_queue_timeout` must stay
+    /// comfortably below client request timeouts.
+    pub concurrency_queue: u32,
+
+    /// Maximum time a request may wait in the concurrency queue.
+    ///
+    /// Ignored when `concurrency_queue` is `0`.
+    ///
+    /// # Default
+    ///
+    /// `1s`
+    #[serde(with = "humantime_serde")]
+    pub concurrency_queue_timeout: Duration,
 }
 
 impl Default for Service {
     fn default() -> Self {
         Self {
             max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
+            concurrency_queue: 0,
+            concurrency_queue_timeout: Duration::from_secs(1),
         }
     }
 }

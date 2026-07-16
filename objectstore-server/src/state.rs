@@ -61,8 +61,12 @@ impl Services {
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
         let backend = backend::from_config(config.storage.clone()).await?;
-        let service =
-            StorageService::new(backend).with_concurrency_limit(config.service.max_concurrency);
+        let service = StorageService::new(backend)
+            .with_concurrency_limit(config.service.max_concurrency)
+            .with_concurrency_queue(
+                config.service.concurrency_queue,
+                config.service.concurrency_queue_timeout,
+            );
         service.start();
 
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);

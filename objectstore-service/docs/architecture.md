@@ -175,20 +175,21 @@ during metadata creation by the server.
 
 # Backpressure
 
-The service applies backpressure to protect backends from overload. Rather than
-queueing work when capacity is exhausted, the service rejects operations
-immediately so the caller can shed load or retry.
+The service applies backpressure to protect backends from overload and to
+prevent exhaustion of internal resources such as memory.
 
 ## Concurrency Limit
 
-A semaphore caps the total number of in-flight backend operations across all
-callers. A permit is acquired before each operation is spawned and held until
-the task completes — including on panic — so the limit counts *running*
-operations, not queued ones. When no permits are available, the operation fails
-with [`Error::AtCapacity`](error::Error::AtCapacity).
+A concurrency limiter caps in-flight
+backend operations. When all execution permits are held, new operations are
+queued — adding latency instead of rejecting immediately. The queue itself is
+bounded in both depth and time: operations that cannot be served within those
+limits fail with [`Error::AtCapacity`](error::Error::AtCapacity).
 
-The default limit is [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). Callers can override it via
-[`StorageService::with_concurrency_limit`].
+The default execution limit is
+[`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
+[`StorageService::with_concurrency_limit`] and
+[`StorageService::with_concurrency_queue`] for configuration.
 
 ## Multipart Uploads
 
