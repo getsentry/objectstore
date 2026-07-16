@@ -26,6 +26,9 @@ pub struct Config {
 
     #[serde(default)]
     pub auth: Option<Auth>,
+
+    #[serde(default)]
+    pub metrics: objectstore_metrics::MetricsConfig,
 }
 
 #[derive(Debug, Deserialize)]

@@ -4549,6 +4549,7 @@ dependencies = [
  "humantime-serde",
  "indicatif",
  "objectstore-client",
+ "objectstore-metrics",
  "rand 0.10.2",
  "rand_distr",
  "serde",
