@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
@@ -11,8 +13,8 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
-from objectstore_client import utils
-from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
+from objectstore_client import presign, utils
+from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import raise_for_status
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
@@ -31,6 +33,9 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
+
+# Query parameter carrying a JWT, mirroring the `x-os-auth` header.
+PARAM_AUTH = "os_auth"
 
 
 class GetResponse(NamedTuple):
@@ -117,9 +122,9 @@ class Client:
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
             timeouts).
-        token: A ``TokenGenerator`` that signs a fresh JWT for each request
+        token: A ``SecretKey`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
-            as-is for every request. Use a ``TokenGenerator`` for internal
+            as-is for every request. Use a ``SecretKey`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
     """
@@ -169,7 +174,7 @@ class Client:
         of key-value pairs passed as kwargs.
         IMPORTANT: the order of the kwargs matters!
 
-        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+*'`.
+        The admitted characters for keys and values are: `A-Za-z0-9_-()$!+'`.
 
         Users are free to choose the scope structure that best suits their Usecase.
         The combination of Usecase and Scope will determine the physical key/path of the
@@ -237,13 +242,12 @@ class Session:
         When ``expiry_seconds`` is ``None``, the generator's default
         expiry is used.
 
-        Raises ``ValueError`` if no ``TokenGenerator`` is configured
-        or if any requested permission is not granted to the
-        generator.
+        Raises ``ValueError`` if no ``SecretKey`` is configured
+        or if any requested permission is not granted to the key.
         """
-        if not isinstance(self._token, TokenGenerator):
-            raise ValueError("no token generator configured on this session")
-        return self._token.sign_for_scope(
+        if not isinstance(self._token, SecretKey):
+            raise ValueError("no secret key configured on this session")
+        return self._token.token_for_scope(
             self._usecase.name,
             self._scope,
             permissions,
@@ -252,8 +256,8 @@ class Session:
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
-        if isinstance(self._token, TokenGenerator):
-            return self._token.sign_for_scope(self._usecase.name, self._scope)
+        if isinstance(self._token, SecretKey):
+            return self._token.token_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
             return self._token
         return None
@@ -270,7 +274,7 @@ class Session:
 
     def _make_url(self, key: str | None, full: bool = False) -> str:
         relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = self._base_path.rstrip("/") + relative_path
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
             return f"http://{self._pool.host}:{self._pool.port}{path}"
         return path
@@ -289,7 +293,7 @@ class Session:
             resource = "objects:multipart"
 
         relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = self._base_path.rstrip("/") + relative_path
+        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if query:
             return f"{path}?{query}"
         return path
@@ -436,15 +440,97 @@ class Session:
 
         return GetResponse(metadata, stream)
 
-    def object_url(self, key: str) -> str:
+    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
         This can then be used by downstream services to fetch the given object.
         NOTE however that the service does not strictly follow HTTP semantics,
         in particular in relation to `Accept-Encoding`.
+
+        When ``token_validity`` is provided, read-only authorization
+        information is embedded in the returned URL's query string, valid
+        for the given duration.
+
+        Raises ``ValueError`` if ``token_validity`` is provided but no
+        ``SecretKey`` is configured on this session.
         """
-        return self._make_url(key, full=True)
+        url = self._make_url(key, full=True)
+        if token_validity is None:
+            return url
+
+        token = self.mint_token(
+            permissions=[Permission.OBJECT_READ],
+            expiry_seconds=math.ceil(token_validity.total_seconds()),
+        )
+        # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
+        # so it can go in the query string as-is with no further encoding.
+        return f"{url}?{PARAM_AUTH}={token}"
+
+    def presigned_object_url(
+        self,
+        method: Literal["GET", "HEAD"],
+        key: str,
+        duration: timedelta = timedelta(hours=1),
+    ) -> str:
+        """
+        Generates a pre-signed URL authorizing a single ``method`` request on the
+        object with the given ``key``, valid for ``duration``.
+
+        .. warning::
+            Experimental: pre-signed URLs are an experimental feature and this
+            API may change in a future release.
+
+        Raises ``ValueError`` if no ``SecretKey`` is configured on this
+        session's client, if ``method`` is not supported, or if ``duration``
+        is above the one-week maximum.
+
+        The returned URL carries a signature that allows the recipient to perform
+        a request without an auth token. It can be handed to any HTTP client;
+        the URL is already percent-encoded, and must be transmitted verbatim.
+
+        Note that `HEAD` and `GET` are considered equivalent from the point of view
+        of signatures, meaning that a signature for `GET` can also be used for
+        `HEAD`, and viceversa.
+        """
+        if method not in presign.SUPPORTED_METHODS:
+            raise ValueError(
+                f"unsupported pre-signed method {method!r}, "
+                f"expected one of {presign.SUPPORTED_METHODS}"
+            )
+
+        if not isinstance(self._token, SecretKey):
+            raise ValueError("no secret key configured on this session")
+
+        if duration > presign.MAX_PRESIGN_DURATION:
+            raise ValueError(
+                f"duration {duration} exceeds the maximum of "
+                f"{presign.MAX_PRESIGN_DURATION}"
+            )
+        duration_secs = math.ceil(duration.total_seconds())
+
+        # `_make_url` already percent-encodes the path identically to the wire.
+        encoded_path = self._make_url(key)
+        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        encoded_query = utils.encode_query(
+            f"{presign.PARAM_KID}={self._token.kid}"
+            f"&{presign.PARAM_TIMESTAMP}={timestamp}"
+            f"&{presign.PARAM_DURATION}={duration_secs}"
+        )
+
+        canonical = presign.build_canonical_form(method, encoded_path, encoded_query)
+        signature = self._token.signature_for_canonical_form(canonical)
+
+        # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
+        # result is a valid absolute URL.
+        host = self._pool.host
+        if ":" in host:
+            host = f"[{host}]"
+
+        return (
+            f"{self._pool.scheme}://{host}:{self._pool.port}"
+            f"{encoded_path}?{encoded_query}&{presign.PARAM_SIG}={signature}"
+        )
 
     def head(self, key: str) -> Metadata | None:
         """

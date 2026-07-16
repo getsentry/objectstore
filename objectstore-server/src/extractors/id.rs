@@ -221,7 +221,7 @@ mod tests {
     // --- Extractor integration tests ---
 
     use std::collections::BTreeMap;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
 
     use axum::Router;
     use axum::body::Body;
@@ -240,7 +240,7 @@ mod tests {
 
     async fn test_state(config: Config) -> ServiceState {
         let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")));
-        let key_directory = PublicKeyDirectory::from_config(&config.auth).await.unwrap();
+        let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await.unwrap());
         let rate_limiter = RateLimiter::new(config.rate_limits.clone());
 
         Arc::new(Services {
@@ -373,11 +373,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -402,11 +401,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_context_killswitched() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: Some("blocked".into()),
                 scopes: BTreeMap::new(),
                 service: None,
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };
@@ -433,11 +431,10 @@ mod tests {
     #[tokio::test]
     async fn extract_object_id_killswitched_with_service() {
         let config = Config {
-            killswitches: Killswitches(vec![Killswitch {
+            killswitches: Killswitches::new(vec![Killswitch {
                 usecase: None,
                 scopes: BTreeMap::new(),
                 service: Some("test-*".into()),
-                service_matcher: OnceLock::new(),
             }]),
             ..Config::default()
         };

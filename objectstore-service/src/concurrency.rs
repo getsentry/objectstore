@@ -193,8 +193,11 @@ where
         }
         .bind_hub(new_hub),
     );
-    rx.await
-        .map_err(|_| Error::new(ErrorKind::Internal).context("task dropped"))?
+    rx.await.map_err(|_| {
+        let err = Error::new(ErrorKind::Internal).context("task dropped");
+        objectstore_log::error!(!!err, operation, "Task failed");
+        err
+    })?
 }
 
 #[cfg(test)]

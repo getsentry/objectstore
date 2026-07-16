@@ -2,17 +2,37 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
+use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::pkcs8::DecodePublicKey;
 use jsonwebtoken::DecodingKey;
 use objectstore_types::auth::Permission;
 
 use crate::config::{AuthZ, AuthZVerificationKey};
 
-async fn read_key_from_file(filename: &Path) -> anyhow::Result<DecodingKey> {
+/// A single version of a public key, usable for both JWT verification (via
+/// [`DecodingKey`]) and pre-signed URL verification (via [`VerifyingKey`]).
+///
+/// Both are parsed from the same EdDSA PEM file.
+#[derive(Debug)]
+pub struct PublicKey {
+    /// Key material for verifying JWT signatures.
+    pub decoding_key: DecodingKey,
+    /// Key material for verifying pre-signed URL signatures.
+    pub verifying_key: VerifyingKey,
+}
+
+async fn read_key_from_file(filename: &Path) -> anyhow::Result<PublicKey> {
     let key_content = tokio::fs::read_to_string(filename)
         .await
         .with_context(|| format!("reading key from {filename:?}"))?;
-    DecodingKey::from_ed_pem(key_content.as_bytes())
-        .with_context(|| format!("parsing key from {filename:?}"))
+    let decoding_key = DecodingKey::from_ed_pem(key_content.as_bytes())
+        .with_context(|| format!("parsing decoding key from {filename:?}"))?;
+    let verifying_key = VerifyingKey::from_public_key_pem(&key_content)
+        .with_context(|| format!("parsing verifying key from {filename:?}"))?;
+    Ok(PublicKey {
+        decoding_key,
+        verifying_key,
+    })
 }
 
 /// Configures the EdDSA public key(s) and permissions used to verify tokens from a single `kid`.
@@ -25,7 +45,7 @@ pub struct PublicKeyConfig {
     /// If a key is being rotated, the old and new versions of that key should both be
     /// configured so objectstore can verify signatures while the updated key is still
     /// rolling out. Otherwise, this should only contain the most recent version of a key.
-    pub key_versions: Vec<DecodingKey>,
+    pub key_versions: Vec<PublicKey>,
 
     /// The maximum set of permissions that this key's signer is authorized to grant.
     ///

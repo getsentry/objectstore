@@ -13,28 +13,39 @@ pub enum AuthError {
     #[error("internal error: {0}")]
     InternalError(String),
 
-    /// Indicates that the provided authorization token is invalid (e.g. expired or malformed).
+    /// Indicates that the provided authorization token/signature is invalid (e.g. expired or malformed).
     #[error("failed to decode token: {0}")]
     ValidationFailure(#[from] jsonwebtoken::errors::Error),
 
-    /// Indicates that an otherwise-valid token was unable to be verified with configured keys.
+    /// Indicates that an otherwise-valid token/signature was unable to be verified with configured keys.
     #[error("failed to verify token")]
     VerificationFailure,
 
     /// Indicates that the requested operation is not permitted on the resource.
     #[error("operation not allowed")]
     NotPermitted,
+
+    /// Indicates that a pre-signed URL was used with an unsupported HTTP method.
+    #[error("presigned URLs are not supported for this method")]
+    UnsupportedPresignedMethod,
+
+    /// Indicates that the authorization token/signature was signed with a key that is unknown to
+    /// this server.
+    #[error("unknown key")]
+    UnknownKey,
 }
 
 impl AuthError {
     /// Return a shortname for the failure reason that can be used to tag metrics.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::UnknownKey => "unknown_key",
             Self::BadRequest(_) => "bad_request",
+            Self::NotPermitted => "not_permitted",
             Self::InternalError(_) => "internal_error",
             Self::ValidationFailure(_) => "validation_failure",
             Self::VerificationFailure => "verification_failure",
-            Self::NotPermitted => "not_permitted",
+            Self::UnsupportedPresignedMethod => "unsupported_presigned_method",
         }
     }
 

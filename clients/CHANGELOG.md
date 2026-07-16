@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.14
+
+### New Features ✨
+
+- (py-client) Support creating pre-signed URLs by @lcian in [#544](https://github.com/getsentry/objectstore/pull/544)
+
+### Bug Fixes 🐛
+
+- (py-client) Treat object keys as literal strings by @lcian in [#548](https://github.com/getsentry/objectstore/pull/548)
+
+## 0.1.13
+
+### New Features ✨
+
+- (client) Accept optional tokens in ClientBuilder::token by @jan-auer in [#516](https://github.com/getsentry/objectstore/pull/516)
+- Add filename field to Metadata by @lcian in [#517](https://github.com/getsentry/objectstore/pull/517)
+
+### Bug Fixes 🐛
+
+- Apply pedantic Clippy lints across workspace by @jan-auer in [#513](https://github.com/getsentry/objectstore/pull/513)
+
+### Documentation 📚
+
+- Fix and expand documentation across the workspace by @jan-auer in [#521](https://github.com/getsentry/objectstore/pull/521)
+- Fix multipart endpoint paths and client examples by @jan-auer in [#505](https://github.com/getsentry/objectstore/pull/505)
+
+### Internal Changes 🔧
+
+- (client) Remove version pin notice on tokio dependency by @jan-auer in [#531](https://github.com/getsentry/objectstore/pull/531)
+- Replace test key LazyLock statics with compile-time constants by @jan-auer in [#510](https://github.com/getsentry/objectstore/pull/510)
+- Consolidate workspace dependencies and pin explicit versions by @jan-auer in [#507](https://github.com/getsentry/objectstore/pull/507)
+
 ## 0.1.12
 
 ### Bug Fixes 🐛

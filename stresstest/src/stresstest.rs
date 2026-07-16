@@ -11,6 +11,7 @@ use bytesize::ByteSize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use objectstore_client::{ExpirationPolicy, Usecase};
+use objectstore_metrics::{count, gauge, record, timer};
 use sketches_ddsketch::DDSketch;
 use tokio::sync::Semaphore;
 use yansi::Paint;
@@ -258,6 +259,7 @@ async fn run_workload(
 
     let workload = Arc::new(Mutex::new(workload));
     let metrics = Arc::new(Mutex::new(WorkloadMetrics::default()));
+    let workload_name = workload.lock().unwrap().name.clone();
 
     // See <https://docs.rs/tokio/latest/tokio/time/struct.Sleep.html#examples>
     let sleep = tokio::time::sleep_until(deadline);
@@ -272,6 +274,7 @@ async fn run_workload(
                 let workload = Arc::clone(&workload);
                 let remote = Arc::clone(&remote);
                 let metrics = Arc::clone(&metrics);
+                let workload_name = workload_name.clone();
 
                 let action = loop {
                     if let Some(action) = workload.lock().unwrap().next_action() {
@@ -284,9 +287,11 @@ async fn run_workload(
 
                 let multipart_config = multipart_config.clone();
                 let task = async move {
+                    gauge!("stresstest.concurrency" += 1usize, workload = workload_name.clone());
                     let start = Instant::now();
                     match action {
                         Action::Write(internal_id, payload) => {
+                            let timer = timer!("stresstest.write.duration", workload = workload_name.clone());
                             let file_size = payload.len;
                             let organization_id = workload.lock().unwrap().next_organization_id();
 
@@ -304,6 +309,9 @@ async fn run_workload(
 
                             match result {
                                 Ok(object_key) => {
+                                    timer.record();
+                                    count!("stresstest.bytes_written" += file_size, workload = workload_name.clone());
+                                    record!("stresstest.write.size" = file_size, workload = workload_name.clone());
                                     let external_id = (usecase, organization_id, object_key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
@@ -312,6 +320,7 @@ async fn run_workload(
                                     metrics.bytes_written += file_size;
                                 }
                                 Err(err) => {
+                                    drop(timer);
                                     print_error("writing object", &err);
                                     let mut metrics = metrics.lock().unwrap();
                                     metrics.write_failures += 1;
@@ -319,16 +328,20 @@ async fn run_workload(
                             }
                         }
                         Action::Read(internal_id, external_id, payload) => {
+                            let timer = timer!("stresstest.read.duration", workload = workload_name.clone());
                             let file_size = payload.len;
                             let (usecase, organization_id, object_key) = &external_id;
                             match remote.read(usecase, *organization_id, object_key, payload).await {
                                 Ok(_) => {
+                                    timer.record();
+                                    count!("stresstest.bytes_read" += file_size, workload = workload_name.clone());
                                     workload.lock().unwrap().push_file(internal_id, external_id);
                                     let mut metrics = metrics.lock().unwrap();
                                     metrics.read_timing.add(start.elapsed().as_secs_f64());
                                     metrics.bytes_read += file_size;
                                 }
                                 Err(err) => {
+                                    drop(timer);
                                     print_error("reading object", &err);
                                     let mut metrics = metrics.lock().unwrap();
                                     metrics.read_failures += 1;
@@ -336,14 +349,20 @@ async fn run_workload(
                             }
                         }
                         Action::Delete(external_id) => {
+                            let timer = timer!("stresstest.delete.duration", workload = workload_name.clone());
                             let (usecase, organization_id, object_key) = &external_id;
-                            if let Err(err) = remote.delete(usecase, *organization_id, object_key).await {
-                                print_error("deleting object", &err);
+                            match remote.delete(usecase, *organization_id, object_key).await {
+                                Ok(()) => timer.record(),
+                                Err(err) => {
+                                    drop(timer);
+                                    print_error("deleting object", &err);
+                                }
                             }
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }
                     }
+                    gauge!("stresstest.concurrency" -= 1usize, workload = workload_name);
                     drop(permit);
                 };
                 tokio::spawn(task);
@@ -388,6 +407,7 @@ async fn run_batch_workload(
 
     let workload = Arc::new(Mutex::new(workload));
     let metrics = Arc::new(Mutex::new(WorkloadMetrics::default()));
+    let workload_name = workload.lock().unwrap().name.clone();
 
     let sleep = tokio::time::sleep_until(deadline);
     tokio::pin!(sleep);
@@ -401,6 +421,7 @@ async fn run_batch_workload(
                 let workload = Arc::clone(&workload);
                 let remote = Arc::clone(&remote);
                 let metrics = Arc::clone(&metrics);
+                let workload_name = workload_name.clone();
 
                 let (payloads, usecase, org_id) = {
                     let mut wl = workload.lock().unwrap();
@@ -414,6 +435,7 @@ async fn run_batch_workload(
                 };
 
                 let task = async move {
+                    gauge!("stresstest.concurrency" += 1usize, workload = workload_name.clone());
                     let session = remote.session(&usecase, org_id);
                     let mut many = session.many();
 
@@ -446,8 +468,9 @@ async fn run_batch_workload(
 
                     metrics.lock().unwrap().many_requests += 1;
 
-                    let batch_start = Instant::now();
+                    let batch_timer = timer!("stresstest.batch.duration", workload = workload_name.clone());
                     let mut results = many.send().await;
+                    let mut batch_had_errors = false;
 
                     while let Some(result) = results.next().await {
                         match result {
@@ -455,6 +478,8 @@ async fn run_batch_workload(
                                 if let Some((internal_id, file_size)) =
                                     payload_info.remove(&key)
                                 {
+                                    count!("stresstest.bytes_written" += file_size, workload = workload_name.clone());
+                                    record!("stresstest.write.size" = file_size, workload = workload_name.clone());
                                     let external_id = (usecase.clone(), org_id, key);
                                     workload.lock().unwrap().push_file(internal_id, external_id);
 
@@ -466,10 +491,12 @@ async fn run_batch_workload(
                                 }
                             }
                             objectstore_client::OperationResult::Put(_, Err(err)) => {
+                                batch_had_errors = true;
                                 print_error("batch write", &err.into());
                                 metrics.lock().unwrap().write_failures += 1;
                             }
                             objectstore_client::OperationResult::Error(err) => {
+                                batch_had_errors = true;
                                 print_error("batch request", &err.into());
                                 metrics.lock().unwrap().write_failures += 1;
                             }
@@ -479,11 +506,18 @@ async fn run_batch_workload(
                         }
                     }
 
+                    let batch_elapsed = batch_timer.elapsed();
+                    if batch_had_errors {
+                        drop(batch_timer);
+                    } else {
+                        batch_timer.record();
+                    }
+
                     metrics
                         .lock()
                         .unwrap()
                         .batch_timing
-                        .add(batch_start.elapsed().as_secs_f64());
+                        .add(batch_elapsed.as_secs_f64());
 
                     // Remove the temp files now that the batch has been uploaded.
                     if let Err(err) = tokio::fs::remove_dir_all(&temp_dir).await {
@@ -493,6 +527,7 @@ async fn run_batch_workload(
                         );
                     }
 
+                    gauge!("stresstest.concurrency" -= 1usize, workload = workload_name);
                     drop(permit);
                 };
                 tokio::spawn(task);

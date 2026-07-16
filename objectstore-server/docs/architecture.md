@@ -93,6 +93,11 @@ Tokens must include:
 - **Permissions**: array of granted operations (`object.read`, `object.write`,
   `object.delete`)
 
+The token is supplied in the `x-os-auth` header (falling back to the standard
+`Authorization` header), optionally prefixed with `Bearer `. It may also be
+supplied as an `os_auth` query parameter, which lets callers embed a token
+directly in a URL. The header takes precedence when both are present.
+
 ### Key Management
 
 The [`PublicKeyDirectory`](auth::PublicKeyDirectory) maps key IDs (`kid`) to
@@ -107,6 +112,33 @@ On every operation, [`AuthAwareService`](auth::AuthAwareService) verifies that
 the token's scopes and permissions cover the requested
 [`ObjectContext`](objectstore_service::id::ObjectContext) and operation type.
 Scope values in the token can use wildcards to grant broad access.
+
+Its [`AuthContext`](auth::AuthContext) is one of `Disabled` (auth inactive — all
+operations permitted), `Preauthorized` (a valid pre-signed URL already authorized
+the exact read request), or `Scoped` (a verified JWT, checked per operation).
+
+### Pre-signed URLs
+
+Instead of a JWT, a request may authorize itself with a **pre-signed URL**: a
+key holder signs a canonical form of the request with its Ed25519 key and encodes
+the signature and parameters entirely in the query string (`os_sig`, `os_kid`,
+`os_timestamp`, `os_duration`). See [`objectstore_types::presign`] for the
+canonical form.
+
+When the extractor sees an `os_sig` query parameter it takes the pre-signed
+path instead of looking for a JWT:
+
+- Only `GET` and `HEAD` are currently supported.
+- The signature is verified against the request's canonical form using the
+  `os_kid` key from the [`PublicKeyDirectory`](auth::PublicKeyDirectory).
+- The signing key must have `ObjectRead` in its `max_permissions`.
+- The validity window (`os_timestamp` + `os_duration`) is enforced, capped at
+  **one week** so a URL cannot be minted to be effectively immortal.
+
+A verified pre-signed request yields an `AuthContext::Preauthorized`. The
+signature already binds the request's method, path, and parameters, so no scope
+or permission check is needed at operation time — the key's read permission was
+verified when the pre-signed URL was validated.
 
 ## Configuration
 
@@ -150,10 +182,13 @@ Limits can be set at multiple granularities:
 
 ### Bandwidth
 
-Bandwidth limiting uses an **exponentially weighted moving average** (EWMA) to
-estimate current throughput. Payload streams are wrapped in a
-`MeteredPayloadStream` that reports bytes consumed. When the estimated bandwidth
-exceeds the configured limit, new requests are rejected.
+Bandwidth limiting uses **debt-based GCRA** (Generic Cell Rate Algorithm)
+buckets that track a theoretical arrival time. Payload streams are wrapped in a
+`MeteredPayloadStream` that track consumed bytes. When accumulated debt exceeds
+the configured threshold, new requests are rejected.
+
+The `burst_ms` parameter controls how much transient overshoot is tolerated
+before rejection (in milliseconds). Defaults to `1000` (1 second).
 
 Like throughput, bandwidth limits can be set at multiple granularities:
 
@@ -161,13 +196,13 @@ Like throughput, bandwidth limits can be set at multiple granularities:
 - **Per-usecase**: a percentage of the global limit for each usecase
 - **Per-scope**: a percentage of the global limit for each scope value
 
-Each granularity maintains its own EWMA estimator. The `MeteredPayloadStream`
-increments all applicable accumulators (global + per-usecase + per-scope) for
-every chunk polled. For non-streamed payloads (e.g., batch INSERT where the
-size is known upfront), bytes are recorded directly via
-[`record_bandwidth`](state::Services::record_bandwidth).
+Each granularity maintains its own bucket. The `MeteredPayloadStream` charges
+all applicable buckets (global + per-usecase + per-scope) for every chunk
+polled. For non-streamed payloads, bytes are recorded directly.
 
-Rate-limited requests receive HTTP 429.
+Rate-limited requests receive HTTP 429. When `report_only` is enabled, all
+accounting and metrics remain active, but requests exceeding the limit are
+admitted instead of rejected.
 
 ### Web Concurrency Limit
 
@@ -210,20 +245,14 @@ metrics so that it remains available when the server is at capacity.
 
 ### Exposed Metrics
 
-#### EWMA Gauges
-
-Pre-smoothed rates, self-contained per scrape (no `irate()` arithmetic needed):
+#### Gauges
 
 | Resource | Utilization | Limit |
 |---|---|---|
-| Bandwidth | `objectstore_bandwidth_ewma` | `objectstore_bandwidth_limit` (only when `global_bps` is set) |
-| Throughput | `objectstore_throughput_ewma` | `objectstore_throughput_limit` (only when `global_rps` is set) |
 | HTTP concurrency | `objectstore_requests_in_flight` | `objectstore_requests_limit` |
 | Task concurrency | `objectstore_tasks_running` | `objectstore_tasks_limit` |
 
-Throughput uses an EWMA with a 50 ms tick and α = 0.2, matching the existing
-bandwidth estimator. The accumulator counts fully admitted requests (requests
-that pass all throughput checks).
+Limit gauges are emitted only when the corresponding limit is configured.
 
 #### Counters
 
@@ -235,30 +264,10 @@ KEDA queries for an unsmoothed, immediately responsive rate:
 | `objectstore_bytes_total` | Total bytes transferred since startup |
 | `objectstore_requests_total` | Total admitted requests since startup |
 
-### Example KEDA ScaledObject Triggers
+### Example KEDA ScaledObject Trigger
 
-#### Using EWMA gauges (backward-compatible)
-
-Scale on the highest utilization across all four resources:
-
-```yaml
-triggers:
-  - type: prometheus
-    metadata:
-      serverAddress: http://prometheus:9090
-      query: |
-        max(
-          objectstore_bandwidth_ewma / objectstore_bandwidth_limit
-          or objectstore_throughput_ewma / objectstore_throughput_limit
-          or objectstore_requests_in_flight / objectstore_requests_limit
-          or objectstore_tasks_running / objectstore_tasks_limit
-        )
-      threshold: "0.7"
-```
-
-#### Using counters with `irate()` (more responsive)
-
-Uses the last two scraped values for an instantaneous rate with no smoothing lag:
+Scale on the highest utilization across all resources using `irate()` for
+bandwidth/throughput rates:
 
 ```yaml
 triggers:

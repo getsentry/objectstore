@@ -67,7 +67,7 @@ where
         let mut headers = HeaderMap::new();
         headers.insert(
             CONTENT_TYPE,
-            format!("multipart/form-data; boundary=\"{}\"", &boundary_str)
+            format!("multipart/form-data; boundary=\"{}\"", boundary_str)
                 .parse()
                 .expect("valid header value, as we just defined it as \"os-boundary-X\" where X are hex digits"),
         );

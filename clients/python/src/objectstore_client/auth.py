@@ -1,8 +1,11 @@
+import base64
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Self
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from objectstore_client.scope import Scope
 
@@ -21,13 +24,13 @@ class Permission(StrEnum):
         return list(cls.__members__.values())
 
 
-class TokenGenerator:
+class SecretKey:
     """
-    A utility to generate auth tokens for Objectstore requests.
+    An EdDSA keypair used to authenticate with Objectstore.
 
-    Use this for internal services that have access to an EdDSA keypair. You can
-    pass a ``TokenGenerator`` directly to ``Client(token=...)`` and it will sign
-    a fresh JWT for each request.
+    Can generate JWTs for request-level auth and sign canonical forms for
+    pre-signed URLs. Pass a ``SecretKey`` directly to ``Client(token=...)``
+    and it will sign a fresh JWT for each request.
     """
 
     def __init__(
@@ -42,7 +45,7 @@ class TokenGenerator:
         self.expiry_seconds = expiry_seconds
         self.permissions = permissions if permissions is not None else Permission.max()
 
-    def sign_for_scope(
+    def token_for_scope(
         self,
         usecase: str,
         scope: Scope,
@@ -53,14 +56,13 @@ class TokenGenerator:
         Sign a JWT for the passed-in usecase and scope using the configured key
         information, expiry, and permissions.
 
-        When ``permissions`` is ``None``, the generator's default permissions are
-        used.  When provided, they override the defaults for this token only.
+        When ``permissions`` is ``None``, the default permissions are used.
+        When provided, they override the defaults for this token only.
 
-        When ``expiry_seconds`` is ``None``, the generator's default expiry is
-        used.
+        When ``expiry_seconds`` is ``None``, the default expiry is used.
 
         Raises ``ValueError`` if any requested permission is not granted to
-        this generator.
+        this key.
 
         The JWT is signed using EdDSA, so ``self.secret_key`` must be an EdDSA
         private key. ``self.kid`` is used by the Objectstore server to load the
@@ -71,7 +73,7 @@ class TokenGenerator:
             if escalated:
                 raise ValueError(
                     "requested permissions not granted to this "
-                    f"token generator: {sorted(escalated)}"
+                    f"secret key: {sorted(escalated)}"
                 )
 
         headers = {"kid": self.kid}
@@ -89,10 +91,28 @@ class TokenGenerator:
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
+    # Deprecated: use token_for_scope() instead.
+    sign_for_scope = token_for_scope
 
-TokenProvider = TokenGenerator | str
+    def signature_for_canonical_form(self, canonical_form: str) -> str:
+        """Signs a canonical request form with the Ed25519 private key.
+
+        Returns the base64url-encoded (no padding) signature, suitable as the
+        value of the ``os_sig`` query parameter.
+        """
+        key = load_pem_private_key(self.secret_key.encode(), password=None)
+        if not isinstance(key, Ed25519PrivateKey):
+            raise ValueError("pre-signed URLs require an Ed25519 private key")
+        signature = key.sign(canonical_form.encode())
+        return base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+
+
+TokenProvider = SecretKey | str
 """Authentication provider for Objectstore requests.
 
-Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
+Can be either a :class:`SecretKey` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
+
+# Deprecated: use SecretKey instead.
+TokenGenerator = SecretKey
