@@ -264,6 +264,7 @@ pub struct MetricsConfig {
     ///     foo: foo
     ///     bar: bar
     /// ```
+    #[serde(default)]
     pub tags: BTreeMap<String, String>,
 }
 

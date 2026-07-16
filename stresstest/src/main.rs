@@ -60,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    objectstore_metrics::init(&config.metrics)?;
+
     let remote = HttpRemote::new(&config.remote, token);
     let mut stresstest = Stresstest::new(remote)
         .duration(config.duration)
