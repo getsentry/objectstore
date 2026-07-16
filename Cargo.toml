@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["objectstore-*", "clients/rust", "stresstest", "bigtable-bench"]
+members = ["objectstore-*", "clients/rust", "stresstest", "bigtable-bench", "bulk-upload"]
 default-members = ["objectstore-server"]
 
 [profile.dev]

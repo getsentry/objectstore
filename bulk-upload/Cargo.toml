@@ -1,0 +1,19 @@
+[package]
+name = "bulk-upload"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Tool for bulk uploading files to Objectstore"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+argh = { workspace = true }
+futures = { workspace = true }
+indicatif = { workspace = true }
+objectstore-client = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
