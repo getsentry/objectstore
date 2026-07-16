@@ -109,7 +109,7 @@ impl ApiError {
     /// Call this exactly once wherever an `ApiError` is serialized into a client-visible
     /// response: standalone responses ([`IntoResponse`]) and batch response parts.
     pub fn capture(&self) {
-        // Tracked inside ServiceError's Drop implementation.
+        // Captured at the source in the service layer to prevent double-logging.
         if matches!(self, ApiError::Service(_)) {
             return;
         }

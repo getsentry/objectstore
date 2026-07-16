@@ -175,6 +175,11 @@ where
                 .await
                 .unwrap_or_else(|payload| Err(Error::panic(payload)));
 
+            if let Err(ref e) = result {
+                let error = e as &dyn std::error::Error;
+                objectstore_log::event_dyn!(e.level(), error, operation, "Task failed");
+            }
+
             objectstore_metrics::record!(
                 "service.task.duration" = start.elapsed(),
                 operation = operation,
@@ -182,7 +187,6 @@ where
             );
 
             let _ = tx.send(result);
-
             drop(guard);
             transaction.finish();
             drop(scope_guard);
@@ -190,7 +194,10 @@ where
         .bind_hub(new_hub),
     );
 
-    rx.await.map_err(|_| Error::Dropped)?
+    rx.await.map_err(|_| {
+        objectstore_log::error!(!!&Error::Dropped, operation, "Task failed");
+        Error::Dropped
+    })?
 }
 
 #[cfg(test)]

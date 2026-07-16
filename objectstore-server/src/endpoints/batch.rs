@@ -232,7 +232,10 @@ async fn got_to_part(
         .meter_stream(stream, context)
         .try_collect::<BytesMut>()
         .await
-        .map_err(|e| ApiError::Service(e.into()))?
+        .map_err(|e| {
+            objectstore_log::error!(!!&e, "failed to collect payload stream");
+            ApiError::Service(e.into())
+        })?
         .freeze();
 
     let mut metadata_headers = metadata.to_headers("").map_err(|err| {

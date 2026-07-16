@@ -215,20 +215,5 @@ impl Error {
     }
 }
 
-impl Drop for Error {
-    /// Captures the error when it goes out of scope.
-    ///
-    /// Every error is dropped exactly once, at whatever point its journey ends — after being
-    /// serialized into a response, when a buffered result is discarded because the client
-    /// disconnected, or inside a task whose receiver is gone. Capturing here guarantees that
-    /// every service error is reported exactly once, without requiring instrumentation at any
-    /// individual call site. The log level is derived from [`level`](Self::level), so errors
-    /// that are expected to be handled (e.g. client errors) stay below capture severity.
-    fn drop(&mut self) {
-        let error = &*self as &dyn std::error::Error;
-        objectstore_log::event_dyn!(self.level(), error, "service error");
-    }
-}
-
 /// Result type for service operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
