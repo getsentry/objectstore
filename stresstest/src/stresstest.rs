@@ -351,10 +351,13 @@ async fn run_workload(
                         Action::Delete(external_id) => {
                             let timer = timer!("stresstest.delete.duration", workload = workload_name.clone());
                             let (usecase, organization_id, object_key) = &external_id;
-                            if let Err(err) = remote.delete(usecase, *organization_id, object_key).await {
-                                print_error("deleting object", &err);
+                            match remote.delete(usecase, *organization_id, object_key).await {
+                                Ok(()) => timer.record(),
+                                Err(err) => {
+                                    drop(timer);
+                                    print_error("deleting object", &err);
+                                }
                             }
-                            timer.success().record();
                             let mut metrics = metrics.lock().unwrap();
                             metrics.delete_timing.add(start.elapsed().as_secs_f64());
                         }
@@ -467,6 +470,7 @@ async fn run_batch_workload(
 
                     let batch_timer = timer!("stresstest.batch.duration", workload = workload_name.clone());
                     let mut results = many.send().await;
+                    let mut batch_had_errors = false;
 
                     while let Some(result) = results.next().await {
                         match result {
@@ -487,10 +491,12 @@ async fn run_batch_workload(
                                 }
                             }
                             objectstore_client::OperationResult::Put(_, Err(err)) => {
+                                batch_had_errors = true;
                                 print_error("batch write", &err.into());
                                 metrics.lock().unwrap().write_failures += 1;
                             }
                             objectstore_client::OperationResult::Error(err) => {
+                                batch_had_errors = true;
                                 print_error("batch request", &err.into());
                                 metrics.lock().unwrap().write_failures += 1;
                             }
@@ -501,7 +507,11 @@ async fn run_batch_workload(
                     }
 
                     let batch_elapsed = batch_timer.elapsed();
-                    batch_timer.success().record();
+                    if batch_had_errors {
+                        drop(batch_timer);
+                    } else {
+                        batch_timer.record();
+                    }
 
                     metrics
                         .lock()
