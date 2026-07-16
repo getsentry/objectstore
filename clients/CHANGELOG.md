@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.15
+
+### New Features ✨
+
+- Read JWT from query params by @lcian in [#556](https://github.com/getsentry/objectstore/pull/556)
+
+### Documentation 📚
+
+- (py-client) Fix scope character set in Client.session docstring by @jan-auer in [#551](https://github.com/getsentry/objectstore/pull/551)
+- Mark pre-signed URLs as experimental by @lcian in [#557](https://github.com/getsentry/objectstore/pull/557)
+
 ## 0.1.14
 
 ### New Features ✨
