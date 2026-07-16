@@ -4,17 +4,16 @@ use std::net::SocketAddr;
 use axum::RequestExt;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use objectstore_log::tracing;
-use tokio::time::Instant;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints::is_internal_route;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::web::RequestCounter;
-use crate::web::metrics_body::MetricsBody;
+use crate::web::metrics_body::{EmitMetricsGuard, MetricsBody};
 use crate::web::sentry_body::SentryBody;
 
 /// The value for the `Server` HTTP header.
@@ -91,10 +90,9 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 /// tower layers so that `Hub::current()` returns the request-scoped hub.
 pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
     let hub = sentry::Hub::current();
-    let response = next.run(request).await;
-    let (parts, body) = response.into_parts();
-    let sentry_body = Body::new(SentryBody::new(hub, body));
-    Response::from_parts(parts, sentry_body)
+    next.run(request)
+        .await
+        .map(|body| Body::new(SentryBody::new(hub, body)))
 }
 
 /// A middleware that logs web request timings as metrics.
@@ -121,119 +119,26 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     match guard {
         Some(mut guard) => {
             guard.finish(response.status());
-            let (parts, body) = response.into_parts();
-            let body = Body::new(MetricsBody::new(guard, body));
-            Response::from_parts(parts, body)
+            response.map(|body| Body::new(MetricsBody::new(guard, body)))
         }
         None => response,
     }
 }
 
-/// How the response body streaming ended, which determines the `status` tag on the emitted
-/// metric when it differs from the status sent in the headers.
-#[derive(Clone, Copy)]
-enum BodyOutcome {
-    /// The body has not finished streaming. At drop time this means the client disconnected
-    /// mid-stream (or no response was produced at all), reported as `499`.
-    Pending,
-    /// The body streamed to completion; the real response status is reported.
-    Completed,
-    /// The body stream errored server-side, reported as `500`.
-    Errored,
-}
-
-/// Helper for [`emit_request_metrics`].
-///
-/// This tracks relevant generic request parameters and emits the `server.requests.duration`
-/// metric on drop. It is moved into the response body ([`MetricsBody`]) so timing spans the
-/// full response, including body streaming.
-///
-/// The `status` tag reflects how streaming ended (see [`BodyOutcome`]):
-/// - streamed to completion: the response status set via [`Self::finish`];
-/// - client disconnect mid-stream, or no response produced at all: `499` (nginx' non-standard
-///   "client closed request");
-/// - server-side stream error: `500`.
-pub struct EmitMetricsGuard {
-    route: String,
-    method: Method,
-    start: Instant,
-    status: Option<StatusCode>,
-    /// How body streaming ended. Updated via [`Self::mark_completed`] / [`Self::mark_errored`]
-    /// from [`MetricsBody`]; stays [`BodyOutcome::Pending`] if the body is dropped before it
-    /// finishes (client disconnect).
-    outcome: BodyOutcome,
-}
-
-impl EmitMetricsGuard {
-    fn new(route: &str, method: &Method, service: DownstreamService) -> Self {
-        objectstore_metrics::count!(
-            "server.requests",
-            route = route.to_owned(),
-            method = method.as_str().to_owned(),
-            service = service.to_string(),
-        );
-
-        Self {
-            route: route.to_owned(),
-            method: method.clone(),
-            start: Instant::now(),
-            status: None,
-            outcome: BodyOutcome::Pending,
-        }
-    }
-
-    /// Records the response status to tag the emitted metric with.
-    fn finish(&mut self, status: StatusCode) {
-        self.status = Some(status);
-    }
-
-    /// Marks the response body as having streamed to completion.
-    ///
-    /// Called by [`MetricsBody`] when the inner body reaches end-of-stream.
-    pub(crate) fn mark_completed(&mut self) {
-        self.outcome = BodyOutcome::Completed;
-    }
-
-    /// Marks the response body stream as having errored server-side.
-    ///
-    /// Called by [`MetricsBody`] when the inner body yields an error frame.
-    pub(crate) fn mark_errored(&mut self) {
-        self.outcome = BodyOutcome::Errored;
-    }
-}
-
-impl Drop for EmitMetricsGuard {
-    fn drop(&mut self) {
-        // The status tag depends on how streaming ended. A body still `Pending` at drop time
-        // never reached end-of-stream, meaning the client disconnected mid-stream (or no
-        // response was produced), reported as `499`. A server-side stream error is reported
-        // as `500`. Both override the status sent in the headers.
-        let status = match self.outcome {
-            BodyOutcome::Completed => self.status.map(|s| s.as_u16()).unwrap_or(499),
-            BodyOutcome::Errored => 500,
-            BodyOutcome::Pending => 499,
-        }
-        .to_string();
-        objectstore_metrics::record!(
-            "server.requests.duration" = self.start.elapsed(),
-            route = self.route.clone(),
-            method = self.method.as_str().to_owned(),
-            status = status,
-            // service omitted to limit cardinality
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     use axum::Router;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::body::{Body, Bytes};
+    use axum::http::{HeaderMap, Request, StatusCode};
     use axum::middleware::from_fn_with_state;
     use axum::response::IntoResponse;
     use axum::routing::get;
+    use http_body::Frame;
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
@@ -427,6 +332,49 @@ mod tests {
             yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"hello"));
         };
         let metric = capture_duration_metric(Body::from_stream(stream), true);
+        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
+    }
+
+    /// A body that needs no polling is completed when it is wrapped, because hyper may not poll
+    /// it before dropping it.
+    #[test]
+    fn empty_body_reports_real_status() {
+        let metric = capture_duration_metric(Body::empty(), false);
+        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
+    }
+
+    /// A buffered body completes after its final data frame, without requiring a subsequent poll
+    /// that returns `None`.
+    #[test]
+    fn buffered_body_reports_real_status() {
+        let metric = capture_duration_metric(Body::from("hello"), true);
+        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
+    }
+
+    /// Hyper treats trailers as terminal, so completion must be recorded when their frame is
+    /// yielded rather than waiting for an unobserved following `None`.
+    #[test]
+    fn trailers_report_real_status() {
+        struct TrailersBody(bool);
+
+        impl http_body::Body for TrailersBody {
+            type Data = Bytes;
+            type Error = Infallible;
+
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(if self.0 {
+                    None
+                } else {
+                    self.0 = true;
+                    Some(Ok(Frame::trailers(HeaderMap::new())))
+                })
+            }
+        }
+
+        let metric = capture_duration_metric(Body::new(TrailersBody(false)), true);
         assert!(metric.contains("status:200"), "unexpected metric: {metric}");
     }
 
