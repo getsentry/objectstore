@@ -79,7 +79,6 @@ impl ApiError {
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Batch(BatchError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
-                objectstore_log::error!(!!self, "error serializing batch response");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
 
@@ -89,10 +88,7 @@ impl ApiError {
             ApiError::Auth(AuthError::UnknownKey) => StatusCode::UNAUTHORIZED,
             ApiError::Auth(AuthError::UnsupportedPresignedMethod) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
-            ApiError::Auth(AuthError::InternalError(_)) => {
-                objectstore_log::error!(!!self, "auth system error");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Auth(AuthError::InternalError(_)) => StatusCode::INTERNAL_SERVER_ERROR,
 
             ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
@@ -102,21 +98,31 @@ impl ApiError {
             ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => {
-                objectstore_log::error!(!!self, "error handling request");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
-            ApiError::Internal(_) => {
-                objectstore_log::error!(!!self, "internal error");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Reports this error to error tracking if it indicates a server fault (5xx status).
+    ///
+    /// Call this exactly once wherever an `ApiError` is serialized into a client-visible
+    /// response: standalone responses ([`IntoResponse`]) and batch response parts.
+    pub fn capture(&self) {
+        // Captured at the source in the service layer to prevent double-logging.
+        if matches!(self, ApiError::Service(_)) {
+            return;
+        }
+
+        if self.status().is_server_error() {
+            objectstore_log::error!(!!self, "error handling request");
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.capture();
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()
     }

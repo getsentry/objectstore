@@ -232,7 +232,10 @@ async fn got_to_part(
         .meter_stream(stream, context)
         .try_collect::<BytesMut>()
         .await
-        .map_err(|e| ApiError::Service(e.into()))?
+        .map_err(|e| {
+            objectstore_log::error!(!!&e, "failed to collect payload stream");
+            ApiError::Service(e.into())
+        })?
         .freeze();
 
     let mut metadata_headers = metadata.to_headers("").map_err(|err| {
@@ -317,6 +320,9 @@ fn create_success_part(
 }
 
 fn create_error_part(idx: usize, error: &ApiError) -> Part {
+    // Capture the error explicitly, as it is not converted via `IntoResponse` here.
+    error.capture();
+
     let mut headers = HeaderMap::new();
     insert_index_header(&mut headers, idx);
     insert_status_header(&mut headers, error.status());

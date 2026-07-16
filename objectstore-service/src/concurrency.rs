@@ -193,7 +193,11 @@ where
         }
         .bind_hub(new_hub),
     );
-    rx.await.map_err(|_| Error::Dropped)?
+
+    rx.await.map_err(|_| {
+        objectstore_log::error!(!!&Error::Dropped, operation, "Task failed");
+        Error::Dropped
+    })?
 }
 
 #[cfg(test)]
