@@ -321,7 +321,7 @@ docs = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.1.14"
+version = "0.1.15"
 source = { editable = "clients/python" }
 dependencies = [
     { name = "filetype" },
