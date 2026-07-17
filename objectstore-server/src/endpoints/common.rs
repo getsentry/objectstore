@@ -101,10 +101,7 @@ impl ApiError {
                 | ServiceErrorKind::BackendTimeout
                 | ServiceErrorKind::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
                 ServiceErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
-                ServiceErrorKind::Internal => {
-                    objectstore_log::error!(!!self, "error handling request");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
+                ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             },
 
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
