@@ -14,7 +14,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
 };
-use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result, ResultExt};
+use crate::error::{Error, ErrorKind, Result, ResultExt};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -145,11 +145,9 @@ impl Backend for LocalFsBackend {
 
         let (content_range, stream) = match range {
             Some(byte_range) => {
-                let content_range = byte_range.resolve(payload_size).ok_or_else(|| {
-                    Error::from(RangeNotSatisfiableError {
-                        total: payload_size,
-                    })
-                })?;
+                let content_range = byte_range
+                    .resolve(payload_size)
+                    .ok_or_else(|| Error::range_not_satisfiable(payload_size))?;
                 let payload_start = metadata_line.len() as u64 + content_range.start;
                 reader.seek(std::io::SeekFrom::Start(payload_start)).await?;
                 let limited = reader.take(content_range.len());
@@ -822,11 +820,8 @@ mod tests {
             .unwrap();
 
         match backend.get_object(&id, Some(ByteRange::From(100))).await {
-            Err(err) if err.kind() == ErrorKind::RangeNotSatisfiable => {
-                let total = err
-                    .source()
-                    .and_then(|s| s.downcast_ref::<crate::error::RangeNotSatisfiableError>())
-                    .map(|e| e.total);
+            Err(err) if err.kind == ErrorKind::RangeNotSatisfiable => {
+                let total = err.range_total();
                 assert_eq!(total, Some(5));
             }
             Err(other) => panic!("expected RangeNotSatisfiable, got: {other:?}"),

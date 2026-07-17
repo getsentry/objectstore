@@ -4,9 +4,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use objectstore_service::error::{
-    Error as ServiceError, ErrorKind as ServiceErrorKind, RangeNotSatisfiableError,
-};
+use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ContentRange;
@@ -74,11 +72,13 @@ async fn object_get(
     let (metadata, content_range, stream) = match result {
         Ok(Some(result)) => result,
         Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
-        Err(ApiError::Service(ref e)) if e.kind() == ServiceErrorKind::RangeNotSatisfiable => {
-            let total = e
-                .source()
-                .and_then(|s| s.downcast_ref::<RangeNotSatisfiableError>())
-                .map_or(0, |r| r.total);
+        Err(ApiError::Service(e)) if e.kind == ServiceErrorKind::RangeNotSatisfiable => {
+            let Some(total) = e.range_total() else {
+                return Err(ApiError::Service(
+                    e.kind(ServiceErrorKind::Internal)
+                        .context("range error missing object size"),
+                ));
+            };
             let mut response = (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [(

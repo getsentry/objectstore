@@ -14,12 +14,12 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{ResponseExt, SendTraced};
+use super::extensions::{ResponseExt, SendTraced, classify_transport};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
 };
-use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result, ResultExt};
+use crate::error::{Error, ErrorKind, Result, ResultExt};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -367,7 +367,7 @@ fn insert_gcs_meta_header(
 /// into the backend error kinds below, so retryability is a simple kind check.
 fn error_is_retryable(error: &Error) -> bool {
     matches!(
-        error.kind(),
+        error.kind,
         ErrorKind::BackendTimeout | ErrorKind::BackendRateLimited | ErrorKind::BackendUnavailable
     )
 }
@@ -499,12 +499,9 @@ impl GcsBackend {
     async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
-                let resp = self
-                    .request(Method::GET, object_url.clone())
-                    .await?
-                    .send_traced()
-                    .await
-                    .context("GCS: get metadata request")?;
+                let request = self.request(Method::GET, object_url.clone()).await?;
+                let resp =
+                    classify_transport(request.send_traced().await, "GCS: get metadata request")?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
@@ -661,7 +658,7 @@ impl Backend for GcsBackend {
                 if let Some(r) = range {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
-                let resp = req.send_traced().await.context("GCS: get payload")?;
+                let resp = classify_transport(req.send_traced().await, "GCS: get payload")?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     let raw = resp
@@ -670,7 +667,7 @@ impl Backend for GcsBackend {
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
                     let err = match total {
-                        Some(total) => RangeNotSatisfiableError { total }.into(),
+                        Some(total) => Error::range_not_satisfiable(total),
                         None => Error::new(ErrorKind::Internal).context(format!(
                             "GCS: 416 response with invalid Content-Range: {raw:?}"
                         )),
@@ -720,12 +717,8 @@ impl Backend for GcsBackend {
         let object_url = self.object_url(id)?;
 
         self.with_retry("delete", || async {
-            let resp = self
-                .request(Method::DELETE, object_url.clone())
-                .await?
-                .send_traced()
-                .await
-                .context("GCS: delete object")?;
+            let request = self.request(Method::DELETE, object_url.clone()).await?;
+            let resp = classify_transport(request.send_traced().await, "GCS: delete object")?;
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {

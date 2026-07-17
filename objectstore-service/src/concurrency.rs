@@ -255,7 +255,7 @@ mod tests {
         let _permit = limiter.try_acquire().unwrap();
 
         let result = limiter.try_acquire();
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::AtCapacity);
+        assert_eq!(result.unwrap_err().kind, ErrorKind::AtCapacity);
     }
 
     #[test]

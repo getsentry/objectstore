@@ -91,7 +91,7 @@ impl ApiError {
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => StatusCode::INTERNAL_SERVER_ERROR,
 
-            ApiError::Service(error) => match error.kind() {
+            ApiError::Service(error) => match error.kind {
                 ServiceErrorKind::ClientStream | ServiceErrorKind::InvalidInput => {
                     StatusCode::BAD_REQUEST
                 }

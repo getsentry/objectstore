@@ -19,7 +19,7 @@ use super::common::{
     DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
     TieredMetadata, TieredWrite, Tombstone,
 };
-use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -138,7 +138,7 @@ impl super::common::Backend for InMemoryBackend {
                     Some(range) => {
                         let content_range = range
                             .resolve(total)
-                            .ok_or_else(|| Error::from(RangeNotSatisfiableError { total }))?;
+                            .ok_or_else(|| Error::range_not_satisfiable(total))?;
                         let sliced =
                             bytes.slice(content_range.start as usize..=content_range.end as usize);
                         (Some(content_range), sliced)
@@ -195,7 +195,7 @@ impl HighVolumeBackend for InMemoryBackend {
                     Some(range) => {
                         let content_range = range
                             .resolve(total)
-                            .ok_or_else(|| Error::from(RangeNotSatisfiableError { total }))?;
+                            .ok_or_else(|| Error::range_not_satisfiable(total))?;
                         let sliced =
                             bytes.slice(content_range.start as usize..=content_range.end as usize);
                         (Some(content_range), sliced)

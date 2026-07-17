@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn at_capacity_when_no_permits() {
         let service = make_service_with_limit(0);
-        assert!(matches!(service.stream(), Err(e) if e.kind() == ErrorKind::AtCapacity));
+        assert!(matches!(service.stream(), Err(e) if e.kind == ErrorKind::AtCapacity));
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
 
         // Permit is held — stream() must fail immediately with AtCapacity.
         assert!(
-            matches!(service.stream(), Err(e) if e.kind() == ErrorKind::AtCapacity),
+            matches!(service.stream(), Err(e) if e.kind == ErrorKind::AtCapacity),
             "expected AtCapacity when all permits are held"
         );
 

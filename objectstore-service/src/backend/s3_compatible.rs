@@ -9,11 +9,11 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
-use super::extensions::{ResponseExt, SendTraced};
+use super::extensions::{ResponseExt, SendTraced, classify_transport};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
-use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result, ResultExt};
+use crate::error::{Error, ErrorKind, Result, ResultExt};
 use crate::id::ObjectId;
 use crate::stream::ClientStream;
 
@@ -169,10 +169,8 @@ where
         if let Some(r) = range {
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
-        let response = builder
-            .send_traced()
-            .await
-            .context("S3: failed to send request")?;
+        let response =
+            classify_transport(builder.send_traced().await, "S3: failed to send request")?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -187,7 +185,7 @@ where
                 .and_then(|v| v.to_str().ok());
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
             let err = match total {
-                Some(total) => RangeNotSatisfiableError { total }.into(),
+                Some(total) => Error::range_not_satisfiable(total),
                 None => Error::new(ErrorKind::Internal).context(format!(
                     "S3: 416 response with invalid Content-Range: {raw:?}"
                 )),
@@ -342,12 +340,11 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
-        let response = self
-            .request(Method::DELETE, self.object_url(id))
-            .await?
-            .send_traced()
-            .await
-            .context("S3: failed to send delete request")?;
+        let request = self.request(Method::DELETE, self.object_url(id)).await?;
+        let response = classify_transport(
+            request.send_traced().await,
+            "S3: failed to send delete request",
+        )?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {

@@ -574,9 +574,12 @@ mod tests {
         let Err(err) = result else {
             panic!("expected panic error");
         };
-        assert_eq!(err.kind(), ErrorKind::Internal);
-        let msg = err.context_str().unwrap_or_default();
-        assert!(msg.contains("intentional panic in get_object"), "{msg}");
+        assert_eq!(err.kind, ErrorKind::Internal);
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("intentional panic in get_object"),
+            "{message}"
+        );
     }
 
     /// In-memory backend with optional synchronization for `put_object`.
@@ -714,7 +717,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(&result, Err(e) if e.kind() == ErrorKind::AtCapacity),
+            matches!(&result, Err(e) if e.kind == ErrorKind::AtCapacity),
             "expected AtCapacity, got {result:?}"
         );
 
@@ -770,13 +773,13 @@ mod tests {
         let Err(err) = service.get_object(id.clone(), None).await else {
             panic!("expected panic error");
         };
-        assert_eq!(err.kind(), ErrorKind::Internal);
-        assert!(err.context_str().unwrap_or_default().contains("panicked"));
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(format!("{err:#}").contains("panicked"));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
         let result = service.get_object(id, None).await;
         assert!(
-            !matches!(&result, Err(e) if e.kind() == ErrorKind::AtCapacity),
+            !matches!(&result, Err(e) if e.kind == ErrorKind::AtCapacity),
             "permit was not released after panic"
         );
     }

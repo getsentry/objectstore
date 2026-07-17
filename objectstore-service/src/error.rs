@@ -1,15 +1,15 @@
 //! Error types for service and backend operations.
 //!
-//! [`Error`] is an `anyhow`-shaped struct: it carries an [`ErrorKind`] (the
-//! *classification* of the failure, independent of any HTTP semantics), an
-//! optional boxed [`source`](Error::source) error, and an optional
-//! [`context`](Error::context) message. [`Result`] is the corresponding alias.
+//! [`Error`] combines an [`ErrorKind`] (the *classification* of the failure,
+//! independent of any HTTP semantics) with an [`anyhow::Error`] diagnostic.
+//! The diagnostic preserves the original error and every context frame, while
+//! the kind can be changed independently. [`Result`] is the corresponding alias.
 //!
 //! The default path is `?`: a foreign error converts via one of the [`From`]
-//! impls into an [`ErrorKind::Internal`] error carrying the original as its
-//! source. To override the classification or attach context without a
-//! `map_err`, use the [`ResultExt`] extension trait's [`kind`](ResultExt::kind)
-//! and [`context`](ResultExt::context) methods.
+//! impls into an [`ErrorKind::Internal`] error carrying the original diagnostic.
+//! To override the classification or attach context without a `map_err`, use the
+//! [`ResultExt`] extension trait's [`kind`](ResultExt::kind) and
+//! [`context`](ResultExt::context) methods.
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -52,8 +52,6 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Returns a short human-readable description of this kind.
-    ///
-    /// Used as the [`Error`] message when no explicit context is attached.
     fn as_str(self) -> &'static str {
         match self {
             ErrorKind::ClientStream => "client stream error",
@@ -79,29 +77,60 @@ impl fmt::Display for ErrorKind {
 ///
 /// See the [module docs](self) for the overall design. Construct one either by
 /// converting a foreign error (via `?` or [`ResultExt`]) or with [`Error::new`]
-/// for source-less failures.
+/// for failures without an underlying error.
 pub struct Error {
-    pub(crate) kind: ErrorKind,
-    pub(crate) source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
-    pub(crate) context: Option<Cow<'static, str>>,
+    /// The classification of this error.
+    pub kind: ErrorKind,
+    /// The diagnostic error and its context chain.
+    pub inner: anyhow::Error,
 }
 
 impl Error {
-    /// Creates a source-less error of the given kind.
+    /// Creates an error of the given kind using the kind's default message.
     ///
-    /// Attach a message with [`context`](Self::context).
+    /// Attach a more specific message with [`context`](Self::context).
     pub fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
-            source: None,
-            context: None,
+            inner: anyhow::Error::msg(kind.as_str()),
         }
     }
 
-    /// Attaches a context message to this error, replacing any existing one.
+    fn from_source<E>(kind: ErrorKind, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind,
+            inner: anyhow::Error::new(source),
+        }
+    }
+
+    /// Creates a range error carrying the object's total size.
+    pub fn range_not_satisfiable(total: u64) -> Self {
+        Self::from_source(
+            ErrorKind::RangeNotSatisfiable,
+            RangeNotSatisfiableError { total },
+        )
+    }
+
+    /// Returns the object size carried by a range error, if present.
+    pub fn range_total(&self) -> Option<u64> {
+        self.downcast_ref::<RangeNotSatisfiableError>()
+            .map(|error| error.total)
+    }
+
+    /// Attaches another context frame to this error.
     #[must_use]
     pub fn context(mut self, context: impl Into<Cow<'static, str>>) -> Self {
-        self.context = Some(context.into());
+        self.inner = self.inner.context(context.into());
+        self
+    }
+
+    /// Changes this error's classification without changing its diagnostic.
+    #[must_use]
+    pub fn kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -117,26 +146,22 @@ impl Error {
         Self::new(ErrorKind::Internal).context(format!("service task panicked: {msg}"))
     }
 
-    /// Returns the classification of this error.
-    pub fn kind(&self) -> ErrorKind {
-        self.kind
+    /// Iterates over the complete diagnostic chain, outermost context first.
+    pub fn chain(&self) -> anyhow::Chain<'_> {
+        self.inner.chain()
     }
 
-    /// Returns the underlying source error, if any.
-    pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|s| s as &(dyn std::error::Error + 'static))
-    }
-
-    /// Returns the context message, if any.
-    pub fn context_str(&self) -> Option<&str> {
-        self.context.as_deref()
+    /// Downcasts any error or context value in the diagnostic chain.
+    pub fn downcast_ref<E>(&self) -> Option<&E>
+    where
+        E: fmt::Display + fmt::Debug + Send + Sync + 'static,
+    {
+        self.inner.downcast_ref()
     }
 
     /// Returns the appropriate log level for this error.
     pub fn level(&self) -> Level {
-        match self.kind() {
+        match self.kind {
             ErrorKind::ClientStream | ErrorKind::InvalidInput | ErrorKind::RangeNotSatisfiable => {
                 Level::DEBUG
             }
@@ -151,58 +176,28 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.context {
-            Some(context) => f.write_str(context),
-            None => fmt::Display::fmt(&self.kind, f),
-        }
+        fmt::Display::fmt(&self.inner, f)
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut dbg = f.debug_struct("Error");
-        dbg.field("kind", &self.kind);
-        if let Some(context) = &self.context {
-            dbg.field("context", context);
-        }
-        if let Some(source) = &self.source {
-            dbg.field("source", source);
-        }
-        dbg.finish()
+        fmt::Debug::fmt(&self.inner, f)
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|s| s as &(dyn std::error::Error + 'static))
+        let inner: &(dyn std::error::Error + Send + Sync + 'static) = self.inner.as_ref();
+        inner.source()
     }
 }
 
-/// The object's total size, carried as the [`source`](Error::source) of an
+/// The object's total size, carried in the diagnostic chain of an
 /// [`ErrorKind::RangeNotSatisfiable`] error.
-///
-/// Construct one at the call site and convert it with `?`/`.into()`: the
-/// [`From`] impl below classifies it as [`ErrorKind::RangeNotSatisfiable`]. The
-/// API layer downcasts back to this to build the `Content-Range` header of a
-/// `416 Range Not Satisfiable` response.
 #[derive(Debug)]
-pub struct RangeNotSatisfiableError {
-    /// Total size of the object in bytes.
-    pub total: u64,
-}
-
-/// Converts into an [`ErrorKind::RangeNotSatisfiable`] error, preserving the
-/// total size as a downcastable source.
-impl From<RangeNotSatisfiableError> for Error {
-    fn from(source: RangeNotSatisfiableError) -> Self {
-        Self {
-            kind: ErrorKind::RangeNotSatisfiable,
-            source: Some(Box::new(source)),
-            context: None,
-        }
-    }
+struct RangeNotSatisfiableError {
+    total: u64,
 }
 
 impl fmt::Display for RangeNotSatisfiableError {
@@ -218,17 +213,13 @@ impl fmt::Display for RangeNotSatisfiableError {
 impl std::error::Error for RangeNotSatisfiableError {}
 
 /// Generates `From<T> for Error` impls that classify `T` as [`ErrorKind::Internal`]
-/// and store it as the source.
+/// and preserve it in the diagnostic chain.
 macro_rules! impl_internal_from {
     ($($ty:ty),* $(,)?) => {
         $(
             impl From<$ty> for Error {
                 fn from(source: $ty) -> Self {
-                    Self {
-                        kind: ErrorKind::Internal,
-                        source: Some(Box::new(source)),
-                        context: None,
-                    }
+                    Self::from_source(ErrorKind::Internal, source)
                 }
             }
         )*
@@ -253,17 +244,13 @@ impl_internal_from!(
     bigtable_rs::bigtable::Error,
 );
 
-/// Converts an [`anyhow::Error`] into an [`ErrorKind::Internal`] error, preserving
-/// its cause chain as the source.
-///
-/// `anyhow::Error` does not implement [`std::error::Error`], so it cannot go through
-/// the `impl_internal_from!` macro; it converts into a boxed error instead.
+/// Converts an [`anyhow::Error`] into an [`ErrorKind::Internal`] error without
+/// altering its diagnostic chain.
 impl From<anyhow::Error> for Error {
-    fn from(source: anyhow::Error) -> Self {
+    fn from(inner: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::Internal,
-            source: Some(source.into()),
-            context: None,
+            inner,
         }
     }
 }
@@ -271,70 +258,85 @@ impl From<anyhow::Error> for Error {
 /// Converts a client-stream fault into an [`ErrorKind::ClientStream`] error.
 impl From<ClientError> for Error {
     fn from(source: ClientError) -> Self {
-        Self {
-            kind: ErrorKind::ClientStream,
-            source: Some(Box::new(source)),
-            context: None,
-        }
+        Self::from_source(ErrorKind::ClientStream, source)
     }
 }
 
 /// Converts a metadata parse error into an [`ErrorKind::InvalidInput`] error.
 impl From<objectstore_types::metadata::Error> for Error {
     fn from(source: objectstore_types::metadata::Error) -> Self {
-        Self {
-            kind: ErrorKind::InvalidInput,
-            source: Some(Box::new(source)),
-            context: None,
-        }
+        Self::from_source(ErrorKind::InvalidInput, source)
     }
 }
 
 /// Converts an invalid upload id into an [`ErrorKind::InvalidInput`] error.
 impl From<objectstore_types::multipart::InvalidUploadId> for Error {
     fn from(source: objectstore_types::multipart::InvalidUploadId) -> Self {
-        Self {
-            kind: ErrorKind::InvalidInput,
-            source: Some(Box::new(source)),
-            context: None,
-        }
+        Self::from_source(ErrorKind::InvalidInput, source)
     }
 }
 
 /// Extension trait for reclassifying and annotating a [`Result`]'s error as an
 /// [`Error`], without a `map_err`.
-///
-/// Both methods convert the existing error into an [`Error`] via its [`From`]
-/// impl (foreign errors are boxed as the source with [`ErrorKind::Internal`];
-/// an existing [`Error`] passes through unchanged), then override the relevant
-/// field. Because the conversion of an existing [`Error`] is the identity, the
-/// source is only ever boxed once — chaining `.kind(k).context(c)` does not
-/// double-wrap.
 pub trait ResultExt<T> {
-    /// Sets the [`ErrorKind`] of the error.
+    /// Sets the [`ErrorKind`] of the error without changing its diagnostic.
     fn kind(self, kind: ErrorKind) -> Result<T, Error>;
 
-    /// Attaches a context message to the error.
+    /// Attaches another context frame to the error.
     fn context(self, context: impl Into<Cow<'static, str>>) -> Result<T, Error>;
 }
 
 impl<T, E: Into<Error>> ResultExt<T> for Result<T, E> {
     fn kind(self, kind: ErrorKind) -> Result<T, Error> {
-        self.map_err(|e| {
-            let mut err = e.into();
-            err.kind = kind;
-            err
-        })
+        self.map_err(|error| error.into().kind(kind))
     }
 
     fn context(self, context: impl Into<Cow<'static, str>>) -> Result<T, Error> {
-        self.map_err(|e| {
-            let mut err = e.into();
-            err.context = Some(context.into());
-            err
-        })
+        self.map_err(|error| error.into().context(context))
     }
 }
 
 /// Result type for service operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_accumulates_without_changing_kind() {
+        let error = Err::<(), _>(std::io::Error::other("root cause"))
+            .context("reading configuration")
+            .kind(ErrorKind::BackendUnavailable)
+            .context("starting backend")
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::BackendUnavailable);
+        assert_eq!(error.to_string(), "starting backend");
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(
+            error.chain().map(ToString::to_string).collect::<Vec<_>>(),
+            ["starting backend", "reading configuration", "root cause",]
+        );
+        assert!(format!("{error:?}").contains("Caused by:"));
+    }
+
+    #[test]
+    fn range_total_survives_context() {
+        let error = Error::range_not_satisfiable(42).context("reading object range");
+
+        assert_eq!(error.kind, ErrorKind::RangeNotSatisfiable);
+        assert_eq!(error.range_total(), Some(42));
+    }
+
+    #[test]
+    fn source_skips_displayed_outer_message() {
+        let error = Error::from(std::io::Error::other("root")).context("outer");
+
+        assert_eq!(error.to_string(), "outer");
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "root"
+        );
+    }
+}

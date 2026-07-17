@@ -47,7 +47,7 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
-use crate::error::{Error, ErrorKind, RangeNotSatisfiableError, Result, ResultExt};
+use crate::error::{Error, ErrorKind, Result, ResultExt};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::stream::{ChunkedBytes, ClientStream};
@@ -1283,7 +1283,7 @@ fn apply_range(payload: Bytes, range: Option<ByteRange>) -> Result<(Option<Conte
     let total = payload.len() as u64;
     let content_range = byte_range
         .resolve(total)
-        .ok_or_else(|| Error::from(RangeNotSatisfiableError { total }))?;
+        .ok_or_else(|| Error::range_not_satisfiable(total))?;
 
     let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
     Ok((Some(content_range), sliced))
@@ -1858,11 +1858,11 @@ mod tests {
         // Legacy reads must error rather than leak tombstone data.
         assert!(matches!(
             backend.get_object(&hv_id, None).await,
-            Err(e) if e.kind() == ErrorKind::Internal
+            Err(e) if e.kind == ErrorKind::Internal
         ));
         assert!(matches!(
             backend.get_metadata(&hv_id).await,
-            Err(e) if e.kind() == ErrorKind::Internal
+            Err(e) if e.kind == ErrorKind::Internal
         ));
 
         // Idempotent retry: retry with the same target succeeds
@@ -2338,11 +2338,8 @@ mod tests {
         let id = put_range_test_object(&backend).await?;
 
         match backend.get_object(&id, Some(ByteRange::From(100))).await {
-            Err(err) if err.kind() == ErrorKind::RangeNotSatisfiable => {
-                let total = err
-                    .source()
-                    .and_then(|s| s.downcast_ref::<crate::error::RangeNotSatisfiableError>())
-                    .map(|e| e.total);
+            Err(err) if err.kind == ErrorKind::RangeNotSatisfiable => {
+                let total = err.range_total();
                 assert_eq!(total, Some(22));
             }
             Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
