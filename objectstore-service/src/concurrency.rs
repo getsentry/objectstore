@@ -72,6 +72,10 @@ impl ConcurrencyLimiter {
     /// configured queue timeout for an execution permit to become
     /// available. Returns [`Error::AtCapacity`] on timeout.
     pub async fn acquire(&self) -> Result<ConcurrencyPermit> {
+        if self.tasks_total == 0 {
+            return Err(Error::AtCapacity);
+        }
+
         let queue_permit = self
             .queue
             .clone()
@@ -529,6 +533,16 @@ mod tests {
         assert_eq!(limiter.queued_permits(), 0);
         let _p2 = limiter.try_acquire_many(1).unwrap();
         assert_eq!(limiter.queued_permits(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_rejects_immediately_when_max_is_zero() {
+        let limiter = ConcurrencyLimiter::new(0).with_queue(5, Duration::from_secs(10));
+
+        let start = tokio::time::Instant::now();
+        let result = limiter.acquire().await;
+        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]
