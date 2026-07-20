@@ -201,11 +201,20 @@ Multipart operations share the same concurrency limiter as regular operations.
 ## Streaming Concurrency
 
 The [`streaming`](streaming) module provides [`StreamExecutor`](streaming::StreamExecutor)
-for running a stream of operations concurrently within a bounded window. It is
-intended for efficient handling of batch requests, where multiple operations
-arrive together and should be dispatched in parallel rather than sequentially.
-See the [module documentation](streaming) for the window formula, permit
-reservation, lazy pulling, memory bounds, and concurrency model.
+for running a stream of operations concurrently. It is intended for efficient
+handling of batch requests, where multiple operations arrive together and should
+be dispatched in parallel rather than sequentially.
+
+Each streaming operation acquires a "bulk" permit. These permits set a safe
+operating point: below this level there is little-to-no performance degradation,
+leaving room for more tasks to be admitted via the queue before rejection is
+necessary. The percentage is configurable.
+
+Normal requests never touch the bulk semaphore, so they can always use 100% of
+permits when no bulk operations are running. Tokio's FIFO semaphore fairness
+ensures parked bulk operations cannot be starved by sustained normal traffic.
+
+See the [module documentation](streaming) for details.
 
 ## Further Plans
 

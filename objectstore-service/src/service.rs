@@ -14,7 +14,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -73,7 +73,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
-    concurrency: ConcurrencyLimiter,
+    pub(crate) concurrency: ConcurrencyLimiter,
 }
 
 impl StorageService {
@@ -100,11 +100,6 @@ impl StorageService {
         self
     }
 
-    /// Returns the number of backend task slots currently available.
-    pub fn tasks_available(&self) -> u32 {
-        self.concurrency.available_permits()
-    }
-
     /// Returns the number of backend tasks currently running.
     pub fn tasks_running(&self) -> u32 {
         self.concurrency.used_permits()
@@ -117,45 +112,38 @@ impl StorageService {
 
     /// Prepares to stream multiple operations concurrently against this service.
     ///
-    /// Operations are executed concurrently up to a window derived from the
-    /// service's current capacity. The permits for that window are reserved
-    /// upfront — if the service is at capacity, this returns
-    /// [`Error::AtCapacity`] immediately before any operations are read.
-    pub fn stream(&self) -> Result<StreamExecutor> {
-        let available = self.tasks_available();
-        let window = available.div_ceil(10);
-
-        let acquire_result = match window {
-            0 => Err(Error::AtCapacity),
-            _ => self.concurrency.try_acquire_many(window),
-        };
-        let reservation = acquire_result.inspect_err(|_| {
-            objectstore_metrics::count!("service.concurrency.rejected");
-            objectstore_log::warn!("Request rejected: service at capacity");
-        })?;
-
-        Ok(StreamExecutor {
+    /// Each operation acquires a bulk permit individually via
+    /// [`ConcurrencyLimiter::acquire_bulk`], which caps bulk traffic at a
+    /// configurable percentage of execution slots while allowing operations
+    /// to queue for permits instead of requiring upfront reservation.
+    pub fn stream(&self) -> StreamExecutor {
+        StreamExecutor {
             backend: Arc::clone(&self.inner),
-            window,
-            reservation,
-        })
+            concurrency: self.concurrency.clone(),
+        }
     }
 
     /// Starts background processes for the storage service.
     ///
     /// Spawns a task that emits concurrency gauges once per second:
     /// `service.concurrency.in_use`, `service.concurrency.queued`,
-    /// `service.concurrency.limit`, and `service.concurrency.queue_limit`.
+    /// `service.concurrency.bulk_in_use`, `service.concurrency.limit`,
+    /// `service.concurrency.queue_limit`, and
+    /// `service.concurrency.bulk_limit`.
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
         objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());
         objectstore_metrics::gauge!("service.concurrency.queue_limit" = concurrency.total_queue());
+        objectstore_metrics::gauge!("service.concurrency.bulk_limit" = concurrency.total_bulk());
 
         tokio::spawn(async move {
             concurrency
                 .run_emitter(|stats| async move {
                     objectstore_metrics::gauge!("service.concurrency.in_use" = stats.in_use);
                     objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
+                    objectstore_metrics::gauge!(
+                        "service.concurrency.bulk_in_use" = stats.bulk_in_use
+                    );
                 })
                 .await;
         });

@@ -548,6 +548,21 @@ pub struct Service {
     /// `1s`
     #[serde(with = "humantime_serde")]
     pub concurrency_queue_timeout: Duration,
+
+    /// Percentage of `max_concurrency` available to bulk operations
+    /// (e.g. parallelized batch requests).
+    ///
+    /// This sets a safe operating point: below this level there is
+    /// little-to-no performance degradation, leaving room for more tasks
+    /// to be admitted via the queue before rejection is necessary.
+    ///
+    /// Clamped to 0..=100. At 100, bulk operations can use all execution
+    /// slots. Lower values leave headroom for single-object requests.
+    ///
+    /// # Default
+    ///
+    /// `60`
+    pub bulk_concurrency_pct: u32,
 }
 
 impl Default for Service {
@@ -556,6 +571,7 @@ impl Default for Service {
             max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
             concurrency_queue: 0,
             concurrency_queue_timeout: Duration::from_secs(1),
+            bulk_concurrency_pct: 60,
         }
     }
 }
