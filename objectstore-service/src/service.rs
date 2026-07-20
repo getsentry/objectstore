@@ -163,15 +163,14 @@ impl StorageService {
     /// `service.concurrency.limit`, and `service.concurrency.queue_limit`.
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
-        let limit = concurrency.total_permits();
-        let queue_limit = concurrency.total_queue();
+        objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());
+        objectstore_metrics::gauge!("service.concurrency.queue_limit" = concurrency.total_queue());
+
         tokio::spawn(async move {
             concurrency
-                .run_emitter(|in_use, queued| async move {
-                    objectstore_metrics::gauge!("service.concurrency.in_use" = in_use);
-                    objectstore_metrics::gauge!("service.concurrency.queued" = queued);
-                    objectstore_metrics::gauge!("service.concurrency.limit" = limit);
-                    objectstore_metrics::gauge!("service.concurrency.queue_limit" = queue_limit);
+                .run_emitter(|stats| async move {
+                    objectstore_metrics::gauge!("service.concurrency.in_use" = stats.in_use);
+                    objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
                 })
                 .await;
         });
@@ -179,10 +178,10 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::AtCapacity`] if the concurrency limit or queue is
-    /// exhausted, [`Error::Panic`] if the spawned task panics (the panic
-    /// message is captured for diagnostics), or [`Error::Dropped`] if the
-    /// task is dropped before sending its result.
+    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
+    /// [`Error::Panic`] if the spawned task panics (the panic message
+    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
+    /// dropped before sending its result.
     ///
     /// Emits `service.task.start` (counter) after acquiring a permit and
     /// `service.task.duration` (distribution) when the task completes, tagged

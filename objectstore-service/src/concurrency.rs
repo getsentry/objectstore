@@ -21,6 +21,19 @@ use crate::error::{Error, Result};
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Snapshot of concurrency limiter state.
+///
+/// Passed to the callback registered via
+/// [`ConcurrencyLimiter::run_emitter`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug)]
+pub struct Stats {
+    /// Number of execution permits currently held.
+    pub in_use: u32,
+    /// Number of callers waiting in the queue for a permit.
+    pub queued: u32,
+}
+
 /// Limits concurrent backend operations and tracks in-flight count.
 ///
 /// Permits are acquired with [`acquire`](Self::acquire) or
@@ -161,19 +174,27 @@ impl ConcurrencyLimiter {
         }
     }
 
+    /// Returns a snapshot of the current counts.
+    pub fn stats(&self) -> Stats {
+        Stats {
+            in_use: self.used_permits(),
+            queued: self.queued_permits(),
+        }
+    }
+
     /// Periodically calls `emit` with the current in-use and queued counts.
     ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
     pub async fn run_emitter<F, Fut>(&self, mut emit: F)
     where
-        F: FnMut(u32, u32) -> Fut,
+        F: FnMut(Stats) -> Fut,
         Fut: Future<Output = ()>,
     {
         let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
         loop {
             ticker.tick().await;
-            emit(self.used_permits(), self.queued_permits()).await;
+            emit(self.stats()).await;
         }
     }
 }
@@ -350,12 +371,12 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |in_use, queued| {
+        let emitter = limiter.run_emitter(move |stats| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {
-                in_use_ref.store(in_use, Ordering::Relaxed);
-                queued_ref.store(queued, Ordering::Relaxed);
+                in_use_ref.store(stats.in_use, Ordering::Relaxed);
+                queued_ref.store(stats.queued, Ordering::Relaxed);
             }
         });
 
@@ -559,12 +580,12 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |in_use, queued| {
+        let emitter = limiter.run_emitter(move |stats| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {
-                in_use_ref.store(in_use, Ordering::Relaxed);
-                queued_ref.store(queued, Ordering::Relaxed);
+                in_use_ref.store(stats.in_use, Ordering::Relaxed);
+                queued_ref.store(stats.queued, Ordering::Relaxed);
             }
         });
 
