@@ -232,9 +232,9 @@ Direct 503 rejection is preferred over readiness-based backpressure:
 Beyond rate limiting and the web concurrency limit, the
 [`StorageService`](objectstore_service::StorageService) enforces a second
 layer of backpressure through a concurrency limit on in-flight backend
-operations, configured via `service.max_concurrency`. When exceeded, requests
-receive HTTP 429. See the [service architecture docs](objectstore_service) for
-details.
+operations, configured via `service.max_concurrency` and related options.
+When exceeded, requests receive HTTP 429. See the [service architecture
+docs](objectstore_service) for details.
 
 ## KEDA Metrics
 

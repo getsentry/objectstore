@@ -34,8 +34,8 @@ pub type DeleteResponse = ();
 
 /// Default concurrency limit for [`StorageService`].
 ///
-/// This value is used when no explicit limit is set via
-/// [`StorageService::with_concurrency_limit`].
+/// This value is used when no explicit limiter is set via
+/// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 
 /// Asynchronous storage service wrapping a single [`Backend`].
@@ -66,11 +66,10 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 ///
 /// # Concurrency Limit
 ///
-/// A semaphore caps the number of in-flight backend operations. The limit is
-/// configured via [`with_concurrency_limit`](StorageService::with_concurrency_limit);
-/// without an explicit value the default is [`DEFAULT_CONCURRENCY_LIMIT`].
-/// Operations that exceed the limit are rejected immediately with
-/// [`Error::AtCapacity`].
+/// A [`ConcurrencyLimiter`] caps the number of in-flight backend operations.
+/// Pass a custom limiter via
+/// [`with_concurrency`](StorageService::with_concurrency); without one the
+/// default is [`DEFAULT_CONCURRENCY_LIMIT`] permits with no queue.
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
@@ -91,12 +90,13 @@ impl StorageService {
         }
     }
 
-    /// Sets the maximum number of concurrent backend operations.
+    /// Replaces the default concurrency limiter.
     ///
-    /// Must be called before [`start`](Self::start). Operations beyond this
-    /// limit are rejected with [`Error::AtCapacity`].
-    pub fn with_concurrency_limit(mut self, max: u32) -> Self {
-        self.concurrency = ConcurrencyLimiter::new(max);
+    /// Must be called before [`start`](Self::start). Without this, the
+    /// service uses a limiter with [`DEFAULT_CONCURRENCY_LIMIT`] permits
+    /// and no queue.
+    pub fn with_concurrency(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.concurrency = limiter;
         self
     }
 
@@ -143,16 +143,19 @@ impl StorageService {
 
     /// Starts background processes for the storage service.
     ///
-    /// Currently spawns a task that emits the `service.concurrency.in_use`
-    /// and `service.concurrency.limit` gauges once per second.
+    /// Spawns a task that emits concurrency gauges once per second:
+    /// `service.concurrency.in_use`, `service.concurrency.queued`,
+    /// `service.concurrency.limit`, and `service.concurrency.queue_limit`.
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
-        let limit = concurrency.total_permits();
+        objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());
+        objectstore_metrics::gauge!("service.concurrency.queue_limit" = concurrency.total_queue());
+
         tokio::spawn(async move {
             concurrency
-                .run_emitter(|permits| async move {
-                    objectstore_metrics::gauge!("service.concurrency.in_use" = permits);
-                    objectstore_metrics::gauge!("service.concurrency.limit" = limit);
+                .run_emitter(|stats| async move {
+                    objectstore_metrics::gauge!("service.concurrency.in_use" = stats.in_use);
+                    objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
                 })
                 .await;
         });
@@ -174,11 +177,13 @@ impl StorageService {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        let permit = self.concurrency.try_acquire().inspect_err(|_| {
+        let timer = objectstore_metrics::timer!("service.concurrency.wait");
+        let permit = self.concurrency.acquire().await.inspect_err(|_| {
             objectstore_metrics::count!("service.concurrency.rejected");
             objectstore_log::warn!("Request rejected: service at capacity");
         })?;
 
+        timer.record();
         crate::concurrency::spawn_metered(operation, permit, f).await
     }
 
@@ -678,7 +683,8 @@ mod tests {
 
     fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
-        let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
+        let service = StorageService::new(Box::new(backend.clone()))
+            .with_concurrency(ConcurrencyLimiter::new(limit));
         (service, backend)
     }
 
@@ -730,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
         let backend = Box::new(InMemoryBackend::new("cap"));
-        let service = StorageService::new(backend).with_concurrency_limit(7);
+        let service = StorageService::new(backend).with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
     }
 
@@ -760,8 +766,8 @@ mod tests {
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service =
-            StorageService::new(Box::new(TestBackend::new(PanicOnGet))).with_concurrency_limit(1);
+        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)))
+            .with_concurrency(ConcurrencyLimiter::new(1));
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
