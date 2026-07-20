@@ -59,7 +59,7 @@ impl ConcurrencyLimiter {
     /// waiting for a permit, each for at most `timeout`. Callers beyond
     /// that are rejected immediately.
     pub fn with_queue(mut self, size: u32, timeout: Duration) -> Self {
-        self.queue_total = self.tasks_total + size;
+        self.queue_total = self.tasks_total.saturating_add(size);
         self.queue = Arc::new(Semaphore::new((self.queue_total) as usize));
         self.timeout = timeout;
         self
