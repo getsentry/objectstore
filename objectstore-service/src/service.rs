@@ -192,35 +192,13 @@ impl StorageService {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        let start = tokio::time::Instant::now();
-        let permit = self.concurrency.acquire().await;
-        let waited = start.elapsed();
+        let timer = objectstore_metrics::timer!("service.concurrency.wait");
+        let permit = self.concurrency.acquire().await.inspect_err(|_| {
+            objectstore_metrics::count!("service.concurrency.rejected");
+            objectstore_log::warn!("Request rejected: service at capacity");
+        })?;
 
-        let permit = match permit {
-            Ok(p) => {
-                if waited > std::time::Duration::from_millis(1) {
-                    objectstore_metrics::record!(
-                        "service.concurrency.wait" = waited,
-                        outcome = "acquired",
-                    );
-                }
-                p
-            }
-            Err(e) => {
-                if waited > std::time::Duration::from_millis(1) {
-                    objectstore_metrics::count!("service.concurrency.queue_timeout");
-                    objectstore_metrics::record!(
-                        "service.concurrency.wait" = waited,
-                        outcome = "timeout",
-                    );
-                } else {
-                    objectstore_metrics::count!("service.concurrency.rejected");
-                }
-                objectstore_log::warn!("Request rejected: service at capacity");
-                return Err(e);
-            }
-        };
-
+        timer.record();
         crate::concurrency::spawn_metered(operation, permit, f).await
     }
 
