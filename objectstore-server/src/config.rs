@@ -529,15 +529,14 @@ pub struct Service {
     /// When all `max_concurrency` execution slots are held, up to this many
     /// additional requests will park and wait (for at most
     /// `concurrency_queue_timeout`) instead of being rejected immediately.
-    /// Requests beyond `max_concurrency + concurrency_queue` are rejected
-    /// with HTTP 429.
-    ///
-    /// Both this and `concurrency_queue_timeout` are inert while this is `0`
-    /// (the default), preserving the immediate-reject behavior.
+    /// Requests beyond that are rejected with HTTP 429.
     ///
     /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
-    /// acceptable_added_latency`. `concurrency_queue_timeout` must stay
-    /// comfortably below client request timeouts.
+    /// acceptable_added_latency`.
+    ///
+    /// # Default
+    ///
+    /// `0`
     pub concurrency_queue: u32,
 
     /// Maximum time a request may wait in the concurrency queue.
