@@ -19,6 +19,38 @@ use objectstore_log::Level;
 
 use crate::stream::ClientError;
 
+/// Structured error detail parsed from a backend HTTP error response.
+///
+/// Formats conditionally: includes only the fields that are non-empty.
+#[derive(Debug)]
+pub struct BackendDetail {
+    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
+    pub code: String,
+    /// Human-readable error message from the response body.
+    pub message: String,
+}
+
+impl BackendDetail {
+    /// Creates a new [`BackendDetail`] with empty code and message.
+    pub fn none() -> Self {
+        Self {
+            code: String::new(),
+            message: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for BackendDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
+            (true, false) => write!(f, "{}", self.message),
+            (false, true) => write!(f, "backend code {}", self.code),
+            (true, true) => Ok(()),
+        }
+    }
+}
+
 /// The category of a service error.
 ///
 /// These kinds describe the *cause* of a failure, independent of any HTTP

@@ -6,46 +6,12 @@
 //! structured error code and message from it (JSON for GCS JSON API, XML for GCS
 //! XML API and S3).
 
-use std::fmt;
-
 use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
 use tracing::Instrument;
 
-use crate::error::{Error, ErrorKind, Result};
+use crate::error::{BackendDetail, Error, ErrorKind, Result};
 use crate::stream;
-
-/// Structured error detail parsed from a backend HTTP error response.
-///
-/// Formats conditionally: includes only the fields that are non-empty.
-#[derive(Debug)]
-struct BackendDetail {
-    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
-    code: String,
-    /// Human-readable error message from the response body.
-    message: String,
-}
-
-impl BackendDetail {
-    /// Creates a new [`BackendDetail`] with empty code and message.
-    fn none() -> Self {
-        Self {
-            code: String::new(),
-            message: String::new(),
-        }
-    }
-}
-
-impl fmt::Display for BackendDetail {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.code.is_empty(), self.message.is_empty()) {
-            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
-            (true, false) => write!(f, "{}", self.message),
-            (false, true) => write!(f, "backend code {}", self.code),
-            (true, true) => Ok(()),
-        }
-    }
-}
 
 /// Classifies a backend HTTP error status into an [`ErrorKind`].
 fn status_to_kind(status: StatusCode) -> ErrorKind {
