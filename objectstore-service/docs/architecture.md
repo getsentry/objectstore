@@ -188,8 +188,7 @@ limits fail with [`Error::AtCapacity`](error::Error::AtCapacity).
 
 The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
-[`StorageService::with_concurrency_limit`] and
-[`StorageService::with_concurrency_queue`] for configuration.
+[`StorageService::with_concurrency`] for configuration.
 
 ## Multipart Uploads
 

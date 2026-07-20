@@ -34,8 +34,8 @@ pub type DeleteResponse = ();
 
 /// Default concurrency limit for [`StorageService`].
 ///
-/// This value is used when no explicit limit is set via
-/// [`StorageService::with_concurrency_limit`].
+/// This value is used when no explicit limiter is set via
+/// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 
 /// Asynchronous storage service wrapping a single [`Backend`].
@@ -66,15 +66,10 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 ///
 /// # Concurrency Limit
 ///
-/// A semaphore caps the number of in-flight backend operations. The limit is
-/// configured via [`with_concurrency_limit`](StorageService::with_concurrency_limit);
-/// without an explicit value the default is [`DEFAULT_CONCURRENCY_LIMIT`].
-///
-/// Optionally, a bounded queue can be enabled with
-/// [`with_concurrency_queue`](StorageService::with_concurrency_queue) so that
-/// requests exceeding `max` but within `max + queue` wait briefly instead of
-/// being rejected immediately. Operations beyond `max + queue` are rejected
-/// with [`Error::AtCapacity`].
+/// A [`ConcurrencyLimiter`] caps the number of in-flight backend operations.
+/// Pass a custom limiter via
+/// [`with_concurrency`](StorageService::with_concurrency); without one the
+/// default is [`DEFAULT_CONCURRENCY_LIMIT`] permits with no queue.
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
@@ -95,23 +90,13 @@ impl StorageService {
         }
     }
 
-    /// Sets the maximum number of concurrent backend operations.
+    /// Replaces the default concurrency limiter.
     ///
-    /// Must be called before [`start`](Self::start). Operations beyond this
-    /// limit are rejected with [`Error::AtCapacity`].
-    pub fn with_concurrency_limit(mut self, max: u32) -> Self {
-        self.concurrency = ConcurrencyLimiter::new(max);
-        self
-    }
-
-    /// Enables a bounded queue for backend concurrency.
-    ///
-    /// When all execution permits are held, up to `queue` additional callers
-    /// wait for a permit, each for at most `timeout`. Must be called after
-    /// [`with_concurrency_limit`](Self::with_concurrency_limit) and before
-    /// [`start`](Self::start).
-    pub fn with_concurrency_queue(mut self, queue: u32, timeout: std::time::Duration) -> Self {
-        self.concurrency = self.concurrency.with_queue(queue, timeout);
+    /// Must be called before [`start`](Self::start). Without this, the
+    /// service uses a limiter with [`DEFAULT_CONCURRENCY_LIMIT`] permits
+    /// and no queue.
+    pub fn with_concurrency(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.concurrency = limiter;
         self
     }
 
@@ -698,7 +683,8 @@ mod tests {
 
     fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
-        let service = StorageService::new(Box::new(backend.clone())).with_concurrency_limit(limit);
+        let service = StorageService::new(Box::new(backend.clone()))
+            .with_concurrency(ConcurrencyLimiter::new(limit));
         (service, backend)
     }
 
@@ -750,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
         let backend = Box::new(InMemoryBackend::new("cap"));
-        let service = StorageService::new(backend).with_concurrency_limit(7);
+        let service = StorageService::new(backend).with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
     }
 
@@ -780,8 +766,8 @@ mod tests {
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service =
-            StorageService::new(Box::new(TestBackend::new(PanicOnGet))).with_concurrency_limit(1);
+        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)))
+            .with_concurrency(ConcurrencyLimiter::new(1));
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
