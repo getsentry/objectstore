@@ -2,6 +2,10 @@ remote: http://localhost:18888
 
 duration: 5s
 
+# Object expiration. Omit for the default 1h TTL, set a duration like `24h`, or
+# `never` to persist objects indefinitely (e.g. for storage/COGS analysis).
+# ttl: never
+
 workloads:
   - name: attachments
     mode: throughput

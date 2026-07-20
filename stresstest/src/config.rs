@@ -3,8 +3,46 @@ use std::time::Duration;
 
 use anyhow::bail;
 use bytesize::ByteSize;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use stresstest::workload::{self, WorkloadMode};
+
+/// Time-to-live configuration for objects created during the stresstest.
+///
+/// Controls the [`ExpirationPolicy`](objectstore_client::ExpirationPolicy) that
+/// objects are written with, which in turn decides whether Bigtable garbage
+/// collects them:
+///
+/// - Omitted -> [`TtlConfig::Default`]: keep the built-in default TTL (1 hour).
+/// - `manual`/`none`/`never` -> [`TtlConfig::Never`]: objects never expire. This
+///   uses the `Manual` expiration policy, so objects are written to the
+///   non-GC (`fm`) column family and persist until explicitly deleted.
+/// - a humantime duration such as `24h` or `30m` -> [`TtlConfig::Fixed`]: objects
+///   expire after that period.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum TtlConfig {
+    /// Leave the stresstest's built-in default TTL in place.
+    #[default]
+    Default,
+    /// Never expire objects (persist indefinitely).
+    Never,
+    /// Expire objects after a fixed duration.
+    Fixed(Duration),
+}
+
+impl<'de> Deserialize<'de> for TtlConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "manual" | "none" | "never" | "off" => Ok(TtlConfig::Never),
+            other => humantime::parse_duration(other)
+                .map(TtlConfig::Fixed)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Auth {
@@ -23,6 +61,13 @@ pub struct Config {
 
     #[serde(default)]
     pub cleanup: bool,
+
+    /// Time-to-live for objects created during the stresstest.
+    ///
+    /// See [`TtlConfig`] for accepted values. Defaults to the built-in TTL
+    /// (1 hour) when omitted; set to `never` to persist objects indefinitely.
+    #[serde(default)]
+    pub ttl: TtlConfig,
 
     #[serde(default)]
     pub auth: Option<Auth>,

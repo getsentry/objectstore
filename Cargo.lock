@@ -4546,6 +4546,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "futures",
+ "humantime",
  "humantime-serde",
  "indicatif",
  "objectstore-client",
