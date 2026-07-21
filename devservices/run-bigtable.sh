@@ -14,7 +14,8 @@ for _ in {1..4}; do
 done
 
 cbt deletetable objectstore || true
-cbt createtable objectstore families=fg,fm
+cbt createtable objectstore families=fg,fm,fpg,fpm
 cbt setgcpolicy objectstore fg maxage=1s
+cbt setgcpolicy objectstore fpg maxage=1s
 
 wait $EMULATOR_PID
