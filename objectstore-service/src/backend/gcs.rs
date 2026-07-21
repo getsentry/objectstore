@@ -893,10 +893,11 @@ impl From<XmlError> for crate::multipart::CompleteMultipartError {
 ///
 /// Request-level retries use the same internal retry helper as JSON API calls for
 /// initiate/list/abort/complete. Part upload is intentionally not retried: the body is streamed and
-/// not buffered. Complete is safe to retry on transport/`5xx` errors; if the first attempt already
-/// assembled the object, a later retry gets HTTP 404 `NoSuchUpload`, which our retry policy does
-/// not treat as retryable and propagates to the caller (and the tiered layer can recover via
-/// changelog / presence checks when needed).
+/// not buffered. Abort treats HTTP 404 as success (idempotent if the session is already gone, e.g.
+/// after a successful abort whose response was lost). Complete is safe to retry on transport/`5xx`
+/// errors; if the first attempt already assembled the object, a later retry gets HTTP 404
+/// `NoSuchUpload`, which our retry policy does not treat as retryable and propagates to the caller
+/// (and the tiered layer can recover via changelog / presence checks when needed).
 #[async_trait::async_trait]
 impl MultipartUploadBackend for GcsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1057,11 +1058,21 @@ impl MultipartUploadBackend for GcsBackend {
         self.with_retry("abort_multipart", || {
             let url = url.clone();
             async move {
-                self.request(Method::DELETE, url)
+                let resp = self
+                    .request(Method::DELETE, url)
                     .await?
                     .send_traced()
                     .await
-                    .check_error("GCS: abort multipart upload")
+                    .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
+
+                // Idempotent: absent upload means the postcondition is already satisfied
+                // (including retry after a successful abort whose response was lost).
+                if resp.status() == StatusCode::NOT_FOUND {
+                    resp.drain_body().await;
+                    return Ok(());
+                }
+
+                resp.check_error("GCS: abort multipart upload")
                     .await?
                     .drain_body()
                     .await;
@@ -1770,6 +1781,9 @@ mod tests {
         // Object should not exist after abort.
         let result = backend.get_object(&id, None).await?;
         assert!(result.is_none(), "object should not exist after abort");
+
+        // A second abort should still succeed (idempotent 404 handling).
+        backend.abort_multipart(&id, &upload_id).await?;
 
         Ok(())
     }
