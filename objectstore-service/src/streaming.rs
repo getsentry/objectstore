@@ -331,6 +331,7 @@ mod tests {
     use crate::backend::common::PutResponse;
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
+    use crate::concurrency::ConcurrencyLimiter;
     use crate::error::{Error, ErrorKind};
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
@@ -344,7 +345,7 @@ mod tests {
 
     fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
-            .with_concurrency_limit(limit)
+            .with_concurrency(ConcurrencyLimiter::new(limit))
     }
 
     fn make_service() -> StorageService {
@@ -539,7 +540,8 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
         });
-        let service = StorageService::new(Box::new(gated)).with_concurrency_limit(100);
+        let service =
+            StorageService::new(Box::new(gated)).with_concurrency(ConcurrencyLimiter::new(100));
 
         let executor = service.stream().unwrap();
         assert_eq!(executor.window(), 10);
@@ -593,7 +595,8 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::new(AtomicUsize::new(0)),
         });
-        let service = StorageService::new(Box::new(gated)).with_concurrency_limit(1);
+        let service =
+            StorageService::new(Box::new(gated)).with_concurrency(ConcurrencyLimiter::new(1));
 
         // Hold the only permit via a blocking insert.
         let svc = service.clone();

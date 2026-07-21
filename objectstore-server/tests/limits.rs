@@ -630,7 +630,10 @@ async fn test_batch_at_capacity_returns_503() -> Result<()> {
     // BatchExecutor::new() returns AtCapacity and the endpoint responds 503:
     // local load-shedding is surfaced as a temporary Service Unavailable.
     let server = TestServer::with_config(Config {
-        service: Service { max_concurrency: 0 },
+        service: Service {
+            max_concurrency: 0,
+            ..Default::default()
+        },
         auth: AuthZ {
             enforce: false,
             ..Default::default()

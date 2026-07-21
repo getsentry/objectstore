@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
+use objectstore_service::concurrency::ConcurrencyLimiter;
 use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
@@ -61,8 +62,11 @@ impl Services {
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
         let backend = backend::from_config(config.storage.clone()).await?;
-        let service =
-            StorageService::new(backend).with_concurrency_limit(config.service.max_concurrency);
+        let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency).with_queue(
+            config.service.concurrency_queue,
+            config.service.concurrency_queue_timeout,
+        );
+        let service = StorageService::new(backend).with_concurrency(concurrency);
         service.start();
 
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);
