@@ -509,7 +509,8 @@ pub struct Config {
 ///
 /// - `OS__SERVICE__MAX_CONCURRENCY`
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
-/// - `OS__SERVICE__CONCURRENCY_QUEUE_TIMEOUT`
+/// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
+/// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
