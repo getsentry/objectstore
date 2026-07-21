@@ -891,7 +891,7 @@ impl From<XmlError> for crate::multipart::CompleteMultipartError {
 /// That's because the fork of [storage-testbench](https://github.com/googleapis/storage-testbench)
 /// that we test against has an incomplete implementation of the XML multipart API that likely doesn't match GCS's behavior in many cases.
 ///
-/// Request-level retries use the same [`GcsBackend::with_retry`] helper as JSON API calls for
+/// Request-level retries use the same internal retry helper as JSON API calls for
 /// initiate/list/abort/complete. Part upload is intentionally not retried: the body is streamed and
 /// not buffered. Complete is safe to retry on transport/`5xx` errors; if the first attempt already
 /// assembled the object, a later retry gets HTTP 404 `NoSuchUpload`, which our retry policy does
