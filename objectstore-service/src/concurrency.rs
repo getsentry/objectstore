@@ -89,6 +89,7 @@ impl ConcurrencyLimiter {
         self.queue_total = self.tasks_total.saturating_add(size);
         self.queue = Arc::new(Semaphore::new((self.queue_total) as usize));
         self.timeout = timeout;
+
         self
     }
 
@@ -172,7 +173,7 @@ impl ConcurrencyLimiter {
     ///
     /// Returns [`Error::AtCapacity`] on timeout or when `max` is zero.
     pub async fn acquire_bulk(&self) -> Result<ConcurrencyPermit> {
-        if self.tasks_total == 0 || self.bulk_total == 0 {
+        if self.tasks_total == 0 {
             return Err(Error::AtCapacity);
         }
 
@@ -772,14 +773,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn bulk_rejects_immediately_when_bulk_budget_is_zero() {
+    async fn bulk_with_zero_percent_allows_one() {
         let limiter = ConcurrencyLimiter::new(10)
             .with_queue(5, Duration::from_secs(10))
             .with_bulk(0);
 
-        let start = tokio::time::Instant::now();
-        let result = limiter.acquire_bulk().await;
+        assert_eq!(limiter.total_bulk(), 1);
+
+        let permit = limiter.acquire_bulk().await.unwrap();
+        assert_eq!(limiter.used_bulk_permits(), 1);
+
+        let limiter2 = limiter.clone();
+        let waiter = tokio::spawn(async move { limiter2.acquire_bulk().await });
+        tokio::time::sleep(Duration::from_secs(11)).await;
+
+        let result = waiter.await.unwrap();
         assert!(matches!(result, Err(Error::AtCapacity)));
-        assert_eq!(start.elapsed(), Duration::ZERO);
+        drop(permit);
     }
 }
