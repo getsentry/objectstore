@@ -66,8 +66,7 @@ impl ConcurrencyLimiter {
     /// [`with_queue`](Self::with_queue) to enable bounded waiting.
     ///
     /// The bulk budget defaults to 100% of `max` (no restriction); use
-    /// [`with_bulk_percent`](Self::with_bulk_percent) to set a safe operating point for bulk
-    /// traffic.
+    /// [`with_bulk`](Self::with_bulk) to set a safe operating point for bulk traffic.
     pub fn new(max: u32) -> Self {
         Self {
             tasks: Arc::new(Semaphore::new(max as usize)),

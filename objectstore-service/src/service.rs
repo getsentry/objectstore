@@ -62,7 +62,6 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 /// blocked. Call [`join`](StorageService::join) during shutdown to wait for
 /// outstanding cleanup. Operations are also isolated from panics in backend
 /// code — a failure in one operation does not bring down other in-flight work.
-/// See [`Error::Panic`].
 ///
 /// # Concurrency Limit
 ///
@@ -151,15 +150,21 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
-    /// [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
-    /// dropped before sending its result.
+    /// # Observability
     ///
-    /// Emits `service.task.start` (counter) after acquiring a permit and
-    /// `service.task.duration` (distribution) when the task completes, tagged
-    /// with the given `operation` name and an `outcome` of `"success"` or
-    /// `"error"`.
+    /// This tracks two metrics:
+    ///
+    /// - `service.task.start` (counter) after acquiring a permit
+    /// - `service.task.duration` (distribution) when the task completes
+    ///
+    /// Both are tagged with the given `operation` name and an `outcome`
+    /// of `"success"` or `"error"`.
+    ///
+    /// # Errors
+    ///
+    /// - `AtCapacity` if the concurrency limit is reached
+    /// - `Panic` if the spawned task panics (the panic message is captured for diagnostics)
+    /// - `Dropped` if the task is dropped before sending its result.
     async fn spawn<T, F>(&self, operation: &'static str, f: F) -> Result<T>
     where
         T: Send + 'static,
