@@ -102,7 +102,7 @@ impl ConcurrencyLimiter {
     /// of permits.
     pub fn with_bulk(mut self, percent: u32) -> Self {
         let clamped = percent.min(100);
-        self.bulk_total = self.tasks_total * clamped / 100;
+        self.bulk_total = (self.tasks_total * clamped / 100).max(1);
         self.bulk = Arc::new(Semaphore::new(self.bulk_total as usize));
         self
     }
@@ -662,6 +662,10 @@ mod tests {
 
         let limiter = ConcurrencyLimiter::new(100).with_bulk(150);
         assert_eq!(limiter.total_bulk(), 100);
+
+        // Allow at least one bulk permit even when the percentage is zero.
+        let limiter = ConcurrencyLimiter::new(1).with_bulk(60);
+        assert_eq!(limiter.total_bulk(), 1);
     }
 
     #[tokio::test(start_paused = true)]
