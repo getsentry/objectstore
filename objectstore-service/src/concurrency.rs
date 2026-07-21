@@ -102,7 +102,7 @@ impl ConcurrencyLimiter {
 
     /// Sets the bulk concurrency budget as a percentage of `max`.
     ///
-    /// `percent` is clamped to `0..=100`. At `100` (the default), bulk
+    /// `percent` is clamped to `1..=100`. At `100` (the default), bulk
     /// operations can use all execution slots. Lower values set a safe
     /// operating point below which there is little-to-no performance
     /// degradation, allowing more tasks to queue before rejection is
@@ -110,7 +110,7 @@ impl ConcurrencyLimiter {
     /// of permits.
     pub fn with_bulk(mut self, percent: u32) -> Self {
         let clamped = percent.min(100);
-        self.bulk_total = (self.tasks_total * clamped / 100).max(1);
+        self.bulk_total = (self.tasks_total * clamped).div_ceil(100).max(1);
         self.bulk = Arc::new(Semaphore::new(self.bulk_total as usize));
         self
     }

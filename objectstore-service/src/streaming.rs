@@ -9,7 +9,7 @@
 //!
 //! Streaming / batch operations are subject to the service's concurrency limiter. They count as
 //! "bulk" operations, which are capped at a lower limit than regular operations. This ensures a
-//! large bulk request doesn't automatically brings the service to its limits and leaves room for
+//! large bulk request doesn't automatically bring the service to its limits and leaves room for
 //! regular requests.
 //!
 //! The regular acquire timeout applies: Operations that cannot acquire a permit within the

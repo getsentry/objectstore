@@ -557,7 +557,7 @@ pub struct Service {
     /// little-to-no performance degradation, leaving room for more tasks
     /// to be admitted via the queue before rejection is necessary.
     ///
-    /// Clamped to 0..=100. At 100, bulk operations can use all execution
+    /// Clamped to 1..=100. At 100, bulk operations can use all execution
     /// slots. Lower values leave headroom for single-object requests.
     ///
     /// # Default
