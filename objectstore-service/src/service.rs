@@ -72,7 +72,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 #[derive(Clone, Debug)]
 pub struct StorageService {
     inner: Arc<dyn Backend>,
-    pub(crate) concurrency: ConcurrencyLimiter,
+    concurrency: ConcurrencyLimiter,
 }
 
 impl StorageService {
@@ -99,6 +99,11 @@ impl StorageService {
         self
     }
 
+    /// Returns a reference to the concurrency limiter.
+    pub fn concurrency_limiter(&self) -> &ConcurrencyLimiter {
+        &self.concurrency
+    }
+
     /// Returns the number of backend tasks currently running.
     pub fn tasks_running(&self) -> u32 {
         self.concurrency.used_permits()
@@ -116,19 +121,21 @@ impl StorageService {
     /// configurable percentage of execution slots while allowing operations
     /// to queue for permits instead of requiring upfront reservation.
     pub fn stream(&self) -> StreamExecutor {
-        StreamExecutor {
-            backend: Arc::clone(&self.inner),
-            concurrency: self.concurrency.clone(),
-        }
+        StreamExecutor::new(Arc::clone(&self.inner), self.concurrency.clone())
     }
 
     /// Starts background processes for the storage service.
     ///
-    /// Spawns a task that emits concurrency gauges once per second:
-    /// `service.concurrency.in_use`, `service.concurrency.queued`,
-    /// `service.concurrency.bulk_in_use`, `service.concurrency.limit`,
-    /// `service.concurrency.queue_limit`, and
-    /// `service.concurrency.bulk_limit`.
+    /// At startup, this tracks the following gauges:
+    ///
+    ///  - `service.concurrency.limit`: concurrent task execution slots
+    ///  - `service.concurrency.queue_limit`: queue size for waiting tasks
+    ///  - `service.concurrency.bulk_limit`: concurrent task execution slots for bulk operations
+    ///
+    /// Also spawns a task that emits concurrency gauges once per second:
+    ///  - `service.concurrency.in_use`: currently running tasks
+    ///  - `service.concurrency.queued`: currently queued tasks
+    ///  - `service.concurrency.bulk_in_use`: currently running bulk tasks
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
         objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());

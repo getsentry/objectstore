@@ -203,11 +203,19 @@ impl std::fmt::Debug for OpResponse {
 /// See the [module documentation](self) for the concurrency model.
 #[derive(Debug)]
 pub struct StreamExecutor {
-    pub(crate) backend: Arc<dyn Backend>,
-    pub(crate) concurrency: ConcurrencyLimiter,
+    backend: Arc<dyn Backend>,
+    concurrency: ConcurrencyLimiter,
 }
 
 impl StreamExecutor {
+    /// Creates a new `StreamExecutor` with the given backend and limiter.
+    pub fn new(backend: Arc<dyn Backend>, concurrency: ConcurrencyLimiter) -> Self {
+        Self {
+            backend,
+            concurrency,
+        }
+    }
+
     /// Executes the operations stream with bounded concurrency.
     ///
     /// Each item is a `(index, Result<Operation, E>)` tuple where `index` is the
@@ -562,7 +570,7 @@ mod tests {
                     .with_bulk(100),
             );
 
-        let _held = service.concurrency.acquire().await.unwrap();
+        let _held = service.concurrency_limiter().acquire().await.unwrap();
 
         let ops = vec![Operation::Insert(Box::new(Insert {
             key: Some("blocked".into()),
