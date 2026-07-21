@@ -172,7 +172,7 @@ impl ConcurrencyLimiter {
     ///
     /// Returns [`Error::AtCapacity`] on timeout or when `max` is zero.
     pub async fn acquire_bulk(&self) -> Result<ConcurrencyPermit> {
-        if self.tasks_total == 0 {
+        if self.tasks_total == 0 || self.bulk_total == 0 {
             return Err(Error::AtCapacity);
         }
 
@@ -760,6 +760,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bulk_rejects_immediately_when_max_is_zero() {
         let limiter = ConcurrencyLimiter::new(0).with_queue(5, Duration::from_secs(10));
+
+        let start = tokio::time::Instant::now();
+        let result = limiter.acquire_bulk().await;
+        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bulk_rejects_immediately_when_bulk_budget_is_zero() {
+        let limiter = ConcurrencyLimiter::new(10)
+            .with_queue(5, Duration::from_secs(10))
+            .with_bulk(0);
 
         let start = tokio::time::Instant::now();
         let result = limiter.acquire_bulk().await;
