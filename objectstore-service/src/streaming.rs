@@ -557,7 +557,8 @@ mod tests {
         let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
             .with_concurrency(
                 ConcurrencyLimiter::new(1)
-                    .with_queue(0, Duration::from_millis(1))
+                    .with_queue(0)
+                    .with_timeout(Duration::from_millis(1))
                     .with_bulk(100),
             );
 

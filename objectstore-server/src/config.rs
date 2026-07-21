@@ -528,7 +528,7 @@ pub struct Service {
     ///
     /// When all `max_concurrency` execution slots are held, up to this many
     /// additional requests will park and wait (for at most
-    /// `concurrency_queue_timeout`) instead of being rejected immediately.
+    /// `concurrency_timeout`) instead of being rejected immediately.
     /// Requests beyond that are rejected with HTTP 429.
     ///
     /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
@@ -539,15 +539,16 @@ pub struct Service {
     /// `0`
     pub concurrency_queue: u32,
 
-    /// Maximum time a request may wait in the concurrency queue.
+    /// Maximum time a caller may wait for a concurrency permit.
     ///
-    /// Ignored when `concurrency_queue` is `0`.
+    /// Applies to both queued normal requests and bulk operations
+    /// waiting for the bulk and execution semaphores.
     ///
     /// # Default
     ///
     /// `1s`
-    #[serde(with = "humantime_serde")]
-    pub concurrency_queue_timeout: Duration,
+    #[serde(alias = "concurrency_queue_timeout", with = "humantime_serde")]
+    pub concurrency_timeout: Duration,
 
     /// Percentage of `max_concurrency` available to bulk operations
     /// (e.g. parallelized batch requests).
@@ -570,7 +571,7 @@ impl Default for Service {
         Self {
             max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
             concurrency_queue: 0,
-            concurrency_queue_timeout: Duration::from_secs(1),
+            concurrency_timeout: Duration::from_secs(1),
             bulk_concurrency_pct: 60,
         }
     }

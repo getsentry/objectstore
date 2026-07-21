@@ -63,10 +63,8 @@ impl Services {
 
         let backend = backend::from_config(config.storage.clone()).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
-            .with_queue(
-                config.service.concurrency_queue,
-                config.service.concurrency_queue_timeout,
-            )
+            .with_queue(config.service.concurrency_queue)
+            .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
         let service = StorageService::new(backend).with_concurrency(concurrency);
         service.start();
