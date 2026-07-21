@@ -2882,6 +2882,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+ "url",
  "uuid",
  "zstd",
 ]

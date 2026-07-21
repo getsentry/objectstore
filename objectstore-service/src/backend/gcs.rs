@@ -6,7 +6,6 @@ use std::future::Future;
 use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
-use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
@@ -15,12 +14,12 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{ResponseExt, SendTraced};
+use super::extensions::{ResponseExt, SendTraced, classify_transport};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -201,10 +200,7 @@ impl GcsObject {
             .size
             .map(|size| size.parse())
             .transpose()
-            .map_err(|e| Error::Generic {
-                context: "GCS: failed to parse size from object metadata".to_string(),
-                cause: Some(Box::new(e)),
-            })?;
+            .context("GCS: failed to parse size from object metadata")?;
         let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
@@ -213,12 +209,9 @@ impl GcsObject {
             if let GcsMetaKey::Custom(custom_key) = key {
                 custom.insert(custom_key, value);
             } else {
-                return Err(Error::Generic {
-                    context: format!(
-                        "GCS: unexpected built-in metadata key in object metadata: {key}"
-                    ),
-                    cause: None,
-                });
+                return Err(Error::new(ErrorKind::Internal).context(format!(
+                    "GCS: unexpected built-in metadata key in object metadata: {key}"
+                )));
             }
         }
 
@@ -311,10 +304,10 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
         let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
-            formatted.to_string().parse().map_err(|e| Error::Generic {
-                context: "GCS: invalid custom-time header value".into(),
-                cause: Some(Box::new(e)),
-            })?,
+            formatted
+                .to_string()
+                .parse()
+                .context("GCS: invalid custom-time header value")?,
         );
     }
 
@@ -324,10 +317,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
             compression
                 .to_string()
                 .parse()
-                .map_err(|e| Error::Generic {
-                    context: "GCS: invalid content-encoding header value".into(),
-                    cause: Some(Box::new(e)),
-                })?,
+                .context("GCS: invalid content-encoding header value")?,
         );
     }
 
@@ -361,42 +351,24 @@ fn insert_gcs_meta_header(
 ) -> Result<()> {
     let header_name = format!("x-goog-meta-{key}");
     headers.insert(
-        HeaderName::try_from(&header_name).map_err(|e| Error::Generic {
-            context: format!("GCS: invalid header name: {header_name}"),
-            cause: Some(Box::new(e)),
-        })?,
-        value.parse().map_err(|e| Error::Generic {
-            context: format!("GCS: invalid header value for {header_name}"),
-            cause: Some(Box::new(e)),
-        })?,
+        HeaderName::try_from(&header_name)
+            .context(format!("GCS: invalid header name: {header_name}"))?,
+        value
+            .parse()
+            .context(format!("GCS: invalid header value for {header_name}"))?,
     );
     Ok(())
 }
 
-/// Returns `true` if the error is a transient reqwest failure worth retrying.
+/// Returns `true` if the error is a transient backend failure worth retrying.
+///
+/// [`check_error`](super::extensions::ResponseExt::check_error) classifies both
+/// transport failures and retryable HTTP statuses (408/429/500/502/503/504)
+/// into the backend error kinds below, so retryability is a simple kind check.
 fn error_is_retryable(error: &Error) -> bool {
-    match error {
-        Error::Reqwest { cause, .. } => {
-            cause.is_timeout()
-                || cause.is_connect()
-                || cause.is_request()
-                || cause.status().is_some_and(status_is_retryable)
-        }
-        Error::BackendResponse { status, .. } => status_is_retryable(*status),
-        _ => false,
-    }
-}
-
-fn status_is_retryable(status: StatusCode) -> bool {
-    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
+        error.kind,
+        ErrorKind::BackendTimeout | ErrorKind::BackendRateLimited | ErrorKind::BackendUnavailable
     )
 }
 
@@ -435,12 +407,11 @@ impl GcsBackend {
 
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
-            .map_err(|()| Error::Generic {
-                context: format!(
+            .map_err(|()| {
+                Error::new(ErrorKind::Internal).context(format!(
                     "GCS: invalid endpoint URL, {} cannot be a base",
                     self.endpoint
-                ),
-                cause: None,
+                ))
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
@@ -452,12 +423,11 @@ impl GcsBackend {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
-            .map_err(|()| Error::Generic {
-                context: format!(
+            .map_err(|()| {
+                Error::new(ErrorKind::Internal).context(format!(
                     "GCS: invalid endpoint URL, {} cannot be a base",
                     self.endpoint
-                ),
-                cause: None,
+                ))
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
@@ -477,12 +447,11 @@ impl GcsBackend {
     fn xml_object_url(&self, id: &ObjectId) -> Result<Url> {
         let mut url = self.endpoint.clone();
         {
-            let mut segments = url.path_segments_mut().map_err(|()| Error::Generic {
-                context: format!(
+            let mut segments = url.path_segments_mut().map_err(|()| {
+                Error::new(ErrorKind::Internal).context(format!(
                     "GCS: invalid endpoint URL, {} cannot be a base",
                     self.endpoint
-                ),
-                cause: None,
+                ))
             })?;
             segments.push(&self.bucket);
             for part in id.as_storage_path().to_string().split('/') {
@@ -530,12 +499,9 @@ impl GcsBackend {
     async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
-                let resp = self
-                    .request(Method::GET, object_url.clone())
-                    .await?
-                    .send_traced()
-                    .await
-                    .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
+                let request = self.request(Method::GET, object_url.clone()).await?;
+                let resp =
+                    classify_transport(request.send_traced().await, "GCS: get metadata request")?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
@@ -547,7 +513,7 @@ impl GcsBackend {
                     .await?
                     .json()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: get metadata parse", e))?;
+                    .context("GCS: get metadata parse")?;
 
                 Ok(Some(metadata))
             })
@@ -638,10 +604,8 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
-        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata for GCS upload".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(&gcs_metadata)
+            .context("failed to serialize metadata for GCS upload")?;
 
         let multipart = multipart::Form::new()
             .part(
@@ -654,10 +618,7 @@ impl Backend for GcsBackend {
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream))
                     .mime_str(&metadata.content_type)
-                    .map_err(|e| Error::Generic {
-                        context: format!("invalid mime type: {}", metadata.content_type),
-                        cause: Some(Box::new(e)),
-                    })?,
+                    .context(format!("invalid mime type: {}", metadata.content_type))?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -697,10 +658,7 @@ impl Backend for GcsBackend {
                 if let Some(r) = range {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
-                let resp = req
-                    .send_traced()
-                    .await
-                    .map_err(|e| Error::reqwest("GCS: get payload", e))?;
+                let resp = classify_transport(req.send_traced().await, "GCS: get payload")?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     let raw = resp
@@ -709,8 +667,8 @@ impl Backend for GcsBackend {
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
                     let err = match total {
-                        Some(total) => Error::RangeNotSatisfiable { total },
-                        None => Error::generic(format!(
+                        Some(total) => Error::range_not_satisfiable(total),
+                        None => Error::new(ErrorKind::Internal).context(format!(
                             "GCS: 416 response with invalid Content-Range: {raw:?}"
                         )),
                     };
@@ -729,9 +687,9 @@ impl Backend for GcsBackend {
                     .get(header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<ContentRange>().ok())
-                    .ok_or_else(|| Error::Generic {
-                        context: "GCS: 206 response missing valid Content-Range header".to_owned(),
-                        cause: None,
+                    .ok_or_else(|| {
+                        Error::new(ErrorKind::Internal)
+                            .context("GCS: 206 response missing valid Content-Range header")
                     })?,
             )
         } else {
@@ -759,12 +717,8 @@ impl Backend for GcsBackend {
         let object_url = self.object_url(id)?;
 
         self.with_retry("delete", || async {
-            let resp = self
-                .request(Method::DELETE, object_url.clone())
-                .await?
-                .send_traced()
-                .await
-                .map_err(|e| Error::reqwest("GCS: delete object", e))?;
+            let request = self.request(Method::DELETE, object_url.clone()).await?;
+            let resp = classify_transport(request.send_traced().await, "GCS: delete object")?;
 
             // Do not error for objects that do not exist
             if resp.status() == StatusCode::NOT_FOUND {
@@ -922,13 +876,10 @@ impl MultipartUploadBackend for GcsBackend {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+            .context("GCS: read initiate multipart body")?;
 
         let xml: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
-            .map_err(|e| Error::Generic {
-                context: "GCS: failed to parse initiate multipart response".to_owned(),
-                cause: Some(Box::new(e)),
-            })?;
+            .context("GCS: failed to parse initiate multipart response")?;
 
         Ok(xml.try_into()?)
     }
@@ -970,7 +921,10 @@ impl MultipartUploadBackend for GcsBackend {
             .get(header::ETAG)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned())
-            .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Internal)
+                    .context("GCS: upload part response missing ETag header")
+            })?;
 
         resp.drain_body().await;
 
@@ -1006,16 +960,10 @@ impl MultipartUploadBackend for GcsBackend {
             .check_error("GCS: list parts")
             .await?;
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
+        let body = resp.bytes().await.context("GCS: read list parts body")?;
 
-        let xml: XmlListPartsResponse =
-            quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
-                context: "GCS: failed to parse list parts response".to_owned(),
-                cause: Some(Box::new(e)),
-            })?;
+        let xml: XmlListPartsResponse = quick_xml::de::from_reader(body.as_ref())
+            .context("GCS: failed to parse list parts response")?;
 
         Ok(xml.into())
     }
@@ -1054,10 +1002,8 @@ impl MultipartUploadBackend for GcsBackend {
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
         let body = XmlCompleteMultipartUpload::from(parts);
-        let xml = quick_xml::se::to_string(&body).map_err(|e| Error::Generic {
-            context: "GCS: failed to serialize complete multipart request".into(),
-            cause: Some(Box::new(e)),
-        })?;
+        let xml = quick_xml::se::to_string(&body)
+            .context("GCS: failed to serialize complete multipart request")?;
 
         let resp = self
             .request(Method::POST, url)
@@ -1072,7 +1018,7 @@ impl MultipartUploadBackend for GcsBackend {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
+            .context("GCS: read complete multipart body")?;
 
         let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
             .ok()

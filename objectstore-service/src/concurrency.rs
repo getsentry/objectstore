@@ -16,7 +16,7 @@ use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -80,26 +80,26 @@ impl ConcurrencyLimiter {
 
     /// Acquires a single concurrency permit, waiting if necessary.
     ///
-    /// If all `max + queue` slots are occupied, returns
-    /// [`Error::AtCapacity`] immediately. Otherwise, waits up to the
-    /// configured queue timeout for an execution permit to become
-    /// available. Returns [`Error::AtCapacity`] on timeout.
+    /// If all `max + queue` slots are occupied, returns an
+    /// [`ErrorKind::AtCapacity`] error immediately. Otherwise, waits up to the
+    /// configured queue timeout for an execution permit to become available.
+    /// Returns an [`ErrorKind::AtCapacity`] error on timeout.
     pub async fn acquire(&self) -> Result<ConcurrencyPermit> {
         if self.tasks_total == 0 {
-            return Err(Error::AtCapacity);
+            return Err(Error::new(ErrorKind::AtCapacity));
         }
 
         let queue_permit = self
             .queue
             .clone()
             .try_acquire_owned()
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?;
 
         let acquire = self.tasks.clone().acquire_owned();
         let task_permit = tokio::time::timeout(self.timeout, acquire)
             .await
-            .map_err(|_| Error::AtCapacity)?
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -115,19 +115,19 @@ impl ConcurrencyLimiter {
     /// the execution semaphore and the queue semaphore are checked, so the
     /// total-capacity invariant (`max + queue`) is maintained.
     ///
-    /// Returns [`Error::AtCapacity`] when fewer than `count` permits are available.
+    /// Returns an [`ErrorKind::AtCapacity`] error when fewer than `count` permits are available.
     pub fn try_acquire_many(&self, count: u32) -> Result<ConcurrencyPermit> {
         let queue_permit = self
             .queue
             .clone()
             .try_acquire_many_owned(count)
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?;
 
         let task_permit = self
             .tasks
             .clone()
             .try_acquire_many_owned(count)
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| Error::new(ErrorKind::AtCapacity))?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -285,10 +285,10 @@ where
         }
         .bind_hub(new_hub),
     );
-
     rx.await.map_err(|_| {
-        objectstore_log::error!(!!&Error::Dropped, operation, "Task failed");
-        Error::Dropped
+        let err = Error::new(ErrorKind::Internal).context("task dropped");
+        objectstore_log::error!(!!&err, operation, "Task failed");
+        err
     })?
 }
 
@@ -297,7 +297,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::error::Error;
+    use crate::error::ErrorKind;
 
     #[test]
     fn available_permits_tracks_held() {
@@ -347,7 +347,7 @@ mod tests {
         let _permit = limiter.try_acquire_many(1).unwrap();
 
         let result = limiter.try_acquire_many(1);
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::AtCapacity);
     }
 
     #[test]
@@ -422,10 +422,10 @@ mod tests {
 
         let p1 = limiter.try_acquire_many(1).unwrap();
         let p2 = limiter.try_acquire_many(1).unwrap();
-        assert!(matches!(
-            limiter.try_acquire_many(1),
-            Err(Error::AtCapacity)
-        ));
+        assert_eq!(
+            limiter.try_acquire_many(1).unwrap_err().kind,
+            ErrorKind::AtCapacity
+        );
 
         drop(p1);
         assert!(limiter.try_acquire_many(1).is_ok());
@@ -475,7 +475,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = waiter.await.unwrap();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::AtCapacity);
         assert_eq!(limiter.queued_permits(), 0);
     }
 
@@ -491,7 +491,7 @@ mod tests {
 
         assert_eq!(limiter.queued_permits(), 1);
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::AtCapacity);
     }
 
     #[test]
@@ -499,10 +499,10 @@ mod tests {
         let limiter = ConcurrencyLimiter::new(1).with_queue(2, Duration::from_secs(5));
 
         let _p = limiter.try_acquire_many(1).unwrap();
-        assert!(matches!(
-            limiter.try_acquire_many(1),
-            Err(Error::AtCapacity)
-        ));
+        assert_eq!(
+            limiter.try_acquire_many(1).unwrap_err().kind,
+            ErrorKind::AtCapacity
+        );
     }
 
     #[test]
@@ -512,10 +512,10 @@ mod tests {
         let _bulk = limiter.try_acquire_many(3).unwrap();
         assert_eq!(limiter.used_permits(), 3);
 
-        assert!(matches!(
-            limiter.try_acquire_many(2),
-            Err(Error::AtCapacity)
-        ));
+        assert_eq!(
+            limiter.try_acquire_many(2).unwrap_err().kind,
+            ErrorKind::AtCapacity
+        );
 
         let _single = limiter.try_acquire_many(1).unwrap();
         assert_eq!(limiter.used_permits(), 4);
@@ -562,7 +562,7 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::AtCapacity);
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 

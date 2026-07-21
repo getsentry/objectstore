@@ -16,7 +16,7 @@
 //!
 //! This means:
 //! - If the service is at capacity, [`StorageService::stream`](crate::service::StorageService::stream) fails immediately with
-//!   [`Error::AtCapacity`] before any operations are read.
+//!   [`ErrorKind::AtCapacity`](crate::error::ErrorKind::AtCapacity) before any operations are read.
 //! - During execution, operations call the storage backend directly without acquiring
 //!   additional per-operation permits.
 //!
@@ -28,8 +28,8 @@
 //! `window × max_operation_size`. Results are yielded in completion order.
 //!
 //! Each operation is wrapped in a [`tokio::spawn`] for panic isolation: a panic in
-//! one operation surfaces as [`Error::Panic`] for that item and does not affect the
-//! others.
+//! one operation surfaces as an [`ErrorKind::Internal`](crate::error::ErrorKind::Internal) error
+//! for that item and does not affect the others.
 //!
 //! ## Future Scope
 //!
@@ -332,7 +332,7 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::concurrency::ConcurrencyLimiter;
-    use crate::error::Error;
+    use crate::error::{Error, ErrorKind};
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
 
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn at_capacity_when_no_permits() {
         let service = make_service_with_limit(0);
-        assert!(matches!(service.stream(), Err(Error::AtCapacity)));
+        assert!(matches!(service.stream(), Err(e) if e.kind == ErrorKind::AtCapacity));
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
 
         // Permit is held — stream() must fail immediately with AtCapacity.
         assert!(
-            matches!(service.stream(), Err(Error::AtCapacity)),
+            matches!(service.stream(), Err(e) if e.kind == ErrorKind::AtCapacity),
             "expected AtCapacity when all permits are held"
         );
 

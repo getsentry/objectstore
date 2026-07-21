@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::ErrorKind as ServiceErrorKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,15 +91,18 @@ impl ApiError {
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => StatusCode::INTERNAL_SERVER_ERROR,
 
-            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
-                StatusCode::RANGE_NOT_SATISFIABLE
-            }
-            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Service(error) => match error.kind {
+                ServiceErrorKind::ClientStream | ServiceErrorKind::InvalidInput => {
+                    StatusCode::BAD_REQUEST
+                }
+                ServiceErrorKind::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+                ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::AtCapacity
+                | ServiceErrorKind::BackendTimeout
+                | ServiceErrorKind::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                ServiceErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+                ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            },
 
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

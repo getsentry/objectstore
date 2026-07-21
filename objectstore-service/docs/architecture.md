@@ -180,11 +180,11 @@ prevent exhaustion of internal resources such as memory.
 
 ## Concurrency Limit
 
-A concurrency limiter caps in-flight
-backend operations. When all execution permits are held, new operations are
-queued — adding latency instead of rejecting immediately. The queue itself is
-bounded in both depth and time: operations that cannot be served within those
-limits fail with [`Error::AtCapacity`](error::Error::AtCapacity).
+A concurrency limiter caps in-flight backend operations. When all execution
+permits are held, new operations are queued — adding latency instead of
+rejecting immediately. The queue itself is bounded in both depth and time:
+operations that cannot be served within those limits fail with an
+[`ErrorKind::AtCapacity`](error::ErrorKind::AtCapacity) error.
 
 The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
@@ -211,3 +211,31 @@ reservation, lazy pulling, memory bounds, and concurrency model.
 
 More backpressure mechanisms (e.g. per-backend limits, adaptive throttling) may
 be added here in the future.
+
+# Error Model
+
+Service and backend failures use a single [`Error`](error::Error) containing an
+[`ErrorKind`](error::ErrorKind) classification and an `anyhow::Error`
+diagnostic. The classification is deliberately independent of both the
+concrete error type and HTTP semantics: it can be changed without altering the
+diagnostic chain, while the server maps it onto a status code and
+[`Error::level`](error::Error::level) maps it onto a log level.
+
+Construction follows two paths:
+
+- **Default (`?`)**: a foreign error converts through one of the `From` impls
+  into an [`ErrorKind::Internal`](error::ErrorKind::Internal) error while the
+  original error and its source chain become the diagnostic.
+- **Override**: the [`ResultExt`](error::ResultExt) extension trait's `.kind(…)`
+  and `.context(…)` methods reclassify and annotate without a `map_err`.
+  Repeated `.context(…)` calls use anyhow semantics and retain every context
+  frame; `.kind(…)` changes only the independent classification.
+
+`Error` delegates display, debug formatting, chain traversal, and downcasting
+to anyhow. Backends classify transport and HTTP failures into the `Backend*`
+kinds in [`check_error`](backend), so retryability is a simple check on
+[`kind`](error::Error::kind). Unsatisfiable ranges are constructed with
+[`Error::range_not_satisfiable`](error::Error::range_not_satisfiable) and expose
+their required object size through
+[`Error::range_total`](error::Error::range_total), allowing the server to emit a
+valid `Content-Range` header without relying on an unchecked source convention.
