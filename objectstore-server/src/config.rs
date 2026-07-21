@@ -547,7 +547,7 @@ pub struct Service {
     /// # Default
     ///
     /// `1s`
-    #[serde(alias = "concurrency_queue_timeout", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub concurrency_timeout: Duration,
 
     /// Percentage of `max_concurrency` available to bulk operations
