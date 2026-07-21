@@ -172,7 +172,7 @@ impl StorageService {
     {
         let timer = objectstore_metrics::timer!("service.concurrency.wait");
         let permit = self.concurrency.acquire().await.inspect_err(|_| {
-            objectstore_metrics::count!("service.concurrency.rejected");
+            objectstore_metrics::count!("service.concurrency.rejected", class = "normal");
             objectstore_log::warn!("Request rejected: service at capacity");
         })?;
 

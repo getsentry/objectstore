@@ -252,7 +252,14 @@ impl StreamExecutor {
                     };
                     match concurrency.acquire_bulk().await {
                         Ok(permit) => (idx, Ok((op, permit))),
-                        Err(e) => (idx, Err(E::from(e))),
+                        Err(e) => {
+                            objectstore_metrics::count!(
+                                "service.concurrency.rejected",
+                                class = "bulk"
+                            );
+                            objectstore_log::warn!("Bulk operation rejected: service at capacity");
+                            (idx, Err(E::from(e)))
+                        }
                     }
                 }
             })
