@@ -67,6 +67,15 @@ async fn main() -> anyhow::Result<()> {
         .duration(config.duration)
         .cleanup(config.cleanup);
 
+    // Apply the configured TTL. `Default` keeps the stresstest's built-in TTL,
+    // `Never` disables expiration (objects persist indefinitely), and `Fixed`
+    // sets an explicit expiration.
+    match config.ttl {
+        config::TtlConfig::Default => {}
+        config::TtlConfig::Never => stresstest = stresstest.ttl(None),
+        config::TtlConfig::Fixed(ttl) => stresstest = stresstest.ttl(Some(ttl)),
+    }
+
     for w in config.workloads {
         w.validate()?;
         let multipart = w.multipart_config();

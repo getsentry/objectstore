@@ -21,6 +21,7 @@ full example.
 | `duration` | yes      | —       | How long to run the test (e.g. `5s`, `10m`, `1h`)       |
 | `workloads`| yes      | —       | List of workload definitions (see below)                |
 | `cleanup`  | no       | `false` | Delete all created objects after the test finishes      |
+| `ttl`      | no       | `1h`    | Object expiration. `never`/`none`/`manual` or a duration |
 
 ### Workload options
 
