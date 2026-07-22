@@ -5,3 +5,4 @@ checks-githubactions-checkruns \
     "${GO_REVISION_OBJECTSTORE_REPO}" \
     "Test (all features)" \
     "Publish to GCR" \
+    "Upload Build Artifacts for GoCD" \
