@@ -62,7 +62,7 @@ jobs:
           llvm-objcopy --add-gnu-debuglink objectstore.debug objectstore
 
           sentry-cli difutil bundle-sources objectstore.debug
-          zip -objectstore-debug.zip objectstore.debug
+          zip objectstore-debug.zip objectstore.debug
 
           mkdir -p /tmp/artifacts/${{ matrix.platform }}
           mv objectstore-debug.zip objectstore.src.zip /tmp/artifacts/${{ matrix.platform }}/
