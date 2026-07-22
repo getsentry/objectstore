@@ -30,6 +30,7 @@ docker build \
 
 docker run --rm \
     --platform linux/arm64 \
+    -e CARGO_PROFILE_RELEASE_DEBUG="${CARGO_PROFILE_RELEASE_DEBUG:-false}" \
     -v "$(pwd)":/workspace \
     -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
     -v "$HOME/.cargo/git":/usr/local/cargo/git \
