@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use std::{fmt, io};
 
 use anyhow::Context;
@@ -78,8 +78,6 @@ pub struct GcsConfig {
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 /// Permission scopes required for accessing GCS.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read_write"];
-/// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// How many times to retry failed operations.
 const REQUEST_RETRY_COUNT: usize = 2;
 
@@ -558,25 +556,23 @@ impl GcsBackend {
             return Ok(None);
         };
 
-        let expire_at = gcs_metadata.custom_time;
         let metadata = gcs_metadata.into_metadata()?;
 
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+        if metadata.expiration_policy.is_timeout()
+            && metadata.time_expires.is_some_and(|ts| ts < access_time)
+        {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            let new_expire_at = access_time + tti;
-            if expire_at.is_some_and(|ts| ts < new_expire_at - TTI_DEBOUNCE) {
-                self.update_custom_time(object_url.clone(), new_expire_at)
-                    .await?;
-            }
+        if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
+            self.update_custom_time(object_url.clone(), new_expire_at)
+                .await?;
         }
 
         Ok(Some(metadata))
@@ -1086,6 +1082,7 @@ impl MultipartUploadBackend for GcsBackend {
 mod tests {
     use std::collections::BTreeMap;
     use std::num::NonZeroU32;
+    use std::time::Duration;
 
     use anyhow::Result;
     use objectstore_types::scope::{Scope, Scopes};
@@ -1327,7 +1324,6 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
@@ -1340,10 +1336,9 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        // Manually set custom_time to just inside the bump window.
-        // The bump condition is: expire_at < now + tti - TTI_DEBOUNCE.
+        // Backdate custom_time so it falls inside the bump window.
         let object_url = backend.object_url(&id)?;
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
+        let old_deadline = SystemTime::now() + Duration::from_mins(1);
         backend.update_custom_time(object_url, old_deadline).await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
@@ -1371,7 +1366,6 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             content_type: "text/plain".into(),
@@ -1395,6 +1389,43 @@ mod tests {
         assert_eq!(
             first_expiry, second_expiry,
             "Fresh TTI object should not have its expiry bumped"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_short_tti_bumps() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let id = make_id();
+        let tti = Duration::from_hours(2);
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(SystemTime::now() + tti),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        // Backdate custom_time so it falls inside the bump window.
+        let object_url = backend.object_url(&id)?;
+        let old_deadline = SystemTime::now() + Duration::from_mins(1);
+        backend.update_custom_time(object_url, old_deadline).await?;
+
+        // First get_metadata triggers the bump.
+        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_expiry = pre_meta.time_expires.unwrap();
+
+        // Second get_metadata sees the bumped timestamp.
+        let post_meta = backend.get_metadata(&id).await?.unwrap();
+        let post_expiry = post_meta.time_expires.unwrap();
+        assert!(
+            post_expiry > pre_expiry,
+            "Short TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
         );
 
         Ok(())

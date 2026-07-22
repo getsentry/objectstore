@@ -1,10 +1,10 @@
 //! S3-compatible backend with generic protocol support.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
@@ -63,8 +63,6 @@ const GCS_CUSTOM_PREFIX: &str = "x-goog-meta-";
 ///
 /// See: <https://cloud.google.com/storage/docs/xml-api/reference-headers#xgoogcustomtime>
 const GCS_CUSTOM_TIME: &str = "x-goog-custom-time";
-/// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
 /// An authentication token that can be passed as a bearer credential.
 pub trait Token: Send + Sync {
@@ -230,13 +228,10 @@ where
         // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
-        let expire_at = headers
-            .get(GCS_CUSTOM_TIME)
-            .and_then(|s| s.to_str().ok())
-            .and_then(|s| humantime::parse_rfc3339(s).ok());
-
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+        if metadata.expiration_policy.is_timeout()
+            && metadata.time_expires.is_some_and(|ts| ts < access_time)
+        {
             objectstore_log::debug!("Object found but past expiry");
             response.drain_body().await;
             return Ok(None);
@@ -244,16 +239,10 @@ where
 
         // TODO: extract into dedicated call from service
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            let expire_at = expire_at.unwrap_or(access_time);
-
-            if expire_at < access_time + tti - TTI_DEBOUNCE {
-                // The write helper persists `time_expires` verbatim, so refresh it to the bumped
-                // deadline here. The returned `metadata` keeps the pre-access value.
-                let mut bumped = metadata.clone();
-                bumped.time_expires = Some(access_time + tti);
-                self.update_metadata(id, &bumped).await?;
-            }
+        if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
+            let mut bumped = metadata.clone();
+            bumped.time_expires = Some(new_expire_at);
+            self.update_metadata(id, &bumped).await?;
         }
 
         Ok(Some((metadata, content_range, response)))
@@ -384,7 +373,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use anyhow::Result;
+    use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
