@@ -272,6 +272,7 @@ pub(super) fn reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)
+        .http1_only()
         .no_zstd()
         .no_brotli()
         .no_gzip()
