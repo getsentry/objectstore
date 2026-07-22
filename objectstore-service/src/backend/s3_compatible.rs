@@ -227,17 +227,25 @@ where
             None
         };
 
+        // TODO: Inject the access time from the request.
+        let access_time = SystemTime::now();
+
+        let expire_at = headers
+            .get(GCS_CUSTOM_TIME)
+            .and_then(|s| s.to_str().ok())
+            .and_then(|s| humantime::parse_rfc3339(s).ok());
+
+        // Filter already expired objects but leave them to garbage collection
+        if metadata.expiration_policy.is_timeout() && expire_at.is_some_and(|ts| ts < access_time) {
+            objectstore_log::debug!("Object found but past expiry");
+            response.drain_body().await;
+            return Ok(None);
+        }
+
         // TODO: extract into dedicated call from service
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let ExpirationPolicy::TimeToIdle(tti) = metadata.expiration_policy {
-            // TODO: Inject the access time from the request.
-            let access_time = SystemTime::now();
-
-            let expire_at = headers
-                .get(GCS_CUSTOM_TIME)
-                .and_then(|s| s.to_str().ok())
-                .and_then(|s| humantime::parse_rfc3339(s).ok())
-                .unwrap_or(access_time);
+            let expire_at = expire_at.unwrap_or(access_time);
 
             if expire_at < access_time + tti - TTI_DEBOUNCE {
                 // The write helper persists `time_expires` verbatim, so refresh it to the bumped
@@ -382,6 +390,7 @@ mod tests {
     use super::*;
     use crate::backend::common::Backend;
     use crate::id::ObjectContext;
+    use crate::stream;
 
     // NB: To run these tests, you need to have a MinIO server running. This is done
     // automatically in CI.
@@ -425,6 +434,52 @@ mod tests {
         let id = make_id();
         let result = backend.get_metadata(&id).await?;
         assert!(result.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ttl_immediate() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        let get_result = backend.get_object(&id, None).await?;
+        assert!(get_result.is_none());
+
+        let head_result = backend.get_metadata(&id).await?;
+        assert!(head_result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tti_immediate() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(SystemTime::now()),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        let get_result = backend.get_object(&id, None).await?;
+        assert!(get_result.is_none());
+
+        let head_result = backend.get_metadata(&id).await?;
+        assert!(head_result.is_none());
+
         Ok(())
     }
 }
