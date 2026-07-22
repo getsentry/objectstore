@@ -38,6 +38,11 @@ def test_bool_true_is_accepted() -> None:
     assert str(scope) == "key=True"
 
 
+def test_none_value_rejected() -> None:
+    with pytest.raises(ValueError, match="Scope value cannot be empty"):
+        Scope(key=None)  # type: ignore[arg-type]
+
+
 def test_empty_string_value_rejected() -> None:
     with pytest.raises(ValueError, match="Scope value cannot be empty"):
         Scope(key="")

@@ -15,6 +15,9 @@ class Scope:
             if not key:
                 raise ValueError("Scope key cannot be empty")
 
+            if value is None:
+                raise ValueError("Scope value cannot be empty")
+
             value_str = str(value)
             if not value_str:
                 raise ValueError("Scope value cannot be empty")
