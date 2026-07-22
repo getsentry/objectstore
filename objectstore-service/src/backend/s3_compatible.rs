@@ -438,6 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
     async fn test_ttl_immediate() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
@@ -461,6 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
     async fn test_tti_immediate() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
