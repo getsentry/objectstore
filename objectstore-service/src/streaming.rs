@@ -1,41 +1,26 @@
 //! Streaming operation types and concurrent executor.
 //!
-//! [`StreamExecutor`] processes a stream of `(idx, Result<`[`Operation`]`, E>)` tuples
-//! concurrently within a bounded window. Errors in the input stream pass through
-//! unchanged; successful operations are executed against the backend directly,
-//! with [`tokio::spawn`] for panic isolation and run-to-completion guarantees.
+//! [`StreamExecutor`] processes a stream of `(idx, Result<`[`Operation`]`, E>)` tuples concurrently
+//! within a bounded window. Errors in the input stream pass through unchanged; successful
+//! operations are executed against the backend directly, with [`tokio::spawn`] for panic isolation
+//! and run-to-completion guarantees.
 //!
-//! ## Window and Permit Reservation
+//! ## Permit Acquisition
 //!
-//! The concurrency window is derived from the service's available permits at the time
-//! [`StorageService::stream`](crate::service::StorageService::stream) is called: `ceil(tasks_available × 0.10)`.
-//! The executor pre-acquires exactly `window` permits from the service's
-//! `ConcurrencyLimiter` as a single bulk reservation. The reservation is shared
-//! (via `Arc`) with every spawned task, so permits are released only after every
-//! in-flight task completes — even if the output stream is dropped early.
+//! Streaming / batch operations are subject to the service's concurrency limiter. They count as
+//! "bulk" operations, which are capped at a lower limit than regular operations. This ensures a
+//! large bulk request doesn't automatically bring the service to its limits and leaves room for
+//! regular requests.
 //!
-//! This means:
-//! - If the service is at capacity, [`StorageService::stream`](crate::service::StorageService::stream) fails immediately with
-//!   [`Error::AtCapacity`] before any operations are read.
-//! - During execution, operations call the storage backend directly without acquiring
-//!   additional per-operation permits.
+//! The regular acquire timeout applies: Operations that cannot acquire a permit within the
+//! configured queue timeout fail with [`Error::AtCapacity`].
 //!
 //! ## Concurrency Model
 //!
-//! [`StreamExecutor::execute`] uses `buffer_unordered` to drive up to `window`
-//! operations concurrently. The input stream is pulled lazily — at most `window`
-//! operations are in-flight at once, bounding memory to roughly
-//! `window × max_operation_size`. Results are yielded in completion order.
-//!
-//! Each operation is wrapped in a [`tokio::spawn`] for panic isolation: a panic in
-//! one operation surfaces as [`Error::Panic`] for that item and does not affect the
-//! others.
-//!
-//! ## Future Scope
-//!
-//! The window fraction (10%) is hard-coded. Configurable fractions, adaptive window
-//! sizing, and backend-level optimizations (e.g. BigTable multi-read, GCS batch API)
-//! are out of scope for the current implementation.
+//! [`StreamExecutor::execute`] uses `buffer_unordered` with the bulk budget as the concurrency
+//! bound. The input stream is pulled lazily and results are yielded in completion order. Each
+//! operation is wrapped in a [`tokio::spawn`] for panic isolation: a panic in one operation
+//! surfaces as [`Error::Panic`] for that item and does not affect the others.
 
 use std::sync::Arc;
 
@@ -43,7 +28,7 @@ use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::Backend;
-use crate::concurrency::ConcurrencyPermit;
+use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
 use crate::service::GetResponse;
@@ -211,35 +196,41 @@ impl std::fmt::Debug for OpResponse {
 
 /// Executes streaming operations with bounded concurrency.
 ///
-/// Construct via [`StorageService::stream`](crate::service::StorageService::stream),
-/// which pre-acquires the concurrency window from the service's available permits.
+/// Construct via [`StorageService::stream`](crate::service::StorageService::stream).
+/// Each operation acquires a bulk permit individually; aggregate bulk
+/// concurrency is bounded by the bulk semaphore on the limiter.
 ///
-/// See the [module documentation](self) for a full description of the window
-/// calculation, permit reservation, and concurrency model.
+/// See the [module documentation](self) for the concurrency model.
 #[derive(Debug)]
 pub struct StreamExecutor {
-    pub(crate) backend: Arc<dyn Backend>,
-    pub(crate) window: u32,
-    pub(crate) reservation: ConcurrencyPermit,
+    backend: Arc<dyn Backend>,
+    concurrency: ConcurrencyLimiter,
 }
 
 impl StreamExecutor {
-    /// Returns the concurrency window computed at construction.
-    pub fn window(&self) -> u32 {
-        self.window
+    /// Creates a new `StreamExecutor` with the given backend and limiter.
+    pub fn new(backend: Arc<dyn Backend>, concurrency: ConcurrencyLimiter) -> Self {
+        Self {
+            backend,
+            concurrency,
+        }
     }
 
     /// Executes the operations stream with bounded concurrency.
     ///
     /// Each item is a `(index, Result<Operation, E>)` tuple where `index` is the
     /// 0-based position of the operation in the original request. Error items pass
-    /// through immediately; successful items are executed concurrently up to `window`
-    /// at a time, each in an isolated [`tokio::spawn`].
+    /// through immediately; successful items acquire a bulk permit and execute
+    /// in an isolated [`tokio::spawn`].
     ///
-    /// Results are yielded in completion order (not submission order). The permit
-    /// reservation is held until every spawned task has completed — if the stream
-    /// is dropped early, in-flight tasks run to completion before the permits are
-    /// released.
+    /// Permit acquisition is sequential — only one acquire is in flight at a
+    /// time, ensuring fairness with other streams and preventing a large
+    /// batch from racing for all permits at once. Execution of operations
+    /// that already hold a permit proceeds concurrently.
+    ///
+    /// Operations that cannot acquire a permit within the configured queue
+    /// timeout fail with [`Error::AtCapacity`]. Results are yielded in
+    /// completion order (not submission order).
     pub fn execute<E>(
         self,
         context: ObjectContext,
@@ -250,34 +241,52 @@ impl StreamExecutor {
     {
         let StreamExecutor {
             backend,
-            window,
-            reservation,
+            concurrency,
         } = self;
 
-        // Arc-wrap so each spawned task can hold a clone. Permits are released
-        // only when the last clone is dropped — i.e. after every spawned task
-        // completes, even if the output stream is dropped early.
-        let reservation = Arc::new(reservation);
+        let buffer = concurrency.total_bulk().max(1) as usize;
 
         operations
-            .map(move |(idx, item)| {
-                let permit = Arc::clone(&reservation);
-                let backend = Arc::clone(&backend);
-                let context = context.clone();
+            // `then` awaits each closure before pulling the next item, making
+            // permit acquisition sequential. this ensures fairness with other
+            // streams and prevents a large batch from racing for all permits
+            // at once.
+            .then(move |(idx, item)| {
+                let concurrency = concurrency.clone();
                 async move {
                     let op = match item {
                         Ok(op) => op,
                         Err(e) => return (idx, Err(e)),
                     };
+                    match concurrency.acquire_bulk().await {
+                        Ok(permit) => (idx, Ok((op, permit))),
+                        Err(e) => {
+                            objectstore_metrics::count!(
+                                "service.concurrency.rejected",
+                                class = "bulk"
+                            );
+                            objectstore_log::warn!("Bulk operation rejected: service at capacity");
+                            (idx, Err(E::from(e)))
+                        }
+                    }
+                }
+            })
+            .map(move |(idx, result)| {
+                let backend = Arc::clone(&backend);
+                let context = context.clone();
+                async move {
+                    let (op, permit) = match result {
+                        Ok(pair) => pair,
+                        Err(e) => return (idx, Err(e)),
+                    };
 
-                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, async move {
-                        execute_operation(backend, context, op).await
+                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, {
+                        execute_operation(backend, context, op)
                     });
-
                     (idx, spawn.await.map_err(E::from))
                 }
             })
-            .buffer_unordered(window as usize)
+            .buffer_unordered(buffer)
     }
 }
 
@@ -321,6 +330,7 @@ async fn execute_operation(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use futures_util::StreamExt;
@@ -357,43 +367,12 @@ mod tests {
         futures_util::stream::iter(ops.into_iter().enumerate().map(|(i, op)| (i, Ok(op))))
     }
 
-    // --- StreamExecutor window and capacity tests ---
-
-    #[test]
-    fn at_capacity_when_no_permits() {
-        let service = make_service_with_limit(0);
-        assert!(matches!(service.stream(), Err(Error::AtCapacity)));
-    }
-
-    #[test]
-    fn window_computation() {
-        // ceil(1 × 0.10) = 1
-        let s = make_service_with_limit(1);
-        assert_eq!(s.stream().unwrap().window(), 1);
-
-        // ceil(10 × 0.10) = 1
-        let s = make_service_with_limit(10);
-        assert_eq!(s.stream().unwrap().window(), 1);
-
-        // ceil(100 × 0.10) = 10
-        let s = make_service_with_limit(100);
-        assert_eq!(s.stream().unwrap().window(), 10);
-
-        // ceil(500 × 0.10) = 50
-        let s = make_service_with_limit(500);
-        assert_eq!(s.stream().unwrap().window(), 50);
-
-        // ceil(1000 × 0.10) = 100
-        let s = make_service_with_limit(1000);
-        assert_eq!(s.stream().unwrap().window(), 100);
-    }
-
-    // --- StreamExecutor::execute() correctness tests ---
+    // --- StreamExecutor correctness tests ---
 
     #[tokio::test]
     async fn execute_empty_stream() {
         let service = make_service();
-        let executor = service.stream().unwrap();
+        let executor = service.stream();
         let outcomes: Vec<_> = executor
             .execute(
                 make_context(),
@@ -433,7 +412,7 @@ mod tests {
             Operation::Delete(Delete { key: "key1".into() }),
         ];
 
-        let executor = service.stream().unwrap();
+        let executor = service.stream();
         let outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
 
         assert_eq!(outcomes.len(), 4);
@@ -473,7 +452,7 @@ mod tests {
             }),
         ];
 
-        let executor = service.stream().unwrap();
+        let executor = service.stream();
         let mut outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
         outcomes.sort_by_key(|(idx, _)| *idx);
 
@@ -530,7 +509,6 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_execution() {
-        // Window = ceil(100 × 0.10) = 10.
         let (paused_tx, mut paused_rx) = tokio::sync::mpsc::channel::<()>(20);
         let resume = Arc::new(tokio::sync::Notify::new());
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -543,10 +521,6 @@ mod tests {
         let service =
             StorageService::new(Box::new(gated)).with_concurrency(ConcurrencyLimiter::new(100));
 
-        let executor = service.stream().unwrap();
-        assert_eq!(executor.window(), 10);
-
-        // Submit 10 inserts. With window=10, all should be in-flight simultaneously.
         let ops: Vec<Operation> = (0..10)
             .map(|i| {
                 Operation::Insert(Box::new(Insert {
@@ -557,6 +531,7 @@ mod tests {
             })
             .collect();
 
+        let executor = service.stream();
         let exec_handle = tokio::spawn(async move {
             executor
                 .execute(make_context(), indexed_ok(ops))
@@ -584,40 +559,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_rejected_when_permits_exhausted() {
-        // Service with limit=1. One background insert holds the only permit.
-        // service.stream() must fail with AtCapacity.
-        let (paused_tx, mut paused_rx) = tokio::sync::mpsc::channel::<()>(2);
-        let resume = Arc::new(tokio::sync::Notify::new());
+    async fn bulk_respects_budget() {
+        // Bulk budget = 1 (100% of max=1). Hold the permit via a normal
+        // acquire; the bulk op should wait and eventually time out.
+        let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
+            .with_concurrency(
+                ConcurrencyLimiter::new(1)
+                    .with_queue(0)
+                    .with_timeout(Duration::from_millis(1))
+                    .with_bulk(100),
+            );
 
-        let gated = TestBackend::new(GateOnPut {
-            paused_tx,
-            resume: Arc::clone(&resume),
-            in_flight: Arc::new(AtomicUsize::new(0)),
-        });
-        let service =
-            StorageService::new(Box::new(gated)).with_concurrency(ConcurrencyLimiter::new(1));
+        let _held = service.concurrency_limiter().acquire().await.unwrap();
 
-        // Hold the only permit via a blocking insert.
-        let svc = service.clone();
-        tokio::spawn(async move {
-            let _ = svc
-                .insert_object(
-                    make_context(),
-                    Some("blocker".into()),
-                    Metadata::default(),
-                    stream::single("x"),
-                )
-                .await;
-        });
-        paused_rx.recv().await.unwrap();
+        let ops = vec![Operation::Insert(Box::new(Insert {
+            key: Some("blocked".into()),
+            metadata: Metadata::default(),
+            payload: Bytes::from("data"),
+        }))];
 
-        // Permit is held — stream() must fail immediately with AtCapacity.
+        let executor = service.stream();
+        let outcomes: Vec<_> = executor
+            .execute(make_context(), indexed_ok(ops))
+            .collect()
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
         assert!(
-            matches!(service.stream(), Err(Error::AtCapacity)),
-            "expected AtCapacity when all permits are held"
+            matches!(&outcomes[0].1, Err(Error::AtCapacity)),
+            "expected AtCapacity, got {:?}",
+            outcomes[0].1,
         );
-
-        resume.notify_waiters();
     }
 }

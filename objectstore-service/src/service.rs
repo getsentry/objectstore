@@ -14,7 +14,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::id::{ObjectContext, ObjectId};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -62,7 +62,6 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 /// blocked. Call [`join`](StorageService::join) during shutdown to wait for
 /// outstanding cleanup. Operations are also isolated from panics in backend
 /// code — a failure in one operation does not bring down other in-flight work.
-/// See [`Error::Panic`].
 ///
 /// # Concurrency Limit
 ///
@@ -100,9 +99,9 @@ impl StorageService {
         self
     }
 
-    /// Returns the number of backend task slots currently available.
-    pub fn tasks_available(&self) -> u32 {
-        self.concurrency.available_permits()
+    /// Returns a reference to the concurrency limiter.
+    pub fn concurrency_limiter(&self) -> &ConcurrencyLimiter {
+        &self.concurrency
     }
 
     /// Returns the number of backend tasks currently running.
@@ -117,45 +116,40 @@ impl StorageService {
 
     /// Prepares to stream multiple operations concurrently against this service.
     ///
-    /// Operations are executed concurrently up to a window derived from the
-    /// service's current capacity. The permits for that window are reserved
-    /// upfront — if the service is at capacity, this returns
-    /// [`Error::AtCapacity`] immediately before any operations are read.
-    pub fn stream(&self) -> Result<StreamExecutor> {
-        let available = self.tasks_available();
-        let window = available.div_ceil(10);
-
-        let acquire_result = match window {
-            0 => Err(Error::AtCapacity),
-            _ => self.concurrency.try_acquire_many(window),
-        };
-        let reservation = acquire_result.inspect_err(|_| {
-            objectstore_metrics::count!("service.concurrency.rejected");
-            objectstore_log::warn!("Request rejected: service at capacity");
-        })?;
-
-        Ok(StreamExecutor {
-            backend: Arc::clone(&self.inner),
-            window,
-            reservation,
-        })
+    /// Each operation acquires a bulk permit individually via
+    /// [`ConcurrencyLimiter::acquire_bulk`], which caps bulk traffic at a
+    /// configurable percentage of execution slots while allowing operations
+    /// to queue for permits instead of requiring upfront reservation.
+    pub fn stream(&self) -> StreamExecutor {
+        StreamExecutor::new(Arc::clone(&self.inner), self.concurrency.clone())
     }
 
     /// Starts background processes for the storage service.
     ///
-    /// Spawns a task that emits concurrency gauges once per second:
-    /// `service.concurrency.in_use`, `service.concurrency.queued`,
-    /// `service.concurrency.limit`, and `service.concurrency.queue_limit`.
+    /// At startup, this tracks the following gauges:
+    ///
+    ///  - `service.concurrency.limit`: concurrent task execution slots
+    ///  - `service.concurrency.queue_limit`: queue size for waiting tasks
+    ///  - `service.concurrency.bulk_limit`: concurrent task execution slots for bulk operations
+    ///
+    /// Also spawns a task that emits concurrency gauges once per second:
+    ///  - `service.concurrency.in_use`: currently running tasks
+    ///  - `service.concurrency.queued`: currently queued tasks
+    ///  - `service.concurrency.bulk_in_use`: currently running bulk tasks
     pub fn start(&self) {
         let concurrency = self.concurrency.clone();
         objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());
         objectstore_metrics::gauge!("service.concurrency.queue_limit" = concurrency.total_queue());
+        objectstore_metrics::gauge!("service.concurrency.bulk_limit" = concurrency.total_bulk());
 
         tokio::spawn(async move {
             concurrency
                 .run_emitter(|stats| async move {
                     objectstore_metrics::gauge!("service.concurrency.in_use" = stats.in_use);
                     objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
+                    objectstore_metrics::gauge!(
+                        "service.concurrency.bulk_in_use" = stats.bulk_in_use
+                    );
                 })
                 .await;
         });
@@ -163,15 +157,21 @@ impl StorageService {
 
     /// Spawns a future in a separate task and awaits its result.
     ///
-    /// Returns [`Error::AtCapacity`] if the concurrency limit is reached,
-    /// [`Error::Panic`] if the spawned task panics (the panic message
-    /// is captured for diagnostics), or [`Error::Dropped`] if the task is
-    /// dropped before sending its result.
+    /// # Observability
     ///
-    /// Emits `service.task.start` (counter) after acquiring a permit and
-    /// `service.task.duration` (distribution) when the task completes, tagged
-    /// with the given `operation` name and an `outcome` of `"success"` or
-    /// `"error"`.
+    /// This tracks two metrics:
+    ///
+    /// - `service.task.start` (counter) after acquiring a permit
+    /// - `service.task.duration` (distribution) when the task completes
+    ///
+    /// Both are tagged with the given `operation` name and an `outcome`
+    /// of `"success"` or `"error"`.
+    ///
+    /// # Errors
+    ///
+    /// - `AtCapacity` if the concurrency limit is reached
+    /// - `Panic` if the spawned task panics (the panic message is captured for diagnostics)
+    /// - `Dropped` if the task is dropped before sending its result.
     async fn spawn<T, F>(&self, operation: &'static str, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -179,7 +179,7 @@ impl StorageService {
     {
         let timer = objectstore_metrics::timer!("service.concurrency.wait");
         let permit = self.concurrency.acquire().await.inspect_err(|_| {
-            objectstore_metrics::count!("service.concurrency.rejected");
+            objectstore_metrics::count!("service.concurrency.rejected", class = "normal");
             objectstore_log::warn!("Request rejected: service at capacity");
         })?;
 

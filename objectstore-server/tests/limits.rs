@@ -625,9 +625,10 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_batch_at_capacity_returns_429() -> Result<()> {
-    // With max_concurrency=0 the service has no permits available, so
-    // BatchExecutor::new() returns AtCapacity and the endpoint responds 429.
+async fn test_batch_at_capacity_returns_per_op_error() -> Result<()> {
+    // With max_concurrency=0 no batch operations can acquire a permit.
+    // Each operation fails individually with AtCapacity inside the
+    // multipart response (the endpoint itself returns 200).
     let server = TestServer::with_config(Config {
         service: Service {
             max_concurrency: 0,
@@ -660,8 +661,14 @@ async fn test_batch_at_capacity_returns_429() -> Result<()> {
 
     assert_eq!(
         response.status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS,
-        "expected 429 when service has no available permits"
+        reqwest::StatusCode::OK,
+        "batch endpoint returns 200 with per-operation errors"
+    );
+
+    let body = response.text().await?;
+    assert!(
+        body.contains("429"),
+        "expected per-operation 429 in multipart body, got: {body}"
     );
 
     Ok(())

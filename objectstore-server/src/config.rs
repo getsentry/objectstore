@@ -509,7 +509,8 @@ pub struct Config {
 ///
 /// - `OS__SERVICE__MAX_CONCURRENCY`
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
-/// - `OS__SERVICE__CONCURRENCY_QUEUE_TIMEOUT`
+/// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
+/// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -528,7 +529,7 @@ pub struct Service {
     ///
     /// When all `max_concurrency` execution slots are held, up to this many
     /// additional requests will park and wait (for at most
-    /// `concurrency_queue_timeout`) instead of being rejected immediately.
+    /// `concurrency_timeout`) instead of being rejected immediately.
     /// Requests beyond that are rejected with HTTP 429.
     ///
     /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
@@ -539,15 +540,31 @@ pub struct Service {
     /// `0`
     pub concurrency_queue: u32,
 
-    /// Maximum time a request may wait in the concurrency queue.
+    /// Maximum time a caller may wait for a concurrency permit.
     ///
-    /// Ignored when `concurrency_queue` is `0`.
+    /// Applies to both queued normal requests and bulk operations
+    /// waiting for the bulk and execution semaphores.
     ///
     /// # Default
     ///
     /// `1s`
     #[serde(with = "humantime_serde")]
-    pub concurrency_queue_timeout: Duration,
+    pub concurrency_timeout: Duration,
+
+    /// Percentage of `max_concurrency` available to bulk operations
+    /// (e.g. parallelized batch requests).
+    ///
+    /// This sets a safe operating point: below this level there is
+    /// little-to-no performance degradation, leaving room for more tasks
+    /// to be admitted via the queue before rejection is necessary.
+    ///
+    /// Clamped to 1..=100. At 100, bulk operations can use all execution
+    /// slots. Lower values leave headroom for single-object requests.
+    ///
+    /// # Default
+    ///
+    /// `60`
+    pub bulk_concurrency_pct: u32,
 }
 
 impl Default for Service {
@@ -555,7 +572,8 @@ impl Default for Service {
         Self {
             max_concurrency: objectstore_service::service::DEFAULT_CONCURRENCY_LIMIT,
             concurrency_queue: 0,
-            concurrency_queue_timeout: Duration::from_secs(1),
+            concurrency_timeout: Duration::from_secs(1),
+            bulk_concurrency_pct: 60,
         }
     }
 }

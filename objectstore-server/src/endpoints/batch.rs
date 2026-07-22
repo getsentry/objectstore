@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -63,12 +63,7 @@ async fn batch(
     Xt(context): Xt<ObjectContext>,
     requests: BatchOperationStream,
 ) -> Response {
-    let batch = match state.service.stream() {
-        Ok(b) => b,
-        Err(e) => return ApiError::Service(e).into_response(),
-    };
-
-    objectstore_metrics::gauge!("service.batch.window" = batch.window());
+    let batch = state.service.stream();
 
     // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
     let parsed = requests.0.map(|r| r.map_err(ApiError::from)).enumerate();
