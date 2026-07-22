@@ -157,6 +157,7 @@ def test_full_cycle(server_url: str) -> None:
     assert object_key is not None
 
     retrieved = session.get(object_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"test data"
     assert retrieved.metadata.time_created is not None
     assert retrieved.metadata.filename is None
@@ -164,13 +165,12 @@ def test_full_cycle(server_url: str) -> None:
     new_key = session.put(b"new data", key=object_key)
     assert new_key == object_key
     retrieved = session.get(object_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"new data"
 
     session.delete(object_key)
 
-    with pytest.raises(RequestError) as exc_info:
-        session.get(object_key)
-    assert exc_info.value.status == 404
+    assert session.get(object_key) is None
 
 
 def test_head(server_url: str) -> None:
@@ -213,6 +213,7 @@ def test_full_cycle_with_origin(server_url: str) -> None:
     assert object_key is not None
 
     retrieved = session.get(object_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"test data"
     assert retrieved.metadata.origin == "203.0.113.42"
     assert retrieved.metadata.filename == "report.pdf"
@@ -239,6 +240,7 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
     assert object_key is not None
 
     retrieved = session.get(object_key)
+    assert retrieved is not None
     retrieved_data = retrieved.payload.read()
 
     assert retrieved_data == compressed_data
@@ -264,6 +266,7 @@ def test_full_cycle_structured_key(server_url: str) -> None:
     assert object_key == "1/shard-0.json"
 
     retrieved = session.get(object_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"test data"
 
 
@@ -283,9 +286,7 @@ def test_not_found_with_different_scope(server_url: str) -> None:
 
     # Now make sure we can't fetch it
     session = client.session(test_usecase, org=42, project=9999)
-    with pytest.raises(RequestError) as exc_info:
-        session.get(object_key)
-    assert exc_info.value.status == 404
+    assert session.get(object_key) is None
 
 
 def test_full_cycle_with_static_token(server_url: str) -> None:
@@ -304,13 +305,12 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
     assert object_key is not None
 
     retrieved = session.get(object_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"static token data"
 
     session.delete(object_key)
 
-    with pytest.raises(RequestError) as exc_info:
-        session.get(object_key)
-    assert exc_info.value.status == 404
+    assert session.get(object_key) is None
 
 
 def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
@@ -405,6 +405,7 @@ def test_multipart_full_cycle_uncompressed(server_url: str) -> None:
     assert final_key == "mp-uncompressed"
 
     retrieved = session.get(final_key, decompress=False)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"hello world!"
 
 
@@ -437,12 +438,14 @@ def test_multipart_full_cycle_compressed(server_url: str) -> None:
 
     # Verify raw compressed round-trip
     retrieved = session.get(final_key, decompress=False)
+    assert retrieved is not None
     assert retrieved.metadata.compression == "zstd"
     raw = retrieved.payload.read()
     assert raw == compressed_part1 + compressed_part2
 
     # Verify transparent decompression
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.metadata.compression is None
     assert retrieved.payload.read() == b"hello world!"
 
@@ -474,6 +477,7 @@ def test_multipart_streaming_part_upload_uncompressed(server_url: str) -> None:
     final_key = upload.complete([part1, part2])
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"hello world!"
 
 
@@ -509,10 +513,12 @@ def test_multipart_streaming_part_upload_compressed(server_url: str) -> None:
     final_key = upload.complete([part1, part2])
 
     retrieved = session.get(final_key, decompress=False)
+    assert retrieved is not None
     assert retrieved.metadata.compression == "zstd"
     assert retrieved.payload.read() == compressed_part1 + compressed_part2
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.metadata.compression is None
     assert retrieved.payload.read() == b"hello world!"
 
@@ -534,6 +540,7 @@ def test_multipart_server_generated_key(server_url: str) -> None:
     assert final_key
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"data"
 
 
@@ -597,6 +604,7 @@ def test_multipart_metadata_preserved(server_url: str) -> None:
     final_key = upload.complete([part])
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.metadata.content_type == "text/plain"
     assert retrieved.metadata.origin == "203.0.113.42"
     assert retrieved.metadata.filename == "archive.tar.gz"
@@ -650,6 +658,7 @@ def test_multipart_resume(server_url: str) -> None:
     final_key = resumed.complete(existing)
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"firstsecond"
 
 
@@ -680,6 +689,7 @@ def test_multipart_concurrent_part_uploads(server_url: str) -> None:
     final_key = upload.complete(parts)
 
     retrieved = session.get(final_key)
+    assert retrieved is not None
     assert retrieved.payload.read() == b"".join(chunks)
 
 
@@ -884,7 +894,9 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     assert stored_key == key
 
     # Retrievable by that same literal key, both normally and pre-signed.
-    assert session.get(key).payload.read() == payload
+    retrieved = session.get(key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == payload
     url = session.presigned_object_url("GET", key, duration=timedelta(hours=1))
     status, body = _fetch(url)
     assert status == 200
