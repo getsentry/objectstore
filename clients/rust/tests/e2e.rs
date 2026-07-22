@@ -288,6 +288,56 @@ async fn fails_with_insufficient_auth_token_perms() {
 }
 
 #[tokio::test]
+async fn mint_token_with_rejects_escalation() {
+    // A read-only generator cannot mint a token requesting write access.
+    let client = Client::builder("http://127.0.0.1:8888/")
+        .token(test_token_generator().permissions(&[Permission::ObjectRead]))
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let result = session.mint_token_with(
+        Some(&[Permission::ObjectRead, Permission::ObjectWrite]),
+        None,
+    );
+    match result {
+        Err(Error::PermissionEscalation { escalated }) => {
+            assert_eq!(escalated, vec![Permission::ObjectWrite]);
+        }
+        other => panic!("Expected PermissionEscalation, got: {other:?}"),
+    }
+
+    // A subset of the granted permissions is accepted.
+    assert!(
+        session
+            .mint_token_with(Some(&[Permission::ObjectRead]), Some(30))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn mint_token_with_rejects_static_override() {
+    let token = sign_static_token("usecase", &[("org", "12345")]);
+    let client = Client::builder("http://127.0.0.1:8888/")
+        .token(token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // Overrides cannot be applied to a static, pre-signed token.
+    assert!(matches!(
+        session.mint_token_with(Some(&[Permission::ObjectRead]), None),
+        Err(Error::StaticTokenOverride)
+    ));
+
+    // Without overrides, the static token is returned as-is.
+    assert!(session.mint_token().unwrap().is_some());
+}
+
+#[tokio::test]
 async fn stores_with_static_token() {
     let server = test_server().await;
 

@@ -10,7 +10,7 @@ use reqwest::RequestBuilder;
 use url::Url;
 
 use crate::IntoTokenProvider;
-use crate::auth::TokenProvider;
+use crate::auth::{Permission, TokenProvider};
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -456,13 +456,43 @@ impl Session {
         url
     }
 
-    /// Returns a signed token if a token or generator was provided or `None` otherwise
+    /// Returns a signed token if a token or generator was provided or `None` otherwise.
+    ///
+    /// The token carries the configured provider's default permissions and expiry. Use
+    /// [`mint_token_with`](Self::mint_token_with) to override them for a single token.
     pub fn mint_token(&self) -> crate::Result<Option<String>> {
+        self.mint_token_with(None, None)
+    }
+
+    /// Returns a signed token, optionally overriding the generator's default permissions
+    /// and/or expiry for this token only.
+    ///
+    /// When `permissions` is `Some`, they must be a subset of the permissions granted to the
+    /// underlying [`TokenGenerator`](crate::TokenGenerator), otherwise an
+    /// [`Error::PermissionEscalation`](crate::Error::PermissionEscalation) is returned. When
+    /// `expiry_seconds` is `Some`, it overrides the generator's default expiry.
+    ///
+    /// These overrides only apply to a [`TokenProvider::Generator`](crate::TokenProvider). A
+    /// static, pre-signed token cannot be re-scoped, so passing an override alongside one returns
+    /// [`Error::StaticTokenOverride`](crate::Error::StaticTokenOverride). Returns `None` when no
+    /// token or generator was provided.
+    pub fn mint_token_with(
+        &self,
+        permissions: Option<&[Permission]>,
+        expiry_seconds: Option<u64>,
+    ) -> crate::Result<Option<String>> {
         match &self.client.token {
-            Some(TokenProvider::Generator(generator)) => {
-                Ok(Some(generator.sign_for_scope(&self.scope)?))
+            Some(TokenProvider::Generator(generator)) => Ok(Some(generator.sign_for_scope(
+                &self.scope,
+                permissions,
+                expiry_seconds,
+            )?)),
+            Some(TokenProvider::Static(token)) => {
+                if permissions.is_some() || expiry_seconds.is_some() {
+                    return Err(crate::Error::StaticTokenOverride);
+                }
+                Ok(Some(token.clone()))
             }
-            Some(TokenProvider::Static(token)) => Ok(Some(token.clone())),
             None => Ok(None),
         }
     }
