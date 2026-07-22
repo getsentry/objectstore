@@ -535,6 +535,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulk-upload"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argh",
+ "futures",
+ "indicatif",
+ "objectstore-client",
+ "tikv-jemallocator",
+ "tokio",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
