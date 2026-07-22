@@ -272,11 +272,19 @@ class Session:
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
+    def _base_url(self) -> str:
+        # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so
+        # the result is a valid absolute URL.
+        host = self._pool.host
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{self._pool.scheme}://{host}:{self._pool.port}"
+
     def _make_url(self, key: str | None, full: bool = False) -> str:
         relative_path = f"/v1/objects/{self._usecase.name}/{self._scope}/{key or ''}"
         path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
-            return f"http://{self._pool.host}:{self._pool.port}{path}"
+            return f"{self._base_url()}{path}"
         return path
 
     def _make_multipart_url(
@@ -521,14 +529,8 @@ class Session:
         canonical = presign.build_canonical_form(method, encoded_path, encoded_query)
         signature = self._token.signature_for_canonical_form(canonical)
 
-        # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so the
-        # result is a valid absolute URL.
-        host = self._pool.host
-        if ":" in host:
-            host = f"[{host}]"
-
         return (
-            f"{self._pool.scheme}://{host}:{self._pool.port}"
+            f"{self._base_url()}"
             f"{encoded_path}?{encoded_query}&{presign.PARAM_SIG}={signature}"
         )
 
