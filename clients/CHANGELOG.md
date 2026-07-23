@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+### Bug Fixes 🐛
+
+#### Python
+
+- Return None from get() on 404 to match Rust client by @jan-auer in [#570](https://github.com/getsentry/objectstore/pull/570)
+- Align empty-scope URL rendering with Rust client by @jan-auer in [#568](https://github.com/getsentry/objectstore/pull/568)
+- Use pool scheme and bracket IPv6 hosts in object URLs by @jan-auer in [#567](https://github.com/getsentry/objectstore/pull/567)
+
 ## 0.1.15
 
 ### New Features ✨
