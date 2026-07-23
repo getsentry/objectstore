@@ -403,10 +403,12 @@ class Session:
         key: str,
         decompress: bool = True,
         accept_encoding: Sequence[str] | None = None,
-    ) -> GetResponse:
+    ) -> GetResponse | None:
         """
         This fetches the blob with the given `key`, returning an `IO` stream that
         can be read.
+
+        Returns ``None`` if the object does not exist.
 
         By default, content that was uploaded compressed will be automatically
         decompressed, unless `decompress=False` is passed.
@@ -428,6 +430,9 @@ class Session:
                 decode_content=False,
                 headers=headers,
             )
+            if response.status == 404:
+                response.read()  # drain body so urllib3 returns the connection
+                return None
             raise_for_status(response)
         # OR: should I use `response.stream()`?
         stream = cast(IO[bytes], response)
@@ -551,6 +556,7 @@ class Session:
                 "HEAD",
                 self._make_url(key),
                 headers=headers,
+                preload_content=True,
             )
             if response.status == 404:
                 return None
