@@ -136,8 +136,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// that attempt to use a certain channel after the server has closed it will pay the cost of the
 /// reconnection, resulting in increased latency for those requests.
 const MAX_CHANNEL_AGE: Option<Duration> = Some(Duration::from_mins(50));
-/// Time to debounce bumping an object with configured TTI.
-const TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 /// Permission scopes required for accessing the BigTable data API.
 const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/bigtable.data"];
 
@@ -664,12 +662,13 @@ impl RowData {
         self.expiration_policy().is_timeout() && self.time_expires().is_some_and(|ts| ts < time)
     }
 
-    /// Returns `true` if this row's TTI deadline should be bumped.
-    fn needs_tti_bump(&self) -> bool {
-        matches!(
-            self.expiration_policy(),
-            ExpirationPolicy::TimeToIdle(tti) if self.expires_before(SystemTime::now() + tti - TTI_DEBOUNCE)
-        )
+    /// Checks whether this row's TTI deadline needs bumping.
+    ///
+    /// Returns `Some(new_expire_at)` when the deadline is stale enough to
+    /// justify a write, `None` otherwise.
+    fn check_tti_bump(&self, access_time: SystemTime) -> Option<SystemTime> {
+        self.expiration_policy()
+            .check_tti_bump(self.time_expires(), access_time)
     }
 }
 
@@ -1019,7 +1018,7 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         // TODO: extract into dedicated call from service
-        if row.needs_tti_bump() {
+        if row.check_tti_bump(SystemTime::now()).is_some() {
             self.bump_tti(path.clone(), &row, true, id).await;
         }
 
@@ -1058,7 +1057,7 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         // TODO: extract into dedicated call from service
-        if row.needs_tti_bump() {
+        if row.check_tti_bump(SystemTime::now()).is_some() {
             self.bump_tti(path.clone(), &row, false, id).await;
         }
 
@@ -1539,22 +1538,19 @@ mod tests {
 
     /// Verifies TTI bump via both `get_object` (loaded=true path) and `get_metadata` (loaded=false path).
     ///
-    /// The bump condition is: `expire_at < now + tti - TTI_DEBOUNCE`. We write a stale
-    /// timestamp just inside the bump window (still in the future, so the row is not GC'd)
-    /// and confirm that a subsequent read returns a later expiry.
+    /// We write a stale timestamp inside the bump window (still in the future,
+    /// so the row is not GC'd) and confirm that a subsequent read extends the expiry.
     #[tokio::test]
     async fn test_tti_bump() -> Result<()> {
         let backend = create_test_backend().await?;
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
         };
 
-        // Pass a backdated `now` so the written expiry is inside the bump window:
-        // expire_at = past_now + tti = now - TTI_DEBOUNCE - 60s (stale but not yet expired).
-        let past_now = SystemTime::now() - TTI_DEBOUNCE - Duration::from_mins(1);
+        // Backdate `now` so the written expiry (past_now + tti) is stale but not expired.
+        let past_now = SystemTime::now() - tti + Duration::from_mins(1);
 
         // Sub-sequence 1: get_object triggers bump (loaded=true path).
         let id1 = make_id();
@@ -1598,7 +1594,6 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        // TTI must exceed TTI_DEBOUNCE (1 day) for the bump condition to be reachable.
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
@@ -2097,11 +2092,10 @@ mod tests {
         let id = make_id();
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let tti = Duration::from_hours(2 * 24); // must exceed TTI_DEBOUNCE (1 day)
+        let tti = Duration::from_hours(2 * 24);
 
-        // Place time_expires just inside the bump window: past `now + tti - TTI_DEBOUNCE`
-        // but still in the future so `expires_before(now)` does not filter the row.
-        let old_deadline = SystemTime::now() + tti - TTI_DEBOUNCE - Duration::from_mins(1);
+        // Place time_expires inside the bump window but still in the future.
+        let old_deadline = SystemTime::now() + Duration::from_mins(1);
         write_legacy_tombstone(
             &backend,
             &id,

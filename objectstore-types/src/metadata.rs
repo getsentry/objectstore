@@ -56,6 +56,14 @@ pub const HEADER_META_PREFIX: &str = "x-snme-";
 /// The default content type for objects without a known content type.
 pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
+/// Upper bound on the TTI debounce window.
+///
+/// The debounce window for TTI bumps is `min(tti / 4, MAX_TTI_DEBOUNCE)`. For
+/// TTI values above 4 days the debounce stays at 24 hours (the historical
+/// constant); shorter TTI values get a proportionally smaller window so that
+/// bumps are not silently suppressed.
+const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
+
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -145,6 +153,28 @@ impl ExpirationPolicy {
     /// Returns `true` if this policy is `Manual`.
     pub fn is_manual(&self) -> bool {
         *self == ExpirationPolicy::Manual
+    }
+
+    /// Checks whether a TTI deadline needs bumping given the current expiry and access time.
+    ///
+    /// Returns `Some(new_expire_at)` when the current deadline is stale enough
+    /// to justify a write, `None` otherwise. The debounce window scales with the
+    /// TTI duration so short-TTI objects get bumped more frequently.
+    pub fn check_tti_bump(
+        &self,
+        time_expires: Option<SystemTime>,
+        access_time: SystemTime,
+    ) -> Option<SystemTime> {
+        let ExpirationPolicy::TimeToIdle(tti) = *self else {
+            return None;
+        };
+
+        let new_expire_at = access_time + tti;
+        let debounce = (tti / 4).min(MAX_TTI_DEBOUNCE);
+        match time_expires {
+            Some(ts) if ts < new_expire_at - debounce => Some(new_expire_at),
+            _ => None,
+        }
     }
 }
 impl fmt::Display for ExpirationPolicy {
@@ -322,6 +352,14 @@ impl Metadata {
             ));
         }
         Ok(())
+    }
+
+    /// Checks whether this object's TTI deadline needs bumping.
+    ///
+    /// See [`ExpirationPolicy::check_tti_bump`] for details.
+    pub fn check_tti_bump(&self, access_time: SystemTime) -> Option<SystemTime> {
+        self.expiration_policy
+            .check_tti_bump(self.time_expires, access_time)
     }
 
     /// Extracts public API metadata from the given [`HeaderMap`].
@@ -958,5 +996,95 @@ mod tests {
     fn compression_parse_invalid() {
         assert!(Compression::from_str("gzip").is_err());
         assert!(Compression::from_str("").is_err());
+    }
+
+    #[test]
+    fn check_tti_bump_returns_none_for_manual() {
+        let metadata = Metadata::default();
+        assert!(metadata.check_tti_bump(SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn check_tti_bump_returns_none_for_ttl() {
+        let now = SystemTime::now();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(now + Duration::from_hours(1)),
+            ..Default::default()
+        };
+        assert!(metadata.check_tti_bump(now).is_none());
+    }
+
+    #[test]
+    fn check_tti_bump_returns_none_when_fresh() {
+        let now = SystemTime::now();
+        let tti = Duration::from_hours(2 * 24);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(now + tti),
+            ..Default::default()
+        };
+        assert!(metadata.check_tti_bump(now).is_none());
+    }
+
+    #[test]
+    fn check_tti_bump_returns_new_deadline_when_stale() {
+        let now = SystemTime::now();
+        let tti = Duration::from_hours(2 * 24);
+        let debounce = tti / 4;
+        let stale_deadline = now + tti - debounce - Duration::from_mins(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(stale_deadline),
+            ..Default::default()
+        };
+        let new_deadline = metadata.check_tti_bump(now).unwrap();
+        assert_eq!(new_deadline, now + tti);
+    }
+
+    #[test]
+    fn check_tti_bump_short_tti_triggers_bump() {
+        let now = SystemTime::now();
+        let tti = Duration::from_hours(2);
+        let debounce = tti / 4;
+        let stale_deadline = now + tti - debounce - Duration::from_mins(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(stale_deadline),
+            ..Default::default()
+        };
+        let new_deadline = metadata.check_tti_bump(now).unwrap();
+        assert_eq!(new_deadline, now + tti);
+    }
+
+    #[test]
+    fn check_tti_bump_debounce_caps_at_24h() {
+        let now = SystemTime::now();
+        let tti = Duration::from_hours(30 * 24);
+        let capped_debounce = Duration::from_hours(24);
+        let stale_deadline = now + tti - capped_debounce - Duration::from_mins(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+            time_expires: Some(stale_deadline),
+            ..Default::default()
+        };
+        assert!(metadata.check_tti_bump(now).is_some());
+
+        let fresh_deadline = now + tti - capped_debounce + Duration::from_mins(1);
+        let metadata = Metadata {
+            time_expires: Some(fresh_deadline),
+            ..metadata
+        };
+        assert!(metadata.check_tti_bump(now).is_none());
+    }
+
+    #[test]
+    fn check_tti_bump_returns_none_when_time_expires_missing() {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: None,
+            ..Default::default()
+        };
+        assert!(metadata.check_tti_bump(SystemTime::now()).is_none());
     }
 }
