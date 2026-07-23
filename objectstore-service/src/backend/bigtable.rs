@@ -6,12 +6,18 @@
 //! **tombstone** — never both. The two layouts are mutually exclusive and distinguished by
 //! column presence:
 //!
-//! | Column | Family    | Content                     | Present when       |
-//! |--------|-----------|-----------------------------|--------------------|
-//! | `p`    | `fg`/`fm` | Compressed payload bytes    | Object row only    |
-//! | `m`    | `fg`/`fm` | [`Metadata`] JSON           | Object row only    |
-//! | `r`    | `fg`/`fm` | Redirect path to LT storage | Tombstone row only |
-//! | `t`    | `fg`/`fm` | [`Tombstone`] metadata JSON | Tombstone row only |
+//! | Column | Family      | Content                     | Present when       |
+//! |--------|-------------|-----------------------------|--------------------|
+//! | `p`    | `fpg`/`fpm` | Compressed payload bytes    | Object row only    |
+//! | `m`    | `fg`/`fm`   | [`Metadata`] JSON           | Object row only    |
+//! | `r`    | `fg`/`fm`   | Redirect path to LT storage | Tombstone row only |
+//! | `t`    | `fg`/`fm`   | [`Tombstone`] metadata JSON | Tombstone row only |
+//!
+//! The payload lives in dedicated `fpg`/`fpm` families, separate from the `fg`/`fm` families
+//! that hold metadata and tombstone columns. The `g`/`m` suffix on each family selects
+//! garbage-collected vs. manual lifetimes, matching the object's expiration policy. Reads
+//! identify cells by column qualifier and so serve payloads from any family — including the
+//! legacy `fg`/`fm` payloads written before this split.
 //!
 //! The `r` column signals a tombstone row: its **value** is the long-term `ObjectId`
 //! serialized via `as_storage_path()`. Callers can resolve the LT object directly from the
@@ -59,8 +65,10 @@ use crate::stream::{ChunkedBytes, ClientStream};
 /// Default Credentials (ADC).
 ///
 /// **Note**: The table must be pre-created with the following column families:
-/// - `fg`: timestamp-based garbage collection (`maxage=1s`)
-/// - `fm`: manual garbage collection (`no GC policy`)
+/// - `fg`: metadata/tombstone, timestamp-based garbage collection (`maxage=1s`)
+/// - `fm`: metadata/tombstone, manual garbage collection (`no GC policy`)
+/// - `fpg`: payload, timestamp-based garbage collection (`maxage=1s`)
+/// - `fpm`: payload, manual garbage collection (`no GC policy`)
 ///
 /// [Google Cloud Bigtable]: https://cloud.google.com/bigtable
 ///
@@ -164,6 +172,22 @@ const FILTER_META: &[u8] = b"^[mrt]$";
 const FAMILY_GC: &str = "fg";
 /// Column family that uses manual garbage collection.
 const FAMILY_MANUAL: &str = "fm";
+/// Payload column family that uses timestamp-based garbage collection.
+///
+/// Mirrors [`FAMILY_GC`] but holds only the payload cell, so it requires the same GC rule.
+const FAMILY_PAYLOAD_GC: &str = "fpg";
+/// Payload column family that uses manual garbage collection.
+///
+/// Mirrors [`FAMILY_MANUAL`] but holds only the payload cell.
+const FAMILY_PAYLOAD_MANUAL: &str = "fpm";
+
+/// Returns `true` if `family` uses timestamp-based garbage collection.
+///
+/// Both the metadata GC family ([`FAMILY_GC`]) and the payload GC family
+/// ([`FAMILY_PAYLOAD_GC`]) carry cell timestamps that encode the expiration deadline.
+fn is_gc_family(family: &str) -> bool {
+    family == FAMILY_GC || family == FAMILY_PAYLOAD_GC
+}
 
 /// BigTable storage backend for high-volume, low-latency object storage.
 pub struct BigTableBackend {
@@ -458,9 +482,15 @@ fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
 fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mutation; 3]> {
-    let (family, timestamp_micros) = match metadata.time_expires {
-        None => (FAMILY_MANUAL, -1),
-        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
+    // The payload lives in a dedicated family (`fpg`/`fpm`) while metadata stays in the
+    // metadata family (`fg`/`fm`); both share the same GC behavior and cell timestamp.
+    let (family, payload_family, timestamp_micros) = match metadata.time_expires {
+        None => (FAMILY_MANUAL, FAMILY_PAYLOAD_MANUAL, -1),
+        Some(deadline) => (
+            FAMILY_GC,
+            FAMILY_PAYLOAD_GC,
+            system_time_to_micros(deadline)?,
+        ),
     };
 
     // Record the payload size in the metadata before persisting it.
@@ -473,7 +503,7 @@ fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mut
         // NB: We explicitly delete the row to clear metadata on overwrite.
         delete_row_mutation(),
         mutation(mutation::Mutation::SetCell(mutation::SetCell {
-            family_name: family.to_owned(),
+            family_name: payload_family.to_owned(),
             column_qualifier: COLUMN_PAYLOAD.to_owned(),
             timestamp_micros,
             value: payload,
@@ -586,9 +616,9 @@ impl RowData {
         for cell in cells {
             // NB: All cells are written with the same timestamp; last write is safe.
 
-            // Only derive expiration from GC-family cells — manual-family cells
-            // use server-assigned timestamps that don't represent expiration.
-            if cell.family_name == FAMILY_GC {
+            // Only derive expiration from GC-family cells (metadata `fg` or payload `fpg`) —
+            // manual-family cells use server-assigned timestamps that don't represent expiration.
+            if is_gc_family(&cell.family_name) {
                 expire_at = micros_to_time(cell.timestamp_micros);
             }
 
@@ -1396,6 +1426,48 @@ mod tests {
         Ok(())
     }
 
+    /// Writes an object row in the legacy layout, with the payload cell in the
+    /// metadata family (`fg`/`fm`) rather than the dedicated payload family
+    /// (`fpg`/`fpm`), simulating rows written before the payload-family split.
+    async fn write_legacy_family_object(
+        backend: &BigTableBackend,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: &[u8],
+        now: SystemTime,
+    ) -> Result<()> {
+        let mut metadata = metadata.clone();
+        if metadata.time_expires.is_none() {
+            metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+        }
+        let (family, timestamp_micros) = match metadata.time_expires {
+            None => (FAMILY_MANUAL, -1),
+            Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
+        };
+        metadata.size = Some(payload.len());
+        let metadata_bytes = serde_json::to_vec(&metadata)?;
+
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = [
+            delete_row_mutation(),
+            // Legacy: payload shares the metadata family instead of `fpg`/`fpm`.
+            mutation(mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: family.to_owned(),
+                column_qualifier: COLUMN_PAYLOAD.to_owned(),
+                timestamp_micros,
+                value: payload.to_vec(),
+            })),
+            mutation(mutation::Mutation::SetCell(mutation::SetCell {
+                family_name: family.to_owned(),
+                column_qualifier: COLUMN_METADATA.to_owned(),
+                timestamp_micros,
+                value: metadata_bytes,
+            })),
+        ];
+        backend.mutate(path, mutations, "test-setup").await?;
+        Ok(())
+    }
+
     /// Writes a new-format tombstone row with an empty `r` value directly,
     /// simulating rows written by code before this change.
     async fn write_empty_redirect_tombstone(
@@ -2195,6 +2267,71 @@ mod tests {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    /// Objects whose payload was written into the legacy `fg`/`fm` families (before the
+    /// payload-family split) remain fully readable through all read paths.
+    #[tokio::test]
+    async fn test_legacy_family_payload_reads() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        // Manual lifetime: payload lands in `fm`.
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            custom: BTreeMap::from_iter([("k".into(), "v".into())]),
+            ..Default::default()
+        };
+        write_legacy_family_object(
+            &backend,
+            &id,
+            &metadata,
+            b"legacy payload",
+            SystemTime::now(),
+        )
+        .await?;
+
+        let (obj_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"legacy payload");
+        assert_eq!(obj_meta.content_type, metadata.content_type);
+        assert_eq!(obj_meta.custom, metadata.custom);
+
+        // A ranged read must also serve from the legacy family.
+        let (_, content_range, stream) = backend
+            .get_object(&id, Some(ByteRange::Bounded(0, 5)))
+            .await?
+            .unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"legacy");
+        assert_eq!(content_range.unwrap().total, 14);
+
+        // GC lifetime: payload lands in `fg`, with expiration derived from its cell timestamp.
+        let id = make_id();
+        let ttl = Duration::from_hours(2 * 24);
+        let gc_metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+            ..Default::default()
+        };
+        write_legacy_family_object(
+            &backend,
+            &id,
+            &gc_metadata,
+            b"gc payload",
+            SystemTime::now(),
+        )
+        .await?;
+
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        assert_eq!(&stream::read_to_vec(stream).await?, b"gc payload");
+        assert!(
+            backend
+                .get_metadata(&id)
+                .await?
+                .unwrap()
+                .time_expires
+                .is_some()
+        );
 
         Ok(())
     }
