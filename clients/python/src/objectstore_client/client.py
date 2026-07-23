@@ -554,6 +554,7 @@ class Session:
                 "HEAD",
                 self._make_url(key),
                 headers=headers,
+                preload_content=True,
             )
             if response.status == 404:
                 return None
