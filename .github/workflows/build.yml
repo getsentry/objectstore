@@ -29,6 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          curl -sL https://sentry.io/get-cli/ | bash
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
@@ -49,6 +55,18 @@ jobs:
           cargo build --release --locked --target=${{ matrix.target }} --bin objectstore --features profiling
           cp target/${{ matrix.target }}/release/objectstore ./objectstore
 
+      - name: Split Debug Info
+        run: |
+          llvm-objcopy --only-keep-debug objectstore objectstore.debug
+          llvm-objcopy --strip-debug --strip-unneeded objectstore
+          llvm-objcopy --add-gnu-debuglink objectstore.debug objectstore
+
+          sentry-cli difutil bundle-sources objectstore.debug
+          zip objectstore-debug.zip objectstore.debug
+
+          mkdir -p /tmp/artifacts/${{ matrix.platform }}
+          mv objectstore-debug.zip objectstore.src.zip /tmp/artifacts/${{ matrix.platform }}/
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
@@ -58,19 +76,19 @@ jobs:
           context: .
           platforms: linux/${{ matrix.platform }}
           tags: ${{ matrix.platform }}
-          outputs: type=docker,dest=/tmp/objectstore-${{ matrix.platform }}.tar
+          outputs: type=docker,dest=/tmp/artifacts/objectstore-${{ matrix.platform }}.tar
           push: false
 
       - name: Test Image
         run: |
-          docker load --input /tmp/objectstore-${{ matrix.platform }}.tar
+          docker load --input /tmp/artifacts/objectstore-${{ matrix.platform }}.tar
           docker run --rm ${{ matrix.platform }} version | grep -q '^objectstore@'
 
-      - name: Upload Image
+      - name: Upload Artifacts
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: objectstore-${{ matrix.platform }}
-          path: /tmp/objectstore-${{ matrix.platform }}.tar
+          path: /tmp/artifacts/
 
   assemble-ghcr:
     name: Publish to GHCR
@@ -186,13 +204,25 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          pattern: objectstore-amd64
+          pattern: objectstore-*
           path: /tmp
+          merge-multiple: true
 
-      - name: Extract and upload artifacts
+      - name: Upload artifacts
+        env:
+          # the upload SA has no delete perms; disable parallel composite uploads
+          # since their chunk cleanup would fail on delete
+          CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED: false
         run: |
           docker load --input /tmp/objectstore-amd64.tar
           docker run --rm amd64 version > /tmp/release-name
 
           gcloud storage cp --no-clobber /tmp/release-name \
             "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/$GITHUB_SHA/"
+
+          for PLATFORM in amd64 arm64; do
+            gcloud storage cp --no-clobber \
+              "/tmp/$PLATFORM/objectstore-debug.zip" \
+              "/tmp/$PLATFORM/objectstore.src.zip" \
+              "gs://dicd-team-devinfra-cd--objectstore/deployment-assets/$GITHUB_SHA/$PLATFORM/"
+          done

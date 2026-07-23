@@ -150,6 +150,9 @@ caching and build output. The build results in two artifacts:
 - The binary at `target/x86_64-unknown-linux-gnu/release/objectstore`
 - The docker container, tagged with `objectstore:latest`
 
+Debug info is stripped by default to reduce binary size. To include debug
+symbols, set `CARGO_PROFILE_RELEASE_DEBUG=true` before running the script.
+
 ## Development
 
 ### Environment Setup
