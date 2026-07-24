@@ -114,12 +114,12 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
 
     let response = next.run(request).await;
 
-    // Record the actual response status, then move the guard into the response body so the
-    // duration metric is emitted only when the body has finished streaming.
+    // Move the guard into the response body so the duration metric is emitted only when the
+    // body has finished streaming. The header status is applied on successful completion.
     match guard {
-        Some(mut guard) => {
-            guard.finish(response.status());
-            response.map(|body| Body::new(MetricsBody::new(guard, body)))
+        Some(guard) => {
+            let status = response.status();
+            response.map(|body| Body::new(MetricsBody::new(guard, status, body)))
         }
         None => response,
     }
