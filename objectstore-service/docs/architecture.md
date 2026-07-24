@@ -198,6 +198,11 @@ delegate to the [`MultipartUploadBackend`](backend::common::MultipartUploadBacke
 trait, accessed via [`Backend::as_multipart_upload_backend`](backend::common::Backend::as_multipart_upload_backend).
 Multipart operations share the same concurrency limiter as regular operations.
 
+On the GCS backend, initiate/list/abort use the same request-level retry helper
+as JSON API calls for transient transport/`5xx` failures. Part upload is not
+retried (the body is a one-shot stream). Abort treats HTTP 404 as success so a
+retry after a lost successful abort response remains idempotent.
+
 ## Streaming Concurrency
 
 The [`streaming`](streaming) module provides [`StreamExecutor`](streaming::StreamExecutor)

@@ -886,6 +886,11 @@ impl From<XmlError> for crate::multipart::CompleteMultipartError {
 /// XXX: Any change that affects this implementation should be manually tested against real GCS.
 /// That's because the fork of [storage-testbench](https://github.com/googleapis/storage-testbench)
 /// that we test against has an incomplete implementation of the XML multipart API that likely doesn't match GCS's behavior in many cases.
+///
+/// Request-level retries use the same internal retry helper as JSON API calls for
+/// initiate/list/abort. Part upload is intentionally not retried: the body is streamed and not
+/// buffered. Abort treats HTTP 404 as success (idempotent if the session is already gone, e.g.
+/// after a successful abort whose response was lost).
 #[async_trait::async_trait]
 impl MultipartUploadBackend for GcsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -898,35 +903,45 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.set_query(Some("uploads"));
 
-        let mut builder = self
-            .request(Method::POST, url)
-            .await?
-            .header(header::CONTENT_TYPE, metadata.content_type.as_ref())
-            .header(header::CONTENT_LENGTH, "0");
-
+        let content_type = metadata.content_type.clone();
         let meta_headers = metadata_to_gcs_headers(metadata)?;
-        for (name, value) in &meta_headers {
-            builder = builder.header(name, value);
-        }
 
-        let resp = builder
-            .send_traced()
-            .await
-            .check_error("GCS: initiate multipart upload")
-            .await?;
+        self.with_retry("initiate_multipart", || {
+            let url = url.clone();
+            let content_type = content_type.clone();
+            let meta_headers = meta_headers.clone();
+            async move {
+                let mut builder = self
+                    .request(Method::POST, url)
+                    .await?
+                    .header(header::CONTENT_TYPE, content_type.as_ref())
+                    .header(header::CONTENT_LENGTH, "0");
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+                for (name, value) in &meta_headers {
+                    builder = builder.header(name, value);
+                }
 
-        let xml: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
-            .map_err(|e| Error::Generic {
-                context: "GCS: failed to parse initiate multipart response".to_owned(),
-                cause: Some(Box::new(e)),
-            })?;
+                let resp = builder
+                    .send_traced()
+                    .await
+                    .check_error("GCS: initiate multipart upload")
+                    .await?;
 
-        Ok(xml.try_into()?)
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+
+                let xml: XmlInitiateMultipartUploadResponse =
+                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
+                        context: "GCS: failed to parse initiate multipart response".to_owned(),
+                        cause: Some(Box::new(e)),
+                    })?;
+
+                xml.try_into()
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, content_md5, body))]
@@ -939,6 +954,7 @@ impl MultipartUploadBackend for GcsBackend {
         content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
+        // Not retried: the part body is a one-shot stream and is not buffered.
         objectstore_log::debug!("Uploading part to GCS backend");
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut()
@@ -994,26 +1010,32 @@ impl MultipartUploadBackend for GcsBackend {
             }
         }
 
-        let resp = self
-            .request(Method::GET, url)
-            .await?
-            .send_traced()
-            .await
-            .check_error("GCS: list parts")
-            .await?;
+        self.with_retry("list_parts", || {
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .request(Method::GET, url)
+                    .await?
+                    .send_traced()
+                    .await
+                    .check_error("GCS: list parts")
+                    .await?;
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
 
-        let xml: XmlListPartsResponse =
-            quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
-                context: "GCS: failed to parse list parts response".to_owned(),
-                cause: Some(Box::new(e)),
-            })?;
+                let xml: XmlListPartsResponse =
+                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
+                        context: "GCS: failed to parse list parts response".to_owned(),
+                        cause: Some(Box::new(e)),
+                    })?;
 
-        Ok(xml.into())
+                Ok(xml.into())
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1026,16 +1048,32 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
-        self.request(Method::DELETE, url)
-            .await?
-            .send_traced()
-            .await
-            .check_error("GCS: abort multipart upload")
-            .await?
-            .drain_body()
-            .await;
+        self.with_retry("abort_multipart", || {
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .request(Method::DELETE, url)
+                    .await?
+                    .send_traced()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
 
-        Ok(())
+                // Idempotent: absent upload means the postcondition is already satisfied
+                // (including retry after a successful abort whose response was lost).
+                if resp.status() == StatusCode::NOT_FOUND {
+                    resp.drain_body().await;
+                    return Ok(());
+                }
+
+                resp.check_error("GCS: abort multipart upload")
+                    .await?
+                    .drain_body()
+                    .await;
+
+                Ok(())
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, parts))]
@@ -1760,6 +1798,9 @@ mod tests {
         // Object should not exist after abort.
         let result = backend.get_object(&id, None).await?;
         assert!(result.is_none(), "object should not exist after abort");
+
+        // A second abort should still succeed (idempotent 404 handling).
+        backend.abort_multipart(&id, &upload_id).await?;
 
         Ok(())
     }
