@@ -12,14 +12,14 @@ use tokio::time::Instant;
 
 use crate::extractors::downstream_service::DownstreamService;
 
-/// How response-body streaming ended, which determines the metric `status` tag.
+/// State of a response body.
 #[derive(Clone, Copy)]
-enum BodyStatus {
-    /// The body was still streaming.
-    Pending,
-    /// The body streamed to completion.
+enum BodyState {
+    /// The body is still streaming.
+    Streaming(StatusCode),
+    /// The body was streamed to completion.
     Completed(StatusCode),
-    /// The body yielded a server-side error.
+    /// An error was encountered while streaming the body.
     Errored,
 }
 
@@ -30,7 +30,7 @@ pub(crate) struct EmitMetricsGuard {
     route: String,
     method: Method,
     start: Instant,
-    status: BodyStatus,
+    body_state: Option<BodyState>,
 }
 
 impl EmitMetricsGuard {
@@ -46,28 +46,27 @@ impl EmitMetricsGuard {
             route: route.to_owned(),
             method: method.clone(),
             start: Instant::now(),
-            status: BodyStatus::Pending,
+            body_state: None,
         }
     }
 
-    fn set_status(&mut self, status: BodyStatus) {
-        self.status = status;
+    fn set_body_state(&mut self, state: BodyState) {
+        self.body_state = Some(state);
     }
 }
 
 impl Drop for EmitMetricsGuard {
     fn drop(&mut self) {
-        let status = match self.status {
-            BodyStatus::Completed(status) => status.as_u16(),
-            BodyStatus::Errored => 500,
-            // `Pending` at drop time means the body was cancelled mid-stream (client disconnect).
-            BodyStatus::Pending => 499,
+        let state = match self.body_state {
+            Some(BodyState::Completed(status)) => status.as_u16(),
+            Some(BodyState::Streaming(_)) | None => 499,
+            Some(BodyState::Errored) => 500,
         };
         objectstore_metrics::record!(
             "server.requests.duration" = self.start.elapsed(),
             route = self.route.clone(),
             method = self.method.as_str().to_owned(),
-            status = status.to_string(),
+            status = state.to_string(),
             // service omitted to limit cardinality
         );
     }
@@ -79,11 +78,7 @@ pin_project! {
     /// The guard emits the request-duration metric on drop, so keeping it inside
     /// the body defers that emission until streaming completes.
     pub struct MetricsBody {
-        // Dropped together with the body once streaming finishes; its `Drop`
-        // emits the request-duration metric.
         guard: EmitMetricsGuard,
-        // Response status from headers, applied when the body completes successfully.
-        status: StatusCode,
         #[pin]
         inner: Body,
     }
@@ -95,15 +90,13 @@ impl MetricsBody {
     /// `status` is the response status from headers.
     pub fn new(mut guard: EmitMetricsGuard, status: StatusCode, inner: Body) -> Self {
         // An empty response body reports end-of-stream immediately and is never polled by hyper,
-        // so we must check and mark it as completed immediately.
+        // so mark it completed up front.
         if inner.is_end_stream() {
-            guard.set_status(BodyStatus::Completed(status));
+            guard.set_body_state(BodyState::Completed(status));
+        } else {
+            guard.set_body_state(BodyState::Streaming(status));
         }
-        Self {
-            guard,
-            status,
-            inner,
-        }
+        Self { guard, inner }
     }
 }
 
@@ -119,13 +112,19 @@ impl http_body::Body for MetricsBody {
         let poll = this.inner.as_mut().poll_frame(cx);
         match &poll {
             // End-of-stream for a streamed body.
-            Poll::Ready(None) => this.guard.set_status(BodyStatus::Completed(*this.status)),
-            // End-of-stream for a buffered body (yields a single frame and reports end-of-stream
-            // immediatley, so hyper doesn't attempt to poll it again).
-            Poll::Ready(Some(Ok(frame))) if frame.is_trailers() || this.inner.is_end_stream() => {
-                this.guard.set_status(BodyStatus::Completed(*this.status))
+            Poll::Ready(None) => {
+                if let Some(BodyState::Streaming(status)) = this.guard.body_state {
+                    this.guard.set_body_state(BodyState::Completed(status));
+                }
             }
-            Poll::Ready(Some(Err(_))) => this.guard.set_status(BodyStatus::Errored),
+            // End-of-stream for a buffered body (yields a single frame and reports end-of-stream
+            // immediately, so hyper doesn't attempt to poll it again).
+            Poll::Ready(Some(Ok(frame))) if frame.is_trailers() || this.inner.is_end_stream() => {
+                if let Some(BodyState::Streaming(status)) = this.guard.body_state {
+                    this.guard.set_body_state(BodyState::Completed(status));
+                }
+            }
+            Poll::Ready(Some(Err(_))) => this.guard.set_body_state(BodyState::Errored),
             _ => {}
         }
         poll
