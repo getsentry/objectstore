@@ -898,25 +898,27 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.set_query(Some("uploads"));
 
-        let content_type = metadata.content_type.clone();
-        let meta_headers = metadata_to_gcs_headers(metadata)?;
+        let mut headers = metadata_to_gcs_headers(metadata)?;
+        headers.insert(
+            header::CONTENT_TYPE,
+            metadata.content_type.parse().map_err(|e| Error::Generic {
+                context: "GCS: invalid content-type header value".into(),
+                cause: Some(Box::new(e)),
+            })?,
+        );
+        headers.insert(
+            header::CONTENT_LENGTH,
+            header::HeaderValue::from_static("0"),
+        );
 
         self.with_retry("initiate_multipart", || {
             let url = url.clone();
-            let content_type = content_type.clone();
-            let meta_headers = meta_headers.clone();
+            let headers = headers.clone();
             async move {
-                let mut builder = self
+                let resp = self
                     .request(Method::POST, url)
                     .await?
-                    .header(header::CONTENT_TYPE, content_type.as_ref())
-                    .header(header::CONTENT_LENGTH, "0");
-
-                for (name, value) in &meta_headers {
-                    builder = builder.header(name, value);
-                }
-
-                let resp = builder
+                    .headers(headers)
                     .send_traced()
                     .await
                     .check_error("GCS: initiate multipart upload")
