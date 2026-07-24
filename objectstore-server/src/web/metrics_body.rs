@@ -50,8 +50,18 @@ impl EmitMetricsGuard {
         }
     }
 
-    fn set_body_state(&mut self, state: BodyState) {
-        self.body_state = Some(state);
+    fn mark_streaming(&mut self, status: StatusCode) {
+        self.body_state = Some(BodyState::Streaming(status));
+    }
+
+    fn mark_completed(&mut self) {
+        if let Some(BodyState::Streaming(status)) = self.body_state {
+            self.body_state = Some(BodyState::Completed(status));
+        }
+    }
+
+    fn mark_errored(&mut self) {
+        self.body_state = Some(BodyState::Errored);
     }
 }
 
@@ -89,12 +99,11 @@ impl MetricsBody {
     ///
     /// `status` is the response status from headers.
     pub fn new(mut guard: EmitMetricsGuard, status: StatusCode, inner: Body) -> Self {
+        guard.mark_streaming(status);
         // An empty response body reports end-of-stream immediately and is never polled by hyper,
         // so mark it completed up front.
         if inner.is_end_stream() {
-            guard.set_body_state(BodyState::Completed(status));
-        } else {
-            guard.set_body_state(BodyState::Streaming(status));
+            guard.mark_completed();
         }
         Self { guard, inner }
     }
@@ -112,19 +121,13 @@ impl http_body::Body for MetricsBody {
         let poll = this.inner.as_mut().poll_frame(cx);
         match &poll {
             // End-of-stream for a streamed body.
-            Poll::Ready(None) => {
-                if let Some(BodyState::Streaming(status)) = this.guard.body_state {
-                    this.guard.set_body_state(BodyState::Completed(status));
-                }
-            }
+            Poll::Ready(None) => this.guard.mark_completed(),
             // End-of-stream for a buffered body (yields a single frame and reports end-of-stream
             // immediately, so hyper doesn't attempt to poll it again).
             Poll::Ready(Some(Ok(frame))) if frame.is_trailers() || this.inner.is_end_stream() => {
-                if let Some(BodyState::Streaming(status)) = this.guard.body_state {
-                    this.guard.set_body_state(BodyState::Completed(status));
-                }
+                this.guard.mark_completed()
             }
-            Poll::Ready(Some(Err(_))) => this.guard.set_body_state(BodyState::Errored),
+            Poll::Ready(Some(Err(_))) => this.guard.mark_errored(),
             _ => {}
         }
         poll
