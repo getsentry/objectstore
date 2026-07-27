@@ -278,5 +278,7 @@ pub(super) fn reqwest_client() -> reqwest::Client {
         .no_gzip()
         .no_deflate()
         .build()
-        .expect("Client::new()")
+        // INVARIANT: Building fails only if the TLS backend cannot be initialized, which
+        // is checked at startup when the rustls crypto provider is installed.
+        .expect("failed to build backend HTTP client")
 }

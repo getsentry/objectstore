@@ -20,8 +20,18 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
     let dsn = config.dsn.as_ref()?;
 
+    let dsn = match dsn.expose_secret().parse() {
+        Ok(dsn) => Some(dsn),
+        Err(error) => {
+            // Sentry is initialized before the tracing subscriber, so a `warn!` here would be
+            // dropped. Write to stderr instead to make the misconfiguration visible.
+            eprintln!("WARN: invalid Sentry DSN, error reporting is disabled: {error}");
+            None
+        }
+    };
+
     let guard = sentry::init(sentry::ClientOptions {
-        dsn: dsn.expose_secret().parse().ok(),
+        dsn,
         release: Some(RELEASE.into()),
         environment: config.environment.clone(),
         server_name: config.server_name.clone(),
