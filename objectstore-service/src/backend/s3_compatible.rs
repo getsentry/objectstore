@@ -4,9 +4,9 @@ use std::time::SystemTime;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{HEADER_SIZE, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
@@ -125,6 +125,13 @@ fn metadata_to_gcs_headers(
     prefix: &str,
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
+
+    // The size is derived from the native `Content-Length` on every read, so it must not be
+    // persisted: metadata updates rewrite *all* stored metadata, and a stored `x-sn-size` key
+    // is rejected by the GCS JSON backend when it deserializes the object.
+    let size = HeaderName::try_from(format!("{prefix}{HEADER_SIZE}"))?;
+    headers.remove(&size);
+
     // GCS custom-time for lifecycle expiration
     if let Some(expires_at) = metadata.time_expires {
         let expires_at = humantime::format_rfc3339_seconds(expires_at);
@@ -413,6 +420,19 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    #[test]
+    fn metadata_to_gcs_headers_omits_size() {
+        let metadata = Metadata {
+            size: Some(4096),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+
+        // Persisting the size would store a key that the GCS JSON backend rejects on read.
+        assert!(headers.get("x-goog-meta-x-sn-size").is_none());
     }
 
     #[test]
