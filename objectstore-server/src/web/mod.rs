@@ -13,6 +13,7 @@
 //! to start a test server and interact with it using the client SDK.
 
 mod app;
+mod metrics_body;
 mod middleware;
 mod request_counter;
 mod sentry_body;
