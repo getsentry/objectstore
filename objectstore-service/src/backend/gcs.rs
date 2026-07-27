@@ -1054,12 +1054,9 @@ impl MultipartUploadBackend for GcsBackend {
                     .await
                     .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
 
-                // Idempotent: absent upload means the postcondition is already satisfied
-                // (including retry after a successful abort whose response was lost).
-                if resp.status() == StatusCode::NOT_FOUND {
-                    resp.drain_body().await;
-                    return Ok(());
-                }
+                // XXX: real S3 would return 404 here if the upload has been recently completed and we
+                // would have to handle it. It turns out GCS returns 204 instead, so we don't need to
+                // handle that case.
 
                 resp.check_error("GCS: abort multipart upload")
                     .await?
@@ -1089,26 +1086,37 @@ impl MultipartUploadBackend for GcsBackend {
             cause: Some(Box::new(e)),
         })?;
 
-        let resp = self
-            .request(Method::POST, url)
-            .await?
-            .header(header::CONTENT_TYPE, "application/xml")
-            .body(xml)
-            .send_traced()
-            .await
-            .check_error("GCS: complete multipart upload")
-            .await?;
+        self.with_retry("complete_multipart", || {
+            let url = url.clone();
+            let xml = xml.clone();
+            async move {
+                let resp = self
+                    .request(Method::POST, url)
+                    .await?
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(xml)
+                    .send_traced()
+                    .await
+                    .check_error("GCS: complete multipart upload")
+                    .await?;
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
+                // XXX: real S3 would return 404 here if the upload has been recently completed and we
+                // would have to handle it. It turns out GCS returns 200 instead, so we don't need to
+                // handle that case.
 
-        let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
-            .ok()
-            .map(Into::into);
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
 
-        Ok(error)
+                let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
+                    .ok()
+                    .map(Into::into);
+
+                Ok(error)
+            }
+        })
+        .await
     }
 }
 
