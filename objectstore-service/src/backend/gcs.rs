@@ -898,35 +898,47 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.set_query(Some("uploads"));
 
-        let mut builder = self
-            .request(Method::POST, url)
-            .await?
-            .header(header::CONTENT_TYPE, metadata.content_type.as_ref())
-            .header(header::CONTENT_LENGTH, "0");
-
-        let meta_headers = metadata_to_gcs_headers(metadata)?;
-        for (name, value) in &meta_headers {
-            builder = builder.header(name, value);
-        }
-
-        let resp = builder
-            .send_traced()
-            .await
-            .check_error("GCS: initiate multipart upload")
-            .await?;
-
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
-
-        let xml: XmlInitiateMultipartUploadResponse = quick_xml::de::from_reader(body.as_ref())
-            .map_err(|e| Error::Generic {
-                context: "GCS: failed to parse initiate multipart response".to_owned(),
+        let mut headers = metadata_to_gcs_headers(metadata)?;
+        headers.insert(
+            header::CONTENT_TYPE,
+            metadata.content_type.parse().map_err(|e| Error::Generic {
+                context: "GCS: invalid content-type header value".into(),
                 cause: Some(Box::new(e)),
-            })?;
+            })?,
+        );
+        headers.insert(
+            header::CONTENT_LENGTH,
+            header::HeaderValue::from_static("0"),
+        );
 
-        Ok(xml.try_into()?)
+        self.with_retry("initiate_multipart", || {
+            let url = url.clone();
+            let headers = headers.clone();
+            async move {
+                let resp = self
+                    .request(Method::POST, url)
+                    .await?
+                    .headers(headers)
+                    .send_traced()
+                    .await
+                    .check_error("GCS: initiate multipart upload")
+                    .await?;
+
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+
+                let xml: XmlInitiateMultipartUploadResponse =
+                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
+                        context: "GCS: failed to parse initiate multipart response".to_owned(),
+                        cause: Some(Box::new(e)),
+                    })?;
+
+                xml.try_into()
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, content_md5, body))]
@@ -994,26 +1006,32 @@ impl MultipartUploadBackend for GcsBackend {
             }
         }
 
-        let resp = self
-            .request(Method::GET, url)
-            .await?
-            .send_traced()
-            .await
-            .check_error("GCS: list parts")
-            .await?;
+        self.with_retry("list_parts", || {
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .request(Method::GET, url)
+                    .await?
+                    .send_traced()
+                    .await
+                    .check_error("GCS: list parts")
+                    .await?;
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
 
-        let xml: XmlListPartsResponse =
-            quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
-                context: "GCS: failed to parse list parts response".to_owned(),
-                cause: Some(Box::new(e)),
-            })?;
+                let xml: XmlListPartsResponse =
+                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
+                        context: "GCS: failed to parse list parts response".to_owned(),
+                        cause: Some(Box::new(e)),
+                    })?;
 
-        Ok(xml.into())
+                Ok(xml.into())
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1026,16 +1044,29 @@ impl MultipartUploadBackend for GcsBackend {
         let mut url = self.xml_object_url(id)?;
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
-        self.request(Method::DELETE, url)
-            .await?
-            .send_traced()
-            .await
-            .check_error("GCS: abort multipart upload")
-            .await?
-            .drain_body()
-            .await;
+        self.with_retry("abort_multipart", || {
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .request(Method::DELETE, url)
+                    .await?
+                    .send_traced()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
 
-        Ok(())
+                // XXX: real S3 would return 404 here if the upload has been recently completed and we
+                // would have to handle it. It turns out GCS returns 204 instead, so we don't need to
+                // handle that case.
+
+                resp.check_error("GCS: abort multipart upload")
+                    .await?
+                    .drain_body()
+                    .await;
+
+                Ok(())
+            }
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, parts))]
@@ -1055,26 +1086,37 @@ impl MultipartUploadBackend for GcsBackend {
             cause: Some(Box::new(e)),
         })?;
 
-        let resp = self
-            .request(Method::POST, url)
-            .await?
-            .header(header::CONTENT_TYPE, "application/xml")
-            .body(xml)
-            .send_traced()
-            .await
-            .check_error("GCS: complete multipart upload")
-            .await?;
+        self.with_retry("complete_multipart", || {
+            let url = url.clone();
+            let xml = xml.clone();
+            async move {
+                let resp = self
+                    .request(Method::POST, url)
+                    .await?
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(xml)
+                    .send_traced()
+                    .await
+                    .check_error("GCS: complete multipart upload")
+                    .await?;
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
+                // XXX: real S3 would return 404 here if the upload has been recently completed and we
+                // would have to handle it. It turns out GCS returns 200 instead, so we don't need to
+                // handle that case.
 
-        let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
-            .ok()
-            .map(Into::into);
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
 
-        Ok(error)
+                let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
+                    .ok()
+                    .map(Into::into);
+
+                Ok(error)
+            }
+        })
+        .await
     }
 }
 
@@ -1760,6 +1802,9 @@ mod tests {
         // Object should not exist after abort.
         let result = backend.get_object(&id, None).await?;
         assert!(result.is_none(), "object should not exist after abort");
+
+        // A second abort should still succeed (idempotent 404 handling).
+        backend.abort_multipart(&id, &upload_id).await?;
 
         Ok(())
     }
