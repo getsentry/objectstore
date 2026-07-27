@@ -217,8 +217,20 @@ where
             metadata.size = Some(range.total as usize);
             Some(range)
         } else {
-            if let Some(len) = response.content_length() {
-                metadata.size = Some(len as usize);
+            // NB: Read the header rather than `Response::content_length`, which reports the
+            // length of the decoded body and is therefore always zero for a HEAD response.
+            let size = headers
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .map_err(|cause| Error::Generic {
+                    context: "S3: failed to parse Content-Length from object response".to_string(),
+                    cause: Some(Box::new(cause)),
+                })?;
+
+            if let Some(size) = size {
+                metadata.size = Some(size);
             } else {
                 objectstore_log::warn!("S3: 200 response missing Content-Length header");
             }
@@ -426,6 +438,25 @@ mod tests {
         let id = make_id();
         let result = backend.get_metadata(&id).await?;
         assert!(result.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
+    async fn test_get_metadata_reports_size() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let payload = "hello, world";
+
+        backend
+            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .await?;
+
+        // The size must come from the `Content-Length` header, not from the (empty) body of
+        // the HEAD response.
+        let metadata = backend.get_metadata(&id).await?.expect("object exists");
+        assert_eq!(metadata.size, Some(payload.len()));
+
         Ok(())
     }
 
