@@ -14,6 +14,7 @@ HEADER_TIME_CREATED = "x-sn-time-created"
 HEADER_TIME_EXPIRES = "x-sn-time-expires"
 HEADER_ORIGIN = "x-sn-origin"
 HEADER_FILENAME = "x-sn-filename"
+HEADER_SIZE = "x-sn-size"
 HEADER_META_PREFIX = "x-snme-"
 
 
@@ -70,6 +71,17 @@ class Metadata:
     prompting browsers and download tools to save the file under this name.
     """
 
+    size: int | None
+    """
+    The size of the complete stored object in bytes.
+
+    This is always the size of the whole object, even when only a range of it was
+    requested. For a compressed object it is the compressed size, matching the bytes on
+    the wire.
+
+    This field is computed by the server, it cannot be set by clients.
+    """
+
     custom: dict[str, str]
 
     @classmethod
@@ -81,6 +93,7 @@ class Metadata:
         time_expires = None
         origin = None
         filename = None
+        size = None
         custom_metadata = {}
 
         for k, v in headers.items():
@@ -98,6 +111,8 @@ class Metadata:
                 origin = v
             elif k == HEADER_FILENAME:
                 filename = v
+            elif k == HEADER_SIZE:
+                size = int(v)
             elif k.startswith(HEADER_META_PREFIX):
                 custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
 
@@ -109,6 +124,7 @@ class Metadata:
             time_expires=time_expires,
             origin=origin,
             filename=filename,
+            size=size,
             custom=custom_metadata,
         )
 

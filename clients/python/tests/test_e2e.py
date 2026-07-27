@@ -185,12 +185,15 @@ def test_head(server_url: str) -> None:
 
     session = client.session(test_usecase, org=42, project=1337)
 
-    object_key = session.put(b"test data", origin="203.0.113.42")
+    payload = b"test data"
+    object_key = session.put(payload, origin="203.0.113.42", compression="none")
 
     metadata = session.head(object_key)
     assert metadata is not None
     assert metadata.time_created is not None
     assert metadata.origin == "203.0.113.42"
+    # `size` reports the stored bytes, which match the payload only without compression.
+    assert metadata.size == len(payload)
 
     session.delete(object_key)
 
