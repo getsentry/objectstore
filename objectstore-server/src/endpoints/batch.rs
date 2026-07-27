@@ -191,7 +191,7 @@ async fn convert_to_part(
                     idx,
                     &key,
                     "head",
-                    StatusCode::NO_CONTENT,
+                    StatusCode::OK,
                     None,
                     Bytes::new(),
                     Some(headers),
