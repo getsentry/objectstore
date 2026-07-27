@@ -398,8 +398,9 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_bandwidth_burst_tolerance() -> Result<()> {
-    // 100 bps with 1.5s burst → burst budget = 150 bytes.
-    // A 100-byte upload creates 1s of debt, within 1.5s burst → next request admitted.
+    // 10 bps with 10s burst → burst budget = exactly one 100-byte upload.
+    // The rate is deliberately slow so that each upload creates 10s of debt: the third
+    // request stays rejected for a full 10s, independent of CI scheduling delays.
     let server = TestServer::with_config(Config {
         auth: AuthZ {
             enforce: false,
@@ -407,8 +408,8 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
         },
         rate_limits: RateLimits {
             bandwidth: BandwidthLimits {
-                global_bps: Some(100),
-                burst_ms: 1500,
+                global_bps: Some(10),
+                burst_ms: 10_000,
                 ..Default::default()
             },
             ..Default::default()
@@ -420,7 +421,7 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
 
-    // First upload creates 1s of debt, within the 1.5s burst tolerance.
+    // First upload creates 10s of debt, within the 10s burst tolerance.
     let response = client
         .post(server.url("/v1/objects/test/org=1/"))
         .body(payload.clone())
@@ -436,7 +437,7 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
-    // Now debt ≈ 2s > 1.5s burst → rejected.
+    // Now debt ≈ 20s > 10s burst → rejected.
     let response = client
         .post(server.url("/v1/objects/test/org=1/"))
         .body(payload.clone())
