@@ -122,7 +122,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
     let headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
-    let mut response = (StatusCode::NO_CONTENT, headers).into_response();
+    let mut response = (StatusCode::OK, headers).into_response();
     insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
     Ok(response)

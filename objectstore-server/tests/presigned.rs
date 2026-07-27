@@ -144,7 +144,7 @@ async fn presigned_head_succeeds() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
     Ok(())
 }
 

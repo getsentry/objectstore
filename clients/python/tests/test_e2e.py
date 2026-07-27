@@ -741,7 +741,7 @@ def test_presigned_head_succeeds(server_url: str) -> None:
     )
     status, _ = _fetch(url, method="HEAD")
 
-    assert status == 204
+    assert status == 200
 
 
 def test_presigned_case_insensitive_method(server_url: str) -> None:

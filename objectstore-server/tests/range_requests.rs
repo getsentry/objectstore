@@ -66,7 +66,7 @@ async fn head_returns_accept_ranges() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
     assert_eq!(
         resp.headers().get("accept-ranges").unwrap().to_str()?,
         "bytes"

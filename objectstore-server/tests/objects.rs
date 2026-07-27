@@ -43,7 +43,7 @@ async fn filename_produces_content_disposition() -> Result<()> {
         .head(server.url("/v1/objects/test/org=1/cd-key"))
         .send()
         .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
     assert_eq!(resp.headers().get("x-sn-filename").unwrap(), "report.pdf");
     assert_eq!(
         resp.headers().get("content-disposition").unwrap(),
