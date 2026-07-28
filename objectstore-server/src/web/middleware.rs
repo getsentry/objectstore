@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use objectstore_log::tracing;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::endpoints::is_internal_route;
+use crate::endpoints;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::web::RequestCounter;
 use crate::web::metrics_body::{EmitMetricsGuard, MetricsBody};
@@ -32,7 +32,7 @@ pub async fn limit_web_concurrency(
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
 
-    if !is_internal_route(route) && counter.count() >= counter.limit() {
+    if !endpoints::is_internal_route(route) && counter.count() >= counter.limit() {
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
         objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
         objectstore_log::warn!("Request rejected: web concurrency limit reached");
@@ -109,7 +109,7 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
 
-    let should_emit = !is_internal_route(route);
+    let should_emit = !endpoints::is_internal_route(route);
     let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service));
 
     let response = next.run(request).await;
@@ -117,10 +117,7 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     // Move the guard into the response body so the duration metric is emitted only when the
     // body has finished streaming. The header status is applied on successful completion.
     match guard {
-        Some(guard) => {
-            let status = response.status();
-            response.map(|body| Body::new(MetricsBody::new(guard, status, body)))
-        }
+        Some(guard) => MetricsBody::wrap(response, guard),
         None => response,
     }
 }
@@ -213,64 +210,5 @@ mod tests {
 
         resume.notify_one();
         blocking.await.unwrap().unwrap();
-    }
-
-    /// The request-duration metric must be emitted only once the response body has finished
-    /// streaming, not when the handler produces the response headers.
-    ///
-    /// This runs on a current-thread runtime inside [`with_capturing_test_client`] so all
-    /// metric emissions happen on the capturing thread. A sentinel `test.marker` metric is
-    /// emitted after the response headers are received but before the body is consumed; the
-    /// duration metric must appear *after* that sentinel.
-    #[test]
-    fn duration_measured_end_to_end() {
-        use axum::body::{self, Bytes};
-        use axum::middleware::from_fn;
-
-        let captured = objectstore_metrics::with_capturing_test_client(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            rt.block_on(async {
-                let app = Router::new()
-                    .route(
-                        "/v1/test/_/key",
-                        get(|| async {
-                            let stream = async_stream::stream! {
-                                yield Ok::<_, std::io::Error>(Bytes::from_static(b"hello"));
-                            };
-                            Body::from_stream(stream).into_response()
-                        }),
-                    )
-                    .layer(from_fn(emit_request_metrics));
-
-                let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
-                assert_eq!(resp.status(), StatusCode::OK);
-
-                // Headers received. The duration metric must not have been emitted yet.
-                objectstore_metrics::count!("test.marker");
-
-                // Consuming the body drops the wrapping `MetricsBody` and its guard, which
-                // emits the duration metric.
-                let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-                assert_eq!(&bytes[..], b"hello");
-            });
-        });
-
-        let marker = captured
-            .iter()
-            .position(|m| m.starts_with("test.marker:"))
-            .expect("sentinel marker not captured");
-        let duration = captured
-            .iter()
-            .position(|m| m.starts_with("server.requests.duration:"))
-            .expect("duration metric not captured");
-
-        assert!(
-            duration > marker,
-            "duration metric emitted before body was consumed: {captured:?}"
-        );
     }
 }

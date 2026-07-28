@@ -318,7 +318,7 @@ pub fn init(config: &MetricsConfig) -> Result<(), Error> {
     Ok(())
 }
 
-pub use mock::with_capturing_test_client;
+pub use mock::{with_capturing_test_client, with_capturing_test_client_async};
 
 // ---------------------------------------------------------------------------
 // Macros

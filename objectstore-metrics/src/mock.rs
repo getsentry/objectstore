@@ -3,6 +3,7 @@
 //! Provides [`with_capturing_test_client`], which installs a thread-local
 //! recorder that captures all emitted metrics as DogStatsD-format strings.
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use metrics::{Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit};
@@ -23,6 +24,30 @@ use metrics::{Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, Share
 pub fn with_capturing_test_client(f: impl FnOnce()) -> Vec<String> {
     let recorder = MockRecorder::default();
     metrics::with_local_recorder(&recorder, f);
+    recorder.consume()
+}
+
+/// Awaits `future` with a thread-local mock recorder installed, then returns all captured
+/// metrics as `"name:value|type|#key:value,key:value"` strings.
+///
+/// The recorder stays installed across await points, so metrics emitted while the future is
+/// suspended are captured as well. Since it is thread-local, the future must not migrate between
+/// threads: run it on a current-thread runtime, as `#[tokio::test]` does by default.
+///
+/// # Example
+///
+/// ```ignore
+/// let captured = objectstore_metrics::with_capturing_test_client_async(async {
+///     objectstore_metrics::count!("test.counter");
+/// })
+/// .await;
+/// assert!(captured.iter().any(|m| m.starts_with("test.counter:")));
+/// ```
+pub async fn with_capturing_test_client_async(future: impl Future<Output = ()>) -> Vec<String> {
+    let recorder = MockRecorder::default();
+    let guard = metrics::set_default_local_recorder(&recorder);
+    future.await;
+    drop(guard);
     recorder.consume()
 }
 
