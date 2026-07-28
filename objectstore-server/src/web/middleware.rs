@@ -23,7 +23,7 @@ const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
 /// maximum.
 ///
 /// Use with [`from_fn_with_state`](axum::middleware::from_fn_with_state), passing a
-/// [`RequestCounter`]. Internal routes (see [`is_internal_route`]) are excluded.
+/// [`RequestCounter`]. Internal routes are excluded.
 pub async fn limit_web_concurrency(
     State(counter): State<RequestCounter>,
     mut request: Request,
@@ -103,7 +103,7 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
 /// the response body (see [`MetricsBody`]) so it is dropped only once the body has finished
 /// streaming, not when the handler produces the response headers.
 ///
-/// Internal routes (see [`is_internal_route`]) are excluded from metrics.
+/// Internal routes are excluded from metrics.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
