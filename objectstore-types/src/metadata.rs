@@ -33,6 +33,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::ParseIntError;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
@@ -50,6 +51,8 @@ pub const HEADER_TIME_EXPIRES: &str = "x-sn-time-expires";
 pub const HEADER_ORIGIN: &str = "x-sn-origin";
 /// The custom HTTP header that contains the filename of the object.
 pub const HEADER_FILENAME: &str = "x-sn-filename";
+/// The custom HTTP header that contains the size of the stored object in bytes.
+pub const HEADER_SIZE: &str = "x-sn-size";
 /// The prefix for custom HTTP headers containing custom per-object metadata.
 pub const HEADER_META_PREFIX: &str = "x-snme-";
 
@@ -82,6 +85,9 @@ pub enum Error {
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
+    /// The object size is not a valid byte count.
+    #[error("invalid object size")]
+    Size(#[from] ParseIntError),
     /// An internal consistency invariant on the metadata was violated.
     #[error("invariant violation: {0}")]
     Invariant(&'static str),
@@ -305,10 +311,11 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
 
-    /// Size of the data in bytes, if known.
+    /// Size of the stored data in bytes, if known (header: `x-sn-size`).
     ///
-    /// Not transmitted via HTTP headers; set by backends when the object is
-    /// stored or retrieved.
+    /// Read-only. This is the size of the complete object, even when only a range of it is
+    /// being returned. It describes the stored bytes, so for a compressed object it is the
+    /// compressed size.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
@@ -421,6 +428,10 @@ impl Metadata {
                         HEADER_FILENAME => {
                             metadata.filename = Some(value.to_str()?.to_owned());
                         }
+                        HEADER_SIZE if !skip_read_only => {
+                            let size = value.to_str()?;
+                            metadata.size = Some(size.parse()?);
+                        }
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
@@ -449,7 +460,7 @@ impl Metadata {
             expiration_policy,
             time_created,
             time_expires,
-            size: _,
+            size,
             custom,
         } = self;
 
@@ -483,6 +494,10 @@ impl Metadata {
         if let Some(filename) = filename {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_FILENAME}"))?;
             headers.append(name, filename.parse()?);
+        }
+        if let Some(size) = size {
+            let name = HeaderName::try_from(format!("{prefix}{HEADER_SIZE}"))?;
+            headers.append(name, size.to_string().parse()?);
         }
 
         // customer-provided metadata
@@ -920,15 +935,47 @@ mod tests {
     }
 
     #[test]
-    fn size_not_included_in_headers() {
+    fn size_roundtrips_through_headers() {
+        let metadata = Metadata {
+            size: Some(42),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        assert_eq!(headers.get(HEADER_SIZE).unwrap(), "42");
+        assert_eq!(Metadata::from_headers(&headers, "").unwrap().size, Some(42));
+    }
+
+    #[test]
+    fn size_is_prefixed_in_headers() {
         let metadata = Metadata {
             size: Some(42),
             ..Default::default()
         };
 
         let headers = metadata.to_headers("x-goog-meta-").unwrap();
-        let has_size_header = headers.keys().any(|k| k.as_str().contains("size"));
-        assert!(!has_size_header);
+        assert_eq!(headers.get("x-goog-meta-x-sn-size").unwrap(), "42");
+    }
+
+    #[test]
+    fn from_insert_headers_ignores_size() {
+        // Size is materialized by the server; a client-supplied value must never be trusted.
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SIZE, "9999".parse().unwrap());
+
+        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        assert!(metadata.size.is_none());
+    }
+
+    #[test]
+    fn from_headers_rejects_malformed_size() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SIZE, "not-a-number".parse().unwrap());
+
+        assert!(matches!(
+            Metadata::from_headers(&headers, ""),
+            Err(Error::Size(_))
+        ));
     }
 
     #[test]

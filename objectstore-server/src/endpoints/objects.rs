@@ -88,25 +88,27 @@ async fn object_get(
     };
 
     let stream = state.meter_stream(stream, &context);
-    let metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let mut metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
 
     let mut response = match content_range {
         Some(ref content_range) => {
-            let mut resp = (
+            metadata_headers.insert(
+                http::header::CONTENT_LENGTH,
+                content_range.len_to_header_value(),
+            );
+            metadata_headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
+
+            (
                 StatusCode::PARTIAL_CONTENT,
                 metadata_headers,
                 Body::from_stream(stream),
             )
-                .into_response();
-            let headers = resp.headers_mut();
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                content_range.len_to_header_value(),
-            );
-            headers.insert(http::header::CONTENT_RANGE, content_range.to_header_value());
-            resp
+                .into_response()
         }
-        None => (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response(),
+        None => {
+            insert_content_length(&mut metadata_headers, &metadata);
+            (StatusCode::OK, metadata_headers, Body::from_stream(stream)).into_response()
+        }
     };
 
     insert_content_disposition(&mut response, &metadata);
@@ -120,12 +122,27 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let mut headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    insert_content_length(&mut headers, &metadata);
 
-    let mut response = (StatusCode::NO_CONTENT, headers).into_response();
+    let mut response = (StatusCode::OK, headers).into_response();
     insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
     Ok(response)
+}
+
+/// Inserts a `Content-Length` header covering the complete object.
+///
+/// Only valid for responses whose body is the whole object, and for `HEAD` responses, which
+/// describe what a `GET` would have returned. Ranged responses announce the length of the range
+/// instead and must not use this.
+fn insert_content_length(headers: &mut HeaderMap, metadata: &Metadata) {
+    if let Some(size) = metadata.size {
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from(size as u64),
+        );
+    }
 }
 
 fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {

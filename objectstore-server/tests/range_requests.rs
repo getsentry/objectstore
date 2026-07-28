@@ -66,11 +66,77 @@ async fn head_returns_accept_ranges() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
     assert_eq!(
         resp.headers().get("accept-ranges").unwrap().to_str()?,
         "bytes"
     );
+    Ok(())
+}
+
+/// `HEAD` announces the object size, so clients can learn it without a download.
+#[tokio::test]
+async fn head_reports_size() -> Result<()> {
+    let (server, key) = setup().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .head(server.url(&format!("/v1/objects/test/org=1/{key}")))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-length").unwrap().to_str()?,
+        "22"
+    );
+    assert_eq!(resp.headers().get("x-sn-size").unwrap().to_str()?, "22");
+    Ok(())
+}
+
+/// A full `GET` announces the same length as `HEAD`, rather than falling back to chunked.
+#[tokio::test]
+async fn full_get_reports_size() -> Result<()> {
+    let (server, key) = setup().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(server.url(&format!("/v1/objects/test/org=1/{key}")))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-length").unwrap().to_str()?,
+        "22"
+    );
+    assert_eq!(resp.headers().get("x-sn-size").unwrap().to_str()?, "22");
+
+    let body = resp.text().await?;
+    assert_eq!(body, "Hello, Range Requests!");
+    Ok(())
+}
+
+/// On a ranged response `Content-Length` describes the range, while `x-sn-size` stays the size of
+/// the complete object.
+#[tokio::test]
+async fn range_content_length_covers_only_the_range() -> Result<()> {
+    let (server, key) = setup().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(server.url(&format!("/v1/objects/test/org=1/{key}")))
+        .header("range", "bytes=0-4")
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap().to_str()?, "5");
+    assert_eq!(
+        resp.headers().get("content-range").unwrap().to_str()?,
+        "bytes 0-4/22"
+    );
+    assert_eq!(resp.headers().get("x-sn-size").unwrap().to_str()?, "22");
     Ok(())
 }
 

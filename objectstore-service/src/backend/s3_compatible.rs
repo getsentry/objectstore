@@ -4,9 +4,9 @@ use std::time::SystemTime;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{HEADER_SIZE, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
@@ -125,6 +125,13 @@ fn metadata_to_gcs_headers(
     prefix: &str,
 ) -> Result<HeaderMap, objectstore_types::metadata::Error> {
     let mut headers = metadata.to_headers(prefix)?;
+
+    // The size is derived from the native `Content-Length` on every read, so it must not be
+    // persisted: metadata updates rewrite *all* stored metadata, and a stored `x-sn-size` key
+    // is rejected by the GCS JSON backend when it deserializes the object.
+    let size = HeaderName::try_from(format!("{prefix}{HEADER_SIZE}"))?;
+    headers.remove(&size);
+
     // GCS custom-time for lifecycle expiration
     if let Some(expires_at) = metadata.time_expires {
         let expires_at = humantime::format_rfc3339_seconds(expires_at);
@@ -217,8 +224,20 @@ where
             metadata.size = Some(range.total as usize);
             Some(range)
         } else {
-            if let Some(len) = response.content_length() {
-                metadata.size = Some(len as usize);
+            // NB: Read the header rather than `Response::content_length`, which reports the
+            // length of the decoded body and is therefore always zero for a HEAD response.
+            let size = headers
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .map_err(|cause| Error::Generic {
+                    context: "S3: failed to parse Content-Length from object response".to_string(),
+                    cause: Some(Box::new(cause)),
+                })?;
+
+            if let Some(size) = size {
+                metadata.size = Some(size);
             } else {
                 objectstore_log::warn!("S3: 200 response missing Content-Length header");
             }
@@ -404,6 +423,19 @@ mod tests {
     }
 
     #[test]
+    fn metadata_to_gcs_headers_omits_size() {
+        let metadata = Metadata {
+            size: Some(4096),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+
+        // Persisting the size would store a key that the GCS JSON backend rejects on read.
+        assert!(headers.get("x-goog-meta-x-sn-size").is_none());
+    }
+
+    #[test]
     fn metadata_to_gcs_headers_uses_time_expires() {
         let expires = SystemTime::now() + Duration::from_hours(1);
         let metadata = Metadata {
@@ -426,6 +458,25 @@ mod tests {
         let id = make_id();
         let result = backend.get_metadata(&id).await?;
         assert!(result.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
+    async fn test_get_metadata_reports_size() -> Result<()> {
+        let backend = create_test_backend();
+        let id = make_id();
+        let payload = "hello, world";
+
+        backend
+            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .await?;
+
+        // The size must come from the `Content-Length` header, not from the (empty) body of
+        // the HEAD response.
+        let metadata = backend.get_metadata(&id).await?.expect("object exists");
+        assert_eq!(metadata.size, Some(payload.len()));
+
         Ok(())
     }
 
