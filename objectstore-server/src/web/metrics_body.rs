@@ -16,7 +16,7 @@ use crate::extractors::downstream_service::DownstreamService;
 /// State of a response body.
 #[derive(Clone, Copy, Default)]
 enum BodyState {
-    /// The body is still streaming.
+    /// The body has not finished streaming: it was either never polled or interrupted mid-stream.
     #[default]
     Pending,
     /// The body was streamed to completion.
@@ -28,7 +28,7 @@ enum BodyState {
 /// Tracks request timing and emits `server.requests.duration` when dropped.
 ///
 /// [`MetricsBody`] owns this guard so request duration spans full response-body streaming.
-pub(crate) struct EmitMetricsGuard {
+pub struct EmitMetricsGuard {
     route: String,
     method: Method,
     start: Instant,
@@ -52,8 +52,11 @@ impl EmitMetricsGuard {
         }
     }
 
+    /// Records that the body ended with `status`, unless it already errored.
     fn complete(&mut self, status: StatusCode) {
-        self.body_state = BodyState::Completed(status);
+        if matches!(self.body_state, BodyState::Pending) {
+            self.body_state = BodyState::Completed(status);
+        }
     }
 
     fn mark_errored(&mut self) {
@@ -85,10 +88,11 @@ pin_project! {
     /// The guard emits the request-duration metric on drop, so keeping it inside
     /// the body defers that emission until streaming completes.
     ///
-    /// The body checks three conditions where hyper stops polling the body before it yields `None`:
-    ///  1. An explicit `content-length` was specified and that many bytes were written.
-    ///  2. For a buffered body, hyper yields a single frame.
-    ///  3. For a body with trailers, hyper yields the trailers frame and then drops the body.
+    /// The body checks these conditions where hyper stops polling:
+    ///  1. The body returns end-of-stream (`None`).
+    ///  2. An explicit `content-length` was specified and that many bytes were written.
+    ///  3. For a buffered body, hyper yields a single frame.
+    ///  4. For a body with trailers, hyper yields the trailers frame and then drops the body.
     pub struct MetricsBody {
         #[pin]
         inner: Body,
@@ -100,7 +104,7 @@ pin_project! {
 
 impl MetricsBody {
     /// Wraps a response body with a [`MetricsBody`] that keeps `guard` alive until the body ends.
-    pub fn wrap(response: Response, mut guard: EmitMetricsGuard) -> Response {
+    pub fn wrap_response(response: Response, mut guard: EmitMetricsGuard) -> Response {
         let status = response.status();
         let content_length = response
             .headers()
@@ -256,7 +260,7 @@ mod tests {
         })
     }
 
-    /// A stream that yields one chunk after [`STREAM_DELAY`] and then ends.
+    /// A stream that yields one chunk after `delay` and then ends.
     fn slow_stream(delay: Duration) -> Body {
         Body::from_stream(async_stream::stream! {
             tokio::time::sleep(delay).await;
@@ -332,6 +336,15 @@ mod tests {
     #[tokio::test]
     async fn interrupted_stream_reports_499() {
         let (status, _) = track_request(|| async { stalling_stream() }, Client::Disconnect).await;
+        assert_eq!(status, 499);
+    }
+
+    /// A client that disconnects after only part of `content-length` was written still reports
+    /// `499`: an incomplete byte count must not complete the request.
+    #[tokio::test]
+    async fn interrupted_content_length_stream_reports_499() {
+        let handler = || async { ([(header::CONTENT_LENGTH, "10")], stalling_stream()) };
+        let (status, _) = track_request(handler, Client::ReadOneChunk).await;
         assert_eq!(status, 499);
     }
 

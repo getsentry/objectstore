@@ -117,7 +117,7 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     // Move the guard into the response body so the duration metric is emitted only when the
     // body has finished streaming. The header status is applied on successful completion.
     match guard {
-        Some(guard) => MetricsBody::wrap(response, guard),
+        Some(guard) => MetricsBody::wrap_response(response, guard),
         None => response,
     }
 }
