@@ -64,6 +64,7 @@ objectstore-options = { workspace = true, features = ["testing"] }
 objectstore-test = { workspace = true }
 stresstest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "objectstore"

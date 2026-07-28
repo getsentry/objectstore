@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::http::{Method, StatusCode};
+use axum::response::Response;
 use bytes::Bytes;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use pin_project_lite::pin_project;
@@ -13,10 +14,11 @@ use tokio::time::Instant;
 use crate::extractors::downstream_service::DownstreamService;
 
 /// State of a response body.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 enum BodyState {
-    /// The body is still streaming.
-    Streaming(StatusCode),
+    /// The body has not finished streaming: it was either never polled or interrupted mid-stream.
+    #[default]
+    Pending,
     /// The body was streamed to completion.
     Completed(StatusCode),
     /// An error was encountered while streaming the body.
@@ -26,15 +28,15 @@ enum BodyState {
 /// Tracks request timing and emits `server.requests.duration` when dropped.
 ///
 /// [`MetricsBody`] owns this guard so request duration spans full response-body streaming.
-pub(crate) struct EmitMetricsGuard {
+pub struct EmitMetricsGuard {
     route: String,
     method: Method,
     start: Instant,
-    body_state: Option<BodyState>,
+    body_state: BodyState,
 }
 
 impl EmitMetricsGuard {
-    pub(crate) fn new(route: &str, method: &Method, service: DownstreamService) -> Self {
+    pub fn new(route: &str, method: &Method, service: DownstreamService) -> Self {
         objectstore_metrics::count!(
             "server.requests",
             route = route.to_owned(),
@@ -46,32 +48,30 @@ impl EmitMetricsGuard {
             route: route.to_owned(),
             method: method.clone(),
             start: Instant::now(),
-            body_state: None,
+            body_state: BodyState::Pending,
         }
     }
 
-    fn mark_streaming(&mut self, status: StatusCode) {
-        self.body_state = Some(BodyState::Streaming(status));
-    }
-
-    fn mark_completed(&mut self) {
-        if let Some(BodyState::Streaming(status)) = self.body_state {
-            self.body_state = Some(BodyState::Completed(status));
+    /// Records that the body ended with `status`, unless it already errored.
+    fn complete(&mut self, status: StatusCode) {
+        if matches!(self.body_state, BodyState::Pending) {
+            self.body_state = BodyState::Completed(status);
         }
     }
 
     fn mark_errored(&mut self) {
-        self.body_state = Some(BodyState::Errored);
+        self.body_state = BodyState::Errored;
     }
 }
 
 impl Drop for EmitMetricsGuard {
     fn drop(&mut self) {
         let state = match self.body_state {
-            Some(BodyState::Completed(status)) => status.as_u16(),
-            Some(BodyState::Streaming(_)) | None => 499,
-            Some(BodyState::Errored) => 500,
+            BodyState::Pending => 499,
+            BodyState::Completed(status) => status.as_u16(),
+            BodyState::Errored => 500,
         };
+
         objectstore_metrics::record!(
             "server.requests.duration" = self.start.elapsed(),
             route = self.route.clone(),
@@ -87,25 +87,45 @@ pin_project! {
     ///
     /// The guard emits the request-duration metric on drop, so keeping it inside
     /// the body defers that emission until streaming completes.
+    ///
+    /// The body checks these conditions where hyper stops polling:
+    ///  1. The body returns end-of-stream (`None`).
+    ///  2. An explicit `content-length` was specified and that many bytes were written.
+    ///  3. For a buffered body, hyper yields a single frame.
+    ///  4. For a body with trailers, hyper yields the trailers frame and then drops the body.
     pub struct MetricsBody {
-        guard: EmitMetricsGuard,
         #[pin]
         inner: Body,
+        guard: EmitMetricsGuard,
+        status: StatusCode,
+        remaining: Option<u64>,
     }
 }
 
 impl MetricsBody {
-    /// Creates a new [`MetricsBody`] that keeps `guard` alive while polling `inner`.
-    ///
-    /// `status` is the response status from headers.
-    pub fn new(mut guard: EmitMetricsGuard, status: StatusCode, inner: Body) -> Self {
-        guard.mark_streaming(status);
-        // An empty response body reports end-of-stream immediately and is never polled by hyper,
-        // so mark it completed up front.
-        if inner.is_end_stream() {
-            guard.mark_completed();
+    /// Wraps a response body with a [`MetricsBody`] that keeps `guard` alive until the body ends.
+    pub fn wrap_response(response: Response, mut guard: EmitMetricsGuard) -> Response {
+        let status = response.status();
+        let content_length = response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+
+        if content_length == Some(0) || response.body().is_end_stream() {
+            // Fast-path: the body won't be polled, so we complete the guard immediately
+            guard.complete(status);
+            response
+        } else {
+            response.map(|inner| {
+                Body::new(Self {
+                    guard,
+                    inner,
+                    status,
+                    remaining: content_length,
+                })
+            })
         }
-        Self { guard, inner }
     }
 }
 
@@ -120,22 +140,24 @@ impl http_body::Body for MetricsBody {
         let mut this = self.project();
         let poll = this.inner.as_mut().poll_frame(cx);
         match &poll {
-            // End-of-stream for a streamed body.
-            Poll::Ready(None) => this.guard.mark_completed(),
-            // End-of-stream for a buffered body (yields a single frame and reports end-of-stream
-            // immediately, so hyper doesn't attempt to poll it again).
-            Poll::Ready(Some(Ok(frame))) if frame.is_trailers() || this.inner.is_end_stream() => {
-                this.guard.mark_completed()
+            Poll::Ready(None) => this.guard.complete(*this.status),
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(remaining) = this.remaining.as_mut() {
+                    let frame_len = frame.data_ref().map_or(0, |data| data.len() as u64);
+                    *remaining = remaining.saturating_sub(frame_len);
+                }
+
+                if *this.remaining == Some(0) || this.inner.is_end_stream() || frame.is_trailers() {
+                    this.guard.complete(*this.status);
+                }
             }
             Poll::Ready(Some(Err(_))) => this.guard.mark_errored(),
-            _ => {}
+            Poll::Pending => {}
         }
         poll
     }
 
     fn size_hint(&self) -> SizeHint {
-        // Delegating [`size_hint`](http_body::Body::size_hint) preserves `Content-Length` on buffered
-        // responses instead of forcing chunked encoding.
         self.inner.size_hint()
     }
 
@@ -147,143 +169,195 @@ impl http_body::Body for MetricsBody {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::io;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
     use axum::Router;
     use axum::body::{self, Body, Bytes};
-    use axum::http::{HeaderMap, Request, StatusCode};
+    use axum::handler::Handler;
+    use axum::http::{HeaderMap, Request, header};
     use axum::middleware::from_fn;
     use axum::routing::get;
+    use futures::StreamExt;
     use http_body::Frame;
     use tower::ServiceExt;
 
     use crate::web::middleware::emit_request_metrics;
 
-    fn make_request(uri: &str) -> Request<Body> {
-        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    /// How the client consumes the response body.
+    enum Client {
+        /// Reads the body to end-of-stream.
+        ReadToEnd,
+        /// Reads a single chunk and then disconnects, like hyper, which stops polling once
+        /// `content-length` bytes have been written.
+        ReadOneChunk,
+        /// Disconnects without reading the body.
+        Disconnect,
     }
 
-    /// Runs a request whose handler returns `body`, driving it to completion on a
-    /// current-thread runtime, and returns the captured `server.requests.duration` metric
-    /// string. If `consume_body` is false, the response body is dropped without being read,
-    /// simulating a client that disconnects mid-stream.
-    fn capture_duration_metric(body: Body, consume_body: bool) -> String {
-        let captured = objectstore_metrics::with_capturing_test_client(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            rt.block_on(async {
-                let shared = Arc::new(std::sync::Mutex::new(Some(body)));
-                let app = Router::new()
-                    .route(
-                        "/v1/test/_/key",
-                        get(move || {
-                            let shared = shared.clone();
-                            async move { shared.lock().unwrap().take().unwrap() }
-                        }),
-                    )
-                    .layer(from_fn(emit_request_metrics));
-
-                let resp = app.oneshot(make_request("/v1/test/_/key")).await.unwrap();
-                assert_eq!(resp.status(), StatusCode::OK);
-
-                if consume_body {
-                    // Drain the body to end-of-stream (or until it errors); the result is
-                    // ignored so a server-side stream error does not panic the test.
-                    let _ = body::to_bytes(resp.into_body(), usize::MAX).await;
-                } else {
-                    // Drop the response (and its body) without reading it: the wrapping
-                    // `MetricsBody` never reaches end-of-stream, mirroring a client disconnect.
-                    drop(resp);
+    impl Client {
+        async fn consume(self, response: axum::response::Response) {
+            // Read results are ignored: a failing stream must be tracked, not panic the test.
+            match self {
+                Client::ReadToEnd => {
+                    let _ = body::to_bytes(response.into_body(), usize::MAX).await;
                 }
-            });
-        });
-
-        captured
-            .into_iter()
-            .find(|m| m.starts_with("server.requests.duration:"))
-            .expect("duration metric not captured")
-    }
-
-    /// A body streamed to completion reports the real response status.
-    #[test]
-    fn completed_stream_reports_real_status() {
-        let stream = async_stream::stream! {
-            yield Ok::<_, std::io::Error>(Bytes::from_static(b"hello"));
-        };
-        let metric = capture_duration_metric(Body::from_stream(stream), true);
-        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
-    }
-
-    /// A body that needs no polling is completed when it is wrapped, because hyper may not poll
-    /// it before dropping it.
-    #[test]
-    fn empty_body_reports_real_status() {
-        let metric = capture_duration_metric(Body::empty(), false);
-        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
-    }
-
-    /// A buffered body completes after its final data frame, without requiring a subsequent poll
-    /// that returns `None`.
-    #[test]
-    fn buffered_body_reports_real_status() {
-        let metric = capture_duration_metric(Body::from("hello"), true);
-        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
-    }
-
-    /// Hyper treats trailers as terminal, so completion must be recorded when their frame is
-    /// yielded rather than waiting for an unobserved following `None`.
-    #[test]
-    fn trailers_report_real_status() {
-        struct TrailersBody(bool);
-
-        impl http_body::Body for TrailersBody {
-            type Data = Bytes;
-            type Error = Infallible;
-
-            fn poll_frame(
-                mut self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-                Poll::Ready(if self.0 {
-                    None
-                } else {
-                    self.0 = true;
-                    Some(Ok(Frame::trailers(HeaderMap::new())))
-                })
+                Client::ReadOneChunk => {
+                    let _ = response.into_body().into_data_stream().next().await;
+                }
+                Client::Disconnect => drop(response),
             }
         }
-
-        let metric = capture_duration_metric(Body::new(TrailersBody(false)), true);
-        assert!(metric.contains("status:200"), "unexpected metric: {metric}");
     }
 
-    /// A body dropped before end-of-stream (client disconnect) reports `499`, overriding the
-    /// `200` status that was sent in the headers.
-    #[test]
-    fn interrupted_stream_reports_499() {
-        // A stream that yields one chunk then pends forever, so it never reaches end-of-stream.
-        let stream = async_stream::stream! {
-            yield Ok::<_, std::io::Error>(Bytes::from_static(b"hello"));
+    /// Serves `handler` behind [`emit_request_metrics`] and returns the status and duration
+    /// tracked in `server.requests.duration`.
+    async fn track_request<H, T>(handler: H, client: Client) -> (u16, Duration)
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        let app = Router::new()
+            .route("/", get(handler))
+            .layer(from_fn(emit_request_metrics));
+
+        let captured = objectstore_metrics::with_capturing_test_client_async(async move {
+            let request = Request::get("/").body(Body::empty()).unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            client.consume(response).await;
+        })
+        .await;
+
+        // The metric is formatted as `server.requests.duration:<seconds>|d|#<tags>`.
+        let metric = captured
+            .iter()
+            .find_map(|m| m.strip_prefix("server.requests.duration:"))
+            .expect("duration metric not captured");
+        let (seconds, tags) = metric
+            .split_once("|d|#")
+            .expect("malformed duration metric");
+        let (_, status) = tags.rsplit_once("status:").expect("status tag");
+
+        let status = status.parse().expect("numeric status");
+        let duration = Duration::from_secs_f64(seconds.parse().expect("numeric duration"));
+        (status, duration)
+    }
+
+    /// A stream that yields one chunk and then ends.
+    fn ending_stream() -> Body {
+        Body::from_stream(async_stream::stream! {
+            yield Ok::<_, io::Error>(Bytes::from_static(b"hello"));
+        })
+    }
+
+    /// A stream that yields one chunk and then never ends.
+    fn stalling_stream() -> Body {
+        Body::from_stream(async_stream::stream! {
+            yield Ok::<_, io::Error>(Bytes::from_static(b"hello"));
             std::future::pending::<()>().await;
-        };
-        let metric = capture_duration_metric(Body::from_stream(stream), false);
-        assert!(metric.contains("status:499"), "unexpected metric: {metric}");
+        })
     }
 
-    /// A body stream that errors server-side reports `500`, overriding the `200` status that
-    /// was sent in the headers.
-    #[test]
-    fn errored_stream_reports_500() {
-        let stream = async_stream::stream! {
+    /// A stream that yields one chunk after `delay` and then ends.
+    fn slow_stream(delay: Duration) -> Body {
+        Body::from_stream(async_stream::stream! {
+            tokio::time::sleep(delay).await;
+            yield Ok::<_, io::Error>(Bytes::from_static(b"hello"));
+        })
+    }
+
+    /// A stream that yields one chunk and then fails.
+    fn failing_stream() -> Body {
+        Body::from_stream(async_stream::stream! {
             yield Ok(Bytes::from_static(b"hello"));
-            yield Err(std::io::Error::other("boom"));
-        };
-        let metric = capture_duration_metric(Body::from_stream(stream), true);
-        assert!(metric.contains("status:500"), "unexpected metric: {metric}");
+            yield Err(io::Error::other("boom"));
+        })
+    }
+
+    /// A body that yields a trailers frame before its end-of-stream.
+    struct TrailersBody(bool);
+
+    impl http_body::Body for TrailersBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(if self.0 {
+                None
+            } else {
+                self.0 = true;
+                Some(Ok(Frame::trailers(HeaderMap::new())))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_stream_reports_real_status() {
+        let (status, _) = track_request(|| async { ending_stream() }, Client::ReadToEnd).await;
+        assert_eq!(status, 200);
+    }
+
+    /// Hyper may drop an empty body without ever polling it.
+    #[tokio::test]
+    async fn empty_body_reports_real_status() {
+        let (status, _) = track_request(|| async { Body::empty() }, Client::Disconnect).await;
+        assert_eq!(status, 200);
+    }
+
+    /// A buffered body reports end-of-stream with its final frame, so no `None` poll follows.
+    #[tokio::test]
+    async fn buffered_body_reports_real_status() {
+        let (status, _) = track_request(|| async { Body::from("hello") }, Client::ReadToEnd).await;
+        assert_eq!(status, 200);
+    }
+
+    /// Hyper treats a trailers frame as terminal and never polls for the following `None`.
+    #[tokio::test]
+    async fn trailers_report_real_status() {
+        let handler = || async { Body::new(TrailersBody(false)) };
+        let (status, _) = track_request(handler, Client::ReadToEnd).await;
+        assert_eq!(status, 200);
+    }
+
+    /// Hyper stops polling once `content-length` bytes have been written, so completion is
+    /// derived from the byte count rather than a following end-of-stream poll.
+    #[tokio::test]
+    async fn content_length_stream_reports_real_status() {
+        let handler = || async { ([(header::CONTENT_LENGTH, "5")], stalling_stream()) };
+        let (status, _) = track_request(handler, Client::ReadOneChunk).await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn interrupted_stream_reports_499() {
+        let (status, _) = track_request(|| async { stalling_stream() }, Client::Disconnect).await;
+        assert_eq!(status, 499);
+    }
+
+    /// A client that disconnects after only part of `content-length` was written still reports
+    /// `499`: an incomplete byte count must not complete the request.
+    #[tokio::test]
+    async fn interrupted_content_length_stream_reports_499() {
+        let handler = || async { ([(header::CONTENT_LENGTH, "10")], stalling_stream()) };
+        let (status, _) = track_request(handler, Client::ReadOneChunk).await;
+        assert_eq!(status, 499);
+    }
+
+    #[tokio::test]
+    async fn errored_stream_reports_500() {
+        let (status, _) = track_request(|| async { failing_stream() }, Client::ReadToEnd).await;
+        assert_eq!(status, 500);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duration_covers_body_streaming() {
+        let handler = || async { slow_stream(Duration::from_secs(5)) };
+        let (_, duration) = track_request(handler, Client::ReadToEnd).await;
+        assert_eq!(duration, Duration::from_secs(5));
     }
 }
