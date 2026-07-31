@@ -7,8 +7,8 @@ use std::task::{Context, Poll};
 
 use futures_util::{Stream, StreamExt as _};
 use multer::Field;
+use objectstore_types::headers;
 use objectstore_types::metadata::{Compression, Metadata};
-use percent_encoding::NON_ALPHANUMERIC;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
@@ -180,12 +180,9 @@ fn operation_headers(operation: &str, key: Option<&str>) -> HeaderMap {
         HeaderValue::from_str(operation).expect("operation kind is always a valid header value"),
     );
     if let Some(key) = key {
-        let encoded =
-            percent_encoding::percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
         headers.insert(
             HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-            HeaderValue::try_from(encoded)
-                .expect("percent-encoded string is always a valid header value"),
+            headers::encode_header_value(key),
         );
     }
     headers
@@ -338,16 +335,7 @@ impl OperationResult {
         // Prioritize the server-provided key, fall back to the one from context.
         let key = headers
             .remove(HEADER_BATCH_OPERATION_KEY)
-            .and_then(|v| {
-                v.to_str()
-                    .ok()
-                    .and_then(|encoded| {
-                        percent_encoding::percent_decode_str(encoded)
-                            .decode_utf8()
-                            .ok()
-                    })
-                    .map(|s| s.into_owned())
-            })
+            .and_then(|v| headers::decode_header_value(&v).ok())
             .or_else(|| ctx.key().map(str::to_owned));
 
         let body = field.bytes().await?;

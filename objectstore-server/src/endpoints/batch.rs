@@ -11,7 +11,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
-use percent_encoding::NON_ALPHANUMERIC;
+use objectstore_types::headers;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{
@@ -262,12 +262,9 @@ fn insert_index_header(headers: &mut HeaderMap, idx: usize) {
 }
 
 fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
-    let encoded = percent_encoding::percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
     headers.insert(
         HEADER_BATCH_OPERATION_KEY,
-        encoded
-            .parse()
-            .expect("percent-encoded string is always a valid header value"),
+        headers::encode_header_value(key),
     );
 }
 

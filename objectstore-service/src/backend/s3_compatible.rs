@@ -392,6 +392,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use anyhow::Result;
@@ -450,6 +451,30 @@ mod tests {
         let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
         let expected = humantime::format_rfc3339_seconds(expires).to_string();
         assert_eq!(custom_time, expected);
+    }
+
+    #[test]
+    fn metadata_to_gcs_headers_escapes_unicode() {
+        let metadata = Metadata {
+            filename: Some("réport-📄.pdf".into()),
+            custom: BTreeMap::from_iter([("release".into(), "vérsion-1.0-🚀".into())]),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+        assert_eq!(
+            headers.get("x-goog-meta-x-sn-filename").unwrap(),
+            "r%C3%A9port-%F0%9F%93%84.pdf",
+        );
+        assert_eq!(
+            headers.get("x-goog-meta-x-snme-release").unwrap(),
+            "v%C3%A9rsion-1.0-%F0%9F%9A%80",
+        );
+
+        // The prefixed headers this backend writes are the ones it reads back.
+        let roundtripped = Metadata::from_headers(&headers, GCS_CUSTOM_PREFIX).unwrap();
+        assert_eq!(roundtripped.filename, metadata.filename);
+        assert_eq!(roundtripped.custom, metadata.custom);
     }
 
     #[tokio::test]

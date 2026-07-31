@@ -29,6 +29,21 @@
 //! prefix on top, so `x-sn-expiration` becomes `x-goog-meta-x-sn-expiration`.
 //! The [`Metadata::from_headers`] and [`Metadata::to_headers`] methods accept
 //! a `prefix` parameter for this purpose.
+//!
+//! # Escaping free-form values
+//!
+//! [`Metadata`] always holds logical strings: [`filename`](Metadata::filename),
+//! [`origin`](Metadata::origin), and [`custom`](Metadata::custom) values may
+//! contain arbitrary Unicode.
+//!
+//! Over the wire, metadata travels in HTTP headers, which have no charset. In
+//! practice anything outside visible ASCII is either rejected outright or
+//! silently reinterpreted.
+//!
+//! The fields are therefore percent-encoded in headers, via
+//! [`headers::encode_header_value`] and [`headers::decode_header_value`].
+//! Encoding is a property of the *transport*, never of the stored value:
+//! anything reading [`Metadata`] sees the logical string.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -40,6 +55,8 @@ use std::time::{Duration, SystemTime};
 use http::header::{self, HeaderMap, HeaderName};
 use humantime::{format_duration, format_rfc3339_micros, parse_duration, parse_rfc3339};
 use serde::{Deserialize, Serialize};
+
+use crate::headers;
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -88,6 +105,9 @@ pub enum Error {
     /// The object size is not a valid byte count.
     #[error("invalid object size")]
     Size(#[from] ParseIntError),
+    /// A free-form header value did not decode into a logical string.
+    #[error("invalid metadata header value")]
+    Encoding(#[from] crate::headers::DecodeError),
     /// An internal consistency invariant on the metadata was violated.
     #[error("invariant violation: {0}")]
     Invariant(&'static str),
@@ -307,7 +327,10 @@ pub struct Metadata {
     ///
     /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
     /// header in GET responses, prompting browsers and download tools to save the file
-    /// under this name.
+    /// under this name. Non-ASCII filenames additionally get an RFC 8187 `filename*` parameter.
+    ///
+    /// This is a logical string and may contain arbitrary Unicode; it is escaped only on the
+    /// wire (see [the module docs](self#escaping-free-form-values)).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
 
@@ -423,10 +446,10 @@ impl Metadata {
                             metadata.time_expires = Some(time);
                         }
                         HEADER_ORIGIN => {
-                            metadata.origin = Some(value.to_str()?.to_owned());
+                            metadata.origin = Some(headers::decode_header_value(value)?);
                         }
                         HEADER_FILENAME => {
-                            metadata.filename = Some(value.to_str()?.to_owned());
+                            metadata.filename = Some(headers::decode_header_value(value)?);
                         }
                         HEADER_SIZE if !skip_read_only => {
                             let size = value.to_str()?;
@@ -435,8 +458,8 @@ impl Metadata {
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
-                                let value = value.to_str()?;
-                                metadata.custom.insert(name.into(), value.into());
+                                let value = headers::decode_header_value(value)?;
+                                metadata.custom.insert(name.into(), value);
                             }
                         }
                     }
@@ -489,11 +512,11 @@ impl Metadata {
         }
         if let Some(origin) = origin {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_ORIGIN}"))?;
-            headers.append(name, origin.parse()?);
+            headers.append(name, headers::encode_header_value(origin));
         }
         if let Some(filename) = filename {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_FILENAME}"))?;
-            headers.append(name, filename.parse()?);
+            headers.append(name, headers::encode_header_value(filename));
         }
         if let Some(size) = size {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_SIZE}"))?;
@@ -503,7 +526,7 @@ impl Metadata {
         // customer-provided metadata
         for (key, value) in custom {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_META_PREFIX}{key}"))?;
-            headers.append(name, value.parse()?);
+            headers.append(name, headers::encode_header_value(value));
         }
 
         Ok(headers)
@@ -631,6 +654,39 @@ mod tests {
         let headers = metadata.to_headers("").unwrap();
         let roundtripped = Metadata::from_headers(&headers, "").unwrap();
         assert_eq!(roundtripped.filename, metadata.filename);
+    }
+
+    /// Every free-form field is escaped on the way out and decoded on the way back in.
+    ///
+    /// The escaping itself is covered in [`crate::headers`]; this only pins down that each of the
+    /// three fields that needs it actually goes through it, in both directions.
+    #[test]
+    fn free_form_values_are_escaped_on_the_wire() {
+        let metadata = Metadata {
+            origin: Some("Ünknown-源".into()),
+            filename: Some("réport-📄.pdf".into()),
+            custom: BTreeMap::from([("release".to_owned(), "100% vérsion-🚀".to_owned())]),
+            ..Default::default()
+        };
+
+        let headers = metadata.to_headers("").unwrap();
+        assert_eq!(
+            headers.get(HEADER_ORIGIN).unwrap(),
+            "%C3%9Cnknown-%E6%BA%90"
+        );
+        assert_eq!(
+            headers.get(HEADER_FILENAME).unwrap(),
+            "r%C3%A9port-%F0%9F%93%84.pdf",
+        );
+        assert_eq!(
+            headers.get(format!("{HEADER_META_PREFIX}release")).unwrap(),
+            "100%25 v%C3%A9rsion-%F0%9F%9A%80",
+        );
+
+        let roundtripped = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(roundtripped.origin, metadata.origin);
+        assert_eq!(roundtripped.filename, metadata.filename);
+        assert_eq!(roundtripped.custom, metadata.custom);
     }
 
     #[test]

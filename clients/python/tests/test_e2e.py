@@ -222,6 +222,42 @@ def test_full_cycle_with_origin(server_url: str) -> None:
     assert retrieved.metadata.filename == "report.pdf"
 
 
+def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
+    client = Client(
+        server_url,
+        token=TestSecretKey.get(),
+    )
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(timedelta(days=1)),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(
+        b"test data",
+        origin="Ünknown-源",
+        filename="réport-📄.pdf",
+        metadata={"release": "vérsion-1.0-🚀", "note": "100% done"},
+    )
+    assert object_key is not None
+
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"test data"
+    assert retrieved.metadata.origin == "Ünknown-源"
+    assert retrieved.metadata.filename == "réport-📄.pdf"
+    assert retrieved.metadata.custom == {
+        "release": "vérsion-1.0-🚀",
+        "note": "100% done",
+    }
+
+    head = session.head(object_key)
+    assert head is not None
+    assert head.filename == "réport-📄.pdf"
+    assert head.custom["release"] == "vérsion-1.0-🚀"
+
+
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(
         server_url,

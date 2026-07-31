@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from typing import IO, Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import filetype  # type: ignore[import-untyped]
 from zstandard import ZstdCompressionReader
@@ -22,6 +22,16 @@ from zstandard import ZstdCompressionReader
 _PATH_SAFE = "/:@!$&'()*+,;="
 _QUERY_SAFE = _PATH_SAFE + "?"
 
+# Characters left unescaped in a metadata header value: every visible ASCII
+# character except "%". Non-ASCII, the C0 controls, and DEL are escaped because a
+# header value cannot carry them; "%" is escaped so that a literal percent sign in
+# a value can never be confused with an escape sequence when decoding.
+#
+# This is byte-for-byte identical to the Rust `HEADER_ESCAPE` set (see
+# `objectstore-types/src/headers.rs`), so both clients and the server agree on the
+# wire form. Values that are already plain ASCII are left untouched.
+_HEADER_VALUE_SAFE = "".join(chr(b) for b in range(0x20, 0x7F) if b != ord("%"))
+
 
 def encode_path(path: str) -> str:
     """Percent-encodes a request path as it will appear on the wire.
@@ -40,6 +50,27 @@ def encode_query(query: str) -> str:
     (see :data:`_QUERY_SAFE`).
     """
     return quote(query, safe=_QUERY_SAFE)
+
+
+def encode_header_value(value: str) -> str:
+    """Percent-encodes a free-form metadata string for an HTTP header value.
+
+    HTTP header values carry only visible ASCII, so anything outside that range has
+    to be escaped to survive the transport (see :data:`_HEADER_VALUE_SAFE`). This is
+    the inverse of :func:`decode_header_value`; only the transport representation is
+    escaped, never the logical string held in :class:`Metadata`.
+    """
+    return quote(value, safe=_HEADER_VALUE_SAFE)
+
+
+def decode_header_value(value: str) -> str:
+    """Decodes a percent-encoded HTTP header value into its logical string.
+
+    Inverse of :func:`encode_header_value`. Values without escape sequences are
+    returned unchanged, so headers written before the encoding existed still read
+    back as-is.
+    """
+    return unquote(value, errors="strict")
 
 
 def parse_accept_encoding(header: str) -> list[str]:
