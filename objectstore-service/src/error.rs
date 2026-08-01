@@ -151,6 +151,14 @@ pub enum Error {
     /// Invalid upload ID (e.g. path traversal attempt).
     #[error(transparent)]
     InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
+
+    /// Errors from SQLx database migrations.
+    #[error("sqlx migration error: {0}")]
+    SqlxMigrate(#[from] sqlx::migrate::MigrateError),
+
+    /// Common SQLx database errors.
+    #[error("sqlx error: {0}")]
+    Sqlx(#[from] sqlx::Error),
 }
 
 impl Error {
@@ -211,6 +219,8 @@ impl Error {
             Self::NotImplemented => Level::ERROR,
             Self::InvalidUploadId(_) => Level::DEBUG,
             Self::Generic { .. } => Level::ERROR,
+            Self::SqlxMigrate(_) => Level::ERROR,
+            Self::Sqlx(_) => Level::ERROR,
         }
     }
 }
