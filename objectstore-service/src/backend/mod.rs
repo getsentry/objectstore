@@ -75,7 +75,7 @@ pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backen
 
 async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
-        StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
+        StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c).await?),
         StorageConfig::S3Compatible(c) => {
             Box::new(s3_compatible::S3CompatibleBackend::without_token(c))
         }
@@ -127,7 +127,9 @@ async fn lt_from_config(
     config: MultipartUploadStorageConfig,
 ) -> Result<Box<dyn common::MultipartUploadBackend>> {
     Ok(match config {
-        MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
+        MultipartUploadStorageConfig::FileSystem(c) => {
+            Box::new(local_fs::LocalFsBackend::new(c).await?)
+        }
         MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
     })
 }

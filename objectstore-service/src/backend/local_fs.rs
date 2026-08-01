@@ -17,6 +17,8 @@ use crate::backend::common::{
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
+use crate::keeper::sqlite_backed::SqliteBackedKeeper;
+use crate::keeper::{Keeper, KeeperBackend, KeeperConfig};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
@@ -34,6 +36,9 @@ use crate::stream::{self, ClientStream};
 /// storage:
 ///   type: filesystem
 ///   path: /data
+///   keeper:
+///     backend: sqlite
+///     connection_url: sqlite://data/keeper.db
 /// ```
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct FileSystemConfig {
@@ -51,18 +56,31 @@ pub struct FileSystemConfig {
     /// - `OS__STORAGE__TYPE=filesystem`
     /// - `OS__STORAGE__PATH=/path/to/storage`
     pub path: PathBuf,
+
+    /// Configuration for the keeper backend.
+    /// See [`KeeperConfig`] for details.
+    pub keeper: KeeperConfig,
 }
 
 /// Local filesystem backend for development and testing.
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
+    keeper: Box<dyn Keeper>,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
-    pub fn new(config: FileSystemConfig) -> Self {
-        Self { path: config.path }
+    pub async fn new(config: FileSystemConfig) -> Result<Self> {
+        let keeper = match config.keeper.backend {
+            KeeperBackend::Sqlite => {
+                Box::new(SqliteBackedKeeper::new(&config.keeper.connection_url).await?)
+            }
+        };
+        Ok(Self {
+            path: config.path,
+            keeper,
+        })
     }
 }
 
@@ -115,6 +133,8 @@ impl Backend for LocalFsBackend {
         file.sync_data().await?;
         drop(file);
 
+        self.keeper.keep(id, metadata.expiration_policy).await?;
+
         Ok(())
     }
 
@@ -131,6 +151,7 @@ impl Backend for LocalFsBackend {
             }
             err => err?,
         };
+        self.keeper.mark_accessed(id).await?;
 
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
@@ -174,6 +195,7 @@ impl Backend for LocalFsBackend {
         {
             objectstore_log::debug!("Object not found");
         }
+        self.keeper.remove(id).await?;
         Ok(result?)
     }
 }
@@ -432,6 +454,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         file.sync_data().await?;
         drop(file);
 
+        self.keeper.keep(id, metadata.expiration_policy).await?;
+
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await?;
 
@@ -451,6 +475,7 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
+    use crate::keeper::sqlite_backed::SqliteBackedKeeper;
     use crate::stream;
 
     #[tokio::test]
@@ -458,6 +483,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(FileSystemConfig {
             path: tempdir.path().to_path_buf(),
+            keeper: KeeperConfig {
+                backend: KeeperBackend::Sqlite,
+                connection_url: "sqlite::memory:".into(),
+            },
         });
 
         let id = ObjectId::random(ObjectContext {
@@ -499,6 +528,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(FileSystemConfig {
             path: tempdir.path().to_path_buf(),
+            keeper: KeeperConfig {
+                backend: KeeperBackend::Sqlite,
+                connection_url: "sqlite::memory:".into(),
+            },
         });
 
         let id = ObjectId::random(ObjectContext {
@@ -533,6 +566,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(FileSystemConfig {
             path: tempdir.path().to_path_buf(),
+            keeper: KeeperConfig {
+                backend: KeeperBackend::Sqlite,
+                connection_url: "sqlite::memory:".into(),
+            },
         });
 
         let id = ObjectId::random(ObjectContext {
@@ -551,11 +588,16 @@ mod tests {
         })
     }
 
-    fn make_backend() -> (tempfile::TempDir, LocalFsBackend) {
+    async fn make_backend() -> (tempfile::TempDir, LocalFsBackend) {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(FileSystemConfig {
             path: tempdir.path().to_path_buf(),
-        });
+            keeper: KeeperConfig {
+                backend: KeeperBackend::Sqlite,
+                connection_url: "sqlite::memory:".into(),
+            },
+        })
+        .await?;
         (tempdir, backend)
     }
 
