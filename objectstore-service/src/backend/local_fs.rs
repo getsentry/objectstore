@@ -475,7 +475,6 @@ mod tests {
 
     use super::*;
     use crate::id::ObjectContext;
-    use crate::keeper::sqlite_backed::SqliteBackedKeeper;
     use crate::stream;
 
     #[tokio::test]
@@ -487,7 +486,8 @@ mod tests {
                 backend: KeeperBackend::Sqlite,
                 connection_url: "sqlite::memory:".into(),
             },
-        });
+        })
+        .await?;
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -532,7 +532,8 @@ mod tests {
                 backend: KeeperBackend::Sqlite,
                 connection_url: "sqlite::memory:".into(),
             },
-        });
+        })
+        .await?;
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -570,7 +571,8 @@ mod tests {
                 backend: KeeperBackend::Sqlite,
                 connection_url: "sqlite::memory:".into(),
             },
-        });
+        })
+        .await?;
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -588,7 +590,7 @@ mod tests {
         })
     }
 
-    async fn make_backend() -> (tempfile::TempDir, LocalFsBackend) {
+    async fn make_backend() -> Result<(tempfile::TempDir, LocalFsBackend)> {
         let tempdir = tempfile::tempdir().unwrap();
         let backend = LocalFsBackend::new(FileSystemConfig {
             path: tempdir.path().to_path_buf(),
@@ -598,12 +600,12 @@ mod tests {
             },
         })
         .await?;
-        (tempdir, backend)
+        Ok((tempdir, backend))
     }
 
     #[tokio::test]
     async fn multipart_single_part() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
@@ -655,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_multiple_parts() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -729,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_list_parts() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -792,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_bounded() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -819,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_from() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -846,7 +848,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_last() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -873,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_unsatisfiable() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -891,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_abort() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -917,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_invalid_etag() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -966,7 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_missing_part() {
-        let (_tempdir, backend) = make_backend();
+        let (_tempdir, backend) = make_backend().await?;
         let id = make_id();
         let metadata = Metadata::default();
 
