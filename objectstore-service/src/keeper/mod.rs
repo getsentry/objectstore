@@ -21,8 +21,7 @@ pub struct ObjectExpiry<'a> {
 pub trait Keeper: Send + Sync {
     /// Keep is the first step in the object retention lifecycle.
     /// Practically speaking, it would not be kept if the `expiration_policy` is `Manual`.
-    /// The `expiration_policy` is set by the client at upload time via the
-    /// [`x-sn-expiration`](crate::id::HEADER_EXPIRATION) header and persisted with the object.
+    /// The `expiration_policy` is set by the client at upload time via the supplied Metadata.
     async fn keep(&self, id: &ObjectId, expiration_policy: ExpirationPolicy) -> Result<()>;
 
     /// Remove is the final step in the object retention lifecycle.
