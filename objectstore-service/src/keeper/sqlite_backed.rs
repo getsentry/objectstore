@@ -106,7 +106,7 @@ impl super::Keeper for SqliteBackedKeeper {
         let expires_at = expiration_duration.map(|duration| current_time + duration);
 
         let mut atomic = self.write_pool.begin().await?;
-        let _ = sqlx::query(
+        sqlx::query(
             "
             INSERT INTO ttl_keeper (object_id, expiration_policy, duration, created_at, expires_at)
             VALUES (?, ?, ?, ?, ?)
@@ -122,7 +122,7 @@ impl super::Keeper for SqliteBackedKeeper {
         .bind(current_time)
         .bind(expires_at)
         .execute(&mut *atomic)
-        .await;
+        .await?;
 
         atomic.commit().await?;
 
@@ -131,7 +131,7 @@ impl super::Keeper for SqliteBackedKeeper {
 
     async fn remove(&self, id: &ObjectId) -> Result<()> {
         let mut atomic = self.write_pool.begin().await?;
-        let _ = sqlx::query(
+        sqlx::query(
             "
             DELETE FROM ttl_keeper
             WHERE object_id = ?
@@ -139,7 +139,7 @@ impl super::Keeper for SqliteBackedKeeper {
         )
         .bind(id.as_storage_path().to_string())
         .execute(&mut *atomic)
-        .await;
+        .await?;
 
         atomic.commit().await?;
 
@@ -190,7 +190,7 @@ impl super::Keeper for SqliteBackedKeeper {
 
                 // Update the object's expiration time.
                 let mut atomic = self.write_pool.begin().await?;
-                let _ = sqlx::query(
+                sqlx::query(
                     "
                     UPDATE ttl_keeper
                     SET expires_at = ?
@@ -200,7 +200,7 @@ impl super::Keeper for SqliteBackedKeeper {
                 .bind(current_time + duration)
                 .bind(id.as_storage_path().to_string())
                 .execute(&mut *atomic)
-                .await;
+                .await?;
 
                 atomic.commit().await?;
             }
@@ -430,5 +430,27 @@ mod tests {
         let id = make_id();
 
         tk.keeper.mark_accessed(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keep_duplicate_returns_error() {
+        let tk = TestKeeper::new().await;
+        let id = make_id();
+
+        tk.keeper
+            .keep(&id, ExpirationPolicy::TimeToLive(Duration::from_secs(60)))
+            .await
+            .unwrap();
+
+        let err = tk
+            .keeper
+            .keep(&id, ExpirationPolicy::TimeToLive(Duration::from_secs(60)))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Sqlx(_)),
+            "expected Error::Sqlx, got: {err:?}"
+        );
     }
 }
