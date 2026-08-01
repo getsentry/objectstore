@@ -487,7 +487,8 @@ mod tests {
                 connection_url: "sqlite::memory:".into(),
             },
         })
-        .await?;
+        .await
+        .unwrap();
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -533,7 +534,8 @@ mod tests {
                 connection_url: "sqlite::memory:".into(),
             },
         })
-        .await?;
+        .await
+        .unwrap();
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -572,7 +574,8 @@ mod tests {
                 connection_url: "sqlite::memory:".into(),
             },
         })
-        .await?;
+        .await
+        .unwrap();
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -605,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_single_part() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
@@ -657,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_multiple_parts() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -731,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_list_parts() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -794,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_bounded() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -821,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_from() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -848,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_last() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -875,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_object_range_unsatisfiable() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -893,7 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_abort() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -919,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_invalid_etag() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
@@ -968,7 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_missing_part() {
-        let (_tempdir, backend) = make_backend().await?;
+        let (_tempdir, backend) = make_backend().await.unwrap();
         let id = make_id();
         let metadata = Metadata::default();
 
