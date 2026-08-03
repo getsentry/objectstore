@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+### New Features ✨
+
+- (types) Support Unicode in object metadata headers by @jan-auer in [#581](https://github.com/getsentry/objectstore/pull/581)
+
+### Bug Fixes 🐛
+
+- (server) Return 200 instead of 204 for object HEAD requests by @jan-auer in [#577](https://github.com/getsentry/objectstore/pull/577)
+
 ## 0.2.0
 
 ### Bug Fixes 🐛

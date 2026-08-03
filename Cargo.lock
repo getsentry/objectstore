@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-compression",
  "base64",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-types"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
