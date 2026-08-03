@@ -1,6 +1,7 @@
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
+use objectstore_types::metadata::Metadata;
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -77,6 +78,99 @@ async fn filename_with_quotes_is_escaped() -> Result<()> {
         resp.headers().get("content-disposition").unwrap(),
         r#"attachment; filename="has\"quote.txt""#,
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn filename_with_unicode_roundtrips() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    let filename = "réport-📄.pdf";
+
+    // Non-ASCII travels percent-encoded; this is the raw wire form our clients send.
+    let resp = client
+        .put(server.url("/v1/objects/test/org=1/cd-unicode"))
+        .header("x-sn-filename", "r%C3%A9port-%F0%9F%93%84.pdf")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = client
+        .get(server.url("/v1/objects/test/org=1/cd-unicode"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Read the filename back through the metadata parser rather than off the raw
+    // header, so the assertion holds regardless of how the value is encoded on the wire.
+    let metadata = Metadata::from_headers(resp.headers(), "")?;
+    assert_eq!(metadata.filename.as_deref(), Some(filename));
+
+    // The wire value is escaped, so it survives as visible ASCII.
+    assert_eq!(
+        resp.headers().get("x-sn-filename").unwrap(),
+        "r%C3%A9port-%F0%9F%93%84.pdf",
+    );
+
+    // Non-ASCII needs the RFC 8187 form, with the quoted-string as the ASCII fallback.
+    assert_eq!(
+        resp.headers().get("content-disposition").unwrap(),
+        "attachment; filename=\"r_port-_.pdf\"; \
+         filename*=UTF-8''r%C3%A9port-%F0%9F%93%84.pdf",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_metadata_with_unicode_roundtrips() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    let release = "vérsion-1.0-🚀";
+
+    // Non-ASCII travels percent-encoded, as does a literal percent sign.
+    let resp = client
+        .put(server.url("/v1/objects/test/org=1/meta-unicode"))
+        .header("x-snme-release", "v%C3%A9rsion-1.0-%F0%9F%9A%80")
+        .header("x-snme-note", "100%25 done")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    for resp in [
+        client
+            .get(server.url("/v1/objects/test/org=1/meta-unicode"))
+            .send()
+            .await?,
+        client
+            .head(server.url("/v1/objects/test/org=1/meta-unicode"))
+            .send()
+            .await?,
+    ] {
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let metadata = Metadata::from_headers(resp.headers(), "")?;
+        assert_eq!(
+            metadata.custom.get("release").map(String::as_str),
+            Some(release)
+        );
+        assert_eq!(
+            metadata.custom.get("note").map(String::as_str),
+            Some("100% done"),
+        );
+
+        // Escaped on the wire, including the literal percent sign.
+        assert_eq!(
+            resp.headers().get("x-snme-release").unwrap(),
+            "v%C3%A9rsion-1.0-%F0%9F%9A%80",
+        );
+        assert_eq!(resp.headers().get("x-snme-note").unwrap(), "100%25 done");
+    }
 
     Ok(())
 }

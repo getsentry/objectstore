@@ -9,6 +9,7 @@ use std::{fmt, io};
 use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
+use objectstore_types::headers;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::HeaderName;
@@ -157,22 +158,27 @@ impl GcsObject {
             );
         }
 
+        // Free-form strings are stored escaped, even though this JSON representation could carry
+        // them verbatim. See `insert_gcs_meta_header` for why, and why both writers must agree.
         if let Some(origin) = &metadata.origin {
-            gcs_object
-                .metadata
-                .insert(GcsMetaKey::Origin, origin.clone());
+            gcs_object.metadata.insert(
+                GcsMetaKey::Origin,
+                headers::encode_header_str(origin).into(),
+            );
         }
 
         if let Some(filename) = &metadata.filename {
-            gcs_object
-                .metadata
-                .insert(GcsMetaKey::Filename, filename.clone());
+            gcs_object.metadata.insert(
+                GcsMetaKey::Filename,
+                headers::encode_header_str(filename).into(),
+            );
         }
 
         for (key, value) in &metadata.custom {
-            gcs_object
-                .metadata
-                .insert(GcsMetaKey::Custom(key.clone()), value.clone());
+            gcs_object.metadata.insert(
+                GcsMetaKey::Custom(key.clone()),
+                headers::encode_header_str(value).into(),
+            );
         }
 
         gcs_object
@@ -190,8 +196,16 @@ impl GcsObject {
             .transpose()?
             .unwrap_or_default();
 
-        let origin = self.metadata.remove(&GcsMetaKey::Origin);
-        let filename = self.metadata.remove(&GcsMetaKey::Filename);
+        let origin = self
+            .metadata
+            .remove(&GcsMetaKey::Origin)
+            .map(|value| decode_gcs_meta_value(&value))
+            .transpose()?;
+        let filename = self
+            .metadata
+            .remove(&GcsMetaKey::Filename)
+            .map(|value| decode_gcs_meta_value(&value))
+            .transpose()?;
 
         let content_type = self.content_type;
         let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
@@ -209,7 +223,7 @@ impl GcsObject {
         let mut custom = BTreeMap::new();
         for (key, value) in self.metadata {
             if let GcsMetaKey::Custom(custom_key) = key {
-                custom.insert(custom_key, value);
+                custom.insert(custom_key, decode_gcs_meta_value(&value)?);
             } else {
                 return Err(Error::Generic {
                     context: format!(
@@ -352,6 +366,24 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     Ok(headers)
 }
 
+/// Decodes a stored GCS metadata value into its logical string.
+fn decode_gcs_meta_value(value: &str) -> Result<String> {
+    headers::decode_header_str(value).map_err(|cause| Error::Generic {
+        context: "GCS: invalid percent-encoded UTF-8 in object metadata".to_owned(),
+        cause: Some(Box::new(cause)),
+    })
+}
+
+/// Inserts a single `x-goog-meta-*` header, escaping the value for transport.
+///
+/// Google: "you should generally avoid non-ascii characters, because they are not permitted in
+/// HTTP headers, which the XML API uses" ([docs]). Real GCS does preserve raw UTF-8 here, but that
+/// is undocumented, and it still drops leading whitespace and turns invalid UTF-8 into `U+FFFD`.
+///
+/// [`GcsObject::from_metadata`] escapes the same values on the JSON path: reads always come back
+/// through the JSON API and cannot tell which writer produced an object, so both must agree.
+///
+/// [docs]: https://docs.cloud.google.com/storage/docs/metadata
 fn insert_gcs_meta_header(
     headers: &mut header::HeaderMap,
     key: &GcsMetaKey,
@@ -363,10 +395,7 @@ fn insert_gcs_meta_header(
             context: format!("GCS: invalid header name: {header_name}"),
             cause: Some(Box::new(e)),
         })?,
-        value.parse().map_err(|e| Error::Generic {
-            context: format!("GCS: invalid header value for {header_name}"),
-            cause: Some(Box::new(e)),
-        })?,
+        headers::encode_header_value(value),
     );
     Ok(())
 }
@@ -1185,6 +1214,50 @@ mod tests {
         assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
         assert!(metadata.time_created.is_some());
+
+        Ok(())
+    }
+
+    /// Metadata with a non-ASCII filename and custom metadata value.
+    fn unicode_metadata() -> Metadata {
+        Metadata {
+            filename: Some("réport-📄.pdf".into()),
+            custom: BTreeMap::from_iter([("release".into(), "vérsion-1.0-🚀".into())]),
+            ..Default::default()
+        }
+    }
+
+    /// Both GCS write paths must agree on how a logical string is stored, because every read goes
+    /// through the JSON API: `put_object` writes metadata as JSON, `initiate_multipart` writes it
+    /// as `x-goog-meta-*` request headers.
+    #[tokio::test]
+    async fn test_unicode_metadata_roundtrip_json_upload() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = unicode_metadata();
+
+        backend
+            .put_object(&id, &metadata, stream::single("hello, world"))
+            .await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(meta.filename, metadata.filename);
+        assert_eq!(meta.custom, metadata.custom);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unicode_metadata_roundtrip_multipart_upload() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = unicode_metadata();
+
+        multipart_put(&backend, &id, &metadata, "hello, world").await?;
+
+        let meta = backend.get_metadata(&id).await?.unwrap();
+        assert_eq!(meta.filename, metadata.filename);
+        assert_eq!(meta.custom, metadata.custom);
 
         Ok(())
     }

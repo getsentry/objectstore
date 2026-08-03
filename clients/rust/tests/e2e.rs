@@ -150,6 +150,54 @@ async fn stores_under_given_key() {
 }
 
 #[tokio::test]
+async fn roundtrips_unicode_metadata() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let filename = "réport-📄.pdf";
+    let release = "vérsion-1.0-🚀";
+
+    let stored_id = session
+        .put("oh hai!")
+        .filename(filename)
+        .origin("Ünknown-源")
+        .append_metadata("release", release)
+        .append_metadata("note", "100% done")
+        .key("unicode-metadata")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    let metadata = response.metadata.clone();
+    assert_eq!(metadata.filename.as_deref(), Some(filename));
+    assert_eq!(metadata.origin.as_deref(), Some("Ünknown-源"));
+    assert_eq!(
+        metadata.custom.get("release").map(String::as_str),
+        Some(release)
+    );
+    assert_eq!(
+        metadata.custom.get("note").map(String::as_str),
+        Some("100% done"),
+    );
+    assert_eq!(response.payload().await.unwrap(), "oh hai!");
+
+    let metadata = session.head(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(metadata.filename.as_deref(), Some(filename));
+    assert_eq!(
+        metadata.custom.get("release").map(String::as_str),
+        Some(release)
+    );
+}
+
+#[tokio::test]
 async fn stores_structured_keys() {
     let server = test_server().await;
 

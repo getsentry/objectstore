@@ -6,6 +6,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod auth;
+pub mod headers;
 pub mod metadata;
 pub mod multipart;
 pub mod presign;

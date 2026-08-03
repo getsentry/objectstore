@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -6,6 +8,7 @@ use axum::routing;
 use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
+use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
@@ -146,25 +149,24 @@ fn insert_content_length(headers: &mut HeaderMap, metadata: &Metadata) {
 }
 
 fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    if let Some(val) = metadata
-        .filename
-        .as_deref()
-        .and_then(format_content_disposition)
-    {
-        response
-            .headers_mut()
-            .insert(http::header::CONTENT_DISPOSITION, val);
+    if let Some(filename) = metadata.filename.as_deref() {
+        response.headers_mut().insert(
+            http::header::CONTENT_DISPOSITION,
+            format_content_disposition(filename),
+        );
     }
 }
 
 /// Formats a `Content-Disposition: attachment; filename="..."` header value.
 ///
-/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all
-/// dashes) and then escaped for RFC 6266 quoted-string (`"` is backslash-escaped).
+/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all dashes, non-ASCII
+/// and control characters become `_`) and then escaped for the RFC 6266 quoted-string (`"` is
+/// backslash-escaped).
 ///
-/// Returns `None` if the resulting value is not a valid HTTP header value (e.g.
-/// the filename contains control characters).
-fn format_content_disposition(filename: &str) -> Option<http::HeaderValue> {
+/// A filename that is not pure ASCII cannot be represented in that quoted-string, so it
+/// additionally gets an RFC 8187 `filename*` parameter carrying the full UTF-8 value. The
+/// quoted-string then serves as the ASCII fallback for clients that ignore `filename*`.
+fn format_content_disposition(filename: &str) -> http::HeaderValue {
     let all_dots = filename.chars().all(|c| c == '.');
 
     let mut result = String::from("attachment; filename=\"");
@@ -176,13 +178,21 @@ fn format_content_disposition(filename: &str) -> Option<http::HeaderValue> {
                 result.push('\\');
                 '"'
             }
+            c if !c.is_ascii() || c.is_control() => '_',
             c => c,
         };
         result.push(c);
     }
     result.push('"');
 
-    http::HeaderValue::from_str(&result).ok()
+    if !filename.is_ascii() {
+        write!(result, "; filename*={}", ExtValue(filename))
+            .expect("writing to a string cannot fail");
+    }
+
+    // INVARIANT: every character written above is visible ASCII — the quoted-string replaces
+    // non-ASCII and control characters with `_`, and the `ext-value` is percent-encoded.
+    http::HeaderValue::from_str(&result).expect("content disposition is a valid header value")
 }
 
 async fn object_put(

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, TypeVar, cast
 
+from objectstore_client.utils import decode_header_value
+
 Compression = Literal["zstd"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
@@ -108,13 +110,13 @@ class Metadata:
             elif k == HEADER_TIME_EXPIRES:
                 time_expires = datetime.fromisoformat(v)
             elif k == HEADER_ORIGIN:
-                origin = v
+                origin = decode_header_value(v)
             elif k == HEADER_FILENAME:
-                filename = v
+                filename = decode_header_value(v)
             elif k == HEADER_SIZE:
                 size = int(v)
             elif k.startswith(HEADER_META_PREFIX):
-                custom_metadata[k[len(HEADER_META_PREFIX) :]] = v
+                custom_metadata[k[len(HEADER_META_PREFIX) :]] = decode_header_value(v)
 
         return Metadata(
             content_type=content_type,

@@ -354,14 +354,14 @@ class Session:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
 
         if origin:
-            headers[HEADER_ORIGIN] = origin
+            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
 
         if filename is not None:
-            headers[HEADER_FILENAME] = filename
+            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
 
         if metadata:
             for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = v
+                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
 
         if key == "":
             key = None
@@ -619,14 +619,14 @@ class Session:
             headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
 
         if origin:
-            headers[HEADER_ORIGIN] = origin
+            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
 
         if filename is not None:
-            headers[HEADER_FILENAME] = filename
+            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
 
         if metadata:
             for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = v
+                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
 
         if key == "":
             key = None
