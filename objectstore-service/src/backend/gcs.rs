@@ -124,7 +124,7 @@ struct GcsObject {
     )]
     pub time_created: Option<SystemTime>,
 
-    /// Version of the object's metadata, used for conditional metadata updates.
+    /// Version of the object's metadata.
     #[serde(skip_serializing)]
     pub metageneration: String,
 
