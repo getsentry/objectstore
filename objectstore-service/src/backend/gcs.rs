@@ -124,6 +124,10 @@ struct GcsObject {
     )]
     pub time_created: Option<SystemTime>,
 
+    /// Version of the object's metadata, used for conditional metadata updates.
+    #[serde(skip_serializing)]
+    pub metageneration: String,
+
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
@@ -138,6 +142,7 @@ impl GcsObject {
             content_encoding: None,
             custom_time: None,
             time_created: metadata.time_created,
+            metageneration: String::new(),
             metadata: BTreeMap::new(),
         };
 
@@ -398,6 +403,13 @@ fn status_is_retryable(status: StatusCode) -> bool {
     )
 }
 
+/// Adds a GCS precondition that requires the object's metadata to remain unchanged.
+fn with_metageneration_match(mut url: Url, metageneration: &str) -> Url {
+    url.query_pairs_mut()
+        .append_pair("ifMetagenerationMatch", metageneration);
+    url
+}
+
 /// GCS JSON API backend for long-term storage of large objects.
 pub struct GcsBackend {
     client: reqwest::Client,
@@ -556,6 +568,7 @@ impl GcsBackend {
             return Ok(None);
         };
 
+        let metageneration = gcs_metadata.metageneration.clone();
         let metadata = gcs_metadata.into_metadata()?;
 
         // TODO: Inject the access time from the request.
@@ -571,7 +584,7 @@ impl GcsBackend {
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            self.update_custom_time(object_url.clone(), new_expire_at)
+            self.update_custom_time(object_url.clone(), new_expire_at, &metageneration)
                 .await?;
         }
 
@@ -579,7 +592,12 @@ impl GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
-    async fn update_custom_time(&self, object_url: Url, custom_time: SystemTime) -> Result<()> {
+    async fn update_custom_time(
+        &self,
+        object_url: Url,
+        custom_time: SystemTime,
+        metageneration: &str,
+    ) -> Result<()> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -587,17 +605,32 @@ impl GcsBackend {
             custom_time: SystemTime,
         }
 
+        let object_url = with_metageneration_match(object_url, metageneration);
+
         self.with_retry("update_custom_time", || async {
-            self.request(Method::PATCH, object_url.clone())
-                .await?
-                .json(&CustomTimeRequest { custom_time })
-                .send_traced()
-                .await
-                .check_error("GCS: update custom time")
-                .await?
-                .drain_body()
-                .await;
-            Ok(())
+            let result: Result<()> = async {
+                self.request(Method::PATCH, object_url.clone())
+                    .await?
+                    .json(&CustomTimeRequest { custom_time })
+                    .send_traced()
+                    .await
+                    .check_error("GCS: update custom time")
+                    .await?
+                    .drain_body()
+                    .await;
+                Ok(())
+            }
+            .await;
+
+            // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
+            // so leave its update intact and let a future read evaluate the TTI again.
+            match result {
+                Err(Error::BackendResponse {
+                    status: StatusCode::PRECONDITION_FAILED,
+                    ..
+                }) => Ok(()),
+                result => result,
+            }
         })
         .await
     }
@@ -1154,6 +1187,20 @@ mod tests {
         })
     }
 
+    async fn get_metageneration(backend: &GcsBackend, object_url: Url) -> Result<String> {
+        Ok(backend
+            .request(Method::GET, object_url)
+            .await?
+            .send_traced()
+            .await
+            .check_error("GCS: get metadata request")
+            .await?
+            .json::<GcsObject>()
+            .await
+            .map_err(|e| Error::reqwest("GCS: get metadata parse", e))
+            .map(|object| object.metageneration)?)
+    }
+
     #[tokio::test]
     async fn test_roundtrip() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -1381,7 +1428,10 @@ mod tests {
         // Backdate custom_time so it falls inside the bump window.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        backend.update_custom_time(object_url, old_deadline).await?;
+        let metageneration = get_metageneration(&backend, object_url.clone()).await?;
+        backend
+            .update_custom_time(object_url, old_deadline, &metageneration)
+            .await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
@@ -1456,7 +1506,10 @@ mod tests {
         // Backdate custom_time so it falls inside the bump window.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        backend.update_custom_time(object_url, old_deadline).await?;
+        let metageneration = get_metageneration(&backend, object_url.clone()).await?;
+        backend
+            .update_custom_time(object_url, old_deadline, &metageneration)
+            .await?;
 
         // First get_metadata triggers the bump.
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
