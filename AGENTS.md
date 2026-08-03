@@ -1,6 +1,6 @@
-# Claude Code Instructions for Objectstore
+# Agent Instructions for Objectstore
 
-This file contains project-specific guidance for Claude Code when working on the Objectstore project.
+This file contains project-specific guidance for agents when working on the Objectstore project.
 
 ## Running Tests
 
@@ -12,32 +12,6 @@ When running tests, use the full workspace test command to ensure all packages a
 cargo test --workspace --all-features
 ```
 
-**Important**: Do not use just `cargo test` as it may miss workspace members and feature-gated code.
-
-### Backend Service Requirements
-
-Some tests require external services (GCS emulator, Bigtable emulator) managed by `devservices`.
-
-**Symptoms of missing services:**
-- Connection refused errors
-- TCP connect error messages
-- `RPC error: status: Unavailable`
-- Tests in `objectstore-service` for GCS/Bigtable backends fail
-
-**How to fix:**
-
-1. Check devservices status:
-   ```bash
-   devservices status
-   ```
-
-2. Start devservices if not running:
-   ```bash
-   devservices up --mode=full
-   ```
-
-3. Devservices run in the background - you only need to start them once per session
-
 ### Testing Individual Packages
 
 To test only one package (e.g., when backend services aren't needed):
@@ -46,11 +20,18 @@ To test only one package (e.g., when backend services aren't needed):
 cargo test -p objectstore-server --all-features
 ```
 
-## Formatting and Linting
+## Documentation Conventions
 
-After completing a batch of edits (before responding to the user), always run formatting and linting to keep the code clean. Do not defer this to commit time — run it every time you're done editing and about to hand control back.
+**Keep docs at the right level**:
+- Crate-level docs (`docs/architecture.md` where present, otherwise the crate's top-level doc) are the highest-level design and behavior reference: what a newcomer reads first to see if/how the crate fits their need, plus pointers into lower-level docs. Update them when something changes at that level, or when a new pointer to lower-level docs is needed. Keep them scoped to role and key concepts.
+- A concept's or module's behavior belongs on that module's doc comment where a module exists, or otherwise on the root type that represents it — not folded into the crate-level doc.
+- Code-level detail (a specific type's or method's exact behavior) belongs on that type's or method's own doc comment: a short one-line summary first, then detail, then a code example and any edge cases (panics, errors).
 
-### Rust
+## Before Responding to the User
+
+Do these checks after completing a batch of edits, before handing control back to the user. Do not defer them to commit time.
+
+### Lint Rust
 
 After editing Rust files, run formatting and clippy:
 
@@ -61,7 +42,7 @@ cargo clippy --workspace --all-targets --all-features --no-deps
 
 Fix any issues before responding.
 
-### Python
+### Lint Python
 
 After editing Python files, run formatting, linting, and type checking:
 
@@ -73,42 +54,12 @@ uv run mypy .
 
 Fix any issues before responding.
 
-### Documentation Validation
+### Documentation
+
+If your changes affect documented behavior, search `docs/` and doc comments for terms related to your change across every crate you touched. Update them according to the project conventions.
 
 When adding docs or moving types, verify documentation references:
 
 ```bash
 cargo doc --workspace --all-features --no-deps --document-private-items
 ```
-
-## After Every Iteration
-
-Do these checks after completing changes and before responding to the user.
-
-**Update architecture docs** if your changes affect documented behavior. Grep `docs/` for terms related to your change. The doc locations are:
-- `objectstore-service/docs/architecture.md` — backends, tombstones, object identification, streaming
-- `objectstore-server/docs/architecture.md` — endpoints, request flow, auth, config, rate limiting, killswitches
-- `objectstore-types/src/lib.rs` + module docs — metadata, scopes, expiration, compression, permissions
-
-**Reflect on user feedback.** When the user corrects your approach or gives guidance on style, patterns, or organization, consider whether it's a general preference that would apply to future work. If so, suggest adding it to this file.
-
-## Version Control
-
-### Commits
-
-- Use `meta(ai):` prefix for commits changing agent instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/` config, etc.).
-- Use `/create-pr` to create PRs following Sentry's conventions.
-
-### Before Creating PRs
-
-- If the implementation is complex, ask whether to run `/code-simplifier`.
-- Run `/find-bugs` to review for bugs, security, and code quality issues.
-
-## Project Structure
-
-- `objectstore-server/` - Web server application
-- `objectstore-service/` - Core service logic and backends
-- `objectstore-types/` - Shared type definitions
-- `objectstore-options/` - Runtime options backed by sentry-options
-- `clients/rust/` - Rust client library
-- `clients/python/` - Python client library
