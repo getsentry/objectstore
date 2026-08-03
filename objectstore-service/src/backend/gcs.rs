@@ -110,10 +110,6 @@ struct GcsObject {
     )]
     pub custom_time: Option<SystemTime>,
 
-    /// Version of the object's contents.
-    #[serde(skip_serializing)]
-    pub generation: String,
-
     /// The `Content-Length` of the data in bytes. GCS returns this as a string.
     ///
     /// GCS sets this in metadata responses. We can use it to know the size of an object
@@ -128,13 +124,17 @@ struct GcsObject {
     )]
     pub time_created: Option<SystemTime>,
 
-    /// Version of the object's metadata.
-    #[serde(skip_serializing)]
-    pub metageneration: String,
-
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<GcsMetaKey, String>,
+
+    /// Version of the object's contents.
+    #[serde(skip_serializing)]
+    pub generation: String,
+
+    /// Version of the object's metadata.
+    #[serde(skip_serializing)]
+    pub metageneration: String,
 }
 
 impl GcsObject {
@@ -145,10 +145,10 @@ impl GcsObject {
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
-            generation: String::new(),
             time_created: metadata.time_created,
-            metageneration: String::new(),
             metadata: BTreeMap::new(),
+            generation: String::new(),
+            metageneration: String::new(),
         };
 
         // For time-based expiration, set the `customTime` field. The bucket must have a
