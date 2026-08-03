@@ -110,6 +110,10 @@ struct GcsObject {
     )]
     pub custom_time: Option<SystemTime>,
 
+    /// Version of the object's contents.
+    #[serde(skip_serializing)]
+    pub generation: String,
+
     /// The `Content-Length` of the data in bytes. GCS returns this as a string.
     ///
     /// GCS sets this in metadata responses. We can use it to know the size of an object
@@ -141,6 +145,7 @@ impl GcsObject {
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
+            generation: String::new(),
             time_created: metadata.time_created,
             metageneration: String::new(),
             metadata: BTreeMap::new(),
@@ -403,9 +408,10 @@ fn status_is_retryable(status: StatusCode) -> bool {
     )
 }
 
-/// Adds a GCS precondition that requires the object's metadata to remain unchanged.
-fn with_metageneration_match(mut url: Url, metageneration: &str) -> Url {
+/// Adds GCS preconditions that require the object generation and metadata to remain unchanged.
+fn with_generation_matches(mut url: Url, generation: &str, metageneration: &str) -> Url {
     url.query_pairs_mut()
+        .append_pair("ifGenerationMatch", generation)
         .append_pair("ifMetagenerationMatch", metageneration);
     url
 }
@@ -568,6 +574,7 @@ impl GcsBackend {
             return Ok(None);
         };
 
+        let generation = gcs_metadata.generation.clone();
         let metageneration = gcs_metadata.metageneration.clone();
         let metadata = gcs_metadata.into_metadata()?;
 
@@ -584,8 +591,13 @@ impl GcsBackend {
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            self.update_custom_time(object_url.clone(), new_expire_at, &metageneration)
-                .await?;
+            self.update_custom_time(
+                object_url.clone(),
+                new_expire_at,
+                &generation,
+                &metageneration,
+            )
+            .await?;
         }
 
         Ok(Some(metadata))
@@ -596,6 +608,7 @@ impl GcsBackend {
         &self,
         object_url: Url,
         custom_time: SystemTime,
+        generation: &str,
         metageneration: &str,
     ) -> Result<()> {
         #[derive(Debug, Serialize)]
@@ -605,7 +618,7 @@ impl GcsBackend {
             custom_time: SystemTime,
         }
 
-        let object_url = with_metageneration_match(object_url, metageneration);
+        let object_url = with_generation_matches(object_url, generation, metageneration);
 
         self.with_retry("update_custom_time", || async {
             let result: Result<()> = async {
@@ -1187,7 +1200,10 @@ mod tests {
         })
     }
 
-    async fn get_metageneration(backend: &GcsBackend, object_url: Url) -> Result<String> {
+    async fn get_generation_matches(
+        backend: &GcsBackend,
+        object_url: Url,
+    ) -> Result<(String, String)> {
         Ok(backend
             .request(Method::GET, object_url)
             .await?
@@ -1198,7 +1214,7 @@ mod tests {
             .json::<GcsObject>()
             .await
             .map_err(|e| Error::reqwest("GCS: get metadata parse", e))
-            .map(|object| object.metageneration)?)
+            .map(|object| (object.generation, object.metageneration))?)
     }
 
     #[tokio::test]
@@ -1428,9 +1444,10 @@ mod tests {
         // Backdate custom_time so it falls inside the bump window.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        let metageneration = get_metageneration(&backend, object_url.clone()).await?;
+        let (generation, metageneration) =
+            get_generation_matches(&backend, object_url.clone()).await?;
         backend
-            .update_custom_time(object_url, old_deadline, &metageneration)
+            .update_custom_time(object_url, old_deadline, &generation, &metageneration)
             .await?;
 
         // First get_metadata sees the old timestamp and triggers a TTI bump.
@@ -1506,9 +1523,10 @@ mod tests {
         // Backdate custom_time so it falls inside the bump window.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        let metageneration = get_metageneration(&backend, object_url.clone()).await?;
+        let (generation, metageneration) =
+            get_generation_matches(&backend, object_url.clone()).await?;
         backend
-            .update_custom_time(object_url, old_deadline, &metageneration)
+            .update_custom_time(object_url, old_deadline, &generation, &metageneration)
             .await?;
 
         // First get_metadata triggers the bump.
