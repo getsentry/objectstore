@@ -408,14 +408,6 @@ fn status_is_retryable(status: StatusCode) -> bool {
     )
 }
 
-/// Adds GCS preconditions that require the object generation and metadata to remain unchanged.
-fn with_generation_matches(mut url: Url, generation: &str, metageneration: &str) -> Url {
-    url.query_pairs_mut()
-        .append_pair("ifGenerationMatch", generation)
-        .append_pair("ifMetagenerationMatch", metageneration);
-    url
-}
-
 /// GCS JSON API backend for long-term storage of large objects.
 pub struct GcsBackend {
     client: reqwest::Client,
@@ -618,31 +610,33 @@ impl GcsBackend {
             custom_time: SystemTime,
         }
 
-        let object_url = with_generation_matches(object_url, generation, metageneration);
+        let mut object_url = object_url;
+        object_url
+            .query_pairs_mut()
+            .append_pair("ifGenerationMatch", generation)
+            .append_pair("ifMetagenerationMatch", metageneration);
 
         self.with_retry("update_custom_time", || async {
-            let result: Result<()> = async {
-                self.request(Method::PATCH, object_url.clone())
-                    .await?
-                    .json(&CustomTimeRequest { custom_time })
-                    .send_traced()
-                    .await
-                    .check_error("GCS: update custom time")
-                    .await?
-                    .drain_body()
-                    .await;
-                Ok(())
-            }
-            .await;
-
-            // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
-            // so leave its update intact and let a future read evaluate the TTI again.
-            match result {
+            match self
+                .request(Method::PATCH, object_url.clone())
+                .await?
+                .json(&CustomTimeRequest { custom_time })
+                .send_traced()
+                .await
+                .check_error("GCS: update custom time")
+                .await
+            {
+                Ok(response) => {
+                    response.drain_body().await;
+                    Ok(())
+                }
+                // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
+                // so leave its update intact and let a future read evaluate the TTI again.
                 Err(Error::BackendResponse {
                     status: StatusCode::PRECONDITION_FAILED,
                     ..
                 }) => Ok(()),
-                result => result,
+                Err(error) => Err(error),
             }
         })
         .await
