@@ -186,7 +186,7 @@ def test_head(server_url: str) -> None:
     session = client.session(test_usecase, org=42, project=1337)
 
     payload = b"test data"
-    object_key = session.put(payload, origin="203.0.113.42", compression="none")
+    object_key = session.put(payload, origin="203.0.113.42", compress="none")
 
     metadata = session.head(object_key)
     assert metadata is not None
@@ -275,7 +275,7 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
     compressor = zstandard.ZstdCompressor()
     compressed_data = compressor.compress(data)
 
-    object_key = session.put(compressed_data, compression="none")
+    object_key = session.put(compressed_data, compress="none")
     assert object_key is not None
 
     retrieved = session.get(object_key)
@@ -288,6 +288,62 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
     decompressed_data = decompressor.decompress(retrieved_data)
 
     assert decompressed_data == data
+
+
+def test_precompressed_is_stored_verbatim(server_url: str) -> None:
+    client = Client(
+        server_url,
+        token=TestSecretKey.get(),
+    )
+    test_usecase = Usecase("test-usecase")
+    session = client.session(test_usecase, org=42, project=1337)
+
+    data = b"test data"
+    compressed_data = zstandard.ZstdCompressor().compress(data)
+
+    object_key = session.put(compressed_data, precompressed="zstd")
+
+    # the payload is stored as-is, without another compression pass
+    retrieved = session.get(object_key, decompress=False)
+    assert retrieved is not None
+    assert retrieved.metadata.compression == "zstd"
+    assert retrieved.payload.read() == compressed_data
+
+    # and the recorded encoding makes downloads decompress transparently
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.metadata.compression is None
+    assert retrieved.payload.read() == data
+
+
+def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+
+    with pytest.raises(ValueError):
+        session.put(b"test data", compress="zstd", precompressed="zstd")
+
+    with pytest.raises(ValueError):
+        session.put(b"test data", precompressed="none")
+
+    with pytest.raises(ValueError):
+        session.put(b"test data", precompressed="brotli")  # type: ignore[arg-type]
+
+
+def test_compression_argument_is_deprecated(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+
+    with pytest.deprecated_call():
+        object_key = session.put(b"test data", compression="none")
+
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.metadata.compression is None
+    assert retrieved.payload.read() == b"test data"
+
+    with pytest.warns(DeprecationWarning), pytest.raises(ValueError):
+        session.put(b"test data", compress="none", compression="none")
 
 
 def test_full_cycle_structured_key(server_url: str) -> None:
@@ -418,10 +474,10 @@ def test_connect_timeout() -> None:
         session.get("foo")
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
-        session.put(b"test data", compression="none")
+        session.put(b"test data", compress="none")
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
-        session.put(b"test data", compression="zstd")
+        session.put(b"test data", compress="zstd")
 
 
 def test_multipart_full_cycle_uncompressed(server_url: str) -> None:

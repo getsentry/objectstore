@@ -38,7 +38,7 @@ impl HttpRemote {
 
         session
             .put_stream(stream)
-            .compression(None)
+            .compress(None)
             .send()
             .await
             .map(|r| r.key)

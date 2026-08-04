@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -310,7 +311,9 @@ class Session:
         self,
         contents: bytes | IO[bytes],
         key: str | None = None,
+        compress: Compression | None = None,
         compression: Compression | Literal["none"] | None = None,
+        precompressed: Compression | None = None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
@@ -324,27 +327,49 @@ class Session:
         from this function.
 
         The client will select the configured `default_compression` if none is given
-        explicitly.
-        This can be overridden by explicitly giving a `compression` argument.
+        explicitly. This can be overridden by explicitly giving a `compress` argument.
         Providing `"none"` as the argument will instruct the client to not apply
         any compression to this upload, which is useful for uncompressible formats.
 
+        If `contents` is already compressed, pass the algorithm as `precompressed`
+        instead. The payload is then uploaded verbatim and the algorithm is recorded
+        in the object's metadata, so downloads decompress it transparently.
+
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
+
+        `compression` is deprecated in favor of `compress`.
         """
-        if compression and compression not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compression}")
+        if compression is not None:
+            warnings.warn(
+                "`compression` is deprecated, use `compress` instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if compress is not None:
+                raise ValueError("Cannot pass both `compress` and `compression`")
+            compress = compression
+
+        if compress is not None and precompressed is not None:
+            raise ValueError("Cannot pass both `compress` and `precompressed`")
+        if compress and compress not in ("none", "zstd"):
+            raise ValueError(f"Invalid compression: {compress}")
+        if precompressed and precompressed != "zstd":
+            raise ValueError(f"Invalid compression: {precompressed}")
 
         headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
 
-        compression = compression or self._usecase._compression
-        if compression == "zstd":
+        encoding = precompressed or compress or self._usecase._compression
+        if encoding != "none":
+            headers["Content-Encoding"] = encoding
+
+        compress_with = encoding if precompressed is None else "none"
+        if compress_with == "zstd":
             cctx = zstandard.ZstdCompressor()
             body = cctx.stream_reader(original_body)
             body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
-            headers["Content-Encoding"] = "zstd"
 
         if content_type:
             headers["Content-Type"] = content_type
@@ -370,8 +395,8 @@ class Session:
             self._metrics_backend, "put", self._usecase.name
         ) as metric_emitter:
             retries = None  # by default use the pool's value, set by the Client
-            if compression == "zstd":
-                # For compressed bodies, don't attempt read retries,
+            if compress_with != "none":
+                # For on-the-fly compression, don't attempt read retries,
                 # as the stream cannot be rewound after data has been consumed.
                 pool_retries = self._pool.retries
                 if isinstance(pool_retries, urllib3.Retry):
@@ -393,9 +418,10 @@ class Session:
 
             # Must do this after streaming `body` as that's what is responsible
             # for advancing the seek position in both streams
-            metric_emitter.record_uncompressed_size(original_body.tell())
-            if compression and compression != "none":
-                metric_emitter.record_compressed_size(body.tell(), compression)
+            if precompressed is None:
+                metric_emitter.record_uncompressed_size(original_body.tell())
+            if encoding != "none":
+                metric_emitter.record_compressed_size(body.tell(), encoding)
             return res["key"]
 
     def get(
