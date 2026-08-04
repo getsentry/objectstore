@@ -4,7 +4,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp
 use objectstore_types::scope;
 use serde::{Deserialize, Serialize};
 
-use crate::ScopeInner;
+use crate::{Scope, ScopeInner};
 
 pub use objectstore_types::auth::Permission;
 
@@ -153,76 +153,35 @@ impl TokenGenerator {
         self
     }
 
-    /// Sign a token for the given [`Scope`](crate::Scope), returning the JWT string.
+    /// Deprecated. Use [`create_token`](Self::create_token) instead.
+    #[deprecated(note = "Use `create_token(scope).sign()` instead")]
+    pub fn sign(&self, scope: &Scope) -> crate::Result<String> {
+        self.create_token(scope).sign()
+    }
+
+    /// Create a token for the given [`Scope`](crate::Scope).
     ///
     /// Use this to produce a static token that can be handed to an external service
     /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
     ///
-    /// The token is signed with the generator's default permissions and expiry. Use
-    /// [`sign_with`](Self::sign_with) to override them for a single token.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the scope is invalid or the JWT cannot be signed.
-    pub fn sign(&self, scope: &crate::Scope) -> crate::Result<String> {
-        self.sign_with(scope, None, None)
+    /// By default, the token is signed with the generator's default permissions and expiry.
+    /// Use the builder methods on the returned [`TokenRequest`] to customize them.
+    pub fn create_token<'a>(&'a self, scope: &'a Scope) -> TokenRequest<'a> {
+        TokenRequest {
+            generator: self,
+            scope: scope.0.as_ref(),
+            permissions: None,
+            expiry_seconds: None,
+        }
     }
 
-    /// Sign a token for the given [`Scope`](crate::Scope), optionally overriding the
-    /// generator's default permissions and/or expiry for this token only.
-    ///
-    /// When `permissions` is `Some`, they must be a subset of the permissions granted to this
-    /// generator, otherwise an [`Error::PermissionEscalation`](crate::Error::PermissionEscalation)
-    /// is returned. When `expiry_seconds` is `Some`, it overrides the generator's default expiry.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the scope is invalid, a requested permission is not granted to this
-    /// generator, or the JWT cannot be signed.
-    pub fn sign_with(
-        &self,
-        scope: &crate::Scope,
-        permissions: Option<&[Permission]>,
-        expiry_seconds: Option<u64>,
-    ) -> crate::Result<String> {
-        let scope = match &scope.0 {
-            Ok(inner) => inner,
-            Err(crate::Error::InvalidScope(err)) => {
-                return Err(err.clone().into());
-            }
-            // Return an ad-hoc `Unreachable` variant to avoid panicking.
-            // It should be impossible to run into a different error variant other than
-            // `InvalidScope`, unless we add a new variant and forget to update this code path.
-            _ => return Err(scope::InvalidScopeError::Unreachable.into()),
-        };
-        self.sign_for_scope(scope, permissions, expiry_seconds)
-    }
-
-    /// Sign a new token for the passed-in scope, applying the given permission and expiry
-    /// overrides (falling back to the generator's defaults when `None`).
-    pub(crate) fn sign_for_scope(
-        &self,
-        scope: &ScopeInner,
-        permissions: Option<&[Permission]>,
-        expiry_seconds: Option<u64>,
-    ) -> crate::Result<String> {
-        let claims = JwtClaims {
-            exp: get_current_timestamp() + expiry_seconds.unwrap_or(self.expiry_seconds),
-            permissions: self.resolve_permissions(permissions)?,
-            res: JwtRes {
-                usecase: scope.usecase().name().into(),
-                scopes: scope
-                    .scopes()
-                    .iter()
-                    .map(|scope| (scope.name().to_string(), scope.value().to_string()))
-                    .collect(),
-            },
-        };
-
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(self.kid.clone());
-
-        Ok(encode(&header, &claims, &self.encoding_key)?)
+    pub(crate) fn request_inner<'a>(&'a self, scope: &'a ScopeInner) -> TokenRequest<'a> {
+        TokenRequest {
+            generator: self,
+            scope: Ok(scope),
+            permissions: None,
+            expiry_seconds: None,
+        }
     }
 
     /// Resolves the permissions to embed in a token, validating that any explicitly requested
@@ -243,5 +202,66 @@ impl TokenGenerator {
             return Err(crate::Error::PermissionEscalation { escalated });
         }
         Ok(requested)
+    }
+}
+
+/// A request to mint a new token returned from [`TokenGenerator::create_token`].
+#[derive(Debug)]
+pub struct TokenRequest<'a> {
+    generator: &'a TokenGenerator,
+    scope: Result<&'a ScopeInner, &'a crate::Error>,
+    permissions: Option<Vec<Permission>>,
+    expiry_seconds: Option<u64>,
+}
+
+impl TokenRequest<'_> {
+    /// Override the permissions for this token, which must be a subset of the generator's
+    /// permissions.
+    pub fn permissions(mut self, permissions: &[Permission]) -> Self {
+        self.permissions = Some(permissions.to_vec());
+        self
+    }
+
+    /// Set the expiry duration for this token, overriding the generator's default.
+    pub fn expiry_seconds(mut self, expiry_seconds: u64) -> Self {
+        self.expiry_seconds = Some(expiry_seconds);
+        self
+    }
+
+    /// Finalizes and signs the token, returning the JWT string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scope is invalid or the JWT cannot be signed.
+    pub fn sign(&self) -> crate::Result<String> {
+        let scope = match self.scope {
+            Ok(inner) => inner,
+            Err(crate::Error::InvalidScope(err)) => return Err(err.clone().into()),
+            // Return an ad-hoc `Unreachable` variant to avoid panicking.
+            // It should be impossible to run into a different error variant other than
+            // `InvalidScope`, unless we add a new variant and forget to update this code path.
+            _ => return Err(scope::InvalidScopeError::Unreachable.into()),
+        };
+
+        let claims = JwtClaims {
+            exp: get_current_timestamp()
+                + self.expiry_seconds.unwrap_or(self.generator.expiry_seconds),
+            permissions: self
+                .generator
+                .resolve_permissions(self.permissions.as_deref())?,
+            res: JwtRes {
+                usecase: scope.usecase().name().into(),
+                scopes: scope
+                    .scopes()
+                    .iter()
+                    .map(|scope| (scope.name().to_string(), scope.value().to_string()))
+                    .collect(),
+            },
+        };
+
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(self.generator.kid.clone());
+
+        Ok(encode(&header, &claims, &self.generator.encoding_key)?)
     }
 }

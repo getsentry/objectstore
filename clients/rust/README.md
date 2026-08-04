@@ -307,31 +307,22 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
-// Use TokenGenerator::sign() to obtain a static token from an internal
-// service, then pass it to the external consumer:
+// Use TokenGenerator::create_token() to obtain a static token from an authority
 let scope = Usecase::new("my_app").for_project(42, 1337);
-let token = TokenGenerator::new(SecretKey {
+let generator = TokenGenerator::new(SecretKey {
     secret_key: "<private key>".into(),
     kid: "my-service".into(),
-})?.sign(&scope)?;
+})?;
+let token = generator.create_token(&scope).sign()?;
 
+// Then pass the token directly to a client builder.
 let client = Client::builder("http://localhost:8888/")
     .token(token)
     .build()?;
 ```
 
-To mint a token with narrower permissions or a different expiry than the generator's
-defaults, use [`TokenGenerator::sign_with`] (for a standalone token) or
-[`Session::mint_token_with`] (scoped to a session). The requested permissions must be a
-subset of those granted to the generator, otherwise an `Error::PermissionEscalation` is
-returned:
-
-```rust,ignore
-use objectstore_client::auth::Permission;
-
-// A read-only token that expires in 30 seconds, from a fully-privileged generator.
-let read_only = session.mint_token_with(Some(&[Permission::ObjectRead]), Some(30))?;
-```
+To create a token with narrower permissions or a different expiry, use the
+methods on the token request returned from `create_token`.
 
 ## Configuration
 
