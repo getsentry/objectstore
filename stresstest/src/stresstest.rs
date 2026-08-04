@@ -463,7 +463,7 @@ async fn run_batch_workload(
                         tokio::io::copy(&mut payload, &mut file)
                             .await
                             .expect("writing an in-memory payload to a temp file cannot fail");
-                        many = many.push(session.put_path(path).compression(None).key(key));
+                        many = many.push(session.put_path(path).compress(None).key(key));
                     }
 
                     metrics.lock().unwrap().many_requests += 1;

@@ -37,17 +37,42 @@ impl fmt::Debug for PutBody {
     }
 }
 
+/// Declares how a payload relates to the compression recorded in its metadata.
+///
+/// Both modes record the same [`Compression`] on the object; they differ only in who performs
+/// the compression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompressionMode {
+    /// The client compresses the payload with this algorithm before uploading it.
+    Compress(Compression),
+    /// The payload is already compressed with this algorithm and is uploaded verbatim.
+    Precompressed(Compression),
+}
+
+impl CompressionMode {
+    /// Returns the compression algorithm applied to the payload.
+    pub fn compression(self) -> Compression {
+        match self {
+            Self::Compress(compression) | Self::Precompressed(compression) => compression,
+        }
+    }
+}
+
 impl Session {
     fn put_body(&self, body: PutBody) -> PutBuilder {
         let metadata = Metadata {
             expiration_policy: self.scope.usecase().expiration_policy(),
-            compression: self.scope.usecase().compression(),
             ..Default::default()
         };
 
         PutBuilder {
             session: self.clone(),
             metadata,
+            compression: self
+                .scope
+                .usecase()
+                .compression()
+                .map(CompressionMode::Compress),
             key: None,
             body,
         }
@@ -103,6 +128,7 @@ impl Session {
 pub struct PutBuilder {
     pub(crate) session: Session,
     pub(crate) metadata: Metadata,
+    pub(crate) compression: Option<CompressionMode>,
     pub(crate) key: Option<ObjectKey>,
     pub(crate) body: PutBody,
 }
@@ -119,13 +145,62 @@ impl PutBuilder {
 
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
-    /// [`None`] should be used if no compression should be performed by the client,
-    /// either because the payload is uncompressible (such as a media format), or if the user
-    /// will handle any kind of compression, without the clients knowledge.
+    /// The client compresses the payload while uploading it and records the algorithm in the
+    /// object's metadata. [`None`] should be used if no compression should be performed by the
+    /// client, either because the payload is uncompressible (such as a media format), or if the
+    /// compression should not be recorded for this object.
     ///
-    /// By default, the compression algorithm set on this Session's Usecase is used.
-    pub fn compression(mut self, compression: impl Into<Option<Compression>>) -> Self {
-        self.metadata.compression = compression.into();
+    /// If the payload is already compressed and the algorithm should still be recorded, use
+    /// [`precompressed`](Self::precompressed) instead.
+    ///
+    /// By default, the compression algorithm set on this Session's Usecase is used (see
+    /// [`with_compression`](crate::Usecase::with_compression)).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session, media: Vec<u8>) {
+    /// session.put(media)
+    ///     .compress(None) // uncompressible payload
+    ///     .send()
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    pub fn compress(mut self, compression: impl Into<Option<Compression>>) -> Self {
+        self.compression = compression.into().map(CompressionMode::Compress);
+        self
+    }
+
+    /// Deprecated in favor of [`compress`](Self::compress).
+    #[deprecated(since = "0.3.0", note = "renamed to `compress`")]
+    pub fn compression(self, compression: impl Into<Option<Compression>>) -> Self {
+        self.compress(compression)
+    }
+
+    /// Declares that the payload is already compressed with the given algorithm.
+    ///
+    /// The payload is uploaded verbatim, and the algorithm is recorded in the object's metadata
+    /// so that downloads decompress it transparently. Use this to hand pre-compressed data to
+    /// the client without paying for another compression pass.
+    ///
+    /// This overrides the compression algorithm set on this Session's Usecase. To have the
+    /// client perform the compression instead, use [`compress`](Self::compress).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use objectstore_client::Compression;
+    /// # async fn example(session: objectstore_client::Session, zstd_data: Vec<u8>) {
+    /// session.put(zstd_data)
+    ///     .precompressed(Compression::Zstd)
+    ///     .send()
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    pub fn precompressed(mut self, compression: Compression) -> Self {
+        self.compression = Some(CompressionMode::Precompressed(compression));
         self
     }
 
@@ -193,11 +268,16 @@ impl PutBuilder {
     }
 }
 
-/// Compresses the body if compression is specified.
-pub(crate) async fn maybe_compress(
-    body: PutBody,
-    compression: Option<Compression>,
-) -> io::Result<Body> {
+/// Turns the body into a request body, compressing it if the mode asks for it.
+///
+/// Payloads declared as [`CompressionMode::Precompressed`] are forwarded verbatim.
+pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) -> io::Result<Body> {
+    let compression = match mode {
+        Some(CompressionMode::Compress(compression)) => Some(compression),
+        // The payload already carries the encoding, so nothing is left to do here.
+        Some(CompressionMode::Precompressed(_)) | None => None,
+    };
+
     Ok(match (compression, body) {
         (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
             let cursor = Cursor::new(bytes);
@@ -242,7 +322,7 @@ pub(crate) async fn maybe_compress(
 // and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
-    pub async fn send(self) -> crate::Result<PutResponse> {
+    pub async fn send(mut self) -> crate::Result<PutResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,
@@ -252,11 +332,85 @@ impl PutBuilder {
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
 
-        let body = maybe_compress(self.body, self.metadata.compression).await?;
+        self.metadata.compression = self.compression.map(CompressionMode::compression);
+        let body = encode_body(self.body, self.compression).await?;
 
         builder = builder.headers(self.metadata.to_headers("")?);
 
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status()?.json().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::stream;
+    use http_body_util::BodyExt as _;
+
+    use super::*;
+
+    fn zstd_compress(data: &[u8]) -> Vec<u8> {
+        zstd::encode_all(Cursor::new(data), 0).expect("zstd encoding to succeed")
+    }
+
+    fn stream_body(chunks: Vec<&'static [u8]>) -> PutBody {
+        let chunks = chunks.into_iter().map(|c| Ok(Bytes::from_static(c)));
+        PutBody::Stream(stream::iter(chunks).boxed())
+    }
+
+    async fn collect(body: Body) -> Vec<u8> {
+        body.collect()
+            .await
+            .expect("body to be readable")
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn compress_buffer_compresses() {
+        let body = PutBody::Buffer(Bytes::from_static(b"hello world"));
+        let mode = Some(CompressionMode::Compress(Compression::Zstd));
+
+        let encoded = collect(encode_body(body, mode).await.unwrap()).await;
+        assert_eq!(encoded, zstd_compress(b"hello world"));
+    }
+
+    #[tokio::test]
+    async fn compress_stream_compresses() {
+        let body = stream_body(vec![b"hello ", b"world"]);
+        let mode = Some(CompressionMode::Compress(Compression::Zstd));
+
+        let encoded = collect(encode_body(body, mode).await.unwrap()).await;
+        assert_eq!(
+            zstd::decode_all(Cursor::new(encoded)).unwrap(),
+            b"hello world"
+        );
+    }
+
+    #[tokio::test]
+    async fn precompressed_buffer_is_forwarded_verbatim() {
+        let compressed = zstd_compress(b"hello world");
+        let body = PutBody::Buffer(Bytes::from(compressed.clone()));
+        let mode = Some(CompressionMode::Precompressed(Compression::Zstd));
+
+        let encoded = collect(encode_body(body, mode).await.unwrap()).await;
+        assert_eq!(encoded, compressed);
+    }
+
+    #[tokio::test]
+    async fn precompressed_stream_is_forwarded_verbatim() {
+        let body = stream_body(vec![b"\x28\xb5\x2f\xfd", b"trailing"]);
+        let mode = Some(CompressionMode::Precompressed(Compression::Zstd));
+
+        let encoded = collect(encode_body(body, mode).await.unwrap()).await;
+        assert_eq!(encoded, b"\x28\xb5\x2f\xfdtrailing");
+    }
+
+    #[tokio::test]
+    async fn without_compression_is_forwarded_verbatim() {
+        let body = PutBody::Buffer(Bytes::from_static(b"hello world"));
+
+        let encoded = collect(encode_body(body, None).await.unwrap()).await;
+        assert_eq!(encoded, b"hello world");
     }
 }

@@ -13,7 +13,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
-use crate::put::PutBody;
+use crate::put::{CompressionMode, PutBody};
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, HeadResponse, ObjectKey,
     PutBuilder, PutResponse, Session, get, put,
@@ -81,6 +81,7 @@ enum BatchOperation {
     Insert {
         key: Option<ObjectKey>,
         metadata: Metadata,
+        compression: Option<CompressionMode>,
         body: PutBody,
     },
     Delete {
@@ -112,12 +113,14 @@ impl From<PutBuilder> for BatchOperation {
         let PutBuilder {
             key,
             metadata,
+            compression,
             body,
             session: _session,
         } = value;
         BatchOperation::Insert {
             key,
             metadata,
+            compression,
             body,
         }
     }
@@ -152,13 +155,15 @@ impl BatchOperation {
             }
             BatchOperation::Insert {
                 key,
-                metadata,
+                mut metadata,
+                compression,
                 body,
             } => {
                 let mut headers = operation_headers("insert", key.as_deref());
+                metadata.compression = compression.map(CompressionMode::compression);
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::maybe_compress(body, metadata.compression).await?;
+                let body = put::encode_body(body, compression).await?;
                 Ok(Part::stream(body).headers(headers))
             }
             BatchOperation::Delete { key } => {
@@ -538,6 +543,7 @@ async fn classify(op: BatchOperation) -> Classified {
         BatchOperation::Insert {
             key,
             metadata,
+            compression,
             body,
         } => {
             let size = match &body {
@@ -554,17 +560,22 @@ async fn classify(op: BatchOperation) -> Classified {
                 PutBody::Stream(_) => None,
             };
 
-            let size = match (metadata.compression, size) {
-                (Some(Compression::Zstd), Some(size)) => {
+            // Client-side compression happens while streaming the body, so the on-wire size is
+            // only known up to its worst case. Precompressed bodies are sent as-is.
+            let size = match (compression, size) {
+                (Some(CompressionMode::Compress(Compression::Zstd)), Some(size)) => {
                     usize::try_from(size).ok().map(zstd_safe::compress_bound)
                 }
-                (None, Some(size)) => usize::try_from(size).ok(),
+                (Some(CompressionMode::Precompressed(_)) | None, Some(size)) => {
+                    usize::try_from(size).ok()
+                }
                 (_, None) => None,
             };
 
             let op = BatchOperation::Insert {
                 key,
                 metadata,
+                compression,
                 body,
             };
 
@@ -620,12 +631,14 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
         BatchOperation::Insert {
             key,
             metadata,
+            compression,
             body,
         } => {
             let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
             let put = PutBuilder {
                 session: session.clone(),
                 metadata,
+                compression,
                 key,
                 body,
             };
@@ -799,15 +812,17 @@ mod tests {
         iter_batches(ops).collect()
     }
 
-    fn put_with_zstd(size: usize) -> BatchOperation {
+    fn put_with_compression(size: usize, compression: CompressionMode) -> BatchOperation {
         BatchOperation::Insert {
             key: Some("k".to_owned()),
-            metadata: Metadata {
-                compression: Some(Compression::Zstd),
-                ..Default::default()
-            },
+            metadata: Metadata::default(),
+            compression: Some(compression),
             body: PutBody::Buffer(vec![0; size].into()),
         }
+    }
+
+    fn put_with_zstd(size: usize) -> BatchOperation {
+        put_with_compression(size, CompressionMode::Compress(Compression::Zstd))
     }
 
     #[tokio::test]
@@ -831,6 +846,20 @@ mod tests {
         core::assert_matches!(
             classify(put_with_zstd(size)).await,
             Classified::Individual(_)
+        );
+    }
+
+    #[tokio::test]
+    async fn precompressed_put_uses_exact_size() {
+        // A size that would exceed the limit once inflated by `compress_bound`, but is sent
+        // verbatim because the payload is already compressed.
+        let size = MAX_BATCH_PART_SIZE as usize;
+        assert!(zstd_safe::compress_bound(size) > MAX_BATCH_PART_SIZE as usize);
+
+        let op = put_with_compression(size, CompressionMode::Precompressed(Compression::Zstd));
+        core::assert_matches!(
+            classify(op).await,
+            Classified::Batchable(_, s) if s == size as u64
         );
     }
 

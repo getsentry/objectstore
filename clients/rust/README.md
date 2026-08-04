@@ -90,15 +90,20 @@ session.put("payload").origin("203.0.113.42").send().await?;
 
 ### Compression
 
-Uploads are compressed with Zstd by default. Downloads are transparently decompressed.
-You can override compression per-upload for pre-compressed or uncompressible data.
-See [`Compression`] for available options.
+Uploads are compressed with Zstd by default, and downloads are transparently decompressed.
+See [`Compression`] for available options. Compression can be overridden per-upload:
 
 ```rust,ignore
 use objectstore_client::Compression;
 
-session.put(already_compressed_data)
-    .compression(None) // disable compression
+// upload as-is and record no encoding:
+session.put(video_data)
+    .compress(None)
+    .send().await?;
+
+// upload as-is, but record the encoding so that downloads still decompress:
+session.put(zstd_data)
+    .precompressed(Compression::Zstd)
     .send().await?;
 ```
 
@@ -141,8 +146,8 @@ For large objects, use multipart uploads to upload parts concurrently with bound
 parallelism.
 
 **Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
-The caller must pre-compress each part according to the compression set as part of the metadata
-when initiating the upload.
+`compression` on the initiate request behaves like `precompressed` above: it only records the
+algorithm, and the caller must pre-compress each part accordingly.
 
 ```rust,ignore
 use futures_util::StreamExt as _;

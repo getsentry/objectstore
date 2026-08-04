@@ -64,13 +64,7 @@ async fn stores_uncompressed() {
 
     let body = "oh hai!";
 
-    let stored_id = session
-        .put(body)
-        .compression(None)
-        .send()
-        .await
-        .unwrap()
-        .key;
+    let stored_id = session.put(body).compress(None).send().await.unwrap().key;
 
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
     assert_eq!(response.metadata.compression, None);
@@ -109,6 +103,43 @@ async fn uses_zstd_by_default() {
 
     let received = response.payload().await.unwrap();
     assert_eq!(received, "oh hai!");
+}
+
+#[tokio::test]
+async fn stores_precompressed_payload_verbatim() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let compressed = zstd::bulk::compress(b"oh hai!", 0).unwrap();
+    let stored_id = session
+        .put(compressed.clone())
+        .precompressed(Compression::Zstd)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    // the payload is stored as-is, without another compression pass
+    let response = session
+        .get(&stored_id)
+        .accept_encoding([Compression::Zstd])
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+    assert_eq!(response.payload().await.unwrap(), compressed);
+
+    // and the recorded encoding makes downloads decompress transparently
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, None);
+    assert_eq!(response.payload().await.unwrap(), "oh hai!");
 }
 
 #[tokio::test]
@@ -273,7 +304,7 @@ async fn stores_with_origin() {
 
     let stored_id = session
         .put("hello with origin")
-        .compression(None)
+        .compress(None)
         .origin("203.0.113.42")
         .send()
         .await
@@ -297,7 +328,7 @@ async fn stores_without_origin() {
 
     let stored_id = session
         .put("hello without origin")
-        .compression(None)
+        .compress(None)
         .send()
         .await
         .unwrap()
@@ -349,13 +380,7 @@ async fn stores_with_static_token() {
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "hello with static token!";
-    let stored_id = session
-        .put(body)
-        .compression(None)
-        .send()
-        .await
-        .unwrap()
-        .key;
+    let stored_id = session.put(body).compress(None).send().await.unwrap().key;
 
     let response = session.get(&stored_id).send().await.unwrap().unwrap();
     let received = response.payload().await.unwrap();
@@ -380,13 +405,13 @@ async fn batch_operations() {
         .push(
             session
                 .put("first object")
-                .compression(None)
+                .compress(None)
                 .filename("report.pdf")
                 .key("key-1"),
         )
         .push(session.put("second object").key("key-2"))
-        .push(session.put("third object").compression(None).key("key-3"))
-        .push(session.put("fourth object").compression(None).key("key-4"))
+        .push(session.put("third object").compress(None).key("key-3"))
+        .push(session.put("fourth object").compress(None).key("key-4"))
         .send()
         .await
         .collect()
@@ -412,7 +437,7 @@ async fn batch_operations() {
         .push(
             session
                 .put("overridden fourth object")
-                .compression(None)
+                .compress(None)
                 .key("key-4"),
         )
         .send()
@@ -493,7 +518,7 @@ async fn batch_insert_without_key() {
     // Insert without specifying a key — the server should generate one
     let results: Vec<_> = session
         .many()
-        .push(session.put("keyless object").compression(None))
+        .push(session.put("keyless object").compress(None))
         .send()
         .await
         .collect()
@@ -628,7 +653,7 @@ async fn batch_put_files() {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
         let file = tokio::fs::File::open(&path).await.unwrap();
-        many = many.push(session.put_file(file).compression(None).key(*name));
+        many = many.push(session.put_file(file).compress(None).key(*name));
     }
 
     let large_path = dir.path().join("large");
@@ -637,7 +662,7 @@ async fn batch_put_files() {
         .write_all(&large_body)
         .unwrap();
     let large_file = tokio::fs::File::open(&large_path).await.unwrap();
-    many = many.push(session.put_file(large_file).compression(None).key("large"));
+    many = many.push(session.put_file(large_file).compress(None).key("large"));
 
     let results: Vec<_> = many.send().await.collect().await;
 
@@ -683,7 +708,7 @@ async fn put_path_does_not_exhaust_file_descriptors() {
     for i in 0..1000 {
         let path = dir.path().join(i.to_string());
         std::fs::File::create(&path).unwrap();
-        many = many.push(session.put_path(path).compression(None));
+        many = many.push(session.put_path(path).compress(None));
     }
     many.send()
         .await
@@ -747,7 +772,7 @@ async fn head_returns_metadata() {
 
     let stored_id = session
         .put("hello head!")
-        .compression(None)
+        .compress(None)
         .key("head-test-key")
         .send()
         .await
@@ -776,8 +801,8 @@ async fn batch_head_operations() {
 
     session
         .many()
-        .push(session.put("obj-a").compression(None).key("head-a"))
-        .push(session.put("obj-b").compression(None).key("head-b"))
+        .push(session.put("obj-a").compress(None).key("head-a"))
+        .push(session.put("obj-b").compress(None).key("head-b"))
         .send()
         .await
         .error_for_failures()

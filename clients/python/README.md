@@ -76,11 +76,15 @@ session.put(b"payload", origin="203.0.113.42")
 
 ### Compression
 
-Uploads are compressed with Zstd by default. Downloads are transparently decompressed.
-You can override compression per-upload for pre-compressed or uncompressible data.
+Uploads are compressed with Zstd by default, and downloads are transparently decompressed.
+Compression can be overridden per-upload:
 
 ```python
-session.put(already_compressed_data, compression="none")
+# upload as-is and record no encoding:
+session.put(video_data, compress="none")
+
+# upload as-is, but record the encoding so that downloads still decompress:
+session.put(zstd_data, precompressed="zstd")
 ```
 
 ### Custom Metadata
@@ -97,8 +101,8 @@ For large objects, use multipart uploads to upload parts independently and then
 assemble them into a final object.
 
 **Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
-The caller must pre-compress each part according to the compression set as part of the metadata
-when initiating the upload.
+`compression` on `initiate_multipart_upload` behaves like `precompressed` above: it only
+records the algorithm, and the caller must pre-compress each part accordingly.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
