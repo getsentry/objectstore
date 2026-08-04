@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+### New Features ✨
+
+- (clients) Allow marking uploads as precompressed by @jan-auer in [#586](https://github.com/getsentry/objectstore/pull/586)
+
 ## 0.2.1
 
 ### New Features ✨
