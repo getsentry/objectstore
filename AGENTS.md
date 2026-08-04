@@ -20,6 +20,13 @@ To test only one package (e.g., when backend services aren't needed):
 cargo test -p objectstore-server --all-features
 ```
 
+## Adding Dependencies
+
+Rust dependencies are declared once in the root `Cargo.toml` under
+`[workspace.dependencies]` with a full version, and referenced from crates as
+`{ workspace = true }`. Only pin a version in a crate's own `Cargo.toml` when
+that crate needs to diverge, and say why in a comment.
+
 ## Documentation Conventions
 
 **Keep docs at the right level**:
