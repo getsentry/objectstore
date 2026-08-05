@@ -4186,9 +4186,9 @@ dependencies = [
 
 [[package]]
 name = "sentry-options"
-version = "1.2.1"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43de0ef77feb227951c1d3eda86e84469389ec2805d7f27eee68e38fe20f2e40"
+checksum = "fe58061c4293466647ead4b29731176a331c64f7a72ec441a47851df93a6410b"
 dependencies = [
  "arc-swap",
  "num",
@@ -4196,13 +4196,14 @@ dependencies = [
  "serde_json",
  "sha1",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "sentry-options-validation"
-version = "1.2.1"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60660c98c3ef950d6ac6986792a55280fe3fa38c2846389b2a4ca99676c1efd0"
+checksum = "0eeb041b3e565d0b7f7e2438d5a5d08c594ce6a855ed3fd301fd42e08fd9122b"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4212,6 +4213,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
