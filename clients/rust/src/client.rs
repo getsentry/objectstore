@@ -456,10 +456,21 @@ impl Session {
         url
     }
 
-    /// Returns a signed token if a token or generator was provided or `None` otherwise.
+    /// Returns a token authorizing access to this session's scope.
     ///
-    /// The token carries the configured provider's default permissions and expiry. Use
-    /// [`create_token`](Self::create_token) to customize these.
+    /// With a [`TokenGenerator`](crate::TokenGenerator), each call signs a fresh token whose expiry
+    /// starts now, using the configured permissions; use [`create_token`](Self::create_token) to
+    /// narrow either.
+    ///
+    /// If a pre-signed token was used to construct the client, it is returned verbatim, including
+    /// its original expiry.
+    ///
+    /// Returns `None` if the client was constructed without authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a new token cannot be signed with the configured key. Retrieving a
+    /// pre-signed token never fails.
     pub fn get_token(&self) -> crate::Result<Option<String>> {
         match self.client.token {
             Some(TokenProvider::Generator(ref generator)) => {
