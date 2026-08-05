@@ -216,8 +216,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     return ::std::result::Result::Ok(());
                 };
 
-                // Force a reload of the underlying values file.
-                let _ = inner.get_forced(#namespace_str, "");
+                inner.refresh()?;
 
                 let new_snapshot =
                     <#name as ::objectstore_typed_options::SentryOptions>::deserialize(inner)?;
