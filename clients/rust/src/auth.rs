@@ -159,7 +159,7 @@ impl TokenGenerator {
         self.create_token(scope).sign()
     }
 
-    /// Create a token for the given [`Scope`](crate::Scope).
+    /// Create a token for the given [`Scope`].
     ///
     /// Use this to produce a static token that can be handed to an external service
     /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
