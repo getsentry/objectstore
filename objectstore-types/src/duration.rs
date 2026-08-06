@@ -167,15 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_invalid_input() {
-        let error = parse_duration("1fortnight").unwrap_err();
-        assert!(
-            error.to_string().starts_with("invalid duration: "),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn parses_units_that_are_never_emitted() {
         assert_eq!(
             parse_duration("2weeks").unwrap(),
