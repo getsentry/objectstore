@@ -53,9 +53,10 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use http::header::{self, HeaderMap, HeaderName};
-use humantime::{format_duration, format_rfc3339_micros, parse_duration, parse_rfc3339};
+use humantime::{format_rfc3339_micros, parse_rfc3339};
 use serde::{Deserialize, Serialize};
 
+use crate::duration::{format_duration, parse_duration};
 use crate::headers;
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
@@ -141,8 +142,8 @@ impl From<header::ToStrError> for Error {
 /// | `TimeToLive` | `ttl:30s`   | Expires after a fixed duration from creation |
 /// | `TimeToIdle` | `tti:1h`    | Expires after a duration of no access        |
 ///
-/// Durations use [humantime](https://docs.rs/humantime) format (e.g. `30s`,
-/// `5m`, `1h`, `7d`).
+/// Durations use the [wire format](crate::duration), which is written in days, hours, minutes,
+/// and seconds (e.g. `30s`, `5m`, `1h`, `7d`, `400d 12h`).
 ///
 /// **Important:** `Manual` is the default and must remain so — persisted objects
 /// without an explicit policy are deserialized as `Manual`.
@@ -710,6 +711,29 @@ mod tests {
             metadata.expiration_policy,
             ExpirationPolicy::TimeToLive(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn expiration_policy_keeps_long_durations_in_days() {
+        let ttl = Duration::from_secs(400 * 86400 + 3600);
+        let policy = ExpirationPolicy::TimeToLive(ttl);
+
+        assert_eq!(policy.to_string(), "ttl:400d 1h");
+        assert_eq!(
+            policy.to_string().parse::<ExpirationPolicy>().unwrap(),
+            policy
+        );
+    }
+
+    #[test]
+    fn expiration_policy_parses_units_that_are_never_emitted() {
+        let policy: ExpirationPolicy = "tti:2weeks".parse().unwrap();
+        assert_eq!(
+            policy,
+            ExpirationPolicy::TimeToIdle(Duration::from_secs(14 * 86400))
+        );
+        // Re-emitting normalizes to the units of the wire format.
+        assert_eq!(policy.to_string(), "tti:14d");
     }
 
     #[test]

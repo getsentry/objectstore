@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use objectstore_types::duration::format_duration;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -84,8 +85,8 @@ impl UseCaseConfig {
                 {
                     return Err(UseCaseError::DurationExceeded {
                         usecase: usecase.to_owned(),
-                        duration: humantime::format_duration(duration).to_string(),
-                        max: humantime::format_duration(max).to_string(),
+                        duration: format_duration(duration).to_string(),
+                        max: format_duration(max).to_string(),
                     });
                 }
             }
@@ -101,8 +102,8 @@ impl UseCaseConfig {
                 {
                     return Err(UseCaseError::DurationExceeded {
                         usecase: usecase.to_owned(),
-                        duration: humantime::format_duration(duration).to_string(),
-                        max: humantime::format_duration(max).to_string(),
+                        duration: format_duration(duration).to_string(),
+                        max: format_duration(max).to_string(),
                     });
                 }
             }
@@ -174,9 +175,9 @@ pub enum UseCaseError {
     DurationExceeded {
         /// The use case name.
         usecase: String,
-        /// The requested duration, in humantime format.
+        /// The requested duration, in wire format.
         duration: String,
-        /// The configured maximum, in humantime format.
+        /// The configured maximum, in wire format.
         max: String,
     },
 }

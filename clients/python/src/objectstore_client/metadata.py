@@ -148,30 +148,37 @@ def parse_expiration(value: str) -> ExpirationPolicy | None:
 
 
 def format_timedelta(delta: timedelta) -> str:
-    days = delta.days
-    output = f"{days} days" if days else ""
-    if seconds := delta.seconds:
-        if output:
-            output += " "
-        output += f"{seconds} seconds"
+    """
+    Formats a duration in the wire format, such as `400d 1m 30s`.
 
-    return output
+    Days are the largest unit, components that are zero are omitted, and a zero duration
+    is written as `0s`. Any sub-second remainder is truncated.
+    """
+    minutes, seconds = divmod(delta.seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    components = ((delta.days, "d"), (hours, "h"), (minutes, "m"), (seconds, "s"))
+    output = " ".join(f"{value}{unit}" for value, unit in components if value)
+
+    return output or "0s"
 
 
 TIME_SPLIT = re.compile(r"[^\W\d_]+|\d+")
 
 
 def parse_timedelta(delta: str) -> timedelta:
+    """
+    Parses a duration in the wire format, such as `400d 1m 30s`.
+
+    Raises a `ValueError` for units outside the wire format.
+    """
     words = TIME_SPLIT.findall(delta)
     seconds = 0
 
     for num, unit in itertools_batched(words, n=2, strict=True):
         num = int(num)
-        multiplier = 0
 
-        if unit.startswith("w"):
-            multiplier = 86400 * 7
-        elif unit.startswith("d"):
+        if unit.startswith("d"):
             multiplier = 86400
         elif unit.startswith("h"):
             multiplier = 3600
@@ -179,6 +186,8 @@ def parse_timedelta(delta: str) -> timedelta:
             multiplier = 60
         elif unit.startswith("s"):
             multiplier = 1
+        else:
+            raise ValueError(f"unknown time unit {unit!r} in duration {delta!r}")
 
         seconds += num * multiplier
 
