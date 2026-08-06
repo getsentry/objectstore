@@ -106,6 +106,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use sentry::{Hub, SentryFutureExt};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
@@ -238,9 +239,10 @@ impl TieredStorage {
         changelog: Box<dyn ChangeLog>,
     ) -> Self {
         let inner = ChangeManager::new(high_volume, long_term, changelog);
+        let hub = Hub::new_from_top(Hub::current());
         // Note on cancellation: Our `join` method will wait for all tasks tracked by the spawned
         // recovery job, so we defer shutdown until recovery is complete or times out.
-        tokio::spawn(inner.clone().recover());
+        tokio::spawn(inner.clone().recover().bind_hub(hub));
         Self { inner }
     }
 

@@ -24,6 +24,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use sentry::{Hub, SentryFutureExt};
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 
@@ -136,7 +137,10 @@ impl ChangeManager {
             _token: token,
         };
 
-        Ok(ChangeGuard { state: Some(state) })
+        Ok(ChangeGuard {
+            state: Some(state),
+            hub: Hub::current(),
+        })
     }
 
     /// Records the change to the log and returns a guard in the `Assembling` state.
@@ -159,13 +163,17 @@ impl ChangeManager {
             _token: token,
         };
 
-        Ok(ChangeGuard { state: Some(state) })
+        Ok(ChangeGuard {
+            state: Some(state),
+            hub: Hub::current(),
+        })
     }
 
     /// Scans the changelog for outstanding entries and runs cleanup for each.
     ///
     /// Spawn this into a background task at startup to recover from any orphaned objects after a
     /// crash. During normal operation, this should return an empty list and have no effect.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn recover(self: Arc<Self>) -> Result<()> {
         // Hold one token for the duration of recovery to prevent premature shutdown.
         let _token = self.tracker.token();
@@ -351,6 +359,7 @@ impl ChangeState {
     }
 
     /// Determines tombstone state and runs cleanup for unreferenced objects.
+    #[tracing::instrument(level = "debug", skip_all, fields(phase= ?self.phase, new = ?self.change.new, old = ?self.change.old))]
     async fn cleanup(self) {
         let current = match self.phase {
             // For `Recovered`, we must first check the state of the tombstone.
@@ -447,9 +456,9 @@ impl Drop for ChangeState {
 /// When dropped in a non-`Completed` phase, determines the LT blob to clean up
 /// and spawns a background task to delete it. If no tokio runtime is available
 /// (e.g., during shutdown), the drop logs an error instead of panicking.
-#[derive(Debug)]
 pub struct ChangeGuard {
     state: Option<ChangeState>,
+    hub: Arc<Hub>,
 }
 
 impl ChangeGuard {
@@ -461,6 +470,15 @@ impl ChangeGuard {
     }
 }
 
+impl fmt::Debug for ChangeGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChangeGuard")
+            .field("state", &self.state)
+            // hide `hub` intentionally
+            .finish()
+    }
+}
+
 impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
@@ -468,7 +486,8 @@ impl Drop for ChangeGuard {
             && state.phase != ChangePhase::Completed
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
-            handle.spawn(state.cleanup());
+            let hub = Hub::new_from_top(&self.hub);
+            handle.spawn(state.cleanup().bind_hub(hub));
         }
 
         // NB: Drop of `ChangeState` logs an error if cleanup is not scheduled.
