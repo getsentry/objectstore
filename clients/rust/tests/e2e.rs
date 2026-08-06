@@ -2,10 +2,11 @@ mod common;
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
+use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_client::{Client, Error, OperationResult, Permission, Usecase};
+use objectstore_client::{Client, Error, ExpirationPolicy, OperationResult, Permission, Usecase};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY};
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
@@ -786,6 +787,37 @@ async fn head_returns_metadata() {
 
     let missing = session.head("nonexistent-key").send().await.unwrap();
     assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn round_trips_expiration_policy_beyond_a_year() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    // Serializes as "400d 1h 18m 31s"
+    let ttl = Duration::from_secs(400 * 86400 + 4711);
+    let policy = ExpirationPolicy::TimeToLive(ttl);
+
+    let stored_id = session
+        .put("hello long ttl!")
+        .expiration_policy(policy)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let metadata = session.head(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(metadata.expiration_policy, policy);
+    assert!(metadata.time_expires.is_some());
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.expiration_policy, policy);
 }
 
 #[tokio::test]

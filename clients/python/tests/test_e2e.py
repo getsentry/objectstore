@@ -258,6 +258,33 @@ def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
     assert head.custom["release"] == "vérsion-1.0-🚀"
 
 
+def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
+    client = Client(
+        server_url,
+        token=TestSecretKey.get(),
+    )
+
+    # Serializes as "400d 1h 18m 31s"
+    ttl = timedelta(days=400, seconds=4711)
+    test_usecase = Usecase(
+        "test-usecase",
+        expiration_policy=TimeToLive(ttl),
+    )
+
+    session = client.session(test_usecase, org=42, project=1337)
+
+    object_key = session.put(b"test data")
+
+    metadata = session.head(object_key)
+    assert metadata is not None
+    assert metadata.expiration_policy == TimeToLive(ttl)
+    assert metadata.time_expires is not None
+
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.metadata.expiration_policy == TimeToLive(ttl)
+
+
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(
         server_url,
