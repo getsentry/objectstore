@@ -56,7 +56,7 @@ use http::header::{self, HeaderMap, HeaderName};
 use humantime::{format_rfc3339_micros, parse_rfc3339};
 use serde::{Deserialize, Serialize};
 
-use crate::duration::{format_duration, parse_duration};
+use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
@@ -93,7 +93,7 @@ pub enum Error {
     Header(#[from] Option<http::Error>),
     /// The value for the expiration policy is invalid.
     #[error("invalid expiration policy value")]
-    Expiration(#[from] Option<humantime::DurationError>),
+    Expiration(#[from] Option<ParseDurationError>),
     /// The compression algorithm is invalid.
     #[error("invalid compression value")]
     Compression,

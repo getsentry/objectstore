@@ -29,10 +29,9 @@
 //! writes. That leniency exists to keep reading values that older versions persisted, and is not
 //! part of the wire format: do not rely on it, and do not reproduce it in clients.
 
+use std::error::Error;
 use std::fmt;
 use std::time::Duration;
-
-pub use humantime::DurationError;
 
 const SECS_PER_MINUTE: u64 = 60;
 const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
@@ -66,15 +65,29 @@ pub fn format_duration(duration: Duration) -> FormattedDuration {
 ///
 /// let duration = parse_duration("400d 1m 30s")?;
 /// assert_eq!(duration, Duration::from_secs(400 * 86400 + 90));
-/// # Ok::<(), objectstore_types::duration::DurationError>(())
+/// # Ok::<(), objectstore_types::duration::ParseDurationError>(())
 /// ```
 ///
 /// # Errors
 ///
-/// Returns a [`DurationError`] if `input` is not a valid duration.
-pub fn parse_duration(input: &str) -> Result<Duration, DurationError> {
-    humantime::parse_duration(input)
+/// Returns a [`ParseDurationError`] if `input` is not a valid duration.
+pub fn parse_duration(input: &str) -> Result<Duration, ParseDurationError> {
+    humantime::parse_duration(input).map_err(ParseDurationError)
 }
+
+/// The error returned when a string is not a valid duration in the wire format.
+///
+/// Returned by [`parse_duration`].
+#[derive(Debug)]
+pub struct ParseDurationError(humantime::DurationError);
+
+impl fmt::Display for ParseDurationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Error for ParseDurationError {}
 
 /// A [`Duration`] that displays in the wire format.
 ///
@@ -151,6 +164,15 @@ mod tests {
             let formatted = format(duration);
             assert_eq!(parse_duration(&formatted).unwrap(), duration, "{formatted}");
         }
+    }
+
+    #[test]
+    fn reports_invalid_input() {
+        let error = parse_duration("1fortnight").unwrap_err();
+        assert!(
+            error.to_string().starts_with("invalid duration: "),
+            "{error}"
+        );
     }
 
     #[test]
