@@ -39,7 +39,22 @@ def test_format_timedelta_truncates_sub_second_remainder() -> None:
     assert format_timedelta(timedelta(milliseconds=500)) == "0s"
 
 
-@pytest.mark.parametrize("value", ["2weeks", "1year", "500ms"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2weeks",
+        "1year",
+        "500ms",
+        # Units that merely start with one of the wire format units must not be
+        # mistaken for it: `13months` is not 13 minutes.
+        "13months",
+        "1month",
+        "1minute",
+        "30sec",
+        "1day",
+        "2hours",
+    ],
+)
 def test_parse_timedelta_rejects_unit_outside_wire_format(value: str) -> None:
     with pytest.raises(ValueError, match="unknown time unit"):
         parse_timedelta(value)

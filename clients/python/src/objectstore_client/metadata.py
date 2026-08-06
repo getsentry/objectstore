@@ -170,7 +170,8 @@ def parse_timedelta(delta: str) -> timedelta:
     """
     Parses a duration in the wire format, such as `400d 1m 30s`.
 
-    Raises a `ValueError` for units outside the wire format.
+    Units are matched exactly, so anything outside the wire format raises a
+    `ValueError` rather than being mistaken for a unit it merely starts with.
     """
     words = TIME_SPLIT.findall(delta)
     seconds = 0
@@ -178,13 +179,13 @@ def parse_timedelta(delta: str) -> timedelta:
     for num, unit in itertools_batched(words, n=2, strict=True):
         num = int(num)
 
-        if unit.startswith("d"):
+        if unit == "d":
             multiplier = 86400
-        elif unit.startswith("h"):
+        elif unit == "h":
             multiplier = 3600
-        elif unit.startswith("m") and not unit.startswith("ms"):
+        elif unit == "m":
             multiplier = 60
-        elif unit.startswith("s"):
+        elif unit == "s":
             multiplier = 1
         else:
             raise ValueError(f"unknown time unit {unit!r} in duration {delta!r}")
