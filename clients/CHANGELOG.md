@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.3
+
+### New Features ✨
+
+- (rust-client) Mint scoped tokens through a TokenRequest builder by @matt-codecov in [#545](https://github.com/getsentry/objectstore/pull/545)
+
+### Bug Fixes 🐛
+
+- (types) Restrict the duration wire format to days and smaller by @jan-auer in [#592](https://github.com/getsentry/objectstore/pull/592)
+
 ## 0.2.2
 
 ### New Features ✨
