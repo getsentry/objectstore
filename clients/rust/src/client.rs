@@ -10,7 +10,7 @@ use reqwest::RequestBuilder;
 use url::Url;
 
 use crate::IntoTokenProvider;
-use crate::auth::TokenProvider;
+use crate::auth::{TokenProvider, TokenRequest};
 
 const USER_AGENT: &str = concat!("objectstore-client/", env!("CARGO_PKG_VERSION"));
 
@@ -350,7 +350,7 @@ pub(crate) struct ClientInner {
 /// ```
 ///
 /// External service with a pre-signed JWT (obtained via
-/// [`TokenGenerator::sign`](crate::TokenGenerator::sign)):
+/// [`TokenGenerator::create_token`](crate::TokenGenerator::create_token)):
 ///
 /// ```no_run
 /// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
@@ -360,7 +360,7 @@ pub(crate) struct ClientInner {
 /// let token = TokenGenerator::new(SecretKey {
 ///     secret_key: "<private key>".into(),
 ///     kid: "my-service".into(),
-/// })?.sign(&scope)?;
+/// })?.create_token(&scope).sign()?;
 ///
 /// let client = Client::builder("http://localhost:8888/")
 ///     .token(token)
@@ -456,13 +456,53 @@ impl Session {
         url
     }
 
-    /// Returns a signed token if a token or generator was provided or `None` otherwise
-    pub fn mint_token(&self) -> crate::Result<Option<String>> {
-        match &self.client.token {
-            Some(TokenProvider::Generator(generator)) => {
-                Ok(Some(generator.sign_for_scope(&self.scope)?))
+    /// Returns a token authorizing access to this session's scope.
+    ///
+    /// With a [`TokenGenerator`](crate::TokenGenerator), each call signs a fresh token whose expiry
+    /// starts now, using the configured permissions; use [`create_token`](Self::create_token) to
+    /// narrow either.
+    ///
+    /// If a pre-signed token was used to construct the client, it is returned verbatim, including
+    /// its original expiry.
+    ///
+    /// Returns `None` if the client was constructed without authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a new token cannot be signed with the configured key. Retrieving a
+    /// pre-signed token never fails.
+    pub fn get_token(&self) -> crate::Result<Option<String>> {
+        match self.client.token {
+            Some(TokenProvider::Generator(ref generator)) => {
+                generator.request_inner(&self.scope).sign().map(Some)
             }
-            Some(TokenProvider::Static(token)) => Ok(Some(token.clone())),
+            Some(TokenProvider::Static(ref token)) => Ok(Some(token.clone())),
+            None => Ok(None),
+        }
+    }
+
+    /// Deprecated. Use [`get_token`](Self::get_token) instead.
+    #[deprecated(note = "Use `get_token` instead.")]
+    pub fn mint_token(&self) -> crate::Result<Option<String>> {
+        self.get_token()
+    }
+
+    /// Creates a new token with configurable permissions and expiry.
+    ///
+    /// Use this to produce a static token that can be handed to an external service
+    /// with lower permissions than the current session.
+    ///
+    /// # Errors
+    ///
+    /// This requires a [`TokenGenerator`](crate::TokenGenerator) to sign a new token.
+    /// If not available, this will result in an error. To retrieve a token with the current
+    /// session's default permissions and expiry, use [`get_token`](Self::get_token) instead.
+    pub fn create_token(&self) -> crate::Result<Option<TokenRequest<'_>>> {
+        match self.client.token {
+            Some(TokenProvider::Generator(ref generator)) => {
+                Ok(Some(generator.request_inner(&self.scope)))
+            }
+            Some(TokenProvider::Static(_)) => Err(crate::Error::StaticTokenOverride),
             None => Ok(None),
         }
     }
@@ -520,7 +560,7 @@ impl Session {
     }
 
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
-        if let Some(token) = self.mint_token()? {
+        if let Some(token) = self.get_token()? {
             builder = builder.header("x-os-auth", format!("Bearer {token}"));
         }
         if self.client.propagate_traces {

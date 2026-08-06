@@ -368,6 +368,73 @@ async fn fails_with_insufficient_auth_token_perms() {
 }
 
 #[tokio::test]
+async fn create_token_rejects_escalation() {
+    // A read-only generator cannot create a token requesting write access.
+    let client = Client::builder("http://127.0.0.1:8888/")
+        .token(test_token_generator().permissions(&[Permission::ObjectRead]))
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let result = session
+        .create_token()
+        .unwrap()
+        .expect("generator is configured")
+        .permissions(&[Permission::ObjectRead, Permission::ObjectWrite])
+        .sign();
+    match result {
+        Err(Error::PermissionEscalation { escalated }) => {
+            assert_eq!(escalated, vec![Permission::ObjectWrite]);
+        }
+        other => panic!("Expected PermissionEscalation, got: {other:?}"),
+    }
+
+    // A subset of the granted permissions is accepted.
+    assert!(
+        session
+            .create_token()
+            .unwrap()
+            .expect("generator is configured")
+            .permissions(&[Permission::ObjectRead])
+            .expiry_seconds(30)
+            .sign()
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn create_token_rejects_static_token() {
+    let token = sign_static_token("usecase", &[("org", "12345")]);
+    let client = Client::builder("http://127.0.0.1:8888/")
+        .token(token)
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // A static, pre-signed token cannot be re-signed with custom permissions or expiry.
+    assert!(matches!(
+        session.create_token(),
+        Err(Error::StaticTokenOverride)
+    ));
+
+    // The static token itself is still returned as-is.
+    assert!(session.get_token().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn create_token_without_provider() {
+    let client = Client::builder("http://127.0.0.1:8888/").build().unwrap();
+    let usecase = Usecase::new("usecase");
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    // Without a token provider there is no request to configure, and no token to return.
+    assert!(session.create_token().unwrap().is_none());
+    assert!(session.get_token().unwrap().is_none());
+}
+
+#[tokio::test]
 async fn stores_with_static_token() {
     let server = test_server().await;
 

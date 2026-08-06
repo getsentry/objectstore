@@ -307,18 +307,22 @@ let client = Client::builder("http://localhost:8888/")
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
-// Use TokenGenerator::sign() to obtain a static token from an internal
-// service, then pass it to the external consumer:
+// Use TokenGenerator::create_token() to obtain a static token from an authority
 let scope = Usecase::new("my_app").for_project(42, 1337);
-let token = TokenGenerator::new(SecretKey {
+let generator = TokenGenerator::new(SecretKey {
     secret_key: "<private key>".into(),
     kid: "my-service".into(),
-})?.sign(&scope)?;
+})?;
+let token = generator.create_token(&scope).sign()?;
 
+// Then pass the token directly to a client builder.
 let client = Client::builder("http://localhost:8888/")
     .token(token)
     .build()?;
 ```
+
+To create a token with narrower permissions or a different expiry, use the
+methods on the token request returned from `create_token`.
 
 ## Configuration
 
