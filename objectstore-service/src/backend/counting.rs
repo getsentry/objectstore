@@ -28,6 +28,9 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{
+    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -46,6 +49,12 @@ fn count(usecase: &str) {
 /// `Arc`s that point to the inner backend:
 /// - `inner: Arc<dyn Backend>`
 /// - `inner_multipart: Option<Arc<dyn MultipartUploadBackend>>` if `inner` supports it
+///
+/// Resumable uploads avoid this problem: their operations live on [`Backend`] itself and express
+/// support by declining in
+/// [`create_upload_session`](Backend::create_upload_session), so this decorator forwards them like
+/// any other method. Forwarding is mandatory — without it the decorator's declining default would
+/// shadow an inner backend that does support resumable uploads.
 #[derive(Debug)]
 pub struct CountingBackend {
     inner: Arc<dyn Backend>,
@@ -98,6 +107,46 @@ impl Backend for CountingBackend {
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         self.inner.as_multipart_upload_backend()?;
         Ok(self)
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<CreateSessionResponse> {
+        count(&id.context.usecase);
+        self.inner
+            .create_upload_session(id, metadata, total_length)
+            .await
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        count(&id.context.usecase);
+        self.inner
+            .put_chunk(id, session, offset, content_length, stream)
+            .await
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+        count(&id.context.usecase);
+        self.inner.upload_offset(id, session).await
+    }
+
+    async fn terminate_upload(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<TerminateUploadResponse> {
+        count(&id.context.usecase);
+        self.inner.terminate_upload(id, session).await
     }
 }
 

@@ -3,6 +3,9 @@ use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use objectstore_service::resumable::{
+    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 
 use objectstore_service::{ClientStream, StorageService};
@@ -185,5 +188,62 @@ impl AuthAwareService {
             .service
             .complete_multipart(id, upload_id, parts)
             .await?)
+    }
+
+    // --- Resumable upload operations ---
+    //
+    // Every operation requires `ObjectWrite`, including the two that do not obviously write:
+    // an offset query can commit an assembled object, and terminating a session discards an
+    // in-progress upload rather than deleting an object. So `DELETE ?session=` needs write
+    // permission where a plain `DELETE` on the same path needs delete permission.
+
+    /// Auth-aware wrapper around [`StorageService::create_upload_session`].
+    pub async fn create_upload_session(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+        total_length: u64,
+    ) -> ApiResult<CreateSessionResponse> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .create_upload_session(id, metadata, total_length)
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::put_chunk`].
+    pub async fn put_chunk(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+        offset: u64,
+        content_length: u64,
+        body: ClientStream,
+    ) -> ApiResult<UploadProgress> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .put_chunk(id, session, offset, content_length, body)
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::upload_offset`].
+    pub async fn upload_offset(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> ApiResult<UploadProgress> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.upload_offset(id, session).await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::terminate_upload`].
+    pub async fn terminate_upload(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> ApiResult<TerminateUploadResponse> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.terminate_upload(id, session).await?)
     }
 }

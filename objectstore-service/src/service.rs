@@ -20,6 +20,9 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{
+    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -359,6 +362,82 @@ impl StorageService {
         })
         .await
     }
+
+    // --- Resumable upload operations ---
+
+    /// Opens a resumable upload session for an object of `total_length` bytes.
+    ///
+    /// Returns `Ok(None)` when the backend declines resumable uploads for this object, in
+    /// which case the caller should fall back to [`Self::insert_object`]. Unlike the
+    /// multipart operations there is no eager capability probe: support is the return value.
+    pub async fn create_upload_session(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+        total_length: u64,
+    ) -> Result<CreateSessionResponse> {
+        metadata.validate()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("create_upload_session", async move {
+            inner
+                .create_upload_session(&id, &metadata, total_length)
+                .await
+        })
+        .await
+    }
+
+    /// Writes a chunk of `content_length` bytes at `offset` into an open session.
+    ///
+    /// Commits the object once the chunk carrying the last byte is persisted.
+    ///
+    /// # Run-to-completion
+    ///
+    /// Once called, the operation runs to completion even if the returned future is dropped.
+    /// This matters most for the final chunk, which commits the object.
+    pub async fn put_chunk(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+        offset: u64,
+        content_length: u64,
+        body: ClientStream,
+    ) -> Result<UploadProgress> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("put_chunk", async move {
+            inner
+                .put_chunk(&id, &session, offset, content_length, body)
+                .await
+        })
+        .await
+    }
+
+    /// Reports how far a session has progressed, committing the object if it is assembled.
+    ///
+    /// This mutates state and therefore requires write permission at the API layer.
+    pub async fn upload_offset(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> Result<UploadProgress> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("upload_offset", async move {
+            inner.upload_offset(&id, &session).await
+        })
+        .await
+    }
+
+    /// Terminates a session, discarding whatever was uploaded.
+    pub async fn terminate_upload(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> Result<TerminateUploadResponse> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("terminate_upload", async move {
+            inner.terminate_upload(&id, &session).await
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -368,7 +447,7 @@ mod tests {
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
-    use objectstore_types::metadata::Metadata;
+    use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::range::ByteRange;
     use objectstore_types::scope::{Scope, Scopes};
 
@@ -780,5 +859,148 @@ mod tests {
             !matches!(result, Err(Error::AtCapacity)),
             "permit was not released after panic"
         );
+    }
+
+    // --- Resumable uploads ---
+
+    #[tokio::test]
+    async fn resumable_declines_by_default() {
+        let service = make_service();
+        let id = ObjectId::new(make_context(), "resumable".into());
+        let session = SessionToken::new("session".into()).unwrap();
+
+        let denied = service
+            .create_upload_session(id.clone(), Metadata::default(), 1024)
+            .await
+            .unwrap();
+        assert!(denied.is_none(), "expected the backend to decline");
+
+        // Without a session no other operation is reachable through the API, but the
+        // declining defaults must still be wired up rather than panicking.
+        let chunk = service
+            .put_chunk(id.clone(), session.clone(), 0, 4, stream::single("data"))
+            .await;
+        assert!(matches!(chunk, Err(Error::NotImplemented)));
+        let offset = service.upload_offset(id.clone(), session.clone()).await;
+        assert!(matches!(offset, Err(Error::NotImplemented)));
+        let terminated = service.terminate_upload(id, session).await;
+        assert!(matches!(terminated, Err(Error::NotImplemented)));
+    }
+
+    #[tokio::test]
+    async fn resumable_create_validates_metadata() {
+        let service = make_service();
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        // A timeout policy with no resolved `time_expires` is rejected before the backend
+        // is consulted, exactly as it is for a regular insert.
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        let result = service.create_upload_session(id, metadata, 1024).await;
+        assert!(matches!(result, Err(Error::Metadata(_))), "{result:?}");
+    }
+
+    /// Backend that accepts resumable uploads and reports a fixed progression.
+    ///
+    /// Records nothing: it exists to prove that [`StorageService`] forwards arguments and
+    /// returns backend outcomes untouched.
+    #[derive(Clone, Debug)]
+    struct AcceptResumable {
+        progress: UploadProgress,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for AcceptResumable {
+        async fn create_upload_session(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            _metadata: &Metadata,
+            total_length: u64,
+        ) -> Result<CreateSessionResponse> {
+            Ok(Some(
+                SessionToken::new(format!("session-{total_length}")).unwrap(),
+            ))
+        }
+
+        async fn put_chunk(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            _session: &SessionToken,
+            _offset: u64,
+            _content_length: u64,
+            _stream: ClientStream,
+        ) -> Result<UploadProgress> {
+            Ok(self.progress)
+        }
+
+        async fn upload_offset(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            _session: &SessionToken,
+        ) -> Result<UploadProgress> {
+            Ok(self.progress)
+        }
+
+        async fn terminate_upload(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            _session: &SessionToken,
+        ) -> Result<TerminateUploadResponse> {
+            Ok(())
+        }
+    }
+
+    fn resumable_service(progress: UploadProgress) -> StorageService {
+        StorageService::new(Box::new(TestBackend::new(AcceptResumable { progress })))
+    }
+
+    #[tokio::test]
+    async fn resumable_reports_incomplete_progress() {
+        let service = resumable_service(UploadProgress::Incomplete { offset: 262_144 });
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let session = service
+            .create_upload_session(id.clone(), Metadata::default(), 1024)
+            .await
+            .unwrap()
+            .expect("session was declined");
+        assert_eq!(session.as_str(), "session-1024");
+
+        let progress = service
+            .put_chunk(id.clone(), session.clone(), 0, 4, stream::single("data"))
+            .await
+            .unwrap();
+        assert_eq!(progress, UploadProgress::Incomplete { offset: 262_144 });
+
+        let progress = service.upload_offset(id.clone(), session.clone()).await;
+        assert_eq!(
+            progress.unwrap(),
+            UploadProgress::Incomplete { offset: 262_144 }
+        );
+
+        service.terminate_upload(id, session).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumable_reports_commit() {
+        let service = resumable_service(UploadProgress::Committed);
+        let id = ObjectId::new(make_context(), "resumable".into());
+        let session = SessionToken::new("session".into()).unwrap();
+
+        let progress = service
+            .put_chunk(id.clone(), session.clone(), 0, 4, stream::single("data"))
+            .await
+            .unwrap();
+        assert_eq!(progress, UploadProgress::Committed);
+
+        let progress = service.upload_offset(id, session).await.unwrap();
+        assert_eq!(progress, UploadProgress::Committed);
     }
 }

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{OriginalUri, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
+use crate::endpoints::resumable::{self, RequestPath, ResumableQuery, ResumableRoute};
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
@@ -43,9 +44,27 @@ async fn objects_post(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
+    // A chunk always addresses a resolved key, so `?session=` has no meaning on the
+    // collection route. `?upload_type=resumable` creates a session for a generated key.
+    match query.classify()? {
+        ResumableRoute::Create => {
+            let id = ObjectId::optional(context, None);
+            let path = RequestPath::Collection;
+            return resumable::create_session(service, state, path, uri.path(), id, headers).await;
+        }
+        ResumableRoute::Session(_) => {
+            return Err(ApiError::Client(
+                "`session` requires an object key; use PUT on the object path".into(),
+            ));
+        }
+        ResumableRoute::Regular => {}
+    }
+
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
@@ -199,9 +218,26 @@ async fn object_put(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
-    MeteredBody(body): MeteredBody,
+    body: MeteredBody,
 ) -> ApiResult<Response> {
+    // `PUT` carries all three write shapes: create a session, write a chunk, query the
+    // offset. `MeteredBody` is extracted unconditionally and dropped unread on the two
+    // bodyless paths.
+    match query.classify()? {
+        ResumableRoute::Create => {
+            let path = RequestPath::Object;
+            return resumable::create_session(service, state, path, uri.path(), id, headers).await;
+        }
+        ResumableRoute::Session(session) => {
+            return resumable::session_request(service, id, session, headers, body).await;
+        }
+        ResumableRoute::Regular => {}
+    }
+
+    let MeteredBody(body) = body;
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     let ObjectId { context, key } = id;
@@ -226,7 +262,14 @@ async fn object_put(
 async fn object_delete(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
-) -> ApiResult<impl IntoResponse> {
+    Query(query): Query<ResumableQuery>,
+) -> ApiResult<Response> {
+    // With a session this terminates the upload; without one it deletes the object, as it
+    // always has. Note the two need different permissions — see `AuthAwareService`.
+    if let ResumableRoute::Session(session) = query.classify_session_only("DELETE")? {
+        return resumable::terminate(service, id, session).await;
+    }
+
     service.delete_object(id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

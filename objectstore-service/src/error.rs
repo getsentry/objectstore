@@ -151,6 +151,29 @@ pub enum Error {
     /// Invalid upload ID (e.g. path traversal attempt).
     #[error(transparent)]
     InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
+
+    /// A resumable chunk was submitted at an offset the backend does not hold.
+    ///
+    /// The client resynchronizes by continuing from [`offset`](Self::UploadOffsetMismatch::offset),
+    /// which is authoritative and may be lower than the end of a previously acknowledged chunk.
+    #[error("upload offset mismatch (server holds {offset} bytes)")]
+    UploadOffsetMismatch {
+        /// The offset the backend currently holds.
+        offset: u64,
+    },
+
+    /// The resumable upload session expired or was terminated, retaining nothing.
+    ///
+    /// The client has to start a new session.
+    #[error("upload session gone")]
+    UploadSessionGone,
+
+    /// A resumable upload request is unusable for the session it addresses.
+    ///
+    /// Covers an unparseable or unknown session token and a chunk that would exceed the
+    /// length declared when the session was created.
+    #[error("invalid upload request: {0}")]
+    InvalidUploadRequest(String),
 }
 
 impl Error {
@@ -197,6 +220,9 @@ impl Error {
             Self::Client(_) => Level::DEBUG,
             Self::Metadata(_) => Level::DEBUG,
             Self::RangeNotSatisfiable { .. } => Level::DEBUG,
+            Self::UploadOffsetMismatch { .. } => Level::DEBUG,
+            Self::UploadSessionGone => Level::DEBUG,
+            Self::InvalidUploadRequest(_) => Level::DEBUG,
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures

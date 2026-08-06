@@ -13,6 +13,9 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{
+    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -70,6 +73,112 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The default returns [`Error::NotImplemented`]. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
+        Err(Error::NotImplemented)
+    }
+
+    /// Opens a resumable upload session for the object at `id`.
+    ///
+    /// `total_length` is the complete size of the object in bytes, declared by the client
+    /// when the session is created. It is a parameter of its own rather than part of
+    /// `metadata`, because [`Metadata::size`] is materialized by the server and never
+    /// trusted from a client. The backend needs it to recognize the final chunk, and a
+    /// tiering backend needs it to decide where the object would be placed.
+    ///
+    /// `metadata` is fixed for the lifetime of the session and does not change afterwards.
+    /// Compression is recorded rather than applied: the payload must already be compressed,
+    /// since its total length has to be known at this point.
+    ///
+    /// Returns `Ok(None)` when this backend cannot store the described object resumably.
+    /// Declining is a routine outcome, not an error — the server denies the session and the
+    /// client falls back to a regular upload. The default implementation declines, so a
+    /// backend opts in simply by overriding this method. There is deliberately no separate
+    /// capability trait and no probe: support can depend on the size, the metadata and the
+    /// routing result at once, all of which are only known here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the backend supports resumable uploads but failed to open
+    /// the session.
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<CreateSessionResponse> {
+        let _ = (id, metadata, total_length);
+        Ok(None)
+    }
+
+    /// Writes a chunk of `content_length` bytes at `offset` into an open session.
+    ///
+    /// `offset` must equal the offset the backend currently holds. Backends persist only
+    /// aligned prefixes and discard the remainder, so the offset in the returned
+    /// [`UploadProgress::Incomplete`] is authoritative and may be lower than
+    /// `offset + content_length`.
+    ///
+    /// A session has a single writer. Concurrent chunk writes are not coordinated: one of
+    /// them wins and the others fail with [`Error::UploadOffsetMismatch`].
+    ///
+    /// Once the chunk carrying the last byte is persisted, the backend assembles and commits
+    /// the object and returns [`UploadProgress::Committed`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotImplemented`] if this backend does not support resumable uploads. The
+    ///   default implementation returns this, which is unreachable through the API because a
+    ///   backend that declines in [`Self::create_upload_session`] never hands out a session.
+    /// - [`Error::UploadOffsetMismatch`] if `offset` is not the offset the backend holds.
+    /// - [`Error::UploadSessionGone`] if the session expired or was terminated.
+    /// - [`Error::InvalidUploadRequest`] if the session is unusable, or the chunk would
+    ///   exceed the length declared at creation.
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        let _ = (id, session, offset, content_length, stream);
+        Err(Error::NotImplemented)
+    }
+
+    /// Reports how far the session has progressed, committing the object if it is assembled.
+    ///
+    /// This is the recovery path: after any failed chunk the client calls this and continues
+    /// from the returned offset. It is also the only read-shaped operation that mutates
+    /// state. Making an object visible can outlive the request that triggered it, so a
+    /// session whose payload fully landed may still be uncommitted; this operation finishes
+    /// that work and returns [`UploadProgress::Committed`]. Callers must therefore treat it
+    /// as a write.
+    ///
+    /// A session whose object was assembled but not yet committed never reports
+    /// [`UploadProgress::Committed`], so a client that observes completion can always read
+    /// the object back.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`Self::put_chunk`], except for the offset mismatch.
+    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+        let _ = (id, session);
+        Err(Error::NotImplemented)
+    }
+
+    /// Terminates a session, discarding whatever was uploaded.
+    ///
+    /// Idempotent. Not required for correctness, since sessions expire on their own, but it
+    /// lets a caller release an abandoned upload immediately.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotImplemented`] if this backend does not support resumable uploads.
+    /// - [`Error::InvalidUploadRequest`] if the session token is unusable.
+    async fn terminate_upload(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<TerminateUploadResponse> {
+        let _ = (id, session);
         Err(Error::NotImplemented)
     }
 }

@@ -52,6 +52,17 @@ pub struct ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
+    /// Creates an error response carrying only a message, with no cause chain.
+    ///
+    /// For outcomes that are not errors in the service layer and therefore have no
+    /// [`Error`] to wrap, such as a denied resumable upload session.
+    pub fn message(detail: impl Into<String>) -> Self {
+        Self {
+            detail: Some(detail.into()),
+            causes: Vec::new(),
+        }
+    }
+
     /// Creates an error response from an error, extracting the full cause chain.
     pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
         let detail = Some(error.to_string());
@@ -96,6 +107,9 @@ impl ApiError {
                 StatusCode::RANGE_NOT_SATISFIABLE
             }
             ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::InvalidUploadRequest(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::UploadOffsetMismatch { .. }) => StatusCode::CONFLICT,
+            ApiError::Service(ServiceError::UploadSessionGone) => StatusCode::GONE,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,

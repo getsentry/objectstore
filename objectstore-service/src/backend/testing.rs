@@ -52,6 +52,9 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{
+    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -237,6 +240,60 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     ) -> Result<CompleteMultipartResponse> {
         inner.complete_multipart(id, upload_id, parts).await
     }
+
+    // --- Resumable upload methods ---
+    //
+    // `InMemoryBackend` does not implement resumable uploads, so these delegate to the
+    // declining `Backend` defaults. A test that exercises the resumable protocol has to
+    // override them.
+
+    /// Intercepts [`Backend::create_upload_session`]. Default delegates to `inner`.
+    async fn create_upload_session(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<CreateSessionResponse> {
+        inner
+            .create_upload_session(id, metadata, total_length)
+            .await
+    }
+
+    /// Intercepts [`Backend::put_chunk`]. Default delegates to `inner`.
+    async fn put_chunk(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        inner
+            .put_chunk(id, session, offset, content_length, stream)
+            .await
+    }
+
+    /// Intercepts [`Backend::upload_offset`]. Default delegates to `inner`.
+    async fn upload_offset(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<UploadProgress> {
+        inner.upload_offset(id, session).await
+    }
+
+    /// Intercepts [`Backend::terminate_upload`]. Default delegates to `inner`.
+    async fn terminate_upload(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<TerminateUploadResponse> {
+        inner.terminate_upload(id, session).await
+    }
 }
 
 /// Generic test backend that implements both [`Backend`] and [`HighVolumeBackend`].
@@ -310,6 +367,42 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
     async fn join(&self) {
         self.hooks.join(&self.inner).await
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<CreateSessionResponse> {
+        self.hooks
+            .create_upload_session(&self.inner, id, metadata, total_length)
+            .await
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        self.hooks
+            .put_chunk(&self.inner, id, session, offset, content_length, stream)
+            .await
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+        self.hooks.upload_offset(&self.inner, id, session).await
+    }
+
+    async fn terminate_upload(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<TerminateUploadResponse> {
+        self.hooks.terminate_upload(&self.inner, id, session).await
     }
 }
 
