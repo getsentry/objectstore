@@ -18,8 +18,8 @@ const BEARER_PREFIX: &str = "Bearer ";
 const HEADER_AUTH: &str = "x-os-auth";
 
 /// Query parameters carrying authentication, as an alternative to the
-/// `x-os-auth`/`Authorization` header. The header takes precedence when both
-/// are present.
+/// `x-os-auth`/`Authorization` header. The query parameter takes precedence
+/// when both are present.
 #[derive(Debug, Deserialize)]
 struct AuthParams {
     /// A JWT, mirroring the `x-os-auth` header value (without the `Bearer `
@@ -29,24 +29,23 @@ struct AuthParams {
 
 impl AuthAwareService {
     fn from_token(parts: &mut Parts, state: &ServiceState) -> Result<AuthContext, AuthError> {
-        let header_token = parts
-            .headers
-            .get(HEADER_AUTH)
-            .or_else(|| parts.headers.get(header::AUTHORIZATION))
-            .and_then(|v| v.to_str().ok())
-            .and_then(strip_bearer);
+        let query_token = Query::<AuthParams>::try_from_uri(&parts.uri)
+            .map_err(|_| AuthError::BadRequest("invalid query string"))?
+            .0
+            .os_auth;
 
-        let query_token = match header_token {
+        let header_token = match query_token {
             Some(_) => None,
-            None => {
-                Query::<AuthParams>::try_from_uri(&parts.uri)
-                    .map_err(|_| AuthError::BadRequest("invalid query string"))?
-                    .0
-                    .os_auth
-            }
+            None => parts
+                .headers
+                .get(HEADER_AUTH)
+                .or_else(|| parts.headers.get(header::AUTHORIZATION))
+                .and_then(|v| v.to_str().ok())
+                .and_then(strip_bearer)
+                .map(str::to_owned),
         };
 
-        let token = header_token.or(query_token.as_deref());
+        let token = query_token.as_deref().or(header_token.as_deref());
 
         AuthContext::from_encoded_jwt(token, &state.key_directory)
     }

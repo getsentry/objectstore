@@ -1,8 +1,8 @@
 //! End-to-end tests for the `os_auth` query parameter authentication path.
 //!
 //! A JWT can be supplied either via the `x-os-auth`/`Authorization` header or,
-//! as-is, via the `os_auth` query parameter. The header takes precedence when
-//! both are present.
+//! as-is, via the `os_auth` query parameter. The query parameter takes
+//! precedence when both are present.
 
 use anyhow::Result;
 use http::header;
@@ -85,12 +85,35 @@ async fn query_auth_tampered_token_is_unauthorized() -> Result<()> {
 }
 
 #[tokio::test]
-async fn header_takes_precedence_over_query() -> Result<()> {
+async fn query_takes_precedence_over_header() -> Result<()> {
     let server = test_server().await;
     seed_object(&server, "hello").await?;
 
-    // Valid header token, garbage query token: the header must win, so the
-    // request succeeds despite the unusable query value.
+    // Valid query token, garbage header token: the query value must win, so
+    // the request succeeds despite the unusable header.
+    let url = format!(
+        "{}?os_auth={}",
+        server.url(OBJECT_PATH),
+        jwt(&["object.read"])
+    );
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header(header::AUTHORIZATION.as_str(), "Bearer not-a-valid-jwt")
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await?, "hello");
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_query_token_is_unauthorized_even_with_valid_header() -> Result<()> {
+    let server = test_server().await;
+    seed_object(&server, "hello").await?;
+
+    // Garbage query token, valid header: the query value still wins, so the
+    // request fails rather than falling back to the header.
     let url = format!("{}?os_auth=not-a-valid-jwt", server.url(OBJECT_PATH));
     let resp = reqwest::Client::new()
         .get(url)
@@ -101,7 +124,6 @@ async fn header_takes_precedence_over_query() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    assert_eq!(resp.text().await?, "hello");
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
     Ok(())
 }
