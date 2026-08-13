@@ -3034,7 +3034,6 @@ dependencies = [
  "sentry",
  "serde",
  "serde_json",
- "sqlx",
  "stresstest",
  "tempfile",
  "thiserror",

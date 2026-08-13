@@ -84,12 +84,7 @@ sentry-options = "1.2.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"
-sqlx = { version = "0.9.0", features = [
-    "runtime-tokio",
-    "tls-rustls-ring-native-roots",
-    "sqlite",
-    "chrono",
-] }
+sqlx = "0.9.0"
 sketches-ddsketch = "0.3.1"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
