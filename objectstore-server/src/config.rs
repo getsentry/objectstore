@@ -41,6 +41,7 @@ use std::time::Duration;
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
+use objectstore_service::keeper::{KeeperBackend, KeeperConfig};
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -633,6 +634,10 @@ impl Default for Config {
 
             storage: StorageConfig::FileSystem(FileSystemConfig {
                 path: PathBuf::from("data"),
+                keeper: KeeperConfig {
+                    backend: KeeperBackend::Sqlite,
+                    connection_url: "sqlite:///opt/objectstore/keeper.db".into(),
+                },
             }),
 
             runtime: Runtime::default(),
