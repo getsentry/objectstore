@@ -28,7 +28,6 @@ pub trait Keeper: Send + Sync {
     /// It is called by a cleanup worker when the object is no longer needed.
     async fn remove(&self, id: &ObjectId) -> Result<()>;
 
-    /// Marks an object as accessed. For `expiration_policy` of `TimeToIdle`, this will
-    /// extend the object retention.
-    async fn mark_accessed(&self, id: &ObjectId) -> Result<()>;
+    /// Update an object to a new expiration policy (and thus, new expiration time).
+    async fn update(&self, id: &ObjectId, expiration_policy: ExpirationPolicy) -> Result<()>;
 }

@@ -23,9 +23,9 @@ pub struct TableRow {
     /// The expiration duration in seconds, if applicable.
     pub duration: Option<i64>,
     /// Unix timestamp (seconds) when the row was created.
-    pub created_at: i64,
+    pub time_created: i64,
     /// Unix timestamp (seconds) when the object expires, if applicable.
-    pub expires_at: Option<i64>,
+    pub time_expires: Option<i64>,
 }
 
 /// SQLite-backed keeper that persists object retention state in a `ttl_keeper` table.
@@ -34,6 +34,10 @@ pub struct SqliteBackedKeeper {
     read_pool: SqlitePool,
     write_pool: SqlitePool,
 }
+
+const SQLITE_POLICY_MANUAL: i32 = 0;
+const SQLITE_POLICY_TIME_TO_LIVE: i32 = 1;
+const SQLITE_POLICY_TIME_TO_IDLE: i32 = 2;
 
 /// Creates a pair of read/write SQLite connection pools for the given URL.
 pub async fn create_sqlite_pool(url: &str) -> Result<(Pool<Sqlite>, Pool<Sqlite>)> {
@@ -89,6 +93,9 @@ impl super::Keeper for SqliteBackedKeeper {
             return Ok(());
         }
 
+        // XXX(aldy505): Since we convert the `expiration_policy.expires_in()` into `i64`
+        // using `Duration.as_secs()`, there is a very small possibility of having it as a negative
+        // number. When that happen, what should we do? Do we mark it as a manual expiration?
         let expiration_duration: Option<i64> = expiration_policy.expires_in().and_then(|x| {
             x.as_secs()
                 .try_into()
@@ -103,24 +110,24 @@ impl super::Keeper for SqliteBackedKeeper {
             .try_into()
             .map_err(|_| Error::generic("current time exceeds i64::MAX"))?;
 
-        let expires_at = expiration_duration.map(|duration| current_time + duration);
+        let time_expires = expiration_duration.map(|duration| current_time + duration);
 
         let mut atomic = self.write_pool.begin().await?;
         sqlx::query(
             "
-            INSERT INTO ttl_keeper (object_id, expiration_policy, duration, created_at, expires_at)
+            INSERT INTO ttl_keeper (object_id, expiration_policy, duration, time_created, time_expires)
             VALUES (?, ?, ?, ?, ?)
             ",
         )
         .bind(id.as_storage_path().to_string())
         .bind(match expiration_policy {
-            ExpirationPolicy::Manual => 0,
-            ExpirationPolicy::TimeToLive(_) => 1,
-            ExpirationPolicy::TimeToIdle(_) => 2,
+            ExpirationPolicy::Manual => SQLITE_POLICY_MANUAL,
+            ExpirationPolicy::TimeToLive(_) => SQLITE_POLICY_TIME_TO_LIVE,
+            ExpirationPolicy::TimeToIdle(_) => SQLITE_POLICY_TIME_TO_IDLE,
         })
         .bind(expiration_duration)
         .bind(current_time)
-        .bind(expires_at)
+        .bind(time_expires)
         .execute(&mut *atomic)
         .await?;
 
@@ -146,16 +153,16 @@ impl super::Keeper for SqliteBackedKeeper {
         Ok(())
     }
 
-    async fn mark_accessed(&self, id: &ObjectId) -> Result<()> {
+    async fn update(&self, id: &ObjectId, expiration_policy: ExpirationPolicy) -> Result<()> {
         // Check what expiration policy is set for this object.
-        let expiration_policy: Option<TableRow> = sqlx::query_as(
+        let keeper_row: Option<TableRow> = sqlx::query_as(
             "
             SELECT
                 object_id,
                 expiration_policy,
                 duration,
-                created_at,
-                expires_at
+                time_created,
+                time_expires
             FROM ttl_keeper
             WHERE object_id = ?
             ",
@@ -164,46 +171,59 @@ impl super::Keeper for SqliteBackedKeeper {
         .fetch_optional(&self.read_pool)
         .await?;
 
-        if let Some(expiration_policy) = expiration_policy {
-            // We only check if the object's policy is TimeToIdle.
-            // If it is, we need to extend the object's time to live.
-            // For other policies, we do nothing.
-            if expiration_policy.expiration_policy == 2 {
-                // `expiration_policy.duration` should not be `None`.
-                // If it is, we should not be here.
-                let duration = match expiration_policy.duration {
-                    Some(duration) => duration,
-                    None => {
-                        return Err(Error::generic(
-                            "unwanted state for time to idle: duration is None",
-                        ));
-                    }
-                };
+        // The current time in UNIX seconds
+        let current_time: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::generic("system time before UNIX_EPOCH"))?
+            .as_secs()
+            .try_into()
+            .map_err(|_| Error::generic("current time exceeds i64::MAX"))?;
 
-                // If `expiration_policy.expires_at` is None, we should set it to `current_time + duration`.
-                let current_time: i64 = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| Error::generic("system time before UNIX_EPOCH"))?
-                    .as_secs()
+        if let Some(keeper_row) = keeper_row {
+            // Check whether the object is expired. If it is, we should not update it.
+            if (keeper_row.expiration_policy == SQLITE_POLICY_TIME_TO_LIVE
+                || keeper_row.expiration_policy == SQLITE_POLICY_TIME_TO_IDLE)
+                && let Some(expires_at) = keeper_row.time_expires
+                && current_time >= expires_at
+            {
+                // The object is expired, we should not update it.
+                return Ok(());
+            }
+
+            // Then, we update the expiration policy, duration, and the new time_expires if applicable.
+
+            let expiration_duration: Option<i64> = expiration_policy.expires_in().and_then(|x| {
+                x.as_secs()
                     .try_into()
-                    .map_err(|_| Error::generic("current time exceeds i64::MAX"))?;
+                    .map_err(|_| Error::generic("expiration duration exceeds i64::MAX"))
+                    .ok()
+            });
+            let time_expires = expiration_duration.map(|duration| current_time + duration);
 
-                // Update the object's expiration time.
-                let mut atomic = self.write_pool.begin().await?;
-                sqlx::query(
-                    "
+            // Update the object's expiration time.
+            let mut atomic = self.write_pool.begin().await?;
+            sqlx::query(
+                "
                     UPDATE ttl_keeper
-                    SET expires_at = ?
+                    SET
+                        expiration_policy = ?,
+                        duration = ?,
+                        time_expires = ?
                     WHERE object_id = ?
                     ",
-                )
-                .bind(current_time + duration)
-                .bind(id.as_storage_path().to_string())
-                .execute(&mut *atomic)
-                .await?;
+            )
+            .bind(match expiration_policy {
+                ExpirationPolicy::Manual => SQLITE_POLICY_MANUAL,
+                ExpirationPolicy::TimeToLive(_) => SQLITE_POLICY_TIME_TO_LIVE,
+                ExpirationPolicy::TimeToIdle(_) => SQLITE_POLICY_TIME_TO_IDLE,
+            })
+            .bind(expiration_duration)
+            .bind(time_expires)
+            .bind(id.as_storage_path().to_string())
+            .execute(&mut *atomic)
+            .await?;
 
-                atomic.commit().await?;
-            }
+            atomic.commit().await?;
         }
 
         Ok(())
@@ -300,8 +320,8 @@ mod tests {
         let row = tk.fetch_row(&id).await.expect("row should exist");
         assert_eq!(row.expiration_policy, 1);
         assert_eq!(row.duration, Some(60));
-        assert_eq!(row.expires_at, Some(row.created_at + 60));
-        assert!(row.created_at >= before && row.created_at <= before + 2);
+        assert_eq!(row.time_expires, Some(row.time_created + 60));
+        assert!(row.time_created >= before && row.time_created <= before + 2);
     }
 
     #[tokio::test]
@@ -317,7 +337,7 @@ mod tests {
         let row = tk.fetch_row(&id).await.expect("row should exist");
         assert_eq!(row.expiration_policy, 2);
         assert_eq!(row.duration, Some(60));
-        assert_eq!(row.expires_at, Some(row.created_at + 60));
+        assert_eq!(row.time_expires, Some(row.time_created + 60));
     }
 
     #[tokio::test]
@@ -344,36 +364,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_accessed_manual_is_noop() {
+    async fn update_manual_is_noop() {
         let tk = TestKeeper::new().await;
         let id = make_id();
 
         tk.keeper.keep(&id, ExpirationPolicy::Manual).await.unwrap();
-        tk.keeper.mark_accessed(&id).await.unwrap();
+        tk.keeper
+            .update(&id, ExpirationPolicy::Manual)
+            .await
+            .unwrap();
         assert!(tk.fetch_row(&id).await.is_none());
     }
 
     #[tokio::test]
-    async fn mark_accessed_ttl_is_noop() {
+    async fn update_ttl_is_noop() {
         let tk = TestKeeper::new().await;
         let id = make_id();
-
-        tk.keeper
-            .keep(&id, ExpirationPolicy::TimeToLive(Duration::from_secs(60)))
-            .await
-            .unwrap();
+        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_secs(60));
+        tk.keeper.keep(&id, expiration_policy).await.unwrap();
         let before = tk.fetch_row(&id).await.unwrap();
 
-        tk.keeper.mark_accessed(&id).await.unwrap();
+        tk.keeper.update(&id, expiration_policy).await.unwrap();
         let after = tk.fetch_row(&id).await.unwrap();
 
-        assert_eq!(before.expires_at, after.expires_at);
-        assert_eq!(before.created_at, after.created_at);
+        assert_eq!(before.time_expires, after.time_expires);
+        assert_eq!(before.time_created, after.time_created);
         assert_eq!(before.duration, after.duration);
     }
 
     #[tokio::test]
-    async fn mark_accessed_tti_without_expires_at_sets_it() {
+    async fn update_tti_without_expires_at_sets_it() {
         let tk = TestKeeper::new().await;
         let id = make_id();
         let id_str = id.as_storage_path().to_string();
@@ -396,40 +416,44 @@ mod tests {
         .await
         .unwrap();
 
-        tk.keeper.mark_accessed(&id).await.unwrap();
+        tk.keeper
+            .update(&id, ExpirationPolicy::TimeToIdle(Duration::from_secs(60)))
+            .await
+            .unwrap();
 
         let row = tk.fetch_row(&id).await.unwrap();
-        assert_eq!(row.expires_at, Some(now + 60));
+        assert_eq!(row.time_expires, Some(now + 60));
     }
 
     #[tokio::test]
-    async fn mark_accessed_tti_with_expires_at_bumps_it() {
+    async fn update_tti_with_expires_at_bumps_it() {
         let tk = TestKeeper::new().await;
         let id = make_id();
+        let expiration_policy = ExpirationPolicy::TimeToIdle(Duration::from_secs(60));
 
-        tk.keeper
-            .keep(&id, ExpirationPolicy::TimeToIdle(Duration::from_secs(60)))
-            .await
-            .unwrap();
+        tk.keeper.keep(&id, expiration_policy).await.unwrap();
         let original = tk.fetch_row(&id).await.unwrap();
 
         // Small delay so the timestamp changes.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        tk.keeper.mark_accessed(&id).await.unwrap();
+        tk.keeper.update(&id, expiration_policy).await.unwrap();
         let updated = tk.fetch_row(&id).await.unwrap();
 
         // expires_at is always recomputed from current time + duration.
-        assert!(updated.expires_at.unwrap() >= original.expires_at.unwrap());
-        assert_eq!(updated.created_at, original.created_at);
+        assert!(updated.time_expires.unwrap() >= original.time_expires.unwrap());
+        assert_eq!(updated.time_created, original.time_created);
     }
 
     #[tokio::test]
-    async fn mark_accessed_nonexistent_is_ok() {
+    async fn update_nonexistent_is_ok() {
         let tk = TestKeeper::new().await;
         let id = make_id();
 
-        tk.keeper.mark_accessed(&id).await.unwrap();
+        tk.keeper
+            .update(&id, ExpirationPolicy::Manual)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
