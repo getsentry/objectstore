@@ -183,8 +183,8 @@ impl super::Keeper for SqliteBackedKeeper {
             // Check whether the object is expired. If it is, we should not update it.
             if (keeper_row.expiration_policy == SQLITE_POLICY_TIME_TO_LIVE
                 || keeper_row.expiration_policy == SQLITE_POLICY_TIME_TO_IDLE)
-                && let Some(expires_at) = keeper_row.time_expires
-                && current_time >= expires_at
+                && let Some(time_expires) = keeper_row.time_expires
+                && current_time >= time_expires
             {
                 // The object is expired, we should not update it.
                 return Ok(());
@@ -198,7 +198,18 @@ impl super::Keeper for SqliteBackedKeeper {
                     .map_err(|_| Error::generic("expiration duration exceeds i64::MAX"))
                     .ok()
             });
-            let time_expires = expiration_duration.map(|duration| current_time + duration);
+
+            // For TTL, the expiration is fixed at creation time and must not change on
+            // access. For TTI, the expiration is reset to now + duration on each access.
+            let time_expires = match expiration_policy {
+                ExpirationPolicy::Manual => None,
+                ExpirationPolicy::TimeToLive(_) => {
+                    expiration_duration.map(|duration| keeper_row.time_created + duration)
+                }
+                ExpirationPolicy::TimeToIdle(_) => {
+                    expiration_duration.map(|duration| current_time + duration)
+                }
+            };
 
             // Update the object's expiration time.
             let mut atomic = self.write_pool.begin().await?;
@@ -281,7 +292,7 @@ mod tests {
         async fn fetch_row(&self, id: &ObjectId) -> Option<TableRow> {
             sqlx::query_as(
                 "
-                SELECT object_id, expiration_policy, duration, created_at, expires_at
+                SELECT object_id, expiration_policy, duration, time_created, time_expires
                 FROM ttl_keeper
                 WHERE object_id = ?
                 ",
@@ -393,7 +404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_tti_without_expires_at_sets_it() {
+    async fn update_tti_without_time_expires_sets_it() {
         let tk = TestKeeper::new().await;
         let id = make_id();
         let id_str = id.as_storage_path().to_string();
@@ -403,10 +414,10 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
-        // Insert a TTI row directly with expires_at = NULL.
+        // Insert a TTI row directly with time_expires = NULL.
         sqlx::query(
             "
-            INSERT INTO ttl_keeper (object_id, expiration_policy, duration, created_at, expires_at)
+            INSERT INTO ttl_keeper (object_id, expiration_policy, duration, time_created, time_expires)
             VALUES (?, 2, 60, ?, NULL)
             ",
         )
@@ -426,7 +437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_tti_with_expires_at_bumps_it() {
+    async fn update_tti_with_time_expires_bumps_it() {
         let tk = TestKeeper::new().await;
         let id = make_id();
         let expiration_policy = ExpirationPolicy::TimeToIdle(Duration::from_secs(60));
@@ -440,7 +451,7 @@ mod tests {
         tk.keeper.update(&id, expiration_policy).await.unwrap();
         let updated = tk.fetch_row(&id).await.unwrap();
 
-        // expires_at is always recomputed from current time + duration.
+        // time_expires is always recomputed from current time + duration.
         assert!(updated.time_expires.unwrap() >= original.time_expires.unwrap());
         assert_eq!(updated.time_created, original.time_created);
     }
