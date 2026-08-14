@@ -21,6 +21,7 @@ debug = true
 lto = "thin"
 
 [workspace.dependencies]
+objectstore-inventory-tracker = { path = "objectstore-inventory-tracker" }
 objectstore-client = { path = "clients/rust" }
 objectstore-log = { path = "objectstore-log" }
 objectstore-metrics = { path = "objectstore-metrics" }
@@ -42,6 +43,7 @@ async-trait = "0.1.89"
 axum = "0.8.9"
 base64 = "0.22.1"
 bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
+blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"
 chrono = "0.4.45"
@@ -81,6 +83,10 @@ rustls = { version = "0.23.40", default-features = false }
 secrecy = "0.10.3"
 sentry = "0.48.3"
 sentry-options = "1.2.4"
+# - `ssl` is required for SASL/SCRAM
+# - `librdkafka` must be built from source either way, and `cmake-build` is the
+#    recommended way to do it
+rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl", "tracing"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"
