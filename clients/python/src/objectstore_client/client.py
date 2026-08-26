@@ -446,7 +446,7 @@ class Session:
 
             # Set after the response, since the key may be server-generated.
             span.set_data("objectstore.key", res["key"])
-            span.set_data("objectstore.compression", metrics.compression)
+            span.set_data("objectstore.compression", encoding)
             if metrics.uncompressed_size is not None:
                 span.set_data(
                     "objectstore.uncompressed_size", metrics.uncompressed_size

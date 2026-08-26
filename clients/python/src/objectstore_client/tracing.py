@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import weakref
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 import sentry_sdk
 from sentry_sdk.tracing import Span
@@ -61,10 +61,11 @@ class _TracedPayload:
     the first read to EOF/close, since the automatic ``http.client`` span
     ends at response headers.
 
-    The span is created lazily on first ``read()``, so a caller that never
-    reads the stream produces no span. Finishing is idempotent and also
+    The span is created lazily on first ``read()``/iteration, so a caller that
+    never reads the stream produces no span. Finishing is idempotent and also
     guarded by a ``weakref.finalize`` fallback, so an abandoned stream still
-    closes its span.
+    closes its span. Any attribute not defined here (``closed``, ``tell``,
+    ``seekable``, etc.) delegates to the wrapped stream.
     """
 
     def __init__(self, stream: IO[bytes], parent: Span) -> None:
@@ -113,3 +114,13 @@ class _TracedPayload:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._stream, attr)
+
+    def __iter__(self) -> Iterator[bytes]:
+        self._ensure_span()
+        for chunk in self._stream:
+            self._transferred += len(chunk)
+            yield chunk
+        self._finish()
