@@ -477,44 +477,47 @@ class Session:
         """
 
         headers = self._make_headers()
-        with (
-            storage_span("get", self._usecase, self._scope, key=key) as span,
-            measure_storage_operation(self._metrics_backend, "get", self._usecase.name),
-        ):
-            response = self._pool.request(
-                "GET",
-                self._make_url(key),
-                preload_content=False,
-                decode_content=False,
-                headers=headers,
-            )
-            if response.status == 404:
-                response.read()  # drain body so urllib3 returns the connection
-                span.set_data("objectstore.found", False)
-                return None
-            raise_for_status(response)
-            span.set_data("objectstore.found", True)
-        # OR: should I use `response.stream()`?
-        stream = cast(IO[bytes], response)
-        metadata = Metadata.from_headers(response.headers)
-        span.set_data("objectstore.compression", metadata.compression or "none")
-
-        encoding_accepted = accept_encoding is not None and (
-            "*" in accept_encoding or metadata.compression in accept_encoding
-        )
-        decompressed = False
-        if metadata.compression and decompress and not encoding_accepted:
-            if metadata.compression != "zstd":
-                raise NotImplementedError(
-                    "Transparent decoding of anything but `zstd` is not implemented yet"
+        with storage_span("get", self._usecase, self._scope, key=key) as span:
+            with measure_storage_operation(
+                self._metrics_backend, "get", self._usecase.name
+            ):
+                response = self._pool.request(
+                    "GET",
+                    self._make_url(key),
+                    preload_content=False,
+                    decode_content=False,
+                    headers=headers,
                 )
+                if response.status == 404:
+                    response.read()  # drain body so urllib3 returns the connection
+                    span.set_data("objectstore.found", False)
+                    return None
+                raise_for_status(response)
+                span.set_data("objectstore.found", True)
 
-            metadata.compression = None
-            dctx = zstandard.ZstdDecompressor()
-            stream = dctx.stream_reader(stream, read_across_frames=True)
-            decompressed = True
+            # OR: should I use `response.stream()`?
+            stream = cast(IO[bytes], response)
+            metadata = Metadata.from_headers(response.headers)
+            span.set_data("objectstore.compression", metadata.compression or "none")
 
-        span.set_data("objectstore.decompressed", decompressed)
+            encoding_accepted = accept_encoding is not None and (
+                "*" in accept_encoding or metadata.compression in accept_encoding
+            )
+            decompressed = False
+            if metadata.compression and decompress and not encoding_accepted:
+                if metadata.compression != "zstd":
+                    raise NotImplementedError(
+                        "Transparent decoding of anything but `zstd` is not "
+                        "implemented yet"
+                    )
+
+                metadata.compression = None
+                dctx = zstandard.ZstdDecompressor()
+                stream = dctx.stream_reader(stream, read_across_frames=True)
+                decompressed = True
+
+            span.set_data("objectstore.decompressed", decompressed)
+
         return GetResponse(metadata, cast(IO[bytes], _TracedPayload(stream, span)))
 
     def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
