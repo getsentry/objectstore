@@ -92,6 +92,34 @@ pub struct GcsConfig {
     pub cogs: Option<CostTrackerStreamConfig>,
 }
 
+/// Response header carrying the size GCS stored, in bytes.
+///
+/// Differs from `Content-Length`, which describes the transfer, once an object is
+/// content-encoded.
+const STORED_CONTENT_LENGTH: &str = "x-goog-stored-content-length";
+
+/// Reads how many payload bytes GCS stored for an object, consuming the response.
+///
+/// Prefers the [`STORED_CONTENT_LENGTH`] response header. If it is missing or malformed, falls back
+/// to the `size` of the [`GcsObject`] in the response body. Returns `None` if neither source yields
+/// a size.
+///
+/// Either way the body is read to the end, so reqwest can return the connection to its pool.
+async fn read_stored_content_length(response: reqwest::Response) -> Option<u64> {
+    let header = response
+        .headers()
+        .get(STORED_CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+
+    if let Some(size) = header {
+        response.drain_body().await;
+        return Some(size);
+    }
+
+    response.json::<GcsObject>().await.ok()?.size?.parse().ok()
+}
+
 /// Default endpoint used to access the GCS JSON API.
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 /// Permission scopes required for accessing GCS.
@@ -156,6 +184,16 @@ struct GcsObject {
 }
 
 impl GcsObject {
+    /// Bytes this object's custom metadata occupies, keys included.
+    ///
+    /// GCS stores metadata alongside the payload, so it counts toward an object's size.
+    fn metadata_size(&self) -> u64 {
+        self.metadata
+            .iter()
+            .map(|(key, value)| key.to_string().len() as u64 + value.len() as u64)
+            .sum()
+    }
+
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         let mut gcs_object = GcsObject {
@@ -588,8 +626,15 @@ impl GcsBackend {
 
     /// Fetches the GCS object metadata (without the payload), bumps TTI if
     /// needed, and returns the parsed [`Metadata`].
+    ///
+    /// `id` is only used to attribute a TTI bump to the right record in the change stream; the
+    /// request itself is addressed by `object_url`.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
-    async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
+    async fn fetch_gcs_metadata(
+        &self,
+        id: &ObjectId,
+        object_url: &Url,
+    ) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
@@ -637,18 +682,27 @@ impl GcsBackend {
 
         // TODO: Schedule into background persistently so this doesn't get lost on restarts
         if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            self.update_custom_time(
-                object_url.clone(),
-                new_expire_at,
-                &generation,
-                &metageneration,
-            )
-            .await?;
+            let bumped = self
+                .update_custom_time(
+                    object_url.clone(),
+                    new_expire_at,
+                    &generation,
+                    &metageneration,
+                )
+                .await?;
+
+            // Only report a deadline that actually moved.
+            if bumped {
+                self.change_stream.update(id, Some(new_expire_at));
+            }
         }
 
         Ok(Some(metadata))
     }
 
+    /// Moves an object's `customTime`, which is what its lifecycle expiry is anchored to.
+    ///
+    /// Returns whether the update was actually applied.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
     async fn update_custom_time(
         &self,
@@ -656,7 +710,7 @@ impl GcsBackend {
         custom_time: SystemTime,
         generation: &str,
         metageneration: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
@@ -682,14 +736,14 @@ impl GcsBackend {
             {
                 Ok(response) => {
                     response.drain_body().await;
-                    Ok(())
+                    Ok(true)
                 }
                 // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
                 // so leave its update intact and let a future read evaluate the TTI again.
                 Err(Error::BackendResponse {
                     status: StatusCode::PRECONDITION_FAILED,
                     ..
-                }) => Ok(()),
+                }) => Ok(false),
                 Err(error) => Err(error),
             }
         })
@@ -742,7 +796,7 @@ impl Backend for GcsBackend {
             )
             .part(
                 "media",
-                multipart::Part::stream(Body::wrap_stream(stream))
+                multipart::Part::stream(Body::wrap_stream(stream.boxed()))
                     .mime_str(&metadata.content_type)
                     .map_err(|e| Error::Generic {
                         context: format!("invalid mime type: {}", metadata.content_type),
@@ -755,16 +809,27 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
-        self.request(Method::POST, self.upload_url(id, "multipart")?)
+        let response = self
+            .request(Method::POST, self.upload_url(id, "multipart")?)
             .await?
             .multipart(multipart)
             .header(header::CONTENT_TYPE, content_type)
             .send_traced()
             .await
             .check_error("GCS: upload object")
-            .await?
-            .drain_body()
-            .await;
+            .await?;
+
+        let stored_size = read_stored_content_length(response).await;
+
+        if let Some(payload_size) = stored_size {
+            self.change_stream.write(
+                id,
+                payload_size + gcs_metadata.metadata_size(),
+                metadata.time_expires,
+            );
+        } else {
+            objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size");
+        }
 
         Ok(())
     }
@@ -774,7 +839,7 @@ impl Backend for GcsBackend {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
-        let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
+        let Some(metadata) = self.fetch_gcs_metadata(id, &object_url).await? else {
             return Ok(None);
         };
 
@@ -840,7 +905,7 @@ impl Backend for GcsBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
-        self.fetch_gcs_metadata(&object_url).await
+        self.fetch_gcs_metadata(id, &object_url).await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -848,28 +913,35 @@ impl Backend for GcsBackend {
         objectstore_log::debug!("Deleting from GCS backend");
         let object_url = self.object_url(id)?;
 
-        self.with_retry("delete", || async {
-            let resp = self
-                .request(Method::DELETE, object_url.clone())
-                .await?
-                .send_traced()
-                .await
-                .map_err(|e| Error::reqwest("GCS: delete object", e))?;
+        let deleted = self
+            .with_retry("delete", || async {
+                let resp = self
+                    .request(Method::DELETE, object_url.clone())
+                    .await?
+                    .send_traced()
+                    .await
+                    .map_err(|e| Error::reqwest("GCS: delete object", e))?;
 
-            // Do not error for objects that do not exist
-            if resp.status() == StatusCode::NOT_FOUND {
-                resp.drain_body().await;
-                return Ok(());
-            }
+                // Do not error for objects that do not exist
+                if resp.status() == StatusCode::NOT_FOUND {
+                    resp.drain_body().await;
+                    return Ok(false);
+                }
 
-            resp.check_error("GCS: delete object")
-                .await?
-                .drain_body()
-                .await;
+                resp.check_error("GCS: delete object")
+                    .await?
+                    .drain_body()
+                    .await;
 
-            Ok(())
-        })
-        .await
+                Ok(true)
+            })
+            .await?;
+
+        if deleted {
+            self.change_stream.delete(id);
+        }
+
+        Ok(())
     }
 
     async fn join(&self) {
@@ -1227,6 +1299,14 @@ mod tests {
     use anyhow::Result;
     use objectstore_types::scope::{Scope, Scopes};
 
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::OpType;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::test_utils::DummyProducer;
+
+    #[cfg(feature = "storage-cogs")]
+    use crate::stream::ClientError;
+
     use super::*;
     use crate::id::ObjectContext;
     use crate::multipart::CompletedPart;
@@ -1247,6 +1327,20 @@ mod tests {
 
     async fn create_test_backend() -> Result<GcsBackend> {
         GcsBackend::new(test_config(), &ChangeStreamFactory::default()).await
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    async fn create_test_backend_with_change_stream() -> Result<(GcsBackend, DummyProducer)> {
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        let config = GcsConfig {
+            cogs: Some(CostTrackerStreamConfig {
+                shared_resource_id: "gcs_objectstore".into(),
+                sample_rate: 1.0,
+            }),
+            ..test_config()
+        };
+
+        Ok((GcsBackend::new(config, &streams).await?, producer))
     }
 
     fn make_id() -> ObjectId {
@@ -2077,6 +2171,180 @@ mod tests {
             payload, compressed,
             "Payload should be returned still compressed, not auto-decompressed"
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_the_size_gcs_stored() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let payload = vec![b'x'; 4096];
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single::<ClientError>(payload.clone()),
+            )
+            .await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].shared_resource_id, "gcs_objectstore");
+        assert_eq!(records[0].app_feature, "testing");
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
+        assert!(records[0].expiration_time.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_size_includes_metadata_keys_and_values() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let payload = b"tiny".to_vec();
+
+        let bare = Metadata::default();
+        backend
+            .put_object(
+                &make_id(),
+                &bare,
+                stream::single::<ClientError>(payload.clone()),
+            )
+            .await?;
+
+        let annotated = Metadata {
+            custom: BTreeMap::from_iter([("a-fairly-long-metadata-key".into(), "value".into())]),
+            ..Default::default()
+        };
+        backend
+            .put_object(
+                &make_id(),
+                &annotated,
+                stream::single::<ClientError>(payload.clone()),
+            )
+            .await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+
+        let bare_size = records[0].size.unwrap();
+        let annotated_size = records[1].size.unwrap();
+        assert_eq!(
+            bare_size,
+            payload.len() as u64,
+            "default metadata contributes no custom keys"
+        );
+        assert!(
+            annotated_size > bare_size,
+            "same payload, more metadata: {annotated_size} should exceed {bare_size}"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_nothing_when_the_object_was_already_gone() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+
+        backend.delete_object(&make_id()).await?;
+
+        assert!(producer.records().is_empty());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_deletes() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+
+        backend
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single::<ClientError>(b"hi".to_vec()),
+            )
+            .await?;
+        producer.clear();
+
+        backend.delete_object(&id).await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "a retried delete must report only once");
+        assert_eq!(records[0].op_type, OpType::Delete);
+        assert_eq!(records[0].size, None);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_tti_bump_as_an_update() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(1)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single::<ClientError>(b"hi".to_vec()),
+            )
+            .await?;
+        producer.clear();
+
+        backend.get_metadata(&id).await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Update);
+        assert_eq!(records[0].size, None);
+        assert!(records[0].expiration_time.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_nothing_when_tti_is_not_bumped() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single::<ClientError>(b"hi".to_vec()),
+            )
+            .await?;
+        producer.clear();
+
+        backend.get_metadata(&id).await?;
+
+        assert!(producer.records().is_empty());
 
         Ok(())
     }

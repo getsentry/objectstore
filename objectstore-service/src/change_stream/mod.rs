@@ -25,6 +25,9 @@ pub use factory::ChangeStreamFactory;
 #[cfg(feature = "storage-cogs")]
 pub use factory::CostTrackerConfig;
 
+#[cfg(all(test, feature = "storage-cogs"))]
+pub(crate) use factory::dummy_factory;
+
 /// How long a backend waits for reported records to be handed off during shutdown.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
