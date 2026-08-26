@@ -42,6 +42,7 @@ rustls = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "logs"] }
 serde = { workspace = true }
+serde-vars = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 thread_local = { workspace = true }
