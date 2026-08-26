@@ -86,7 +86,13 @@ sentry-options = "1.2.4"
 # - `ssl` is required for SASL/SCRAM
 # - `librdkafka` must be built from source either way, and `cmake-build` is the
 #    recommended way to do it
-rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl", "tracing"] }
+# - `libz-static` avoids a runtime dependency on `libz.so.1`; see objectstore-inventory-tracker
+rdkafka = { version = "0.39.0", features = [
+    "cmake-build",
+    "libz-static",
+    "ssl",
+    "tracing",
+] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"

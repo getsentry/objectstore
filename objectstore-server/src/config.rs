@@ -41,6 +41,7 @@ use std::time::Duration;
 use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
+use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -445,6 +446,32 @@ pub struct Config {
     /// ```
     pub storage: StorageConfig,
 
+    /// Cost tracking sink for backends' change streams.
+    ///
+    /// A transport owns connections and a send queue, so it is configured once here and
+    /// shared by every backend. What each backend reports, and how much of it, is
+    /// configured per backend under [`storage`](Self::storage).
+    ///
+    /// Absent is the default, and disables reporting entirely.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// storage_cogs:
+    ///   type: kafka
+    ///   topic: shared-resources-inventory
+    ///   bootstrap_servers: [kafka:9092]
+    /// ```
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE_COGS__TYPE=kafka`
+    /// - `OS__STORAGE_COGS__TOPIC=shared-resources-inventory`
+    /// - `OS__STORAGE_COGS__BOOTSTRAP_SERVERS=kafka:9092`
+    /// - `OS__STORAGE_COGS__OVERRIDE_PARAMS__<PROPERTY>=<value>`
+    #[serde(default)]
+    pub storage_cogs: Option<CostTrackerConfig>,
+
     /// Configuration of the internal task runtime.
     ///
     /// Controls the thread pool size and behavior of the async runtime powering the server.
@@ -635,6 +662,7 @@ impl Default for Config {
                 path: PathBuf::from("data"),
             }),
 
+            storage_cogs: None,
             runtime: Runtime::default(),
             logging: LoggingConfig::default(),
             sentry: Sentry::default(),
@@ -863,6 +891,63 @@ mod tests {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn storage_cogs_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "bigtable");
+            jail.set_env("OS__STORAGE__PROJECT_ID", "my-project");
+            jail.set_env("OS__STORAGE__INSTANCE_NAME", "my-instance");
+            jail.set_env("OS__STORAGE__TABLE_NAME", "my-table");
+            jail.set_env(
+                "OS__STORAGE__COGS__SHARED_RESOURCE_ID",
+                "bigtable_objectstore",
+            );
+            jail.set_env("OS__STORAGE__COGS__SAMPLE_RATE", "0.5");
+            jail.set_env("OS__STORAGE_COGS__TYPE", "kafka");
+            jail.set_env("OS__STORAGE_COGS__TOPIC", "my-topic");
+            jail.set_env("OS__STORAGE_COGS__BOOTSTRAP_SERVERS", "[kafka:9092]");
+
+            let config = Config::load(None).unwrap();
+
+            let StorageConfig::BigTable(storage) = &dbg!(&config).storage else {
+                panic!("expected bigtable storage");
+            };
+            let stream = storage.cogs.as_ref().expect("change stream");
+            assert_eq!(stream.shared_resource_id, "bigtable_objectstore");
+            assert_eq!(stream.sample_rate, 0.5);
+
+            let CostTrackerConfig::Kafka(kafka) =
+                config.storage_cogs.as_ref().expect("kafka transport");
+            assert_eq!(kafka.topic, "my-topic");
+            assert_eq!(kafka.bootstrap_servers, ["kafka:9092"]);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_backend_stream_defaults_to_reporting_everything_and_no_transport() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "gcs");
+            jail.set_env("OS__STORAGE__BUCKET", "my-bucket");
+            jail.set_env("OS__STORAGE__COGS__SHARED_RESOURCE_ID", "gcs_objectstore");
+
+            let config = Config::load(None).unwrap();
+
+            let StorageConfig::Gcs(storage) = &dbg!(&config).storage else {
+                panic!("expected gcs storage");
+            };
+            let stream = storage.cogs.as_ref().expect("change stream");
+            assert_eq!(stream.sample_rate, 1.0, "reports everything by default");
+            assert!(
+                config.storage_cogs.is_none(),
+                "no transport is configured by default"
+            );
 
             Ok(())
         });

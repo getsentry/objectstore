@@ -62,8 +62,13 @@ impl Services {
         #[cfg(target_os = "linux")]
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
-        let backend =
-            backend::from_config(config.storage.clone(), &ChangeStreamFactory::default()).await?;
+        // Absent config means no transport, and therefore no reporting.
+        let streams = config
+            .storage_cogs
+            .as_ref()
+            .map(ChangeStreamFactory::new)
+            .unwrap_or_default();
+        let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
