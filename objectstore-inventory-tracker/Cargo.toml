@@ -22,6 +22,7 @@ blake3 = { workspace = true }
 # Allow a range of possible `rdkafka` versions so library users can pin whichever they use
 rdkafka = { version = ">=0.29.0, <0.40.0", features = [
     "cmake-build",
+    "libz-static", # for distroless
     "ssl",
     "tracing",
 ], optional = true }

@@ -32,7 +32,7 @@ num_cpus = { workspace = true }
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
 objectstore-options = { workspace = true }
-objectstore-service = { workspace = true }
+objectstore-service = { workspace = true, features = ["storage-cogs"] }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
 pin-project-lite = { workspace = true }
