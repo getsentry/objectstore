@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "storage-cogs")]
 use objectstore_inventory_tracker::SharedProducer;
+#[cfg(all(test, feature = "storage-cogs"))]
+use objectstore_inventory_tracker::test_utils;
 #[cfg(feature = "storage-cogs")]
 use serde::{Deserialize, Serialize};
 
@@ -102,5 +104,75 @@ fn build_kafka_producer(
             );
             None
         }
+    }
+}
+
+/// A [`ChangeStreamFactory`] that reports into the returned producer.
+#[cfg(all(test, feature = "storage-cogs"))]
+pub(crate) fn dummy_factory() -> (ChangeStreamFactory, test_utils::DummyProducer) {
+    use objectstore_inventory_tracker::Producer as _;
+
+    let producer = test_utils::DummyProducer::default();
+    let factory = ChangeStreamFactory {
+        producer: Some(producer.clone().shared()),
+    };
+
+    (factory, producer)
+}
+
+#[cfg(all(test, feature = "storage-cogs"))]
+mod tests {
+    use super::*;
+
+    fn config() -> CostTrackerStreamConfig {
+        CostTrackerStreamConfig {
+            shared_resource_id: "bigtable_objectstore".into(),
+            sample_rate: 1.0,
+        }
+    }
+
+    fn reports(stream: &Arc<dyn ChangeStream>) -> bool {
+        !format!("{stream:?}").contains("NoopStream")
+    }
+
+    #[test]
+    fn a_backend_without_a_change_stream_config_reports_nothing() {
+        let (factory, _producer) = dummy_factory();
+
+        assert!(!reports(&factory.build(None)));
+    }
+
+    #[test]
+    fn a_configured_backend_without_a_transport_reports_nothing() {
+        let factory = ChangeStreamFactory::default();
+
+        assert!(!reports(&factory.build(Some(&config()))));
+    }
+
+    #[test]
+    fn a_configured_backend_reports_through_the_transport() {
+        let (factory, producer) = dummy_factory();
+        let stream = factory.build(Some(&config()));
+
+        assert!(reports(&stream));
+
+        stream.delete(&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap());
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].shared_resource_id, "bigtable_objectstore");
+    }
+
+    #[test]
+    fn an_unusable_transport_disables_reporting_instead_of_failing() {
+        let factory = ChangeStreamFactory::new(&CostTrackerConfig::Kafka(
+            objectstore_inventory_tracker::kafka::KafkaConfig {
+                topic: "shared-resources-inventory".into(),
+                bootstrap_servers: vec!["127.0.0.1:9092".into()],
+                override_params: [("not.a.real.property".to_owned(), "1".to_owned())].into(),
+            },
+        ));
+
+        assert!(!reports(&factory.build(Some(&config()))));
     }
 }
