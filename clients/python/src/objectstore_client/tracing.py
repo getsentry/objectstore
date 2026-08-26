@@ -98,7 +98,9 @@ class _TracedPayload:
         self._ensure_span()
         chunk = self._stream.read(size)
         self._transferred += len(chunk)
-        if not chunk:
+        # `size < 0` always reaches EOF in one call; `size == 0` returns b""
+        # without reaching EOF, so only an empty chunk for `size > 0` counts.
+        if size < 0 or (chunk == b"" and size > 0):
             self._finish()
         return chunk
 
