@@ -256,6 +256,24 @@ attachments = Usecase("attachments")
 
 See the docstrings on `Client`, `Usecase`, and `Session` for full parameter documentation.
 
+### Tracing
+
+When the Sentry SDK is initialized, every method that talks to Objectstore
+automatically emits a span, with no setup required on your side. If you also
+want a span for the underlying HTTP request, Sentry's `StdlibIntegration`
+covers that, it's enabled by default:
+
+```python
+import sentry_sdk
+
+sentry_sdk.init(
+    dsn="...",
+    traces_sample_rate=1.0,
+    # Optional: controls which hosts get `sentry-trace`/`baggage` headers.
+    # trace_propagation_targets=["http://objectstore"],
+)
+```
+
 ## Development
 
 ### Environment Setup

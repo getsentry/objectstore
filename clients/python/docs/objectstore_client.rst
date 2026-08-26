@@ -57,10 +57,26 @@ objectstore\_client.multipart module
    :show-inheritance:
    :undoc-members:
 
+objectstore\_client.presign module
+----------------------------------
+
+.. automodule:: objectstore_client.presign
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 objectstore\_client.scope module
 --------------------------------
 
 .. automodule:: objectstore_client.scope
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+objectstore\_client.tracing module
+----------------------------------
+
+.. automodule:: objectstore_client.tracing
    :members:
    :show-inheritance:
    :undoc-members:
