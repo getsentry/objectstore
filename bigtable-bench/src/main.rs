@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         instance_name: args.instance.clone(),
         table_name: args.table.clone(),
         connections: Some(args.pool),
+        cogs: None,
     })
     .await
     .context("failed to connect to Bigtable")?;

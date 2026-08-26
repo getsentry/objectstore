@@ -47,6 +47,7 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
+use crate::change_stream::CostTrackerStreamConfig;
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
@@ -124,6 +125,19 @@ pub struct BigTableConfig {
     ///
     /// - `OS__STORAGE__CONNECTIONS=16` (optional)
     pub connections: Option<usize>,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=bigtable_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Connection timeout used for the initial connection to Bigtable.
@@ -701,6 +715,7 @@ impl BigTableBackend {
             instance_name,
             table_name,
             connections,
+            cogs: _,
         } = config;
 
         let bigtable = if let Some(ref endpoint) = endpoint {
@@ -1318,6 +1333,7 @@ mod tests {
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
+            cogs: None,
         })
         .await
     }

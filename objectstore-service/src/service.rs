@@ -436,6 +436,7 @@ mod tests {
         let config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
+            cogs: None,
         };
 
         let backend = GcsBackend::new(config).await.unwrap();
@@ -465,10 +466,12 @@ mod tests {
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
+            cogs: None,
         };
         let gcs_config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
+            cogs: None,
         };
 
         let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
