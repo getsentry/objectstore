@@ -30,6 +30,29 @@
 //!   type: filesystem
 //!   path: /data
 //! ```
+//!
+//! # Variable References
+//!
+//! Any configuration value may be written as a reference, which is resolved after all
+//! sources have been merged. `${file:PATH}` is replaced by that file's contents and
+//! `${VAR_NAME}` by that environment variable:
+//!
+//! ```yaml
+//! storage_cogs:
+//!   type: kafka
+//!   override_params:
+//!     sasl.password: ${file:/var/secrets/kafka-password}
+//! ```
+//!
+//! A reference must be the entire value: `${A}` works, `prefix-${A}` does not. Referencing
+//! a file that cannot be read, or an environment variable that is not set, is an error at
+//! startup.
+//!
+//! ## Relationship to `OS__` environment variables
+//!
+//! These are different mechanisms and neither replaces the other. They can even be used
+//! together: `OS__SENTRY__DSN=${SENTRY_DSN}` will set the `sentry.dsn` YAML key to the
+//! value of the `SENTRY_DSN` environment variable.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -685,20 +708,44 @@ impl Config {
     /// 2. YAML configuration file (if provided in `args`)
     /// 3. Environment variables (prefixed with `OS__`)
     ///
+    /// Any value in the merged configuration may then be written as `${file:PATH}` or
+    /// `${VAR_NAME}` to have it replaced by that file's contents or that environment
+    /// variable — see [variable references](self#variable-references).
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The YAML configuration file cannot be read or parsed
     /// - Environment variables contain invalid values
     /// - Required fields are missing or invalid
+    /// - A `${file:PATH}` reference names a file that cannot be read, or a `${VAR_NAME}`
+    ///   reference names an environment variable that is not set
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut figment = figment::Figment::from(Serialized::defaults(Config::default()));
         if let Some(path) = path {
             figment = figment.merge(Yaml::file(path));
         }
-        let config = figment
+
+        // Merge first, then resolve variables against the merged value, so a reference is
+        // resolved wherever it came from and whichever layer won.
+        let merged: figment::value::Value = figment
             .merge(Env::prefixed(ENV_PREFIX).split("__"))
             .extract()?;
+
+        let base_path = path.and_then(Path::parent).unwrap_or(Path::new(""));
+
+        // The file source must come first: `${file:x}` also matches the environment
+        // source's `${` prefix, which would otherwise look up a variable named `file:x`.
+        let mut source = (
+            serde_vars::FileSource::new()
+                .with_variable_prefix("${file:")
+                .with_variable_suffix("}")
+                .with_base_path(base_path),
+            serde_vars::EnvSource::default()
+                .with_variable_prefix("${")
+                .with_variable_suffix("}"),
+        );
+        let config = serde_vars::deserialize(&merged, &mut source)?;
 
         Ok(config)
     }
@@ -947,6 +994,102 @@ mod tests {
             assert!(
                 config.storage_cogs.is_none(),
                 "no transport is configured by default"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn serde_var_yaml_references() {
+        let secrets = tempfile::tempdir().unwrap();
+        let absolute_secret = secrets.path().join("kafka-password");
+        std::fs::write(&absolute_secret, "hunter2").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("relative-password"), "hunter3").unwrap();
+
+        let config_path = dir.path().join("config.yml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+            storage_cogs:
+                type: kafka
+                override_params:
+                    sasl.mechanism: SCRAM-SHA-256
+                    not.a.reference: prod-${{NOT_A_VAR
+                    from.env: ${{KAFKA_SASL_PASSWORD}}
+                    from.relative.file: ${{file:relative-password}}
+                    from.absolute.file: ${{file:{}}}
+            "#,
+                absolute_secret.display()
+            ),
+        )
+        .unwrap();
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("KAFKA_SASL_PASSWORD", "hunter1");
+
+            let config = Config::load(Some(&config_path)).unwrap();
+
+            let CostTrackerConfig::Kafka(sink) =
+                config.storage_cogs.as_ref().expect("kafka transport");
+            assert_eq!(sink.override_params["from.env"], "hunter1");
+            assert_eq!(sink.override_params["from.relative.file"], "hunter3");
+            assert_eq!(
+                sink.override_params["from.absolute.file"], "hunter2",
+                "an absolute path ignores the config directory"
+            );
+            assert_eq!(sink.override_params["sasl.mechanism"], "SCRAM-SHA-256");
+            assert_eq!(
+                sink.override_params["not.a.reference"], "prod-${NOT_A_VAR",
+                "a value that is not a reference is left alone"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn serde_vars_yaml_reference_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, reference) in [
+            ("missing-file.yml", "${file:nope}"),
+            ("unset-var.yml", "${FAKE_VAR}"),
+        ] {
+            let config_path = dir.path().join(name);
+            std::fs::write(
+                &config_path,
+                format!(
+                    r#"
+                storage_cogs:
+                    type: kafka
+                    override_params:
+                        sasl.password: {reference}
+                "#
+                ),
+            )
+            .unwrap();
+
+            figment::Jail::expect_with(|_jail| {
+                assert!(Config::load(Some(&config_path)).is_err(), "{reference}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn serde_vars_env_reference() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SENTRY_DSN", "https://public@example.invalid/1");
+            jail.set_env("OS__SENTRY__DSN", "${SENTRY_DSN}");
+
+            let config = Config::load(None).unwrap();
+
+            assert_eq!(
+                config.sentry.dsn.unwrap().expose_secret().as_str(),
+                "https://public@example.invalid/1"
             );
 
             Ok(())
