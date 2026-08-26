@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fmt, io};
 
@@ -21,7 +22,9 @@ use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
 };
-use crate::change_stream::CostTrackerStreamConfig;
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+};
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
@@ -457,16 +460,19 @@ pub struct GcsBackend {
     endpoint: Url,
     bucket: String,
     token_provider: Option<PrefetchingTokenProvider>,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl GcsBackend {
     /// Creates an authenticated GCS JSON API backend bound to the bucket in `config`.
-    pub async fn new(config: GcsConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: GcsConfig, streams: &ChangeStreamFactory) -> anyhow::Result<Self> {
         let GcsConfig {
             endpoint,
             bucket,
-            cogs: _,
+            cogs,
         } = config;
+        let change_stream = streams.build(cogs.as_ref());
 
         let token_provider = if endpoint.is_none() {
             Some(PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?)
@@ -481,6 +487,7 @@ impl GcsBackend {
             endpoint: endpoint_str.parse().context("invalid GCS endpoint URL")?,
             bucket,
             token_provider,
+            change_stream,
         })
     }
 
@@ -864,6 +871,10 @@ impl Backend for GcsBackend {
         })
         .await
     }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1226,13 +1237,16 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<GcsBackend> {
-        GcsBackend::new(GcsConfig {
+    fn test_config() -> GcsConfig {
+        GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
             cogs: None,
-        })
-        .await
+        }
+    }
+
+    async fn create_test_backend() -> Result<GcsBackend> {
+        GcsBackend::new(test_config(), &ChangeStreamFactory::default()).await
     }
 
     fn make_id() -> ObjectId {

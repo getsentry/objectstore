@@ -32,7 +32,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm
+          # libcurl4-openssl-dev: librdkafka is built from source and links against libcurl,
+          # whose headers are not on the runner by default.
+          sudo apt-get install -y llvm libcurl4-openssl-dev
           curl -sL https://sentry.io/get-cli/ | bash
 
       - name: Install Rust Toolchain

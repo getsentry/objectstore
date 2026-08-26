@@ -380,6 +380,7 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
+    use crate::change_stream::ChangeStreamFactory;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
 
@@ -439,7 +440,9 @@ mod tests {
             cogs: None,
         };
 
-        let backend = GcsBackend::new(config).await.unwrap();
+        let backend = GcsBackend::new(config, &ChangeStreamFactory::default())
+            .await
+            .unwrap();
         let service = StorageService::new(Box::new(backend));
 
         let key = service
@@ -474,13 +477,23 @@ mod tests {
             cogs: None,
         };
 
-        let high_volume = Box::new(BigTableBackend::new(bigtable_config).await.unwrap());
-        let long_term = Box::new(GcsBackend::new(gcs_config.clone()).await.unwrap());
+        let high_volume = Box::new(
+            BigTableBackend::new(bigtable_config, &ChangeStreamFactory::default())
+                .await
+                .unwrap(),
+        );
+        let long_term = Box::new(
+            GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
+                .await
+                .unwrap(),
+        );
         let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
         let service = StorageService::new(Box::new(backend));
 
         // A separate GCS backend to directly inspect the long-term storage.
-        let gcs_backend = GcsBackend::new(gcs_config.clone()).await.unwrap();
+        let gcs_backend = GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
+            .await
+            .unwrap();
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
         // the real payload goes to GCS, and a redirect tombstone is written to BigTable.

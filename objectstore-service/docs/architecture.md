@@ -3,6 +3,13 @@ durable access to blobs through a dual-backend architecture that balances cost,
 latency, and reliability. The service is designed as a library crate consumed by
 the `objectstore-server`.
 
+# Cargo features
+
+- `storage_cogs`: support for publishing per-object change streams to Kafka for
+  storage cost attribution. Off by default; it adds a build step to compile
+  `librdkafka` and requires toolchain components we don't otherwise need. Local
+  and sandbox builds don't have a Kafka topic/consumer anyway.
+
 # Object Identification
 
 Every object is uniquely identified by an [`ObjectId`](id::ObjectId), a logical

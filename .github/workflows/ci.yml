@@ -154,6 +154,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # librdkafka is built from source and links against libcurl, whose headers are not
+      # on the runner by default. Needed by anything that builds the `kafka` feature.
+      - name: Install libcurl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install Rust Toolchain

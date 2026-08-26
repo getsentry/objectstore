@@ -21,6 +21,7 @@ use yansi::Paint;
 use objectstore_service::backend::bigtable::BigTableBackend;
 use objectstore_service::backend::bigtable::BigTableConfig;
 use objectstore_service::backend::common::Backend;
+use objectstore_service::change_stream::ChangeStreamFactory;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
@@ -92,14 +93,17 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    let backend = BigTableBackend::new(BigTableConfig {
-        endpoint: args.addr.clone(),
-        project_id: args.project.clone(),
-        instance_name: args.instance.clone(),
-        table_name: args.table.clone(),
-        connections: Some(args.pool),
-        cogs: None,
-    })
+    let backend = BigTableBackend::new(
+        BigTableConfig {
+            endpoint: args.addr.clone(),
+            project_id: args.project.clone(),
+            instance_name: args.instance.clone(),
+            table_name: args.table.clone(),
+            connections: Some(args.pool),
+            cogs: None,
+        },
+        &ChangeStreamFactory::default(),
+    )
     .await
     .context("failed to connect to Bigtable")?;
 
