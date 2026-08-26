@@ -61,11 +61,13 @@ class _TracedPayload:
     the first read to EOF/close, since the automatic ``http.client`` span
     ends at response headers.
 
-    The span is created lazily on first ``read()``/iteration, so a caller that
-    never reads the stream produces no span. Finishing is idempotent and also
-    guarded by a ``weakref.finalize`` fallback, so an abandoned stream still
-    closes its span. Any attribute not defined here (``closed``, ``tell``,
-    ``seekable``, etc.) delegates to the wrapped stream.
+    The span is created lazily on first ``read()``, so a caller that never
+    reads the stream produces no span — this includes a caller that only
+    iterates the stream, since iteration delegates straight to the wrapped
+    stream. Finishing is idempotent and also guarded by a
+    ``weakref.finalize`` fallback, so an abandoned stream still closes its
+    span. Any attribute not defined here (``closed``, ``tell``, ``seekable``,
+    etc.) delegates to the wrapped stream too.
     """
 
     def __init__(self, stream: IO[bytes], parent: Span) -> None:
@@ -119,8 +121,4 @@ class _TracedPayload:
         return getattr(self._stream, attr)
 
     def __iter__(self) -> Iterator[bytes]:
-        self._ensure_span()
-        for chunk in self._stream:
-            self._transferred += len(chunk)
-            yield chunk
-        self._finish()
+        return iter(self._stream)
