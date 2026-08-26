@@ -164,10 +164,9 @@ class Client:
         if connection_kwargs:
             connection_kwargs_to_use = {**connection_kwargs_to_use, **connection_kwargs}
 
-        connection_kwargs_to_use["headers"] = {
-            "User-Agent": USER_AGENT,
-            **connection_kwargs_to_use.get("headers", {}),
-        }
+        headers = urllib3.HTTPHeaderDict({"User-Agent": USER_AGENT})
+        headers.update(connection_kwargs_to_use.get("headers") or {})
+        connection_kwargs_to_use["headers"] = headers
 
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs_to_use
