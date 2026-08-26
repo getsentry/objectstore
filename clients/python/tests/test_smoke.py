@@ -1,4 +1,5 @@
 from objectstore_client import Client, Usecase
+from objectstore_client.client import USER_AGENT
 
 
 def test_imports() -> None:
@@ -56,3 +57,29 @@ def test_object_url_empty_scope() -> None:
         session.object_url("foo/bar")
         == "http://127.0.0.1:8888/v1/objects/testing/_/foo/bar"
     )
+
+
+def test_default_user_agent() -> None:
+    client = Client("http://127.0.0.1:8888/")
+
+    assert client._pool.headers["User-Agent"] == USER_AGENT
+
+
+def test_user_agent_can_be_overridden() -> None:
+    client = Client(
+        "http://127.0.0.1:8888/",
+        connection_kwargs={"headers": {"User-Agent": "custom-agent/1.0"}},
+    )
+
+    assert client._pool.headers["User-Agent"] == "custom-agent/1.0"
+
+
+def test_user_agent_override_is_case_insensitive() -> None:
+    client = Client(
+        "http://127.0.0.1:8888/",
+        connection_kwargs={"headers": {"user-agent": "custom-agent/1.0"}},
+    )
+
+    headers = client._pool.headers
+    assert headers["User-Agent"] == "custom-agent/1.0"
+    assert len(headers) == 1

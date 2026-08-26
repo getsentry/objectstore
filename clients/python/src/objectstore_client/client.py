@@ -5,6 +5,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
@@ -37,6 +38,9 @@ from objectstore_client.scope import Scope
 
 # Query parameter carrying a JWT, mirroring the `x-os-auth` header.
 PARAM_AUTH = "os_auth"
+
+# Identifies this library to the server, mirroring the Rust client's user agent.
+USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
 
 
 class GetResponse(NamedTuple):
@@ -122,7 +126,9 @@ class Client:
 
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
-            timeouts).
+            timeouts). By default, requests carry a ``User-Agent`` header of
+            ``objectstore-client/{version}``; pass a ``headers`` mapping with a
+            ``User-Agent`` key here to override it.
         token: A ``SecretKey`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
             as-is for every request. Use a ``SecretKey`` for internal
@@ -157,6 +163,10 @@ class Client:
 
         if connection_kwargs:
             connection_kwargs_to_use = {**connection_kwargs_to_use, **connection_kwargs}
+
+        headers = urllib3.HTTPHeaderDict({"User-Agent": USER_AGENT})
+        headers.update(connection_kwargs_to_use.get("headers") or {})
+        connection_kwargs_to_use["headers"] = headers
 
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs_to_use
