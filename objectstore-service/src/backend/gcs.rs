@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fmt, io};
 
@@ -20,6 +21,9 @@ use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
+};
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -73,6 +77,19 @@ pub struct GcsConfig {
     ///
     /// - `OS__STORAGE__BUCKET=my-gcs-bucket`
     pub bucket: String,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=gcs_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Default endpoint used to access the GCS JSON API.
@@ -443,12 +460,19 @@ pub struct GcsBackend {
     endpoint: Url,
     bucket: String,
     token_provider: Option<PrefetchingTokenProvider>,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl GcsBackend {
     /// Creates an authenticated GCS JSON API backend bound to the bucket in `config`.
-    pub async fn new(config: GcsConfig) -> anyhow::Result<Self> {
-        let GcsConfig { endpoint, bucket } = config;
+    pub async fn new(config: GcsConfig, streams: &ChangeStreamFactory) -> anyhow::Result<Self> {
+        let GcsConfig {
+            endpoint,
+            bucket,
+            cogs,
+        } = config;
+        let change_stream = streams.build(cogs.as_ref());
 
         let token_provider = if endpoint.is_none() {
             Some(PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?)
@@ -463,6 +487,7 @@ impl GcsBackend {
             endpoint: endpoint_str.parse().context("invalid GCS endpoint URL")?,
             bucket,
             token_provider,
+            change_stream,
         })
     }
 
@@ -846,6 +871,10 @@ impl Backend for GcsBackend {
         })
         .await
     }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1208,12 +1237,16 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<GcsBackend> {
-        GcsBackend::new(GcsConfig {
+    fn test_config() -> GcsConfig {
+        GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
-        })
-        .await
+            cogs: None,
+        }
+    }
+
+    async fn create_test_backend() -> Result<GcsBackend> {
+        GcsBackend::new(test_config(), &ChangeStreamFactory::default()).await
     }
 
     fn make_id() -> ObjectId {

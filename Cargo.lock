@@ -2946,6 +2946,7 @@ dependencies = [
  "gcp_auth",
  "humantime",
  "humantime-serde",
+ "objectstore-inventory-tracker",
  "objectstore-log",
  "objectstore-metrics",
  "objectstore-types",

@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::Stream;
+use objectstore_service::change_stream::ChangeStreamFactory;
 use objectstore_service::concurrency::ConcurrencyLimiter;
 use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
@@ -61,7 +62,8 @@ impl Services {
         #[cfg(target_os = "linux")]
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
-        let backend = backend::from_config(config.storage.clone()).await?;
+        let backend =
+            backend::from_config(config.storage.clone(), &ChangeStreamFactory::default()).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)

@@ -47,6 +47,9 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+};
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
@@ -124,6 +127,19 @@ pub struct BigTableConfig {
     ///
     /// - `OS__STORAGE__CONNECTIONS=16` (optional)
     pub connections: Option<usize>,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=bigtable_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Connection timeout used for the initial connection to Bigtable.
@@ -170,6 +186,8 @@ pub struct BigTableBackend {
     instance_path: String,
     table_path: String,
     table_name: String,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl fmt::Debug for BigTableBackend {
@@ -694,14 +712,19 @@ impl BigTableBackend {
     ///
     /// Pass an `endpoint` in the config to connect to a local emulator; omit it to use real GCP
     /// credentials. `connections` controls the gRPC connection pool size (defaults to 1).
-    pub async fn new(config: BigTableConfig) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: BigTableConfig,
+        streams: &ChangeStreamFactory,
+    ) -> anyhow::Result<Self> {
         let BigTableConfig {
             endpoint,
             project_id,
             instance_name,
             table_name,
             connections,
+            cogs,
         } = config;
+        let change_stream = streams.build(cogs.as_ref());
 
         let bigtable = if let Some(ref endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
@@ -734,6 +757,7 @@ impl BigTableBackend {
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
             table_path: client.get_full_table_name(&table_name),
             table_name,
+            change_stream,
         })
     }
 
@@ -951,6 +975,10 @@ impl Backend for BigTableBackend {
         self.mutate(path, [delete_row_mutation()], "delete").await?;
 
         Ok(())
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -1311,15 +1339,19 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<BigTableBackend> {
-        BigTableBackend::new(BigTableConfig {
+    fn test_config() -> BigTableConfig {
+        BigTableConfig {
             endpoint: Some("localhost:8086".into()),
             project_id: "testing".into(),
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
-        })
-        .await
+            cogs: None,
+        }
+    }
+
+    async fn create_test_backend() -> Result<BigTableBackend> {
+        BigTableBackend::new(test_config(), &ChangeStreamFactory::default()).await
     }
 
     fn make_id() -> ObjectId {
