@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import weakref
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import IO, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import sentry_sdk
 from sentry_sdk.tracing import Span
@@ -48,83 +47,3 @@ def storage_span(
             if data_value is not None:
                 span.set_data(f"objectstore.{data_key}", data_value)
         yield span
-
-
-def _finish_span(span: Span) -> None:
-    if span.timestamp is None:
-        span.finish()
-
-
-class _TracedPayload:
-    """
-    Wraps a ``get()`` response stream in a child span covering the time from
-    the first read to EOF/close, since the automatic ``http.client`` span
-    ends at response headers.
-
-    The span is created lazily on first ``read()`` or iteration, so a caller
-    that never consumes the stream produces no span. Finishing is idempotent
-    and also guarded by a ``weakref.finalize`` fallback, so an abandoned
-    stream still closes its span. Any attribute not defined here (``closed``,
-    ``tell``, ``seekable``, etc.) delegates to the wrapped stream.
-    """
-
-    def __init__(self, stream: IO[bytes], parent: Span) -> None:
-        self._stream = stream
-        self._parent = parent
-        self._span: Span | None = None
-        self._finalizer: weakref.finalize[[Span], _TracedPayload] | None = None
-        self._transferred = 0
-
-    def _ensure_span(self) -> Span:
-        if self._span is None:
-            self._span = self._parent.start_child(
-                op="objectstore.get.stream", name="objectstore.get.stream"
-            )
-            self._finalizer = weakref.finalize(self, _finish_span, self._span)
-        return self._span
-
-    def _finish(self) -> None:
-        if self._finalizer is None:
-            return
-        detached = self._finalizer.detach()
-        if detached is None:
-            return
-        span = self._span
-        assert span is not None
-        span.set_data("objectstore.transferred_bytes", self._transferred)
-        span.finish()
-
-    def read(self, size: int = -1) -> bytes:
-        self._ensure_span()
-        chunk = self._stream.read(size)
-        self._transferred += len(chunk)
-        # `size < 0` always reaches EOF in one call; `size == 0` returns b""
-        # without reaching EOF, so only an empty chunk for `size > 0` counts.
-        if size < 0 or (chunk == b"" and size > 0):
-            self._finish()
-        return chunk
-
-    def close(self) -> None:
-        self._finish()
-        self._stream.close()
-
-    def readable(self) -> bool:
-        return True
-
-    def __enter__(self) -> _TracedPayload:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-    def __getattr__(self, attr: str) -> Any:
-        return getattr(self._stream, attr)
-
-    def __iter__(self) -> Iterator[bytes]:
-        self._ensure_span()
-        try:
-            for chunk in self._stream:
-                self._transferred += len(chunk)
-                yield chunk
-        finally:
-            self._finish()

@@ -34,7 +34,7 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
-from objectstore_client.tracing import _TracedPayload, storage_span
+from objectstore_client.tracing import storage_span
 
 # Query parameter carrying a JWT, mirroring the `x-os-auth` header.
 PARAM_AUTH = "os_auth"
@@ -517,8 +517,7 @@ class Session:
                 decompressed = True
 
             span.set_data("objectstore.decompressed", decompressed)
-
-        return GetResponse(metadata, cast(IO[bytes], _TracedPayload(stream, span)))
+            return GetResponse(metadata, stream)
 
     def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
         """
