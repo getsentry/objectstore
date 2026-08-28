@@ -42,7 +42,7 @@ async fn dispatch_objects_post(
 ) -> Response {
     match target {
         Some(ResumableTarget::NewSession) => resumable::create_session.call(request, state).await,
-        Some(ResumableTarget::ExistingSession(_)) => {
+        Some(ResumableTarget::ExistingSession) => {
             ApiError::Client("`session` requires an object key; use PUT on the object path".into())
                 .into_response()
         }
@@ -53,14 +53,13 @@ async fn dispatch_objects_post(
 async fn dispatch_object_put(
     State(state): State<ServiceState>,
     target: Option<ResumableTarget>,
-    mut request: Request,
+    request: Request,
 ) -> Response {
     match target {
         Some(ResumableTarget::NewSession) => {
             resumable::create_session_for_key.call(request, state).await
         }
-        Some(ResumableTarget::ExistingSession(session)) => {
-            request.extensions_mut().insert(session);
+        Some(ResumableTarget::ExistingSession) => {
             resumable::continue_session.call(request, state).await
         }
         None => insert_object.call(request, state).await,
@@ -70,11 +69,10 @@ async fn dispatch_object_put(
 async fn dispatch_object_delete(
     State(state): State<ServiceState>,
     target: Option<ResumableTarget>,
-    mut request: Request,
+    request: Request,
 ) -> Response {
     match target {
-        Some(ResumableTarget::ExistingSession(session)) => {
-            request.extensions_mut().insert(session);
+        Some(ResumableTarget::ExistingSession) => {
             resumable::cancel_session.call(request, state).await
         }
         Some(ResumableTarget::NewSession) => {
@@ -274,7 +272,10 @@ async fn insert_object(
     Ok((StatusCode::OK, response).into_response())
 }
 
-async fn delete_object(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
+async fn delete_object(
+    service: AuthAwareService,
+    Xt(id): Xt<ObjectId>,
+) -> ApiResult<impl IntoResponse> {
     service.delete_object(id).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -23,7 +23,7 @@
 //!
 //! [TUS]: https://tus.io/protocols/resumable-upload
 
-use axum::extract::{Extension, OptionalFromRequestParts, Query, State};
+use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query, State};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
@@ -63,7 +63,7 @@ struct ResumableQuery {
     /// Present on a session creation request.
     upload_type: Option<UploadType>,
     /// Present on a chunk write, offset query, or cancellation.
-    session: Option<SessionToken>,
+    session: Option<String>,
 }
 
 /// Which resumable session a request on an object route targets.
@@ -72,7 +72,7 @@ pub(super) enum ResumableTarget {
     /// A new session to create for the object addressed by the request.
     NewSession,
     /// An existing session to continue or cancel.
-    ExistingSession(SessionToken),
+    ExistingSession,
 }
 
 impl ResumableQuery {
@@ -88,9 +88,31 @@ impl ResumableQuery {
                 "`upload_type` and `session` are mutually exclusive".into(),
             )),
             (Some(UploadType::Resumable), None) => Ok(Some(ResumableTarget::NewSession)),
-            (None, Some(session)) => Ok(Some(ResumableTarget::ExistingSession(session))),
+            (None, Some(_)) => Ok(Some(ResumableTarget::ExistingSession)),
             (None, None) => Ok(None),
         }
+    }
+}
+
+/// A validated session token extracted by a continuation or cancellation handler.
+#[derive(Debug)]
+pub(super) struct Session(SessionToken);
+
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    session: SessionToken,
+}
+
+impl<S> FromRequestParts<S> for Session
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
+        let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
+            .map_err(|error| ApiError::Client(error.to_string()))?;
+        Ok(Session(session))
     }
 }
 
@@ -254,7 +276,7 @@ async fn create_session_for_id(
 pub(super) async fn continue_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
-    Extension(session): Extension<SessionToken>,
+    Session(session): Session,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
@@ -284,7 +306,7 @@ pub(super) async fn continue_session(
 pub(super) async fn cancel_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
-    Extension(session): Extension<SessionToken>,
+    Session(session): Session,
 ) -> ApiResult<Response> {
     service.cancel_upload(id, session).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -328,7 +350,7 @@ mod tests {
     fn query(upload_type: Option<UploadType>, session: Option<&str>) -> ResumableQuery {
         ResumableQuery {
             upload_type,
-            session: session.map(|s| SessionToken::new(s.into()).unwrap()),
+            session: session.map(str::to_owned),
         }
     }
 
@@ -340,7 +362,7 @@ mod tests {
         ));
         assert!(matches!(
             query(None, Some("token")).classify(),
-            Ok(Some(ResumableTarget::ExistingSession(_)))
+            Ok(Some(ResumableTarget::ExistingSession))
         ));
         assert!(matches!(query(None, None).classify(), Ok(None)));
     }
