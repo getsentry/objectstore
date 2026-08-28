@@ -74,29 +74,12 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         Err(Error::NotImplemented)
     }
 
-    /// Opens a resumable upload session for the object at `id`.
+    /// Creates a resumable upload session for the object at `id`.
     ///
-    /// `total_length` is the complete size of the object in bytes, declared by the client
-    /// when the session is created. It is a parameter of its own rather than part of
-    /// `metadata`, because [`Metadata::size`] is materialized by the server and never
-    /// trusted from a client. The backend needs it to recognize the final chunk, and a
-    /// tiering backend needs it to decide where the object would be placed.
+    /// Object metadata and its total length are declared upfront and cannot be mutated
+    /// during the upload.
     ///
-    /// `metadata` is fixed for the lifetime of the session and does not change afterwards.
-    /// Compression is recorded rather than applied: the payload must already be compressed,
-    /// since its total length has to be known at this point.
-    ///
-    /// Returns `Ok(None)` when this backend cannot store the described object resumably.
-    /// Declining is a routine outcome, not an error — the server denies the session and the
-    /// client falls back to a regular upload. The default implementation declines, so a
-    /// backend opts in simply by overriding this method. There is deliberately no separate
-    /// capability trait and no probe: support can depend on the size, the metadata and the
-    /// routing result at once, all of which are only known here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only when the backend supports resumable uploads but failed to open
-    /// the session.
+    /// Returns `Ok(None)` when the backend refuses to store the described object resumably.
     async fn create_upload_session(
         &self,
         id: &ObjectId,
@@ -109,29 +92,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// The application protocol requires the caller to declare `content_length` before the body
-    /// is consumed, including over HTTP/2. Backends may rely on it without buffering the stream.
-    ///
-    /// `offset` must equal the offset the backend currently holds. Backends persist only
-    /// aligned prefixes and discard the remainder, so the offset in the returned
-    /// [`UploadProgress::Incomplete`] is authoritative and may be lower than
-    /// `offset + content_length`.
-    ///
-    /// A session has a single writer. Concurrent chunk writes are not coordinated: one of
-    /// them wins and the others fail with [`Error::UploadOffsetMismatch`].
-    ///
-    /// Once the chunk carrying the last byte is persisted, the backend assembles and commits
-    /// the object and returns [`UploadProgress::Committed`].
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::NotImplemented`] if this backend does not support resumable uploads. The
-    ///   default implementation returns this, which is unreachable through the API because a
-    ///   backend that declines in [`Self::create_upload_session`] never hands out a session.
-    /// - [`Error::UploadOffsetMismatch`] if `offset` is not the offset the backend holds.
-    /// - [`Error::UploadSessionGone`] if the session expired or was canceled.
-    /// - [`Error::InvalidUploadRequest`] if the session is unusable, or the chunk would
-    ///   exceed the length declared at creation.
+    /// `offset` must equal the offset the backend currently holds.
     async fn put_chunk(
         &self,
         id: &ObjectId,
@@ -144,34 +105,13 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         Err(Error::NotImplemented)
     }
 
-    /// Reports how far the session has progressed, committing the object if it is assembled.
-    ///
-    /// This is the recovery path: after any failed chunk the client calls this and continues
-    /// from the returned offset. It is also the only read-shaped operation that mutates state.
-    /// Making an object visible can outlive the request that triggered it, so a session whose
-    /// payload fully landed may still be uncommitted; this operation must finish that work. It
-    /// returns [`UploadProgress::Committed`] only after the object is committed and readable, or
-    /// returns an error if committing fails. It must not return [`UploadProgress::Incomplete`]
-    /// with the session's total length, because the client would have no bytes left to send.
-    /// Callers must therefore treat it as a write.
-    ///
-    /// # Errors
-    ///
-    /// The same conditions as [`Self::put_chunk`], except for the offset mismatch.
+    /// Reports how far the session has progressed.
     async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
-    ///
-    /// Idempotent. Not required for correctness, since sessions expire on their own, but it
-    /// lets a caller release an abandoned upload immediately.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::NotImplemented`] if this backend does not support resumable uploads.
-    /// - [`Error::InvalidUploadRequest`] if the session token is unusable.
     async fn cancel_upload(
         &self,
         id: &ObjectId,

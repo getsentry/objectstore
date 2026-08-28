@@ -47,12 +47,6 @@ fn count(usecase: &str) {
 /// `Arc`s that point to the inner backend:
 /// - `inner: Arc<dyn Backend>`
 /// - `inner_multipart: Option<Arc<dyn MultipartUploadBackend>>` if `inner` supports it
-///
-/// Resumable uploads avoid this problem: their operations live on [`Backend`] itself and express
-/// support by declining in
-/// [`create_upload_session`](Backend::create_upload_session), so this decorator forwards them like
-/// any other method. Forwarding is mandatory — without it the decorator's declining default would
-/// shadow an inner backend that does support resumable uploads.
 #[derive(Debug)]
 pub struct CountingBackend {
     inner: Arc<dyn Backend>,
