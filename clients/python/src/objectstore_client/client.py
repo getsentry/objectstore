@@ -291,7 +291,7 @@ class Session:
                 permissions,
                 expiry_seconds,
             )
-            span.set_data(
+            span.set_attribute(
                 "objectstore.permissions", [str(p) for p in resolved_permissions]
             )
             return token
@@ -468,14 +468,16 @@ class Session:
                 metrics.record_compressed_size(body.tell(), encoding)
 
             # Set after the response, since the key may be server-generated.
-            span.set_data("objectstore.key", res["key"])
-            span.set_data("objectstore.compression", encoding)
+            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.compression", encoding)
             if metrics.uncompressed_size is not None:
-                span.set_data(
+                span.set_attribute(
                     "objectstore.uncompressed_size", metrics.uncompressed_size
                 )
             if metrics.compressed_size is not None:
-                span.set_data("objectstore.compressed_size", metrics.compressed_size)
+                span.set_attribute(
+                    "objectstore.compressed_size", metrics.compressed_size
+                )
             return res["key"]
 
     def get(
@@ -513,15 +515,17 @@ class Session:
                 )
                 if response.status == 404:
                     response.read()  # drain body so urllib3 returns the connection
-                    span.set_data("objectstore.found", False)
+                    span.set_attribute("objectstore.found", False)
                     return None
                 raise_for_status(response)
-                span.set_data("objectstore.found", True)
+                span.set_attribute("objectstore.found", True)
 
             # OR: should I use `response.stream()`?
             stream = cast(IO[bytes], response)
             metadata = Metadata.from_headers(response.headers)
-            span.set_data("objectstore.compression", metadata.compression or "none")
+            span.set_attribute(
+                "objectstore.compression", metadata.compression or "none"
+            )
 
             encoding_accepted = accept_encoding is not None and (
                 "*" in accept_encoding or metadata.compression in accept_encoding
@@ -539,7 +543,7 @@ class Session:
                 stream = dctx.stream_reader(stream, read_across_frames=True)
                 decompressed = True
 
-            span.set_data("objectstore.decompressed", decompressed)
+            span.set_attribute("objectstore.decompressed", decompressed)
             return GetResponse(metadata, stream)
 
     def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
@@ -661,10 +665,10 @@ class Session:
                 preload_content=True,
             )
             if response.status == 404:
-                span.set_data("objectstore.found", False)
+                span.set_attribute("objectstore.found", False)
                 return None
             raise_for_status(response)
-            span.set_data("objectstore.found", True)
+            span.set_attribute("objectstore.found", True)
             return Metadata.from_headers(response.headers)
 
     def delete(self, key: str) -> None:
@@ -756,8 +760,8 @@ class Session:
             raise_for_status(response)
             res = response.json()
             # Set after the response, since the key may be server-generated.
-            span.set_data("objectstore.key", res["key"])
-            span.set_data("objectstore.upload_id", res["upload_id"])
+            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.upload_id", res["upload_id"])
             return MultipartUpload(self, res["key"], res["upload_id"])
 
     def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:

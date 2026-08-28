@@ -335,7 +335,7 @@ dependencies = [
 requires-dist = [
     { name = "filetype", specifier = ">=1.2.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
-    { name = "sentry-sdk", specifier = ">=2.42.1" },
+    { name = "sentry-sdk", specifier = ">=2.66.0" },
     { name = "urllib3", specifier = ">=2.2.2" },
     { name = "zstandard", specifier = ">=0.18.0" },
 ]
@@ -515,14 +515,14 @@ wheels = [
 
 [[package]]
 name = "sentry-sdk"
-version = "2.43.0"
+version = "2.68.1"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 dependencies = [
     { name = "certifi" },
     { name = "urllib3" },
 ]
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_sdk-2.43.0-py2.py3-none-any.whl", hash = "sha256:4aacafcf1756ef066d359ae35030881917160ba7f6fc3ae11e0e58b09edc2d5d" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_sdk-2.68.1-py3-none-any.whl", hash = "sha256:775b78871783a0ffd758276ad01b3bb2b1ebcdad8f9d2f0a7723f76b73c99b65" },
 ]
 
 [[package]]

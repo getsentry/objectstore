@@ -189,7 +189,7 @@ class MultipartUpload:
                     )
 
                 if not data["is_truncated"]:
-                    span.set_data("objectstore.part_count", len(all_parts))
+                    span.set_attribute("objectstore.part_count", len(all_parts))
                     return all_parts
 
                 marker = data.get("next_part_number_marker")

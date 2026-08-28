@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import sentry_sdk
@@ -11,7 +11,10 @@ from objectstore_client.errors import RequestError
 from objectstore_client.multipart import MultipartUpload
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.transport import Transport
-from sentry_sdk.types import Event, Hint
+from sentry_sdk.types import Hint
+
+if TYPE_CHECKING:
+    from sentry_sdk._types import SpanJSON
 
 
 class FakeResponse:
@@ -43,30 +46,35 @@ class _NoOpTransport(Transport):
 
 
 @pytest.fixture
-def captured_transactions() -> Generator[list[Event]]:
-    events: list[Event] = []
+def captured_spans() -> Generator[list[SpanJSON]]:
+    spans: list[SpanJSON] = []
 
-    def capture(event: Event, hint: Hint) -> Event | None:
-        events.append(event)
-        return event
+    def capture(span: SpanJSON, hint: Hint) -> SpanJSON | None:
+        spans.append(span)
+        return span
 
     old_client = sentry_sdk.get_global_scope().client
     sentry_sdk.init(
         dsn="http://public@localhost/1",
         traces_sample_rate=1.0,
-        before_send_transaction=capture,
+        trace_lifecycle="stream",
+        before_send_span=capture,
         transport=_NoOpTransport,
     )
     try:
-        yield events
+        yield spans
     finally:
         sentry_sdk.get_client().close()
         sentry_sdk.get_global_scope().set_client(old_client)
 
 
-def _spans_by_op(event: Event) -> dict[str, Any]:
-    spans = cast(list[dict[str, Any]], event["spans"])
-    return {span["op"]: span for span in spans}
+def _spans_by_op(spans: list[SpanJSON]) -> dict[str, SpanJSON]:
+    spans_by_op: dict[str, SpanJSON] = {}
+    for span in spans:
+        op = span["attributes"].get("sentry.op")
+        if isinstance(op, str):
+            spans_by_op[op] = span
+    return spans_by_op
 
 
 SIMPLE_OPERATIONS = [
@@ -158,7 +166,7 @@ SIMPLE_OPERATIONS = [
 
 @pytest.mark.parametrize("call,response,expected_op,expected_data", SIMPLE_OPERATIONS)
 def test_storage_span_attributes(
-    captured_transactions: list[Event],
+    captured_spans: list[SpanJSON],
     monkeypatch: pytest.MonkeyPatch,
     call: Any,
     response: FakeResponse,
@@ -172,22 +180,21 @@ def test_storage_span_attributes(
 
     monkeypatch.setattr(session._pool, "request", lambda *args, **kwargs: response)
 
-    with sentry_sdk.start_transaction(name="test"):
+    with sentry_sdk.traces.start_span(name="test", parent_span=None):
         call({"session": session, "upload": upload})
 
-    event = captured_transactions[-1]
-    spans = _spans_by_op(event)
+    spans = _spans_by_op(captured_spans)
     span = spans[expected_op]
 
-    assert span["description"] == f"{expected_op} testing"
-    assert span["data"]["objectstore.usecase"] == "testing"
-    assert span["data"]["objectstore.scopes.org"] == 1
+    assert span["name"] == f"{expected_op} testing"
+    assert span["attributes"]["objectstore.usecase"] == "testing"
+    assert span["attributes"]["objectstore.scopes.org"] == 1
     for key, value in expected_data.items():
-        assert span["data"][key] == value
+        assert span["attributes"][key] == value
 
 
 def test_get_missing_object_sets_found_false(
-    captured_transactions: list[Event],
+    captured_spans: list[SpanJSON],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = Client("http://127.0.0.1:8888")
@@ -197,18 +204,17 @@ def test_get_missing_object_sets_found_false(
         session._pool, "request", lambda *args, **kwargs: FakeResponse(404)
     )
 
-    with sentry_sdk.start_transaction(name="test"):
+    with sentry_sdk.traces.start_span(name="test", parent_span=None):
         result = session.get("my-key")
 
     assert result is None
-    event = captured_transactions[-1]
-    span = _spans_by_op(event)["objectstore.get"]
-    assert span["data"]["objectstore.found"] is False
-    assert span.get("tags", {}).get("status") != "internal_error"
+    span = _spans_by_op(captured_spans)["objectstore.get"]
+    assert span["attributes"]["objectstore.found"] is False
+    assert span["status"] != "error"
 
 
 def test_request_error_marks_span_internal_error(
-    captured_transactions: list[Event],
+    captured_spans: list[SpanJSON],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = Client("http://127.0.0.1:8888")
@@ -220,9 +226,11 @@ def test_request_error_marks_span_internal_error(
         lambda *args, **kwargs: FakeResponse(500, data=b"boom"),
     )
 
-    with sentry_sdk.start_transaction(name="test"), pytest.raises(RequestError):
+    with (
+        sentry_sdk.traces.start_span(name="test", parent_span=None),
+        pytest.raises(RequestError),
+    ):
         session.get("my-key")
 
-    event = captured_transactions[-1]
-    span = _spans_by_op(event)["objectstore.get"]
-    assert span["tags"]["status"] == "internal_error"
+    span = _spans_by_op(captured_spans)["objectstore.get"]
+    assert span["status"] == "error"
