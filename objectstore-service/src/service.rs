@@ -865,7 +865,7 @@ mod tests {
     async fn resumable_declines_by_default() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
-        let session = SessionToken::new("session".into()).unwrap();
+        let session = SessionToken::from("session".to_owned());
 
         let denied = service
             .create_upload_session(id.clone(), Metadata::default(), 1024)
@@ -919,9 +919,7 @@ mod tests {
             _metadata: &Metadata,
             total_length: u64,
         ) -> Result<CreateSessionResponse> {
-            Ok(Some(
-                SessionToken::new(format!("session-{total_length}")).unwrap(),
-            ))
+            Ok(Some(SessionToken::from(format!("session-{total_length}"))))
         }
 
         async fn put_chunk(
@@ -990,7 +988,7 @@ mod tests {
     async fn resumable_reports_commit() {
         let service = resumable_service(UploadProgress::Committed);
         let id = ObjectId::new(make_context(), "resumable".into());
-        let session = SessionToken::new("session".into()).unwrap();
+        let session = SessionToken::from("session".to_owned());
 
         let progress = service
             .put_chunk(id.clone(), session.clone(), 0, 4, stream::single("data"))

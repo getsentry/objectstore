@@ -152,10 +152,8 @@ pub enum Error {
     #[error(transparent)]
     InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
 
-    /// A resumable chunk was submitted at an offset the backend does not hold.
-    ///
-    /// The client resynchronizes by continuing from [`offset`](Self::UploadOffsetMismatch::offset),
-    /// which is authoritative and may be lower than the end of a previously acknowledged chunk.
+    /// A resumable chunk was submitted at an offset that's different from the one held by the
+    /// backend.
     #[error("upload offset mismatch (server holds {offset} bytes)")]
     UploadOffsetMismatch {
         /// The offset the backend currently holds.
@@ -163,17 +161,25 @@ pub enum Error {
     },
 
     /// The resumable upload session expired or was canceled, retaining nothing.
-    ///
-    /// The client has to start a new session.
     #[error("upload session gone")]
     UploadSessionGone,
 
-    /// A resumable upload request is unusable for the session it addresses.
-    ///
-    /// Covers an unparseable or unknown session token and a chunk that would exceed the
-    /// length declared when the session was created.
-    #[error("invalid upload request: {0}")]
-    InvalidUploadRequest(String),
+    /// The backend does not recognize the addressed resumable upload session.
+    #[error("unknown upload session")]
+    UnknownUploadSession,
+
+    /// A resumable upload chunk would exceed the length declared for the session.
+    #[error(
+        "chunk at offset {offset} with length {content_length} exceeds upload length {upload_length}"
+    )]
+    ChunkExceedsUploadLength {
+        /// The offset at which the chunk would be written.
+        offset: u64,
+        /// The declared length of the chunk.
+        content_length: u64,
+        /// The total upload length declared when the session was created.
+        upload_length: u64,
+    },
 }
 
 impl Error {
@@ -222,7 +228,8 @@ impl Error {
             Self::RangeNotSatisfiable { .. } => Level::DEBUG,
             Self::UploadOffsetMismatch { .. } => Level::DEBUG,
             Self::UploadSessionGone => Level::DEBUG,
-            Self::InvalidUploadRequest(_) => Level::DEBUG,
+            Self::UnknownUploadSession => Level::DEBUG,
+            Self::ChunkExceedsUploadLength { .. } => Level::DEBUG,
             // Indicates that optional functionality is not supported.
             // We don't want a rogue client spamming us with Sentry errors just by calling an API
             // that the server doesn't support, so we just log it.

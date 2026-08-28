@@ -66,7 +66,7 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed: unusable session, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Terminal |
+//! | `400`  | Malformed: unknown upload session, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Terminal |
 //! | `409`  | A chunk's offset does not match, with the authoritative offset in `Upload-Offset` | Resynchronize |
 //! | `410`  | The session expired or was canceled; nothing was retained | Start a new session |
 //! | `501`  | The configured backend does not implement resumable uploads | Fall back to a regular upload |

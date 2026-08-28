@@ -93,6 +93,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
     /// `offset` must equal the offset the backend currently holds.
+    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session,
+    /// and [`Error::ChunkExceedsUploadLength`] when the chunk would exceed the total length
+    /// declared when the session was created.
     async fn put_chunk(
         &self,
         id: &ObjectId,
@@ -106,12 +109,16 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Reports how far the session has progressed.
+    ///
+    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
     async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
+    ///
+    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
     async fn cancel_upload(
         &self,
         id: &ObjectId,

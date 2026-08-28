@@ -94,7 +94,7 @@ impl ResumableQuery {
     }
 }
 
-/// A validated session token extracted by a continuation or cancellation handler.
+/// A session token decoded by a continuation or cancellation handler.
 #[derive(Debug)]
 pub(super) struct Session(SessionToken);
 
@@ -460,8 +460,12 @@ mod tests {
         let error = progress_response(Err(gone), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::GONE);
 
-        let invalid = ApiError::Service(ServiceError::InvalidUploadRequest("bad".into()));
-        let error = progress_response(Err(invalid), "my-key".into()).unwrap_err();
+        let oversized = ApiError::Service(ServiceError::ChunkExceedsUploadLength {
+            offset: 8,
+            content_length: 4,
+            upload_length: 10,
+        });
+        let error = progress_response(Err(oversized), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }
 }

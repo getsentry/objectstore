@@ -12,7 +12,7 @@
 //! Declining is a routine outcome rather than an error: the server denies the session and
 //! the client falls back to a regular upload.
 
-pub use objectstore_types::resumable::{InvalidSessionToken, SessionToken, UploadOffset};
+pub use objectstore_types::resumable::{SessionToken, UploadOffset};
 
 /// How far a resumable upload has progressed.
 ///

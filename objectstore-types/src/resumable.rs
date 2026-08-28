@@ -46,33 +46,22 @@ const OFFSET_WILDCARD: &str = "*";
 
 /// Identifier for an in-progress resumable upload session.
 ///
-/// The token is an opaque identifier whose contents are defined by the storage backend. It is
-/// validated on construction only to ensure it is non-empty. At the API boundary it is serialized
-/// as unpadded base64url, keeping the opaque value out of URL parsing and escaping rules.
+/// The token is an opaque identifier whose contents are defined and interpreted by the storage
+/// backend. At the API boundary it is serialized as unpadded base64url, keeping the opaque value
+/// out of URL parsing and escaping rules.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionToken(String);
 
-/// Error returned when a [`SessionToken`] fails validation.
-#[derive(Debug, thiserror::Error)]
-#[error("invalid session token: {0}")]
-pub struct InvalidSessionToken(String);
-
 impl SessionToken {
-    /// Creates a new `SessionToken` after validating the input.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidSessionToken`] if the string is empty.
-    pub fn new(s: String) -> Result<Self, InvalidSessionToken> {
-        if s.is_empty() {
-            return Err(InvalidSessionToken("must not be empty".into()));
-        }
-        Ok(Self(s))
-    }
-
     /// Returns the session token as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<String> for SessionToken {
+    fn from(value: String) -> Self {
+        Self(value)
     }
 }
 
@@ -115,7 +104,7 @@ impl<'de> Deserialize<'de> for SessionToken {
         }
 
         let token = String::from_utf8(bytes).map_err(serde::de::Error::custom)?;
-        Self::new(token).map_err(serde::de::Error::custom)
+        Ok(Self(token))
     }
 }
 
@@ -189,27 +178,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_token_accepts_opaque_values() -> Result<(), InvalidSessionToken> {
-        for value in ["abc123", "..", "/abs", "a/../b", "./a", "a/", "opaque +? ü"] {
-            assert_eq!(SessionToken::new(value.into())?.as_str(), value);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn session_token_rejects_empty() {
-        assert!(SessionToken::new(String::new()).is_err());
-    }
-
-    #[test]
     fn session_token_serializes_as_unpadded_base64url() -> Result<(), Box<dyn std::error::Error>> {
-        let token = SessionToken::new("tok3n".into())?;
+        let token = SessionToken::from("tok3n".to_owned());
         assert_eq!(serde_json::to_string(&token)?, r#""dG9rM24""#);
 
         let decoded: SessionToken = serde_json::from_str(r#""dG9rM24""#)?;
         assert_eq!(decoded, token);
 
-        let opaque = SessionToken::new("../escape".into())?;
+        let opaque = SessionToken::from("../escape".to_owned());
         assert_eq!(serde_json::to_string(&opaque)?, r#""Li4vZXNjYXBl""#);
         let decoded: SessionToken = serde_json::from_str(r#""Li4vZXNjYXBl""#)?;
         assert_eq!(decoded, opaque);
