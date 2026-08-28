@@ -20,9 +20,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{
-    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
-};
+use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -426,15 +424,15 @@ impl StorageService {
         .await
     }
 
-    /// Terminates a session, discarding whatever was uploaded.
-    pub async fn terminate_upload(
+    /// Cancels an upload session, discarding whatever was uploaded.
+    pub async fn cancel_upload(
         &self,
         id: ObjectId,
         session: SessionToken,
-    ) -> Result<TerminateUploadResponse> {
+    ) -> Result<CancelUploadResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn("terminate_upload", async move {
-            inner.terminate_upload(&id, &session).await
+        self.spawn("cancel_upload", async move {
+            inner.cancel_upload(&id, &session).await
         })
         .await
     }
@@ -883,8 +881,8 @@ mod tests {
         assert!(matches!(chunk, Err(Error::NotImplemented)));
         let offset = service.upload_offset(id.clone(), session.clone()).await;
         assert!(matches!(offset, Err(Error::NotImplemented)));
-        let terminated = service.terminate_upload(id, session).await;
-        assert!(matches!(terminated, Err(Error::NotImplemented)));
+        let canceled = service.cancel_upload(id, session).await;
+        assert!(matches!(canceled, Err(Error::NotImplemented)));
     }
 
     #[tokio::test]
@@ -947,12 +945,12 @@ mod tests {
             Ok(self.progress)
         }
 
-        async fn terminate_upload(
+        async fn cancel_upload(
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _session: &SessionToken,
-        ) -> Result<TerminateUploadResponse> {
+        ) -> Result<CancelUploadResponse> {
             Ok(())
         }
     }
@@ -985,7 +983,7 @@ mod tests {
             UploadProgress::Incomplete { offset: 262_144 }
         );
 
-        service.terminate_upload(id, session).await.unwrap();
+        service.cancel_upload(id, session).await.unwrap();
     }
 
     #[tokio::test]

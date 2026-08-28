@@ -1,11 +1,12 @@
 use std::fmt::Write as _;
 
 use axum::body::Body;
-use axum::extract::{Query, State};
+use axum::extract::{Query, Request, State};
+use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
-use axum::{Json, Router};
+use axum::{Json, RequestExt, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
@@ -15,23 +16,102 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
-use crate::endpoints::resumable::{self, ResumableQuery, ResumableRoute};
+use crate::endpoints::resumable::{self, ResumableQuery, ResumableTarget};
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
-    let collection_routes = routing::post(objects_post);
+    let collection_routes = routing::post(dispatch_objects_post);
     let object_routes = routing::get(object_get)
         .head(object_head)
-        .put(object_put)
+        .put(dispatch_object_put)
         // TODO(ja): Implement PATCH (metadata update w/o body)
-        .delete(object_delete);
+        .delete(dispatch_object_delete);
 
     Router::new()
         .route("/objects/{usecase}/{scopes}", collection_routes.clone())
         .route("/objects/{usecase}/{scopes}/", collection_routes)
         .route("/objects/{usecase}/{scopes}/{*key}", object_routes)
+}
+
+/// Extracts which resumable session, if any, the request targets.
+///
+/// Returns `None` without parsing when the URI has no query string.
+///
+/// Parsing a query does not consume the request body, so the selected handler can still extract
+/// it.
+async fn extract_resumable_target(
+    request: &mut Request,
+) -> Result<Option<ResumableTarget>, Response> {
+    if request.uri().query().is_none() {
+        return Ok(None);
+    }
+
+    let Query(query) = request
+        .extract_parts::<Query<ResumableQuery>>()
+        .await
+        .map_err(|rejection| rejection.into_response())?;
+
+    query.classify().map_err(IntoResponse::into_response)
+}
+
+async fn dispatch_objects_post(
+    State(state): State<ServiceState>,
+    mut request: Request,
+) -> Response {
+    let target = match extract_resumable_target(&mut request).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+
+    match target {
+        Some(ResumableTarget::NewSession) => resumable::create_session.call(request, state).await,
+        Some(ResumableTarget::ExistingSession(_)) => {
+            ApiError::Client("`session` requires an object key; use PUT on the object path".into())
+                .into_response()
+        }
+        None => create_object.call(request, state).await,
+    }
+}
+
+async fn dispatch_object_put(State(state): State<ServiceState>, mut request: Request) -> Response {
+    let target = match extract_resumable_target(&mut request).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+
+    match target {
+        Some(ResumableTarget::NewSession) => {
+            resumable::create_session_for_key.call(request, state).await
+        }
+        Some(ResumableTarget::ExistingSession(session)) => {
+            request.extensions_mut().insert(session);
+            resumable::continue_session.call(request, state).await
+        }
+        None => insert_object.call(request, state).await,
+    }
+}
+
+async fn dispatch_object_delete(
+    State(state): State<ServiceState>,
+    mut request: Request,
+) -> Response {
+    let target = match extract_resumable_target(&mut request).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+
+    match target {
+        Some(ResumableTarget::ExistingSession(session)) => {
+            request.extensions_mut().insert(session);
+            resumable::cancel_session.call(request, state).await
+        }
+        Some(ResumableTarget::NewSession) => {
+            ApiError::Client("`upload_type` is not supported on DELETE".into()).into_response()
+        }
+        None => delete_object.call(request, state).await,
+    }
 }
 
 /// Response returned when inserting an object.
@@ -40,29 +120,13 @@ pub struct InsertObjectResponse {
     pub key: String,
 }
 
-async fn objects_post(
+async fn create_object(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
-    Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    // A chunk always addresses a resolved key, so `?session=` has no meaning on the
-    // collection route. `?upload_type=resumable` creates a session for a generated key.
-    match query.classify()? {
-        ResumableRoute::Create => {
-            let id = ObjectId::optional(context, None);
-            return resumable::create_session(service, state, id, headers).await;
-        }
-        ResumableRoute::Session(_) => {
-            return Err(ApiError::Client(
-                "`session` requires an object key; use PUT on the object path".into(),
-            ));
-        }
-        ResumableRoute::Regular => {}
-    }
-
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
@@ -212,28 +276,13 @@ fn format_content_disposition(filename: &str) -> http::HeaderValue {
     http::HeaderValue::from_str(&result).expect("content disposition is a valid header value")
 }
 
-async fn object_put(
+async fn insert_object(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
-    Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
-    body: MeteredBody,
+    MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    // `PUT` carries all three write shapes: create a session, write a chunk, query the
-    // offset. `MeteredBody` is extracted unconditionally and dropped unread on the two
-    // bodyless paths.
-    match query.classify()? {
-        ResumableRoute::Create => {
-            return resumable::create_session(service, state, id, headers).await;
-        }
-        ResumableRoute::Session(session) => {
-            return resumable::session_request(service, id, session, headers, body).await;
-        }
-        ResumableRoute::Regular => {}
-    }
-
-    let MeteredBody(body) = body;
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     let ObjectId { context, key } = id;
@@ -255,17 +304,7 @@ async fn object_put(
     Ok((StatusCode::OK, response).into_response())
 }
 
-async fn object_delete(
-    service: AuthAwareService,
-    Xt(id): Xt<ObjectId>,
-    Query(query): Query<ResumableQuery>,
-) -> ApiResult<Response> {
-    // With a session this terminates the upload; without one it deletes the object, as it
-    // always has. Note the two need different permissions — see `AuthAwareService`.
-    if let ResumableRoute::Session(session) = query.classify_session_only("DELETE")? {
-        return resumable::terminate(service, id, session).await;
-    }
-
+async fn delete_object(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
     service.delete_object(id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

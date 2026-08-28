@@ -41,6 +41,5 @@ pub enum UploadProgress {
 /// `None` means the backend declines resumable uploads for this object.
 pub type CreateSessionResponse = Option<SessionToken>;
 
-/// Response for
-/// [`Backend::terminate_upload`](crate::backend::common::Backend::terminate_upload).
-pub type TerminateUploadResponse = ();
+/// Response for [`Backend::cancel_upload`](crate::backend::common::Backend::cancel_upload).
+pub type CancelUploadResponse = ();

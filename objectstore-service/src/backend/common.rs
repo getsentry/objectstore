@@ -13,9 +13,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{
-    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
-};
+use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -128,7 +126,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///   default implementation returns this, which is unreachable through the API because a
     ///   backend that declines in [`Self::create_upload_session`] never hands out a session.
     /// - [`Error::UploadOffsetMismatch`] if `offset` is not the offset the backend holds.
-    /// - [`Error::UploadSessionGone`] if the session expired or was terminated.
+    /// - [`Error::UploadSessionGone`] if the session expired or was canceled.
     /// - [`Error::InvalidUploadRequest`] if the session is unusable, or the chunk would
     ///   exceed the length declared at creation.
     async fn put_chunk(
@@ -164,7 +162,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         Err(Error::NotImplemented)
     }
 
-    /// Terminates a session, discarding whatever was uploaded.
+    /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Idempotent. Not required for correctness, since sessions expire on their own, but it
     /// lets a caller release an abandoned upload immediately.
@@ -173,11 +171,11 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// - [`Error::NotImplemented`] if this backend does not support resumable uploads.
     /// - [`Error::InvalidUploadRequest`] if the session token is unusable.
-    async fn terminate_upload(
+    async fn cancel_upload(
         &self,
         id: &ObjectId,
         session: &SessionToken,
-    ) -> Result<TerminateUploadResponse> {
+    ) -> Result<CancelUploadResponse> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }

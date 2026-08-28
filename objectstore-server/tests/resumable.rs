@@ -275,10 +275,10 @@ async fn session_token_requires_base64url() -> Result<()> {
     Ok(())
 }
 
-// --- Termination ---
+// --- Cancellation ---
 
 #[tokio::test]
-async fn terminate_reaches_the_declining_backend() -> Result<()> {
+async fn cancel_upload_reaches_the_declining_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -377,6 +377,20 @@ async fn regular_upload_ignores_resumable_headers() -> Result<()> {
         .put(server.url("/v1/objects/test/org=1/my-key"))
         .header(HEADER_UPLOAD_LENGTH, "7")
         .header(HEADER_UPLOAD_OFFSET, "0")
+        .body("payload")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn regular_upload_ignores_unrelated_query_parameters() -> Result<()> {
+    let server = test_server().await;
+
+    let response = reqwest::Client::new()
+        .put(server.url("/v1/objects/test/org=1/my-key?unrelated=value"))
         .body("payload")
         .send()
         .await?;

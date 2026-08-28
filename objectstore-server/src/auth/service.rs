@@ -4,7 +4,7 @@ use objectstore_service::multipart::{
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use objectstore_service::resumable::{
-    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
+    CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress,
 };
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 
@@ -193,7 +193,7 @@ impl AuthAwareService {
     // --- Resumable upload operations ---
     //
     // Every operation requires `ObjectWrite`, including the two that do not obviously write:
-    // an offset query can commit an assembled object, and terminating a session discards an
+    // an offset query can commit an assembled object, and canceling a session discards an
     // in-progress upload rather than deleting an object. So `DELETE ?session=` needs write
     // permission where a plain `DELETE` on the same path needs delete permission.
 
@@ -237,13 +237,13 @@ impl AuthAwareService {
         Ok(self.service.upload_offset(id, session).await?)
     }
 
-    /// Auth-aware wrapper around [`StorageService::terminate_upload`].
-    pub async fn terminate_upload(
+    /// Auth-aware wrapper around [`StorageService::cancel_upload`].
+    pub async fn cancel_upload(
         &self,
         id: ObjectId,
         session: SessionToken,
-    ) -> ApiResult<TerminateUploadResponse> {
+    ) -> ApiResult<CancelUploadResponse> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
-        Ok(self.service.terminate_upload(id, session).await?)
+        Ok(self.service.cancel_upload(id, session).await?)
     }
 }

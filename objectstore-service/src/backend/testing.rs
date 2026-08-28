@@ -52,9 +52,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{
-    CreateSessionResponse, SessionToken, TerminateUploadResponse, UploadProgress,
-};
+use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -285,14 +283,14 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.upload_offset(id, session).await
     }
 
-    /// Intercepts [`Backend::terminate_upload`]. Default delegates to `inner`.
-    async fn terminate_upload(
+    /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
+    async fn cancel_upload(
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
         session: &SessionToken,
-    ) -> Result<TerminateUploadResponse> {
-        inner.terminate_upload(id, session).await
+    ) -> Result<CancelUploadResponse> {
+        inner.cancel_upload(id, session).await
     }
 }
 
@@ -397,12 +395,12 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.upload_offset(&self.inner, id, session).await
     }
 
-    async fn terminate_upload(
+    async fn cancel_upload(
         &self,
         id: &ObjectId,
         session: &SessionToken,
-    ) -> Result<TerminateUploadResponse> {
-        self.hooks.terminate_upload(&self.inner, id, session).await
+    ) -> Result<CancelUploadResponse> {
+        self.hooks.cancel_upload(&self.inner, id, session).await
     }
 }
 

@@ -208,7 +208,7 @@ trips for objects large enough that re-sending the whole payload is expensive.
    reports where the backend stands, so the caller resumes from there.
 4. The chunk carrying the last byte commits the object. There is no finalize call —
    the backend recognizes that chunk from the declared total size.
-5. At any time, a session can be terminated, which discards what it holds.
+5. At any time, an upload can be canceled, which discards what its session holds.
 
 Not all backends support resumable uploads and can decline creating a session.
 Support can depend on the declared size, the metadata, or whether resuming is

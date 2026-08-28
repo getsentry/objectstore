@@ -162,7 +162,7 @@ pub enum Error {
         offset: u64,
     },
 
-    /// The resumable upload session expired or was terminated, retaining nothing.
+    /// The resumable upload session expired or was canceled, retaining nothing.
     ///
     /// The client has to start a new session.
     #[error("upload session gone")]

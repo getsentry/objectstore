@@ -3,7 +3,8 @@
 //! Resumable uploads are a variation of the regular object endpoints rather than a separate
 //! resource, following GCS and S3 rather than [TUS]. Every request addresses the same object
 //! path with the session in the query string, so these handlers have no router of their own:
-//! [`objects`](super::objects) dispatches to them based on [`ResumableQuery`].
+//! thin handlers in [`objects`](super::objects) inspect [`ResumableQuery`] and dispatch the
+//! original request here, where each operation runs with its own Axum extractors.
 //! Session tokens are encoded as unpadded base64url at this API boundary.
 //!
 //! | Operation | Request | Success |
@@ -12,7 +13,7 @@
 //! | Create | `PUT /objects/{usecase}/{scopes}/{key}?upload_type=resumable` | `200` + `{"key","session"}` |
 //! | Chunk | `PUT …/{key}?session=<s>` with `Upload-Offset: <n>` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
-//! | Terminate | `DELETE …/{key}?session=<s>` | `204` |
+//! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
 //!
 //! There is no completion request. The total size is known from session creation, so the
 //! backend recognizes the chunk carrying the last byte and commits the object itself.
@@ -22,12 +23,13 @@
 //!
 //! [TUS]: https://tus.io/protocols/resumable-upload
 
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
-use objectstore_service::id::ObjectId;
+use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::resumable::{SessionToken, UploadOffset, UploadProgress};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
@@ -37,7 +39,7 @@ use serde::Deserialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
-use crate::extractors::body::MeteredBody;
+use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
 /// The `upload_type` query parameter.
@@ -59,19 +61,20 @@ pub(super) enum UploadType {
 pub(super) struct ResumableQuery {
     /// Present on a session creation request.
     upload_type: Option<UploadType>,
-    /// Present on a chunk write, offset query, or termination.
+    /// Present on a chunk write, offset query, or cancellation.
     session: Option<SessionToken>,
 }
 
-/// What a request on an object route is addressing.
+/// Which resumable session a request on an object route targets.
 #[derive(Debug)]
-pub(super) enum ResumableRoute {
-    /// Create a session for the object named by the request path.
-    Create,
-    /// Act on the identified session: write a chunk, query the offset, or terminate.
-    Session(SessionToken),
-    /// A regular object request that does not involve the resumable protocol.
-    Regular,
+pub(super) enum ResumableTarget {
+    /// A new session to create for the object addressed by the request.
+    NewSession,
+    /// An existing session to continue or cancel.
+    ///
+    /// The dispatcher moves the token into the request extensions before calling the selected
+    /// handler, avoiding a second query-string deserialization.
+    ExistingSession(SessionToken),
 }
 
 impl ResumableQuery {
@@ -81,35 +84,14 @@ impl ResumableQuery {
     ///
     /// Returns [`ApiError::Client`] if both parameters are present. They address different
     /// operations, so a request carrying both is ambiguous rather than defaulted.
-    pub fn classify(self) -> ApiResult<ResumableRoute> {
+    pub fn classify(self) -> ApiResult<Option<ResumableTarget>> {
         match (self.upload_type, self.session) {
             (Some(_), Some(_)) => Err(ApiError::Client(
                 "`upload_type` and `session` are mutually exclusive".into(),
             )),
-            (Some(UploadType::Resumable), None) => Ok(ResumableRoute::Create),
-            (None, Some(session)) => Ok(ResumableRoute::Session(session)),
-            (None, None) => Ok(ResumableRoute::Regular),
-        }
-    }
-
-    /// Classifies a request that may only act on an existing session.
-    ///
-    /// Used by routes where session creation is not defined: `DELETE`, which terminates, and
-    /// the collection `POST`, whose generated key is only known once a session exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiError::Client`] if `upload_type` is present.
-    pub fn classify_session_only(self, operation: &str) -> ApiResult<ResumableRoute> {
-        if self.upload_type.is_some() {
-            return Err(ApiError::Client(format!(
-                "`upload_type` is not supported on {operation}"
-            )));
-        }
-
-        match self.session {
-            Some(session) => Ok(ResumableRoute::Session(session)),
-            None => Ok(ResumableRoute::Regular),
+            (Some(UploadType::Resumable), None) => Ok(Some(ResumableTarget::NewSession)),
+            (None, Some(session)) => Ok(Some(ResumableTarget::ExistingSession(session))),
+            (None, None) => Ok(None),
         }
     }
 }
@@ -155,11 +137,31 @@ fn content_length(headers: &HeaderMap) -> ApiResult<u64> {
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))
 }
 
+/// Creates a session with a server-generated object key.
+pub(super) async fn create_session(
+    service: AuthAwareService,
+    State(state): State<ServiceState>,
+    Xt(context): Xt<ObjectContext>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    create_session_for_id(service, state, ObjectId::optional(context, None), headers).await
+}
+
+/// Creates a session for the object key in the request path.
+pub(super) async fn create_session_for_key(
+    service: AuthAwareService,
+    State(state): State<ServiceState>,
+    Xt(id): Xt<ObjectId>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    create_session_for_id(service, state, id, headers).await
+}
+
 /// Creates a session for the object at `id`.
 ///
 /// Answers `501 Not Implemented` when the backend declines, which tells the client to fall back
 /// to a regular upload. Metadata is declared here and does not change afterwards.
-pub(super) async fn create_session(
+async fn create_session_for_id(
     service: AuthAwareService,
     state: ServiceState,
     id: ObjectId,
@@ -196,10 +198,10 @@ pub(super) async fn create_session(
 ///
 /// Both answer `204 No Content` with the authoritative offset while bytes remain, and
 /// `201 Created` with the key once the object is committed.
-pub(super) async fn session_request(
+pub(super) async fn continue_session(
     service: AuthAwareService,
-    id: ObjectId,
-    session: SessionToken,
+    Xt(id): Xt<ObjectId>,
+    Extension(session): Extension<SessionToken>,
     headers: HeaderMap,
     MeteredBody(mut body): MeteredBody,
 ) -> ApiResult<Response> {
@@ -231,13 +233,13 @@ pub(super) async fn session_request(
     progress_response(progress, key)
 }
 
-/// Terminates a session, discarding whatever was uploaded.
-pub(super) async fn terminate(
+/// Cancels a session, discarding whatever was uploaded.
+pub(super) async fn cancel_session(
     service: AuthAwareService,
-    id: ObjectId,
-    session: SessionToken,
+    Xt(id): Xt<ObjectId>,
+    Extension(session): Extension<SessionToken>,
 ) -> ApiResult<Response> {
-    service.terminate_upload(id, session).await?;
+    service.cancel_upload(id, session).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -289,37 +291,19 @@ mod tests {
     fn classify_recognizes_each_operation() {
         assert!(matches!(
             query(Some(UploadType::Resumable), None).classify(),
-            Ok(ResumableRoute::Create)
+            Ok(Some(ResumableTarget::NewSession))
         ));
         assert!(matches!(
             query(None, Some("token")).classify(),
-            Ok(ResumableRoute::Session(_))
+            Ok(Some(ResumableTarget::ExistingSession(_)))
         ));
-        assert!(matches!(
-            query(None, None).classify(),
-            Ok(ResumableRoute::Regular)
-        ));
+        assert!(matches!(query(None, None).classify(), Ok(None)));
     }
 
     #[test]
     fn classify_rejects_both_parameters() {
         let result = query(Some(UploadType::Resumable), Some("token")).classify();
         assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
-    }
-
-    #[test]
-    fn classify_session_only_rejects_upload_type() {
-        let result = query(Some(UploadType::Resumable), None).classify_session_only("DELETE");
-        assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
-
-        assert!(matches!(
-            query(None, Some("token")).classify_session_only("DELETE"),
-            Ok(ResumableRoute::Session(_))
-        ));
-        assert!(matches!(
-            query(None, None).classify_session_only("DELETE"),
-            Ok(ResumableRoute::Regular)
-        ));
     }
 
     #[test]

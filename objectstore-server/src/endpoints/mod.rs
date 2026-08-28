@@ -42,7 +42,7 @@
 //! | `POST`   | `/v1/objects/{usecase}/{scopes}/?upload_type=resumable`    | Create session (server-generated key)        |
 //! | `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}?upload_type=resumable` | Create session (user-provided key)        |
 //! | `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}?session=<token>`    | Upload a chunk, or query the offset          |
-//! | `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}?session=<token>`    | Terminate session, discarding what was sent  |
+//! | `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}?session=<token>`    | Cancel upload, discarding what was sent      |
 //!
 //! Session creation requires an `Upload-Length` header carrying the total size of the object
 //! in bytes, and takes the same metadata headers as a regular upload. It answers `200 OK`
@@ -67,7 +67,7 @@
 //! |--------|---------|---------------|
 //! | `400`  | Malformed: unusable session, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Terminal |
 //! | `409`  | A chunk's offset does not match, with the authoritative offset in `Upload-Offset` | Resynchronize |
-//! | `410`  | The session expired or was terminated; nothing was retained | Start a new session |
+//! | `410`  | The session expired or was canceled; nothing was retained | Start a new session |
 //! | `501`  | The configured backend does not implement resumable uploads | Fall back to a regular upload |
 //!
 //! Not every backend can support this. Session creation asks the backend that would store the
