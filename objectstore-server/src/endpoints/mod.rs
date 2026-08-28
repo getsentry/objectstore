@@ -45,9 +45,9 @@
 //! | `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}?session=<token>`    | Cancel upload, discarding what was sent      |
 //!
 //! Session creation requires an `Upload-Length` header carrying the total size of the object
-//! in bytes, and takes the same metadata headers as a regular upload. It answers `200 OK`
-//! with `{"key", "session"}`; the session field is the token to use in subsequent query
-//! parameters. Metadata is fixed at this point and does not change afterwards.
+//! in bytes, takes the same metadata headers as a regular upload, and requires an empty body.
+//! It answers `200 OK` with `{"key", "session"}`; the session field is the token to use in
+//! subsequent query parameters. Metadata is fixed at this point and does not change afterwards.
 //!
 //! Chunk uploads and offset queries share one request shape, distinguished by the
 //! `Upload-Offset` header: a byte offset submits the body as the chunk starting there, while
@@ -56,8 +56,9 @@
 //! `201 Created` with `{"key"}` once the object is committed. **The offset in the response
 //! may be lower than the end of the chunk that was sent** — backends persist only aligned
 //! prefixes and discard the remainder — so clients always continue from the returned offset.
-//! A chunk requires `Content-Length`; an offset query does not, but its body must still be empty.
-//! The server rejects an offset query carrying any body bytes with `400 Bad Request`.
+//! A chunk requires `Content-Length` even over HTTP/2; an offset query does not, but its body must
+//! still be empty. The server rejects a session creation or offset query carrying any body bytes
+//! with `400 Bad Request`.
 //!
 //! An offset query can commit an object that was assembled but not yet committed, so it
 //! requires write permission despite being read-shaped. Termination likewise needs write

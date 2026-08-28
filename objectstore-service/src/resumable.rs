@@ -26,7 +26,9 @@ pub enum UploadProgress {
     /// More bytes are expected. The client continues from `offset`.
     ///
     /// This offset is authoritative and may be lower than the end of the chunk that was
-    /// just written: backends persist only aligned prefixes and discard the remainder.
+    /// just written: backends persist only aligned prefixes and discard the remainder. It must
+    /// remain below the session's total length; once every byte has landed, the backend commits
+    /// the object or returns an error instead.
     Incomplete {
         /// The offset the backend has persisted.
         offset: u64,

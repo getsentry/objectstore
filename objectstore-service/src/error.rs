@@ -223,6 +223,8 @@ impl Error {
             Self::UploadOffsetMismatch { .. } => Level::DEBUG,
             Self::UploadSessionGone => Level::DEBUG,
             Self::InvalidUploadRequest(_) => Level::DEBUG,
+            // Unsupported optional functionality is a routine capability outcome.
+            Self::NotImplemented => Level::DEBUG,
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures
@@ -234,7 +236,6 @@ impl Error {
             Self::Panic(_) => Level::ERROR,
             Self::Dropped => Level::ERROR,
             Self::UnexpectedTombstone => Level::ERROR,
-            Self::NotImplemented => Level::ERROR,
             Self::InvalidUploadId(_) => Level::DEBUG,
             Self::Generic { .. } => Level::ERROR,
         }

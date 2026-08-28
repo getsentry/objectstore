@@ -31,6 +31,7 @@ use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::resumable::{SessionToken, UploadOffset, UploadProgress};
+use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
     CommitResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
@@ -137,14 +138,45 @@ fn content_length(headers: &HeaderMap) -> ApiResult<u64> {
         .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))
 }
 
+/// Confirms that a request neither declares nor streams a non-empty body.
+async fn require_empty_body(
+    headers: &HeaderMap,
+    mut body: ClientStream,
+    request: &str,
+) -> ApiResult<()> {
+    if headers.contains_key(http::header::CONTENT_LENGTH) && content_length(headers)? > 0 {
+        return Err(ApiError::Client(format!(
+            "{request} must be sent with an empty body"
+        )));
+    }
+
+    while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
+        if !chunk.is_empty() {
+            return Err(ApiError::Client(format!(
+                "{request} must be sent with an empty body"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Creates a session with a server-generated object key.
 pub(super) async fn create_session(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
+    MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    create_session_for_id(service, state, ObjectId::optional(context, None), headers).await
+    create_session_for_id(
+        service,
+        state,
+        ObjectId::optional(context, None),
+        headers,
+        body,
+    )
+    .await
 }
 
 /// Creates a session for the object key in the request path.
@@ -153,8 +185,9 @@ pub(super) async fn create_session_for_key(
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
+    MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    create_session_for_id(service, state, id, headers).await
+    create_session_for_id(service, state, id, headers, body).await
 }
 
 /// Creates a session for the object at `id`.
@@ -166,8 +199,10 @@ async fn create_session_for_id(
     state: ServiceState,
     id: ObjectId,
     headers: HeaderMap,
+    body: ClientStream,
 ) -> ApiResult<Response> {
     let total_length = upload_length(&headers)?;
+    require_empty_body(&headers, body, "resumable session creation").await?;
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
@@ -193,8 +228,8 @@ async fn create_session_for_id(
 /// [`HEADER_UPLOAD_OFFSET`] selects between the two. A concrete offset submits the request
 /// body as the chunk starting there; the `*` wildcard submits nothing and asks where the
 /// server stands, which also commits an object that was assembled but not yet committed.
-/// Chunks require `Content-Length`. Offset queries may omit it, but the body stream is checked
-/// and any bytes are rejected as a malformed request.
+/// Chunks require `Content-Length`, including over HTTP/2. Offset queries may omit it, but the
+/// body stream is checked and any bytes are rejected as a malformed request.
 ///
 /// Both answer `204 No Content` with the authoritative offset while bytes remain, and
 /// `201 Created` with the key once the object is committed.
@@ -203,7 +238,7 @@ pub(super) async fn continue_session(
     Xt(id): Xt<ObjectId>,
     Extension(session): Extension<SessionToken>,
     headers: HeaderMap,
-    MeteredBody(mut body): MeteredBody,
+    MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     let offset = upload_offset(&headers)?;
     let key = id.key().to_owned();
@@ -218,19 +253,7 @@ pub(super) async fn continue_session(
         UploadOffset::Unknown => {
             // The wildcard carries no payload. A body would be silently discarded, so
             // reject it rather than let a client believe those bytes were written.
-            if headers.contains_key(http::header::CONTENT_LENGTH) && content_length(&headers)? > 0 {
-                return Err(ApiError::Client(format!(
-                    "{HEADER_UPLOAD_OFFSET}: * must be sent with an empty body"
-                )));
-            }
-
-            while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
-                if !chunk.is_empty() {
-                    return Err(ApiError::Client(format!(
-                        "{HEADER_UPLOAD_OFFSET}: * must be sent with an empty body"
-                    )));
-                }
-            }
+            require_empty_body(&headers, body, "Upload-Offset: *").await?;
 
             service.upload_offset(id, session).await
         }

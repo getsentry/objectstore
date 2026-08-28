@@ -128,6 +128,21 @@ async fn create_session_rejects_malformed_upload_length() -> Result<()> {
 }
 
 #[tokio::test]
+async fn create_session_rejects_a_payload() -> Result<()> {
+    let server = test_server().await;
+
+    let response = reqwest::Client::new()
+        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=resumable"))
+        .header(HEADER_UPLOAD_LENGTH, "7")
+        .body("payload")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unknown_upload_type_is_rejected() -> Result<()> {
     let server = test_server().await;
 

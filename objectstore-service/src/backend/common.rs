@@ -109,6 +109,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
+    /// The application protocol requires the caller to declare `content_length` before the body
+    /// is consumed, including over HTTP/2. Backends may rely on it without buffering the stream.
+    ///
     /// `offset` must equal the offset the backend currently holds. Backends persist only
     /// aligned prefixes and discard the remainder, so the offset in the returned
     /// [`UploadProgress::Incomplete`] is authoritative and may be lower than
@@ -144,15 +147,13 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Reports how far the session has progressed, committing the object if it is assembled.
     ///
     /// This is the recovery path: after any failed chunk the client calls this and continues
-    /// from the returned offset. It is also the only read-shaped operation that mutates
-    /// state. Making an object visible can outlive the request that triggered it, so a
-    /// session whose payload fully landed may still be uncommitted; this operation finishes
-    /// that work and returns [`UploadProgress::Committed`]. Callers must therefore treat it
-    /// as a write.
-    ///
-    /// A session whose object was assembled but not yet committed never reports
-    /// [`UploadProgress::Committed`], so a client that observes completion can always read
-    /// the object back.
+    /// from the returned offset. It is also the only read-shaped operation that mutates state.
+    /// Making an object visible can outlive the request that triggered it, so a session whose
+    /// payload fully landed may still be uncommitted; this operation must finish that work. It
+    /// returns [`UploadProgress::Committed`] only after the object is committed and readable, or
+    /// returns an error if committing fails. It must not return [`UploadProgress::Incomplete`]
+    /// with the session's total length, because the client would have no bytes left to send.
+    /// Callers must therefore treat it as a write.
     ///
     /// # Errors
     ///

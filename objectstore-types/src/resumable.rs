@@ -46,16 +46,9 @@ const OFFSET_WILDCARD: &str = "*";
 
 /// Identifier for an in-progress resumable upload session.
 ///
-/// The token is opaque to the client: it is minted by the storage backend and carries
-/// whatever that backend needs to continue or commit the upload without shared state.
-/// It is neither signed nor encrypted, which is safe because the usecase, scopes and
-/// key travel in the request path rather than in the token, so a request cannot address
-/// an object other than the one it names.
-///
-/// Validated on construction only to ensure it is non-empty. Its contents are otherwise opaque:
-/// backends may use any UTF-8 string, including path separators and traversal-like text.
-/// At the API boundary it is serialized as unpadded base64url, keeping the opaque value out of
-/// URL parsing and escaping rules.
+/// The token is an opaque identifier whose contents are defined by the storage backend. It is
+/// validated on construction only to ensure it is non-empty. At the API boundary it is serialized
+/// as unpadded base64url, keeping the opaque value out of URL parsing and escaping rules.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionToken(String);
 
