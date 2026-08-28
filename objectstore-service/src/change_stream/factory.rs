@@ -1,0 +1,178 @@
+//! Constructs the [`ChangeStream`] implementation(s) for a backend based on the available
+//! service-wide sink config and per-backend stream config.
+
+use std::fmt;
+use std::sync::Arc;
+
+#[cfg(feature = "storage-cogs")]
+use objectstore_inventory_tracker::SharedProducer;
+#[cfg(all(test, feature = "storage-cogs"))]
+use objectstore_inventory_tracker::test_utils;
+#[cfg(feature = "storage-cogs")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "storage-cogs")]
+use super::CostTrackerStream;
+use super::{ChangeStream, CostTrackerStreamConfig, NoopStream};
+
+/// Where every backend's change stream records are carried for cost tracking.
+///
+/// Service-wide: a transport owns connections and a send queue worth sharing.
+#[cfg(feature = "storage-cogs")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum CostTrackerConfig {
+    /// Reports onto a Kafka topic.
+    Kafka(objectstore_inventory_tracker::kafka::KafkaConfig),
+}
+
+/// Builds the [`ChangeStream`] impl(s) a backend reports to.
+///
+/// Without a usable transport every backend gets a [`NoopStream`].
+#[derive(Clone, Default)]
+pub struct ChangeStreamFactory {
+    #[cfg(feature = "storage-cogs")]
+    producer: Option<SharedProducer>,
+}
+
+impl ChangeStreamFactory {
+    /// Builds the transport described by `config`.
+    ///
+    /// Fails open: an unusable transport is logged, not fatal.
+    #[cfg(feature = "storage-cogs")]
+    pub fn new(config: &CostTrackerConfig) -> Self {
+        let CostTrackerConfig::Kafka(kafka) = config;
+        Self {
+            producer: build_kafka_producer(kafka),
+        }
+    }
+
+    /// Builds the stream `config` asks for, or a [`NoopStream`] if it cannot be built.
+    #[cfg(feature = "storage-cogs")]
+    pub fn build(&self, config: Option<&CostTrackerStreamConfig>) -> Arc<dyn ChangeStream> {
+        match (config, self.producer.clone()) {
+            (Some(config), Some(producer)) => Arc::new(CostTrackerStream::new(producer, config)),
+            (None, None) => Arc::new(NoopStream),
+            (c, p) => {
+                objectstore_log::warn!(
+                    stream_configured = c.is_some(),
+                    producer_configured = p.is_some(),
+                    "incomplete change stream configuration, returning NoopStream",
+                );
+                Arc::new(NoopStream)
+            }
+        }
+    }
+
+    /// Reporting is not compiled in, so every backend reports nothing.
+    #[cfg(not(feature = "storage-cogs"))]
+    pub fn build(&self, _config: Option<&CostTrackerStreamConfig>) -> Arc<dyn ChangeStream> {
+        Arc::new(NoopStream)
+    }
+}
+
+impl fmt::Debug for ChangeStreamFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_struct("ChangeStreamFactory");
+        #[cfg(feature = "storage-cogs")]
+        f.field("producer", &self.producer.is_some());
+        f.finish()
+    }
+}
+
+/// Creates the shared Kafka producer, or logs why there will be no reporting.
+#[cfg(feature = "storage-cogs")]
+fn build_kafka_producer(
+    config: &objectstore_inventory_tracker::kafka::KafkaConfig,
+) -> Option<SharedProducer> {
+    use objectstore_inventory_tracker::Producer as _;
+    use objectstore_inventory_tracker::kafka::KafkaProducer;
+
+    // Delivery is asynchronous, so an accepted record can still fail to arrive. Without
+    // this those show up only as a shortfall in the downstream data.
+    let on_delivery_failure = Box::new(|_: &_| {
+        objectstore_metrics::count!("cost_tracker.undelivered" += 1);
+    });
+
+    match KafkaProducer::try_new(config.clone(), Some(on_delivery_failure)) {
+        Ok(producer) => Some(producer.shared()),
+        Err(error) => {
+            objectstore_log::error!(
+                !!&error,
+                "failed to create the change stream kafka producer; \
+                 backends with a change stream will report nothing"
+            );
+            None
+        }
+    }
+}
+
+/// A [`ChangeStreamFactory`] that reports into the returned producer.
+#[cfg(all(test, feature = "storage-cogs"))]
+pub(crate) fn dummy_factory() -> (ChangeStreamFactory, test_utils::DummyProducer) {
+    use objectstore_inventory_tracker::Producer as _;
+
+    let producer = test_utils::DummyProducer::default();
+    let factory = ChangeStreamFactory {
+        producer: Some(producer.clone().shared()),
+    };
+
+    (factory, producer)
+}
+
+#[cfg(all(test, feature = "storage-cogs"))]
+mod tests {
+    use super::*;
+
+    fn config() -> CostTrackerStreamConfig {
+        CostTrackerStreamConfig {
+            shared_resource_id: "bigtable_objectstore".into(),
+            sample_rate: 1.0,
+        }
+    }
+
+    fn reports(stream: &Arc<dyn ChangeStream>) -> bool {
+        !format!("{stream:?}").contains("NoopStream")
+    }
+
+    #[test]
+    fn a_backend_without_a_change_stream_config_reports_nothing() {
+        let (factory, _producer) = dummy_factory();
+
+        assert!(!reports(&factory.build(None)));
+    }
+
+    #[test]
+    fn a_configured_backend_without_a_transport_reports_nothing() {
+        let factory = ChangeStreamFactory::default();
+
+        assert!(!reports(&factory.build(Some(&config()))));
+    }
+
+    #[test]
+    fn a_configured_backend_reports_through_the_transport() {
+        let (factory, producer) = dummy_factory();
+        let stream = factory.build(Some(&config()));
+
+        assert!(reports(&stream));
+
+        stream.delete(&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap());
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].shared_resource_id, "bigtable_objectstore");
+    }
+
+    #[test]
+    fn an_unusable_transport_disables_reporting_instead_of_failing() {
+        let factory = ChangeStreamFactory::new(&CostTrackerConfig::Kafka(
+            objectstore_inventory_tracker::kafka::KafkaConfig {
+                topic: "shared-resources-inventory".into(),
+                bootstrap_servers: vec!["127.0.0.1:9092".into()],
+                override_params: [("not.a.real.property".to_owned(), "1".to_owned())].into(),
+            },
+        ));
+
+        assert!(!reports(&factory.build(Some(&config()))));
+    }
+}

@@ -11,6 +11,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::change_stream::ChangeStreamFactory;
+
 pub mod bigtable;
 pub mod changelog;
 pub mod common;
@@ -58,29 +60,38 @@ pub enum StorageConfig {
 }
 
 /// Constructs a type-erased [`Backend`](common::Backend) from the given [`StorageConfig`].
-pub async fn from_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
+///
+/// Backends that configured a [`ChangeStream`](crate::change_stream::ChangeStream) get one
+/// from `streams`; the rest report nothing.
+pub async fn from_config(
+    config: StorageConfig,
+    streams: &ChangeStreamFactory,
+) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::Tiered(c) => {
-            let hv = hv_from_config(c.high_volume).await?;
-            let lt = lt_from_config(c.long_term).await?;
+            let hv = hv_from_config(c.high_volume, streams).await?;
+            let lt = lt_from_config(c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
             Box::new(tiered::TieredStorage::new(hv, lt, log))
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
         // is intentional here: any new leaf variant should fall through to
         // from_leaf_config, which will handle it or produce a compile error.
-        _ => from_leaf_config(config).await?,
+        _ => from_leaf_config(config, streams).await?,
     })
 }
 
-async fn from_leaf_config(config: StorageConfig) -> Result<Box<dyn common::Backend>> {
+async fn from_leaf_config(
+    config: StorageConfig,
+    streams: &ChangeStreamFactory,
+) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
         StorageConfig::S3Compatible(c) => {
             Box::new(s3_compatible::S3CompatibleBackend::without_token(c))
         }
-        StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
-        StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
+        StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
+        StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c, streams).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
     })
 }
@@ -101,9 +112,12 @@ pub enum HighVolumeStorageConfig {
 /// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
 async fn hv_from_config(
     config: HighVolumeStorageConfig,
+    streams: &ChangeStreamFactory,
 ) -> Result<Box<dyn common::HighVolumeBackend>> {
     Ok(match config {
-        HighVolumeStorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c).await?),
+        HighVolumeStorageConfig::BigTable(c) => {
+            Box::new(bigtable::BigTableBackend::new(c, streams).await?)
+        }
     })
 }
 
@@ -125,9 +139,10 @@ pub enum MultipartUploadStorageConfig {
 /// Constructs a type-erased [`common::MultipartUploadBackend`] from the given config.
 async fn lt_from_config(
     config: MultipartUploadStorageConfig,
+    streams: &ChangeStreamFactory,
 ) -> Result<Box<dyn common::MultipartUploadBackend>> {
     Ok(match config {
         MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
-        MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c).await?),
+        MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
     })
 }

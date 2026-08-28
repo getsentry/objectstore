@@ -1,0 +1,38 @@
+[package]
+name = "objectstore-inventory-tracker"
+authors = ["Sentry <oss@sentry.io>"]
+description = "Emits per-record inventory change events for shared storage resources"
+homepage = "https://getsentry.github.io/objectstore/"
+repository = "https://github.com/getsentry/objectstore"
+license-file = "../LICENSE.md"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Off by default so that depending on the record types does not pull in librdkafka
+# and its native build.
+kafka = ["dep:rdkafka"]
+# Exposes `DummyProducer` so downstream crates can assert on emitted records
+# without a broker.
+test-utils = []
+
+[dependencies]
+blake3 = { workspace = true }
+# Allow a range of possible `rdkafka` versions so library users can pin whichever they use
+rdkafka = { version = ">=0.29.0, <0.40.0", features = [
+    "cmake-build",
+    "libz-static", # for distroless
+    "ssl",
+    "tracing",
+], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

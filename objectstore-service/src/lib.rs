@@ -3,6 +3,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod backend;
+pub mod change_stream;
 pub mod concurrency;
 pub mod error;
 mod gcp_auth;

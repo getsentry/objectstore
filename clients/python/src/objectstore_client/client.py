@@ -5,6 +5,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from io import BytesIO
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
@@ -38,6 +39,9 @@ from objectstore_client.tracing import storage_span
 
 # Query parameter carrying a JWT, mirroring the `x-os-auth` header.
 PARAM_AUTH = "os_auth"
+
+# Identifies this library to the server, mirroring the Rust client's user agent.
+USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
 
 
 class GetResponse(NamedTuple):
@@ -101,8 +105,13 @@ class Client:
             "http://objectstore:8888"). metrics_backend: Optional metrics backend for
             tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
             provided.
-        propagate_traces: Whether to propagate Sentry trace headers in requests to
-            objectstore. Defaults to ``False``.
+        propagate_traces: **Deprecated.** Use Sentry's ``StdlibIntegration``
+            instead; it propagates traces on the underlying HTTP request
+            regardless of this flag, unless the host application's Sentry SDK
+            is configured to opt out.
+
+            This only controls headers this client adds itself. Defaults to
+            ``False``.
         retries: Number of connection retries for failed requests.
             Defaults to ``3`` if not specified. **Note:** only connection failures are
             retried, not read failures (as compression streams cannot be rewound).
@@ -123,7 +132,9 @@ class Client:
 
         connection_kwargs: Additional keyword arguments to pass to the underlying
             urllib3 connection pool (e.g., custom headers, SSL settings, advanced
-            timeouts).
+            timeouts). By default, requests carry a ``User-Agent`` header of
+            ``objectstore-client/{version}``; pass a ``headers`` mapping with a
+            ``User-Agent`` key here to override it.
         token: A ``SecretKey`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
             as-is for every request. Use a ``SecretKey`` for internal
@@ -141,6 +152,14 @@ class Client:
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
     ):
+        if propagate_traces:
+            warnings.warn(
+                "`propagate_traces` is deprecated; Sentry's `StdlibIntegration` "
+                "already propagates traces on the underlying HTTP request",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries:
@@ -158,6 +177,10 @@ class Client:
 
         if connection_kwargs:
             connection_kwargs_to_use = {**connection_kwargs_to_use, **connection_kwargs}
+
+        headers = urllib3.HTTPHeaderDict({"User-Agent": USER_AGENT})
+        headers.update(connection_kwargs_to_use.get("headers") or {})
+        connection_kwargs_to_use["headers"] = headers
 
         self._pool = urllib3.connectionpool.connection_from_url(
             base_url, **connection_kwargs_to_use

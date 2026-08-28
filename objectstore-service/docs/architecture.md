@@ -3,6 +3,13 @@ durable access to blobs through a dual-backend architecture that balances cost,
 latency, and reliability. The service is designed as a library crate consumed by
 the `objectstore-server`.
 
+# Cargo features
+
+- `storage_cogs`: support for publishing per-object change streams to Kafka for
+  storage cost attribution. Off by default; it adds a build step to compile
+  `librdkafka` and requires toolchain components we don't otherwise need. Local
+  and sandbox builds don't have a Kafka topic/consumer anyway.
+
 # Object Identification
 
 Every object is uniquely identified by an [`ObjectId`](id::ObjectId), a logical
@@ -108,23 +115,69 @@ sequences.
 
 # Cost of Goods Sold (COGS) Accounting
 
-[`StorageService::new`] wraps the configured backend in a
-[`CountingBackend`](backend::counting::CountingBackend), a
-[`Backend`](backend::common::Backend) decorator that increments the
-`objectstore.cogs.usage` counter (tagged with an `app_feature` derived from the
-usecase) once per operation. Multipart operations are also counted.
+Objectstore emits attribution data that can break Objectstore costs (compute and
+storage) down proportionally by usecase (or `app_feature`, as it's called in our
+COGS pipelines). To calculate, for example, the compute costs for the
+`attachments` usecase, multiply Objectstore's overall compute cost by the
+`attachments` usecase's proportional weight in our compute attribution data.
+
+## Compute COGS
+
+Objectstore emits the `objectstore.cogs.usage` counter with an `app_feature`
+label derived from the usecase once per operation. Multipart and batch
+operations are also counted. This counter can be straightforwardly summed by
+`app_feature`.
+
+The counter is incremented in the [`CountingBackend`](backend::counting::CountingBackend)
+decorator which [`StorageService::new`] applies to its backend. Wrapping the
+outermost decorator owned by `StorageService` covers every operation called by
+`StorageService` itself as well as batched operations that are run through
+[`StreamExecutor`](crate::streaming::StreamExecutor).
 
 For COGS purposes we use operation count as a proxy for compute cost under the
 assumption that each operation we serve has a basically flat CPU cost. Large
 payloads take longer, but they can be streamed in the background while other
 operations are served so they don't really cost more.
 
-Wrapping the outermost backend owned by `StorageService` covers every operation
-called by `StorageService` itself as well as batched operations that are run
-through [`StreamExecutor`](crate::streaming::StreamExecutor).
-
 Notably, operations that fail before reaching `StorageService` (e.g. auth or
 rate-limiting failures at a higher layer) are not counted.
+
+## Storage COGS
+
+This is gated behind the `storage_cogs` Cargo feature.
+
+Each backend reports every write/overwrite, TTI bump, and delete it performs on
+stored objects to a [`ChangeStream`](change_stream::ChangeStream). To
+turn this change stream into COGS data, a stream consumer has to merge each
+change event into an external table to update an inventory of objects. The
+inventory table can be queried to break down each backend's storage utilization
+by `app_feature`. Note that [`NoopStream`](change_stream::NoopStream) is used
+unless the backend's config includes a
+[`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig) and the
+service has a usable transport for it, and unless the `storage-cogs` feature is
+compiled in at all.
+
+Each row in the inventory table has an anonymized hash of an `ObjectId` as well
+as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
+backend. When using [`TieredStorage`](backend::tiered::TieredStorage)'s
+long-term backend the inventory table will contain _two rows_ for an object: a
+row for the actual object and its size in long-term backend, and a separate row
+for the tombstone and the tombstone's size in the high-volume backend.
+
+`ChangeStream` is not aware of any automatic garbage collection that backends
+may perform. Expired objects must be filtered out when querying the inventory
+table.
+
+Under the hood, `CostTrackerStream` uses
+[`InventoryTracker`](objectstore_inventory_tracker::InventoryTracker) to publish
+change events; it is generic over the transport rather than tied to Kafka. Each
+backend has its own sampling rate to lessen the load put on the stream
+processor. Sampling decisions are made
+based on [`ObjectId`](id::ObjectId). Each change event includes the sampling rate that was in
+effect at the time so that consumers can smooth over the effects of changing the
+sampling rate. When aggregating, divide each row's value by its `sample_rate`.
+
+See also: [`objectstore_inventory_tracker`] documentation.
 
 # Metadata and Payload
 

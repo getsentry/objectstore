@@ -20,6 +20,7 @@ futures-util = { workspace = true }
 gcp_auth = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
+objectstore-inventory-tracker = { workspace = true, features = ["kafka"], optional = true }
 objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
@@ -36,8 +37,16 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
+[features]
+# Publishes a per-record change stream used to attribute storage cost to app features.
+# Off by default: it pulls in librdkafka, whose native build needs a toolchain the
+# cross-build image would otherwise not need, and sandbox deployments have no topic or
+# consumer for the records anyway.
+storage-cogs = ["dep:objectstore-inventory-tracker"]
+
 [dev-dependencies]
 futures = { workspace = true }
+objectstore-inventory-tracker = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 zstd = { workspace = true }

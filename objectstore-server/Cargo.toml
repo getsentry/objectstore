@@ -32,7 +32,7 @@ num_cpus = { workspace = true }
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
 objectstore-options = { workspace = true }
-objectstore-service = { workspace = true }
+objectstore-service = { workspace = true, features = ["storage-cogs"] }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
 pin-project-lite = { workspace = true }
@@ -42,6 +42,7 @@ rustls = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "logs"] }
 serde = { workspace = true }
+serde-vars = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 thread_local = { workspace = true }

@@ -47,6 +47,9 @@ use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+};
 use crate::error::{Error, Result};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
@@ -124,6 +127,19 @@ pub struct BigTableConfig {
     ///
     /// - `OS__STORAGE__CONNECTIONS=16` (optional)
     pub connections: Option<usize>,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=bigtable_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Connection timeout used for the initial connection to Bigtable.
@@ -170,6 +186,8 @@ pub struct BigTableBackend {
     instance_path: String,
     table_path: String,
     table_name: String,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl fmt::Debug for BigTableBackend {
@@ -451,11 +469,15 @@ fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
 }
 
 /// Builds the three mutations that write an object row: clear existing data,
-/// then set the payload and metadata cells.
+/// then set the payload and metadata cells. Returns them with the resulting row size.
 ///
 /// Used by both [`BigTableBackend::put_row`] (unconditional write) and
 /// [`BigTableBackend::put_non_tombstone`] (conditional write).
-fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mutation; 3]> {
+fn object_mutations(
+    path: &[u8],
+    mut metadata: Metadata,
+    payload: Vec<u8>,
+) -> Result<([v2::Mutation; 3], u64)> {
     let (family, timestamp_micros) = match metadata.time_expires {
         None => (FAMILY_MANUAL, -1),
         Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
@@ -467,7 +489,7 @@ fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mut
     let metadata_bytes = serde_json::to_vec(&metadata)
         .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
 
-    Ok([
+    let mutations = [
         // NB: We explicitly delete the row to clear metadata on overwrite.
         delete_row_mutation(),
         mutation(mutation::Mutation::SetCell(mutation::SetCell {
@@ -482,7 +504,33 @@ fn object_mutations(mut metadata: Metadata, payload: Vec<u8>) -> Result<[v2::Mut
             timestamp_micros,
             value: metadata_bytes,
         })),
-    ])
+    ];
+
+    let size = row_size(path, &mutations);
+    Ok((mutations, size))
+}
+
+/// Approximates the bytes a row occupies, as its key plus every cell value written.
+///
+/// This function does not distinguish between object rows and tombstone rows. It does not
+/// include Bigtable's own overhead.
+fn row_size(path: &[u8], mutations: &[v2::Mutation]) -> u64 {
+    let cells: usize = mutations
+        .iter()
+        .filter_map(|m| match &m.mutation {
+            Some(mutation::Mutation::SetCell(cell)) => Some(cell.value.len()),
+            _ => None,
+        })
+        .sum();
+
+    (path.len() + cells) as u64
+}
+
+/// The moment a row written now under `policy` is expected to be reclaimed.
+///
+/// Returns `None` for [`ExpirationPolicy::Manual`], which never expires on its own.
+fn expiry_from_policy(policy: ExpirationPolicy, now: SystemTime) -> Option<SystemTime> {
+    policy.expires_in().map(|ttl| now + ttl)
 }
 
 /// Metadata carried by tombstone rows in the `t` (tombstone-meta) column.
@@ -694,14 +742,19 @@ impl BigTableBackend {
     ///
     /// Pass an `endpoint` in the config to connect to a local emulator; omit it to use real GCP
     /// credentials. `connections` controls the gRPC connection pool size (defaults to 1).
-    pub async fn new(config: BigTableConfig) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: BigTableConfig,
+        streams: &ChangeStreamFactory,
+    ) -> anyhow::Result<Self> {
         let BigTableConfig {
             endpoint,
             project_id,
             instance_name,
             table_name,
             connections,
+            cogs,
         } = config;
+        let change_stream = streams.build(cogs.as_ref());
 
         let bigtable = if let Some(ref endpoint) = endpoint {
             BigTableConnection::new_with_emulator(
@@ -734,6 +787,7 @@ impl BigTableBackend {
             instance_path: format!("projects/{project_id}/instances/{instance_name}"),
             table_path: client.get_full_table_name(&table_name),
             table_name,
+            change_stream,
         })
     }
 
@@ -799,15 +853,17 @@ impl BigTableBackend {
         Ok(response.into_inner())
     }
 
+    /// Writes an object row, returning the size of the row it wrote.
     async fn put_row(
         &self,
         path: Vec<u8>,
         metadata: Metadata,
         payload: Vec<u8>,
         action: &'static str,
-    ) -> Result<v2::MutateRowResponse> {
-        let mutations = object_mutations(metadata, payload)?;
-        self.mutate(path, mutations, action).await
+    ) -> Result<(v2::MutateRowResponse, u64)> {
+        let (mutations, size) = object_mutations(&path, metadata, payload)?;
+        let response = self.mutate(path, mutations, action).await?;
+        Ok((response, size))
     }
 
     async fn put_tombstone_row(
@@ -823,6 +879,8 @@ impl BigTableBackend {
     /// Best-effort TTI bump for a row.
     ///
     /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
+    ///
+    /// A successful bump is reported to the [`ChangeStream`].
     #[tracing::instrument(level = "debug", fields(?hv_id, loaded), skip_all)]
     async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
         let expiration_policy = row.expiration_policy();
@@ -837,17 +895,30 @@ impl BigTableBackend {
                     }
                 };
 
+                let now = SystemTime::now();
                 let tombstone = Tombstone {
                     target,
                     expiration_policy,
                 };
-                let _ = self.put_tombstone_row(path, &tombstone, "tti-bump").await;
+                if self
+                    .put_tombstone_row(path, &tombstone, "tti-bump")
+                    .await
+                    .is_ok()
+                {
+                    self.change_stream
+                        .update(hv_id, expiry_from_policy(expiration_policy, now));
+                }
             }
             RowData::Object { metadata, payload } if loaded => {
                 let bumped = bumped_tti_metadata(metadata);
-                let _ = self
+                let expires_at = bumped.time_expires;
+                if self
                     .put_row(path, bumped, payload.clone(), "tti-bump")
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    self.change_stream.update(hv_id, expires_at);
+                }
             }
             RowData::Object { metadata, .. } => {
                 let payload_read = self
@@ -856,7 +927,14 @@ impl BigTableBackend {
 
                 if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
                     let bumped = bumped_tti_metadata(metadata);
-                    let _ = self.put_row(path, bumped, payload, "tti-bump").await;
+                    let expires_at = bumped.time_expires;
+                    if self
+                        .put_row(path, bumped, payload, "tti-bump")
+                        .await
+                        .is_ok()
+                    {
+                        self.change_stream.update(hv_id, expires_at);
+                    }
                 }
             }
         }
@@ -917,8 +995,10 @@ impl Backend for BigTableBackend {
             payload.push(chunk);
         }
 
-        self.put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
+        let (_, size) = self
+            .put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
+        self.change_stream.write(id, size, metadata.time_expires);
 
         Ok(())
     }
@@ -949,8 +1029,13 @@ impl Backend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
+        self.change_stream.delete(id);
 
         Ok(())
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -966,7 +1051,7 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = object_mutations(metadata.clone(), payload.to_vec())?;
+        let (mutations, size) = object_mutations(&path, metadata.clone(), payload.to_vec())?;
 
         for _ in 0..CAS_RETRY_COUNT {
             let write_succeeded = self
@@ -979,6 +1064,7 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
+                self.change_stream.write(id, size, metadata.time_expires);
                 return Ok(None);
             }
 
@@ -1087,6 +1173,9 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
+                // TODO(FS-492): `write_succeeded` is `true` even when there was no tombstone to
+                // delete so, while harmless, we emit an extra DELETE to the changestream here
+                self.change_stream.delete(id);
                 return Ok(None);
             }
 
@@ -1133,14 +1222,44 @@ impl HighVolumeBackend for BigTableBackend {
             (None, None) => tombstone_predicate(),
         };
 
-        let mutations = match write {
-            TieredWrite::Tombstone(tombstone) => tombstone_mutations(&tombstone, now)?.into(),
-            TieredWrite::Object(m, p) => object_mutations(m, p.to_vec())?.into(),
-            TieredWrite::Delete => vec![delete_row_mutation()],
+        // Get the correct set of mutations to apply as well as the new expiration date.
+        // If we're deleting something, `expires_at` is `None`. If we're writing something
+        // without an expiration date, `expires_at` is `Some(None)`.
+        let (mutations, expires_at): (Vec<v2::Mutation>, Option<Option<SystemTime>>) = match write {
+            TieredWrite::Tombstone(tombstone) => (
+                tombstone_mutations(&tombstone, now)?.into(),
+                Some(expiry_from_policy(tombstone.expiration_policy, now)),
+            ),
+            TieredWrite::Object(m, p) => {
+                let expires_at = m.time_expires;
+                let (mutations, _) = object_mutations(&path, m, p.to_vec())?;
+                (mutations.into(), Some(expires_at))
+            }
+            TieredWrite::Delete => (vec![delete_row_mutation()], None),
         };
 
-        self.check_and_mutate(path, predicate, mutations, "compare_and_write")
-            .await
+        let written = self
+            .check_and_mutate(
+                path.clone(),
+                predicate,
+                mutations.clone(),
+                "compare_and_write",
+            )
+            .await?;
+
+        match (written, expires_at) {
+            // Don't record anything if the write didn't succeed
+            (false, _) => {}
+            // We wrote something (the inner `expires_at` is `None` for manual GC)
+            (true, Some(expires_at)) => {
+                self.change_stream
+                    .write(id, row_size(&path, &mutations), expires_at)
+            }
+            // We deleted something
+            (true, None) => self.change_stream.delete(id),
+        }
+
+        Ok(written)
     }
 }
 
@@ -1300,6 +1419,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use anyhow::Result;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::OpType;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::test_utils::DummyProducer;
+
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -1311,15 +1435,33 @@ mod tests {
     //
     // Refer to the readme for how to set up the emulator.
 
-    async fn create_test_backend() -> Result<BigTableBackend> {
-        BigTableBackend::new(BigTableConfig {
+    fn test_config() -> BigTableConfig {
+        BigTableConfig {
             endpoint: Some("localhost:8086".into()),
             project_id: "testing".into(),
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
-        })
-        .await
+            cogs: None,
+        }
+    }
+
+    async fn create_test_backend() -> Result<BigTableBackend> {
+        BigTableBackend::new(test_config(), &ChangeStreamFactory::default()).await
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    async fn create_test_backend_with_change_stream() -> Result<(BigTableBackend, DummyProducer)> {
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        let config = BigTableConfig {
+            cogs: Some(CostTrackerStreamConfig {
+                shared_resource_id: "bigtable_objectstore".into(),
+                sample_rate: 1.0,
+            }),
+            ..test_config()
+        };
+
+        Ok((BigTableBackend::new(config, &streams).await?, producer))
     }
 
     fn make_id() -> ObjectId {
@@ -1343,7 +1485,7 @@ mod tests {
         if metadata.time_expires.is_none() {
             metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
         }
-        let mutations = object_mutations(metadata, payload.to_vec())?;
+        let (mutations, _) = object_mutations(&path, metadata, payload.to_vec())?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -2358,5 +2500,157 @@ mod tests {
         assert!(content_range.is_none());
 
         Ok(())
+    }
+
+    #[test]
+    fn row_size_counts_the_key_and_every_cell() {
+        let path = b"attachments/org.1/objects/abc";
+        let (mutations, size) =
+            object_mutations(path, Metadata::default(), b"0123456789".to_vec()).unwrap();
+
+        // The key, the 10-byte payload, and the serialized metadata. `object_mutations`
+        // stamps the size into the metadata before serializing it, so the expected length
+        // has to account for that too.
+        let stamped = Metadata {
+            size: Some(10),
+            ..Default::default()
+        };
+        let metadata_len = serde_json::to_vec(&stamped).unwrap().len();
+        let expected = (path.len() + 10 + metadata_len) as u64;
+
+        assert_eq!(row_size(path, &mutations), expected);
+        assert_eq!(size, expected, "the size handed back matches the mutations");
+    }
+
+    #[test]
+    fn row_size_is_nonzero_for_tombstones() {
+        let path = b"attachments/org.1/objects/abc";
+        let tombstone = Tombstone {
+            target: ObjectId::from_storage_path("attachments/org.1/objects/abc/0199").unwrap(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+        };
+        let mutations = tombstone_mutations(&tombstone, SystemTime::now()).unwrap();
+
+        assert!(row_size(path, &mutations) > path.len() as u64);
+    }
+
+    #[test]
+    fn expiry_from_policy_resolves_only_timeout_policies() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+
+        assert_eq!(expiry_from_policy(ExpirationPolicy::Manual, now), None);
+        assert_eq!(
+            expiry_from_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(30)), now),
+            Some(now + Duration::from_secs(30))
+        );
+        assert_eq!(
+            expiry_from_policy(ExpirationPolicy::TimeToIdle(Duration::from_secs(30)), now),
+            Some(now + Duration::from_secs(30))
+        );
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_writes_and_deletes() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single::<crate::stream::ClientError>(b"hello".to_vec()),
+            )
+            .await?;
+        backend.delete_object(&id).await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].app_feature, "testing");
+        assert_eq!(records[0].shared_resource_id, "bigtable_objectstore");
+        // Key plus payload plus metadata, so strictly more than the payload alone.
+        assert!(records[0].size.unwrap() > b"hello".len() as u64);
+        assert!(records[0].expiration_time.is_some());
+
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[1].size, None);
+        assert_eq!(records[1].record_id, records[0].record_id);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_tombstone_rows() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let target = new_test_revision(&id);
+
+        let tombstone = Tombstone {
+            target: target.clone(),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+        };
+        let written = backend
+            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .await?;
+        assert!(written);
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert!(
+            records[0].size.unwrap() > 0,
+            "tombstone rows occupy storage and must not report zero"
+        );
+        assert!(records[0].expiration_time.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_tti_bump_as_an_update() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(1)),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single::<crate::stream::ClientError>(b"hello".to_vec()),
+            )
+            .await?;
+        producer.clear();
+
+        // The stored deadline is far enough below `now + tti` to clear the debounce.
+        backend.get_tiered_object(&id, None).await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "expected exactly one bump report");
+        assert_eq!(records[0].op_type, OpType::Update);
+        assert_eq!(records[0].size, None, "a bump does not change the size");
+        assert!(records[0].expiration_time.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    fn new_test_revision(id: &ObjectId) -> ObjectId {
+        ObjectId {
+            context: id.context.clone(),
+            key: format!("{}/{}", id.key, uuid::Uuid::now_v7()),
+        }
     }
 }
