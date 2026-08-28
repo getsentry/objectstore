@@ -7,6 +7,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
 use objectstore_service::error::Error as ServiceError;
+use objectstore_types::range::ContentRange;
+use objectstore_types::resumable::HEADER_UPLOAD_OFFSET;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,17 +54,6 @@ pub struct ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
-    /// Creates an error response carrying only a message, with no cause chain.
-    ///
-    /// For outcomes that are not errors in the service layer and therefore have no
-    /// [`Error`] to wrap, such as a denied resumable upload session.
-    pub fn message(detail: impl Into<String>) -> Self {
-        Self {
-            detail: Some(detail.into()),
-            causes: Vec::new(),
-        }
-    }
-
     /// Creates an error response from an error, extracting the full cause chain.
     pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
         let detail = Some(error.to_string());
@@ -137,8 +128,37 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         self.capture();
-        let body = ApiErrorResponse::from_error(&self);
-        (self.status(), Json(body)).into_response()
+
+        match self {
+            ApiError::Service(ServiceError::RangeNotSatisfiable { total }) => {
+                let mut response = (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [(
+                        http::header::CONTENT_RANGE,
+                        ContentRange::unsatisfiable_total_to_header_value(total),
+                    )],
+                )
+                    .into_response();
+                insert_accept_ranges(&mut response);
+                response
+            }
+            ApiError::Service(ServiceError::UploadOffsetMismatch { offset }) => {
+                let body = ApiErrorResponse {
+                    detail: Some(format!("expected offset {offset}")),
+                    causes: Vec::new(),
+                };
+                (
+                    StatusCode::CONFLICT,
+                    [(HEADER_UPLOAD_OFFSET, HeaderValue::from(offset))],
+                    Json(body),
+                )
+                    .into_response()
+            }
+            error => {
+                let body = ApiErrorResponse::from_error(&error);
+                (error.status(), Json(body)).into_response()
+            }
+        }
     }
 }
 

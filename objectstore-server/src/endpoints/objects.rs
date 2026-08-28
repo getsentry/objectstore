@@ -11,7 +11,6 @@ use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::Metadata;
-use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
@@ -144,24 +143,8 @@ async fn object_get(
     _headers: HeaderMap,
 ) -> ApiResult<Response> {
     let context = id.context().clone();
-    let result = service.get_object(id, byte_range).await;
-
-    let (metadata, content_range, stream) = match result {
-        Ok(Some(result)) => result,
-        Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
-        Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
-            let mut response = (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    http::header::CONTENT_RANGE,
-                    ContentRange::unsatisfiable_total_to_header_value(total),
-                )],
-            )
-                .into_response();
-            insert_accept_ranges(&mut response);
-            return Ok(response);
-        }
-        Err(e) => return Err(e),
+    let Some((metadata, content_range, stream)) = service.get_object(id, byte_range).await? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
     let stream = state.meter_stream(stream, &context);

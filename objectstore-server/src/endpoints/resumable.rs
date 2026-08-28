@@ -38,7 +38,7 @@ use objectstore_types::resumable::{
 use serde::Deserialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiErrorResponse, ApiResult};
+use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
@@ -250,23 +250,8 @@ pub(super) async fn cancel_session(
 }
 
 /// Turns an [`UploadProgress`] outcome into the response shared by chunks and offset queries.
-///
-/// An offset mismatch is answered here rather than through [`ApiError::status`], because the
-/// authoritative offset has to travel in a header that a generic error response cannot set.
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
-    let progress = match progress {
-        Ok(progress) => progress,
-        Err(ApiError::Service(ServiceError::UploadOffsetMismatch { offset })) => {
-            let body = ApiErrorResponse::message(format!("expected offset {offset}"));
-            let response = (
-                StatusCode::CONFLICT,
-                [(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset))],
-                Json(body),
-            );
-            return Ok(response.into_response());
-        }
-        Err(e) => return Err(e),
-    };
+    let progress = progress?;
 
     let response = match progress {
         UploadProgress::Incomplete { offset } => (
@@ -380,8 +365,9 @@ mod tests {
     #[tokio::test]
     async fn offset_mismatch_answers_conflict_with_the_authoritative_offset() {
         let mismatch = ServiceError::UploadOffsetMismatch { offset: 786_432 };
-        let response =
-            progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap();
+        let error =
+            progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap_err();
+        let response = error.into_response();
 
         let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::CONFLICT);
