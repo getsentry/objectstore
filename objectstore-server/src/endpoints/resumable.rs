@@ -3,8 +3,8 @@
 //! Resumable uploads are a variation of the regular object endpoints rather than a separate
 //! resource, following GCS and S3 rather than [TUS]. Every request addresses the same object
 //! path with the session in the query string, so these handlers have no router of their own:
-//! thin handlers in [`objects`](super::objects) inspect [`ResumableQuery`] and dispatch the
-//! original request here, where each operation runs with its own Axum extractors.
+//! [`ResumableTarget`] classifies the query before thin handlers in [`objects`](super::objects)
+//! dispatch the original request here, where each operation runs with its own Axum extractors.
 //! Session tokens are encoded as unpadded base64url at this API boundary.
 //!
 //! | Operation | Request | Success |
@@ -23,8 +23,8 @@
 //!
 //! [TUS]: https://tus.io/protocols/resumable-upload
 
-use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, OptionalFromRequestParts, Query, State};
+use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use futures_util::TryStreamExt;
@@ -58,8 +58,8 @@ pub(super) enum UploadType {
 ///
 /// Both fields are optional and unknown parameters are ignored, because pre-signed URLs put
 /// their own `os_*` parameters into the same query string.
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct ResumableQuery {
+#[derive(Debug, Deserialize)]
+struct ResumableQuery {
     /// Present on a session creation request.
     upload_type: Option<UploadType>,
     /// Present on a chunk write, offset query, or cancellation.
@@ -72,9 +72,6 @@ pub(super) enum ResumableTarget {
     /// A new session to create for the object addressed by the request.
     NewSession,
     /// An existing session to continue or cancel.
-    ///
-    /// The dispatcher moves the token into the request extensions before calling the selected
-    /// handler, avoiding a second query-string deserialization.
     ExistingSession(SessionToken),
 }
 
@@ -85,7 +82,7 @@ impl ResumableQuery {
     ///
     /// Returns [`ApiError::Client`] if both parameters are present. They address different
     /// operations, so a request carrying both is ambiguous rather than defaulted.
-    pub fn classify(self) -> ApiResult<Option<ResumableTarget>> {
+    fn classify(self) -> ApiResult<Option<ResumableTarget>> {
         match (self.upload_type, self.session) {
             (Some(_), Some(_)) => Err(ApiError::Client(
                 "`upload_type` and `session` are mutually exclusive".into(),
@@ -94,6 +91,27 @@ impl ResumableQuery {
             (None, Some(session)) => Ok(Some(ResumableTarget::ExistingSession(session))),
             (None, None) => Ok(None),
         }
+    }
+}
+
+impl<S> OptionalFromRequestParts<S> for ResumableTarget
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> ApiResult<Option<ResumableTarget>> {
+        if parts.uri.query().is_none() {
+            return Ok(None);
+        }
+
+        let Query(query) = Query::<ResumableQuery>::try_from_uri(&parts.uri)
+            .map_err(|error| ApiError::Client(error.to_string()))?;
+
+        query.classify()
     }
 }
 

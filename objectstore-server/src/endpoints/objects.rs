@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use axum::body::Body;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Request, State};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
-use crate::endpoints::resumable::{self, ResumableQuery, ResumableTarget};
+use crate::endpoints::resumable::{self, ResumableTarget};
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
@@ -34,29 +34,11 @@ pub fn router() -> Router<ServiceState> {
         .route("/objects/{usecase}/{scopes}/{*key}", object_routes)
 }
 
-/// Extracts which resumable session, if any, the request targets.
-///
-/// Returns `None` without parsing when the URI has no query string.
-///
-/// Parsing a query does not consume the request body, so the selected handler can still extract
-/// it.
-fn extract_resumable_target(request: &Request) -> ApiResult<Option<ResumableTarget>> {
-    if request.uri().query().is_none() {
-        return Ok(None);
-    }
-
-    let Query(query) = Query::<ResumableQuery>::try_from_uri(request.uri())
-        .map_err(|error| ApiError::Client(error.to_string()))?;
-
-    query.classify()
-}
-
-async fn dispatch_objects_post(State(state): State<ServiceState>, request: Request) -> Response {
-    let target = match extract_resumable_target(&request) {
-        Ok(target) => target,
-        Err(error) => return error.into_response(),
-    };
-
+async fn dispatch_objects_post(
+    State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
+    request: Request,
+) -> Response {
     match target {
         Some(ResumableTarget::NewSession) => resumable::create_session.call(request, state).await,
         Some(ResumableTarget::ExistingSession(_)) => {
@@ -67,12 +49,11 @@ async fn dispatch_objects_post(State(state): State<ServiceState>, request: Reque
     }
 }
 
-async fn dispatch_object_put(State(state): State<ServiceState>, mut request: Request) -> Response {
-    let target = match extract_resumable_target(&request) {
-        Ok(target) => target,
-        Err(error) => return error.into_response(),
-    };
-
+async fn dispatch_object_put(
+    State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
+    mut request: Request,
+) -> Response {
     match target {
         Some(ResumableTarget::NewSession) => {
             resumable::create_session_for_key.call(request, state).await
@@ -87,13 +68,9 @@ async fn dispatch_object_put(State(state): State<ServiceState>, mut request: Req
 
 async fn dispatch_object_delete(
     State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
     mut request: Request,
 ) -> Response {
-    let target = match extract_resumable_target(&request) {
-        Ok(target) => target,
-        Err(error) => return error.into_response(),
-    };
-
     match target {
         Some(ResumableTarget::ExistingSession(session)) => {
             request.extensions_mut().insert(session);
