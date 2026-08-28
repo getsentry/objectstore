@@ -6,7 +6,7 @@ use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
-use axum::{Json, RequestExt, Router};
+use axum::{Json, Router};
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
@@ -41,28 +41,21 @@ pub fn router() -> Router<ServiceState> {
 ///
 /// Parsing a query does not consume the request body, so the selected handler can still extract
 /// it.
-async fn extract_resumable_target(
-    request: &mut Request,
-) -> Result<Option<ResumableTarget>, Response> {
+fn extract_resumable_target(request: &Request) -> ApiResult<Option<ResumableTarget>> {
     if request.uri().query().is_none() {
         return Ok(None);
     }
 
-    let Query(query) = request
-        .extract_parts::<Query<ResumableQuery>>()
-        .await
-        .map_err(|rejection| rejection.into_response())?;
+    let Query(query) = Query::<ResumableQuery>::try_from_uri(request.uri())
+        .map_err(|error| ApiError::Client(error.to_string()))?;
 
-    query.classify().map_err(IntoResponse::into_response)
+    query.classify()
 }
 
-async fn dispatch_objects_post(
-    State(state): State<ServiceState>,
-    mut request: Request,
-) -> Response {
-    let target = match extract_resumable_target(&mut request).await {
+async fn dispatch_objects_post(State(state): State<ServiceState>, request: Request) -> Response {
+    let target = match extract_resumable_target(&request) {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     match target {
@@ -76,9 +69,9 @@ async fn dispatch_objects_post(
 }
 
 async fn dispatch_object_put(State(state): State<ServiceState>, mut request: Request) -> Response {
-    let target = match extract_resumable_target(&mut request).await {
+    let target = match extract_resumable_target(&request) {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     match target {
@@ -97,9 +90,9 @@ async fn dispatch_object_delete(
     State(state): State<ServiceState>,
     mut request: Request,
 ) -> Response {
-    let target = match extract_resumable_target(&mut request).await {
+    let target = match extract_resumable_target(&request) {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     match target {
