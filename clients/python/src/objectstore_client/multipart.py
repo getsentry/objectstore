@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 from objectstore_client.errors import RequestError, raise_for_status
 from objectstore_client.metrics import measure_storage_operation
+from objectstore_client.tracing import storage_span
 
 if TYPE_CHECKING:
     from objectstore_client.client import Session
@@ -118,11 +119,22 @@ class MultipartUpload:
         )
         url = self._session._make_multipart_url("parts", self._key, query)
 
-        with measure_storage_operation(
-            self._session._metrics_backend,
-            "multipart.put_part",
-            self._session._usecase.name,
-        ) as metric_emitter:
+        with (
+            storage_span(
+                "multipart.put_part",
+                self._session._usecase,
+                self._session._scope,
+                key=self._key,
+                upload_id=self._upload_id,
+                part_number=part_number,
+                size=content_length,
+            ),
+            measure_storage_operation(
+                self._session._metrics_backend,
+                "multipart.put_part",
+                self._session._usecase.name,
+            ) as metric_emitter,
+        ):
             response = self._session._pool.request(
                 "PUT",
                 url,
@@ -141,57 +153,73 @@ class MultipartUpload:
         all_parts: list[PartInfo] = []
         marker: int | None = None
 
-        while True:
-            params: dict[str, str] = {"upload_id": self._upload_id}
-            if marker is not None:
-                params["part_number_marker"] = str(marker)
+        with storage_span(
+            "multipart.list_parts",
+            self._session._usecase,
+            self._session._scope,
+            key=self._key,
+            upload_id=self._upload_id,
+        ) as span:
+            while True:
+                params: dict[str, str] = {"upload_id": self._upload_id}
+                if marker is not None:
+                    params["part_number_marker"] = str(marker)
 
-            query = urlencode(params)
-            url = self._session._make_multipart_url("parts", self._key, query)
-            headers = self._session._make_headers()
+                query = urlencode(params)
+                url = self._session._make_multipart_url("parts", self._key, query)
+                headers = self._session._make_headers()
 
-            response = self._session._pool.request(
-                "GET",
-                url,
-                headers=headers,
-                preload_content=True,
-            )
-            raise_for_status(response)
-            data = response.json()
+                response = self._session._pool.request(
+                    "GET",
+                    url,
+                    headers=headers,
+                    preload_content=True,
+                )
+                raise_for_status(response)
+                data = response.json()
 
-            for p in data["parts"]:
-                all_parts.append(
-                    PartInfo(
-                        part_number=p["part_number"],
-                        etag=p["etag"],
-                        last_modified=datetime.fromisoformat(p["last_modified"]),
-                        size=p["size"],
+                for p in data["parts"]:
+                    all_parts.append(
+                        PartInfo(
+                            part_number=p["part_number"],
+                            etag=p["etag"],
+                            last_modified=datetime.fromisoformat(p["last_modified"]),
+                            size=p["size"],
+                        )
                     )
-                )
 
-            if not data["is_truncated"]:
-                return all_parts
+                if not data["is_truncated"]:
+                    span.set_attribute("objectstore.part_count", len(all_parts))
+                    return all_parts
 
-            marker = data.get("next_part_number_marker")
-            if marker is None:
-                raise RequestError(
-                    "Server returned is_truncated=true but no next_part_number_marker",
-                    status=200,
-                    response=str(data),
-                )
+                marker = data.get("next_part_number_marker")
+                if marker is None:
+                    raise RequestError(
+                        "Server returned is_truncated=true but no "
+                        "next_part_number_marker",
+                        status=200,
+                        response=str(data),
+                    )
 
     def abort(self) -> None:
         """Aborts this multipart upload, cleaning up server-side state."""
-        query = urlencode({"upload_id": self._upload_id})
-        url = self._session._make_multipart_url(None, self._key, query)
-        headers = self._session._make_headers()
+        with storage_span(
+            "multipart.abort",
+            self._session._usecase,
+            self._session._scope,
+            key=self._key,
+            upload_id=self._upload_id,
+        ):
+            query = urlencode({"upload_id": self._upload_id})
+            url = self._session._make_multipart_url(None, self._key, query)
+            headers = self._session._make_headers()
 
-        response = self._session._pool.request(
-            "DELETE",
-            url,
-            headers=headers,
-        )
-        raise_for_status(response)
+            response = self._session._pool.request(
+                "DELETE",
+                url,
+                headers=headers,
+            )
+            raise_for_status(response)
 
     def complete(self, parts: Sequence[CompletePart | PartInfo]) -> str:
         """Completes the multipart upload, assembling all parts into the final object.
@@ -216,10 +244,20 @@ class MultipartUpload:
             }
         ).encode("utf-8")
 
-        with measure_storage_operation(
-            self._session._metrics_backend,
-            "multipart.complete",
-            self._session._usecase.name,
+        with (
+            storage_span(
+                "multipart.complete",
+                self._session._usecase,
+                self._session._scope,
+                key=self._key,
+                upload_id=self._upload_id,
+                part_count=len(sorted_parts),
+            ),
+            measure_storage_operation(
+                self._session._metrics_backend,
+                "multipart.complete",
+                self._session._usecase.name,
+            ),
         ):
             response = self._session._pool.request(
                 "POST",

@@ -7,7 +7,7 @@ authors = [{ name = "Sentry", email = "oss@sentry.io" }]
 license = { file = "LICENSE.md" }
 requires-python = ">=3.11"
 dependencies = [
-    "sentry-sdk>=2.42.1",
+    "sentry-sdk>=2.66.0",
     "urllib3>=2.2.2",
     "zstandard>=0.18.0",
     "filetype>=1.2.0",

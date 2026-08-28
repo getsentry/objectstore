@@ -35,6 +35,7 @@ from objectstore_client.metrics import (
 )
 from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
+from objectstore_client.tracing import storage_span
 
 # Query parameter carrying a JWT, mirroring the `x-os-auth` header.
 PARAM_AUTH = "os_auth"
@@ -271,12 +272,29 @@ class Session:
         """
         if not isinstance(self._token, SecretKey):
             raise ValueError("no secret key configured on this session")
-        return self._token.token_for_scope(
-            self._usecase.name,
-            self._scope,
-            permissions,
-            expiry_seconds,
+
+        resolved_expiry = (
+            expiry_seconds if expiry_seconds is not None else self._token.expiry_seconds
         )
+        resolved_permissions = (
+            permissions if permissions is not None else self._token.permissions
+        )
+        with storage_span(
+            "mint_token",
+            self._usecase,
+            self._scope,
+            expiry_seconds=resolved_expiry,
+        ) as span:
+            token = self._token.token_for_scope(
+                self._usecase.name,
+                self._scope,
+                permissions,
+                expiry_seconds,
+            )
+            span.set_attribute(
+                "objectstore.permissions", [str(p) for p in resolved_permissions]
+            )
+            return token
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
@@ -414,9 +432,12 @@ class Session:
         if key == "":
             key = None
 
-        with measure_storage_operation(
-            self._metrics_backend, "put", self._usecase.name
-        ) as metric_emitter:
+        with (
+            storage_span("put", self._usecase, self._scope) as span,
+            measure_storage_operation(
+                self._metrics_backend, "put", self._usecase.name
+            ) as metrics,
+        ):
             retries = None  # by default use the pool's value, set by the Client
             if compress_with != "none":
                 # For on-the-fly compression, don't attempt read retries,
@@ -442,9 +463,21 @@ class Session:
             # Must do this after streaming `body` as that's what is responsible
             # for advancing the seek position in both streams
             if precompressed is None:
-                metric_emitter.record_uncompressed_size(original_body.tell())
+                metrics.record_uncompressed_size(original_body.tell())
             if encoding != "none":
-                metric_emitter.record_compressed_size(body.tell(), encoding)
+                metrics.record_compressed_size(body.tell(), encoding)
+
+            # Set after the response, since the key may be server-generated.
+            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.compression", encoding)
+            if metrics.uncompressed_size is not None:
+                span.set_attribute(
+                    "objectstore.uncompressed_size", metrics.uncompressed_size
+                )
+            if metrics.compressed_size is not None:
+                span.set_attribute(
+                    "objectstore.compressed_size", metrics.compressed_size
+                )
             return res["key"]
 
     def get(
@@ -469,38 +502,49 @@ class Session:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(
-            self._metrics_backend, "get", self._usecase.name
-        ):
-            response = self._pool.request(
-                "GET",
-                self._make_url(key),
-                preload_content=False,
-                decode_content=False,
-                headers=headers,
-            )
-            if response.status == 404:
-                response.read()  # drain body so urllib3 returns the connection
-                return None
-            raise_for_status(response)
-        # OR: should I use `response.stream()`?
-        stream = cast(IO[bytes], response)
-        metadata = Metadata.from_headers(response.headers)
-
-        encoding_accepted = accept_encoding is not None and (
-            "*" in accept_encoding or metadata.compression in accept_encoding
-        )
-        if metadata.compression and decompress and not encoding_accepted:
-            if metadata.compression != "zstd":
-                raise NotImplementedError(
-                    "Transparent decoding of anything but `zstd` is not implemented yet"
+        with storage_span("get", self._usecase, self._scope, key=key) as span:
+            with measure_storage_operation(
+                self._metrics_backend, "get", self._usecase.name
+            ):
+                response = self._pool.request(
+                    "GET",
+                    self._make_url(key),
+                    preload_content=False,
+                    decode_content=False,
+                    headers=headers,
                 )
+                if response.status == 404:
+                    response.read()  # drain body so urllib3 returns the connection
+                    span.set_attribute("objectstore.found", False)
+                    return None
+                raise_for_status(response)
+                span.set_attribute("objectstore.found", True)
 
-            metadata.compression = None
-            dctx = zstandard.ZstdDecompressor()
-            stream = dctx.stream_reader(stream, read_across_frames=True)
+            # OR: should I use `response.stream()`?
+            stream = cast(IO[bytes], response)
+            metadata = Metadata.from_headers(response.headers)
+            span.set_attribute(
+                "objectstore.compression", metadata.compression or "none"
+            )
 
-        return GetResponse(metadata, stream)
+            encoding_accepted = accept_encoding is not None and (
+                "*" in accept_encoding or metadata.compression in accept_encoding
+            )
+            decompressed = False
+            if metadata.compression and decompress and not encoding_accepted:
+                if metadata.compression != "zstd":
+                    raise NotImplementedError(
+                        "Transparent decoding of anything but `zstd` is not "
+                        "implemented yet"
+                    )
+
+                metadata.compression = None
+                dctx = zstandard.ZstdDecompressor()
+                stream = dctx.stream_reader(stream, read_across_frames=True)
+                decompressed = True
+
+            span.set_attribute("objectstore.decompressed", decompressed)
+            return GetResponse(metadata, stream)
 
     def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
         """
@@ -571,22 +615,32 @@ class Session:
             )
         duration_secs = math.ceil(duration.total_seconds())
 
-        # `_make_url` already percent-encodes the path identically to the wire.
-        encoded_path = self._make_url(key)
-        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        encoded_query = utils.encode_query(
-            f"{presign.PARAM_KID}={self._token.kid}"
-            f"&{presign.PARAM_TIMESTAMP}={timestamp}"
-            f"&{presign.PARAM_DURATION}={duration_secs}"
-        )
+        with storage_span(
+            "presign",
+            self._usecase,
+            self._scope,
+            key=key,
+            method=method,
+            duration_seconds=duration_secs,
+        ):
+            # `_make_url` already percent-encodes the path identically to the wire.
+            encoded_path = self._make_url(key)
+            timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            encoded_query = utils.encode_query(
+                f"{presign.PARAM_KID}={self._token.kid}"
+                f"&{presign.PARAM_TIMESTAMP}={timestamp}"
+                f"&{presign.PARAM_DURATION}={duration_secs}"
+            )
 
-        canonical = presign.build_canonical_form(method, encoded_path, encoded_query)
-        signature = self._token.signature_for_canonical_form(canonical)
+            canonical = presign.build_canonical_form(
+                method, encoded_path, encoded_query
+            )
+            signature = self._token.signature_for_canonical_form(canonical)
 
-        return (
-            f"{self._base_url()}"
-            f"{encoded_path}?{encoded_query}&{presign.PARAM_SIG}={signature}"
-        )
+            return (
+                f"{self._base_url()}"
+                f"{encoded_path}?{encoded_query}&{presign.PARAM_SIG}={signature}"
+            )
 
     def head(self, key: str) -> Metadata | None:
         """
@@ -598,8 +652,11 @@ class Session:
         and therefore bumps its expiration.
         """
         headers = self._make_headers()
-        with measure_storage_operation(
-            self._metrics_backend, "head", self._usecase.name
+        with (
+            storage_span("head", self._usecase, self._scope, key=key) as span,
+            measure_storage_operation(
+                self._metrics_backend, "head", self._usecase.name
+            ),
         ):
             response = self._pool.request(
                 "HEAD",
@@ -608,8 +665,10 @@ class Session:
                 preload_content=True,
             )
             if response.status == 404:
+                span.set_attribute("objectstore.found", False)
                 return None
             raise_for_status(response)
+            span.set_attribute("objectstore.found", True)
             return Metadata.from_headers(response.headers)
 
     def delete(self, key: str) -> None:
@@ -618,8 +677,11 @@ class Session:
         """
 
         headers = self._make_headers()
-        with measure_storage_operation(
-            self._metrics_backend, "delete", self._usecase.name
+        with (
+            storage_span("delete", self._usecase, self._scope, key=key),
+            measure_storage_operation(
+                self._metrics_backend, "delete", self._usecase.name
+            ),
         ):
             response = self._pool.request(
                 "DELETE",
@@ -680,8 +742,13 @@ class Session:
         if key == "":
             key = None
 
-        with measure_storage_operation(
-            self._metrics_backend, "multipart.initiate", self._usecase.name
+        with (
+            storage_span(
+                "multipart.initiate", self._usecase, self._scope, key=key
+            ) as span,
+            measure_storage_operation(
+                self._metrics_backend, "multipart.initiate", self._usecase.name
+            ),
         ):
             response = self._pool.request(
                 "POST" if not key else "PUT",
@@ -692,6 +759,9 @@ class Session:
             )
             raise_for_status(response)
             res = response.json()
+            # Set after the response, since the key may be server-generated.
+            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.upload_id", res["upload_id"])
             return MultipartUpload(self, res["key"], res["upload_id"])
 
     def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
