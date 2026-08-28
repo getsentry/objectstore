@@ -1,18 +1,24 @@
 //! Integration tests for the resumable upload endpoints.
 //!
 //! No backend implements resumable uploads yet, so the reachable surface is session denial
-//! and request validation. That is deliberate: a deployment must answer `409 Conflict` to
+//! and request validation. That is deliberate: a deployment must answer `501 Not Implemented` to
 //! every session creation so clients fall back to a regular upload, and it must reject a
 //! malformed request before it reaches a backend.
 //!
 //! The `501 Not Implemented` assertions are the proof that dispatch and header parsing work:
 //! the only way to reach a declining backend method is through a well-formed request.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
 use reqwest::StatusCode;
+
+/// Unpadded base64url for the opaque backend token `some-token`.
+const SESSION: &str = "c29tZS10b2tlbg";
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -25,10 +31,41 @@ async fn test_server() -> TestServer {
     .await
 }
 
+/// Sends a raw HTTP/1.1 `PUT`, preserving the caller's exact body framing headers.
+async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> Result<String> {
+    let url = reqwest::Url::parse(&server.url(path))?;
+    let host = url
+        .host_str()
+        .expect("test server URL has a host")
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .expect("test server URL has a port");
+    let target = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    let headers = headers.to_owned();
+    let body = body.to_owned();
+
+    tokio::task::spawn_blocking(move || -> Result<String> {
+        let mut stream = TcpStream::connect((host.as_str(), port))?;
+        write!(
+            stream,
+            "PUT {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{headers}Connection: close\r\n\r\n{body}"
+        )?;
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    })
+    .await?
+}
+
 // --- Session creation ---
 
 #[tokio::test]
-async fn create_session_is_denied_with_client_key() -> Result<()> {
+async fn unsupported_create_session_with_client_key_is_not_implemented() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -37,12 +74,12 @@ async fn create_session_is_denied_with_client_key() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     Ok(())
 }
 
 #[tokio::test]
-async fn create_session_is_denied_with_generated_key() -> Result<()> {
+async fn unsupported_create_session_with_generated_key_is_not_implemented() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -51,7 +88,7 @@ async fn create_session_is_denied_with_generated_key() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     Ok(())
 }
 
@@ -111,7 +148,7 @@ async fn chunk_reaches_the_declining_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
         .header(HEADER_UPLOAD_OFFSET, "0")
         .body("payload")
         .send()
@@ -126,9 +163,8 @@ async fn offset_query_reaches_the_declining_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
         .header(HEADER_UPLOAD_OFFSET, "*")
-        .header(reqwest::header::CONTENT_LENGTH, "0")
         .send()
         .await?;
 
@@ -137,11 +173,47 @@ async fn offset_query_reaches_the_declining_backend() -> Result<()> {
 }
 
 #[tokio::test]
+async fn offset_query_allows_missing_content_length() -> Result<()> {
+    let server = test_server().await;
+    let response = raw_put(
+        &server,
+        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
+        &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
+        "",
+    )
+    .await?;
+
+    assert!(
+        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+        "unexpected response: {response}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
+    let server = test_server().await;
+    let response = raw_put(
+        &server,
+        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
+        &format!("{HEADER_UPLOAD_OFFSET}: *\r\nTransfer-Encoding: chunked\r\n"),
+        "7\r\npayload\r\n0\r\n\r\n",
+    )
+    .await?;
+
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+        "unexpected response: {response}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn chunk_requires_upload_offset() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
         .body("payload")
         .send()
         .await?;
@@ -157,7 +229,7 @@ async fn chunk_rejects_malformed_upload_offset() -> Result<()> {
 
     for invalid in ["", "-1", "1.5", "**", "here"] {
         let response = client
-            .put(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+            .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
             .header(HEADER_UPLOAD_OFFSET, invalid)
             .body("payload")
             .send()
@@ -178,7 +250,7 @@ async fn offset_query_rejects_a_payload() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
         .header(HEADER_UPLOAD_OFFSET, "*")
         .body("payload")
         .send()
@@ -189,11 +261,11 @@ async fn offset_query_rejects_a_payload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn session_token_with_path_traversal_is_rejected() -> Result<()> {
+async fn session_token_requires_base64url() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?session=../escape"))
+        .put(server.url("/v1/objects/test/org=1/my-key?session=%25%25%25"))
         .header(HEADER_UPLOAD_OFFSET, "0")
         .body("payload")
         .send()
@@ -210,7 +282,7 @@ async fn terminate_reaches_the_declining_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .delete(server.url("/v1/objects/test/org=1/my-key?session=some-token"))
+        .delete(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
         .send()
         .await?;
 
@@ -238,7 +310,9 @@ async fn upload_type_and_session_are_mutually_exclusive() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=resumable&session=some-token"))
+        .put(server.url(&format!(
+            "/v1/objects/test/org=1/my-key?upload_type=resumable&session={SESSION}"
+        )))
         .header(HEADER_UPLOAD_LENGTH, "1048576")
         .header(HEADER_UPLOAD_OFFSET, "0")
         .send()
@@ -253,7 +327,7 @@ async fn session_on_the_collection_route_is_rejected() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .post(server.url("/v1/objects/test/org=1/?session=some-token"))
+        .post(server.url(&format!("/v1/objects/test/org=1/?session={SESSION}")))
         .header(HEADER_UPLOAD_OFFSET, "0")
         .body("payload")
         .send()

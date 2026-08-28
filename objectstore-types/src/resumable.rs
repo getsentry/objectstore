@@ -7,9 +7,10 @@
 //! so it recognizes the chunk carrying the last byte and commits the object itself.
 //!
 //! Every request addresses the regular object endpoints with the session in the query
-//! string. Header names are borrowed from [TUS] where they fit, but this is not a TUS
-//! implementation: there is no version negotiation, no capability discovery, and no
-//! support for uploads of unknown length.
+//! string. [`SessionToken`] serializes as unpadded base64url at that API boundary. Header
+//! names are borrowed from [TUS] where they fit, but this is not a TUS implementation: there
+//! is no version negotiation, no capability discovery, and no support for uploads of unknown
+//! length.
 //!
 //! Key types:
 //! - [`SessionToken`] — opaque identifier for an in-progress upload session.
@@ -21,10 +22,11 @@
 
 use std::fmt;
 use std::ops::Deref;
-use std::path::{Component, Path};
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Request header declaring the total size of the object, in bytes.
 ///
@@ -50,10 +52,11 @@ const OFFSET_WILDCARD: &str = "*";
 /// key travel in the request path rather than in the token, so a request cannot address
 /// an object other than the one it names.
 ///
-/// Validated on construction: non-empty and free of path-traversal components (`..`,
-/// leading `/`, etc.), so a backend can safely use it as a single path segment.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+/// Validated on construction only to ensure it is non-empty. Its contents are otherwise opaque:
+/// backends may use any UTF-8 string, including path separators and traversal-like text.
+/// At the API boundary it is serialized as unpadded base64url, keeping the opaque value out of
+/// URL parsing and escaping rules.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionToken(String);
 
 /// Error returned when a [`SessionToken`] fails validation.
@@ -66,16 +69,10 @@ impl SessionToken {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidSessionToken`] if the string is empty or contains a component
-    /// that is not a plain path segment.
+    /// Returns [`InvalidSessionToken`] if the string is empty.
     pub fn new(s: String) -> Result<Self, InvalidSessionToken> {
         if s.is_empty() {
             return Err(InvalidSessionToken("must not be empty".into()));
-        }
-        for component in Path::new(&s).components() {
-            if !matches!(component, Component::Normal(_)) {
-                return Err(InvalidSessionToken(s));
-            }
         }
         Ok(Self(s))
     }
@@ -100,13 +97,32 @@ impl fmt::Display for SessionToken {
     }
 }
 
+impl Serialize for SessionToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0.as_bytes()))
+    }
+}
+
 impl<'de> Deserialize<'de> for SessionToken {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        Self::new(s).map_err(serde::de::Error::custom)
+        let encoded = String::deserialize(deserializer)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(&encoded)
+            .map_err(serde::de::Error::custom)?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+            return Err(serde::de::Error::custom(
+                "session token must use canonical unpadded base64url",
+            ));
+        }
+
+        let token = String::from_utf8(bytes).map_err(serde::de::Error::custom)?;
+        Self::new(token).map_err(serde::de::Error::custom)
     }
 }
 
@@ -161,7 +177,7 @@ impl fmt::Display for UploadOffset {
 pub struct CreateSessionResponse {
     /// The object key (server-generated or client-provided).
     pub key: String,
-    /// The session token for subsequent requests.
+    /// The session token for subsequent requests, serialized as unpadded base64url.
     pub session: SessionToken,
 }
 
@@ -181,20 +197,38 @@ mod tests {
 
     #[test]
     fn session_token_accepts_opaque_values() -> Result<(), InvalidSessionToken> {
-        assert_eq!(SessionToken::new("abc123".into())?.as_str(), "abc123");
-        assert_eq!(
-            SessionToken::new("eyJyZXZpc2lvbiI6ImEifQ".into())?.as_str(),
-            "eyJyZXZpc2lvbiI6ImEifQ"
-        );
+        for value in ["abc123", "..", "/abs", "a/../b", "./a", "a/", "opaque +? ü"] {
+            assert_eq!(SessionToken::new(value.into())?.as_str(), value);
+        }
         Ok(())
     }
 
     #[test]
-    fn session_token_rejects_empty_and_traversal() {
-        for invalid in ["", "..", "/abs", "a/../b", "./a"] {
+    fn session_token_rejects_empty() {
+        assert!(SessionToken::new(String::new()).is_err());
+    }
+
+    #[test]
+    fn session_token_serializes_as_unpadded_base64url() -> Result<(), Box<dyn std::error::Error>> {
+        let token = SessionToken::new("tok3n".into())?;
+        assert_eq!(serde_json::to_string(&token)?, r#""dG9rM24""#);
+
+        let decoded: SessionToken = serde_json::from_str(r#""dG9rM24""#)?;
+        assert_eq!(decoded, token);
+
+        let opaque = SessionToken::new("../escape".into())?;
+        assert_eq!(serde_json::to_string(&opaque)?, r#""Li4vZXNjYXBl""#);
+        let decoded: SessionToken = serde_json::from_str(r#""Li4vZXNjYXBl""#)?;
+        assert_eq!(decoded, opaque);
+        Ok(())
+    }
+
+    #[test]
+    fn session_token_rejects_invalid_api_encodings() {
+        for invalid in [r#""%%%""#, r#""dG9rM24=""#, r#""_w""#] {
             assert!(
-                SessionToken::new(invalid.into()).is_err(),
-                "expected {invalid:?} to be rejected"
+                serde_json::from_str::<SessionToken>(invalid).is_err(),
+                "accepted {invalid}"
             );
         }
     }

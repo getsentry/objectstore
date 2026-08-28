@@ -33,6 +33,7 @@
 //!
 //! Resumable uploads use the object endpoints above, selected by a query parameter:
 //! `upload_type=resumable` opens a session, and `session=<token>` addresses it from then on.
+//! Session tokens are unpadded base64url at the API boundary.
 //! The object is named by the request path as usual, and [`objectstore_types::resumable`]
 //! holds the protocol types.
 //!
@@ -45,8 +46,8 @@
 //!
 //! Session creation requires an `Upload-Length` header carrying the total size of the object
 //! in bytes, and takes the same metadata headers as a regular upload. It answers `200 OK`
-//! with `{"key", "session"}` and a `Location` header pointing at the object path with the
-//! session appended. Metadata is fixed at this point and does not change afterwards.
+//! with `{"key", "session"}`; the session field is the token to use in subsequent query
+//! parameters. Metadata is fixed at this point and does not change afterwards.
 //!
 //! Chunk uploads and offset queries share one request shape, distinguished by the
 //! `Upload-Offset` header: a byte offset submits the body as the chunk starting there, while
@@ -55,6 +56,8 @@
 //! `201 Created` with `{"key"}` once the object is committed. **The offset in the response
 //! may be lower than the end of the chunk that was sent** — backends persist only aligned
 //! prefixes and discard the remainder — so clients always continue from the returned offset.
+//! A chunk requires `Content-Length`; an offset query does not, but its body must still be empty.
+//! The server rejects an offset query carrying any body bytes with `400 Bad Request`.
 //!
 //! An offset query can commit an object that was assembled but not yet committed, so it
 //! requires write permission despite being read-shaped. Termination likewise needs write
@@ -62,14 +65,14 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed: unusable session, missing `Upload-Length`, or a chunk exceeding the declared length | Terminal |
-//! | `409`  | On creation: resumable uploads are unavailable for this object. On a chunk: offset mismatch, with the authoritative offset in `Upload-Offset` | Fall back to a regular upload, or resynchronize |
+//! | `400`  | Malformed: unusable session, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Terminal |
+//! | `409`  | A chunk's offset does not match, with the authoritative offset in `Upload-Offset` | Resynchronize |
 //! | `410`  | The session expired or was terminated; nothing was retained | Start a new session |
 //! | `501`  | The configured backend does not implement resumable uploads | Fall back to a regular upload |
 //!
 //! Not every backend can support this. Session creation asks the backend that would store the
 //! object to open one, and a backend that cannot declines, which the server reports as
-//! `409 Conflict`. No backend implements resumable uploads yet, so every session creation is
+//! `501 Not Implemented`. No backend implements resumable uploads yet, so every session creation is
 //! currently denied.
 //!
 //! # Multipart Upload Endpoints

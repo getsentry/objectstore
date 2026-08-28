@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use axum::body::Body;
-use axum::extract::{OriginalUri, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
-use crate::endpoints::resumable::{self, RequestPath, ResumableQuery, ResumableRoute};
+use crate::endpoints::resumable::{self, ResumableQuery, ResumableRoute};
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
@@ -44,7 +44,6 @@ async fn objects_post(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
-    OriginalUri(uri): OriginalUri,
     Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
@@ -54,8 +53,7 @@ async fn objects_post(
     match query.classify()? {
         ResumableRoute::Create => {
             let id = ObjectId::optional(context, None);
-            let path = RequestPath::Collection;
-            return resumable::create_session(service, state, path, uri.path(), id, headers).await;
+            return resumable::create_session(service, state, id, headers).await;
         }
         ResumableRoute::Session(_) => {
             return Err(ApiError::Client(
@@ -218,7 +216,6 @@ async fn object_put(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
-    OriginalUri(uri): OriginalUri,
     Query(query): Query<ResumableQuery>,
     headers: HeaderMap,
     body: MeteredBody,
@@ -228,8 +225,7 @@ async fn object_put(
     // bodyless paths.
     match query.classify()? {
         ResumableRoute::Create => {
-            let path = RequestPath::Object;
-            return resumable::create_session(service, state, path, uri.path(), id, headers).await;
+            return resumable::create_session(service, state, id, headers).await;
         }
         ResumableRoute::Session(session) => {
             return resumable::session_request(service, id, session, headers, body).await;
