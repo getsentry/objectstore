@@ -223,8 +223,10 @@ impl Error {
             Self::UploadOffsetMismatch { .. } => Level::DEBUG,
             Self::UploadSessionGone => Level::DEBUG,
             Self::InvalidUploadRequest(_) => Level::DEBUG,
-            // Unsupported optional functionality is a routine capability outcome.
-            Self::NotImplemented => Level::DEBUG,
+            // Indicates that optional functionality is not supported.
+            // We don't want a rogue client spamming us with Sentry errors just by calling an API
+            // that the server doesn't support, so we just log it.
+            Self::NotImplemented => Level::INFO,
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures
