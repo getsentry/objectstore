@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4
+
+### New Features ✨
+
+#### Python Client
+
+- Deprecate `propagate_traces` by @jan-auer in [#603](https://github.com/getsentry/objectstore/pull/603)
+- Send a default User-Agent header by @jan-auer in [#601](https://github.com/getsentry/objectstore/pull/601)
+
 ## 0.2.3
 
 ### New Features ✨
