@@ -26,7 +26,7 @@ def storage_span(
     operation: str,
     usecase: Usecase,
     scope: Scope,
-    **data: SpanAttributeValue | None,
+    **attributes: SpanAttributeValue | None,
 ) -> Generator[StreamedSpan]:
     """
     Starts a span for a single Objectstore operation.
@@ -41,19 +41,16 @@ def storage_span(
     """
     op = f"objectstore.{operation}"
     name = f"{op} {usecase.name}"
-    attributes: Attributes = {
+    span_attributes: Attributes = {
         "sentry.op": op,
         "sentry.origin": SPAN_ORIGIN,
         "objectstore.usecase": usecase.name,
-        **{
-            f"objectstore.scopes.{scope_key}": scope_value
-            for scope_key, scope_value in scope.dict().items()
-        },
-        **{
-            f"objectstore.{data_key}": data_value
-            for data_key, data_value in data.items()
-            if data_value is not None
-        },
     }
-    with sentry_sdk.traces.start_span(name=name, attributes=attributes) as span:
+    for scope_key, scope_value in scope.dict().items():
+        span_attributes[f"objectstore.scopes.{scope_key}"] = scope_value
+    for attribute_key, attribute_value in attributes.items():
+        if attribute_value is not None:
+            span_attributes[f"objectstore.{attribute_key}"] = attribute_value
+
+    with sentry_sdk.traces.start_span(name=name, attributes=span_attributes) as span:
         yield span
