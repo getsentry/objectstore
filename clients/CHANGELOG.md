@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+### New Features ✨
+
+- (python-client) Add Sentry span instrumentation for storage operations by @jan-auer in [#602](https://github.com/getsentry/objectstore/pull/602)
+
 ## 0.2.4
 
 ### New Features ✨
