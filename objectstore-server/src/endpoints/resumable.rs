@@ -218,6 +218,12 @@ pub(super) async fn continue_session(
         UploadOffset::Unknown => {
             // The wildcard carries no payload. A body would be silently discarded, so
             // reject it rather than let a client believe those bytes were written.
+            if headers.contains_key(http::header::CONTENT_LENGTH) && content_length(&headers)? > 0 {
+                return Err(ApiError::Client(format!(
+                    "{HEADER_UPLOAD_OFFSET}: * must be sent with an empty body"
+                )));
+            }
+
             while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
                 if !chunk.is_empty() {
                     return Err(ApiError::Client(format!(
