@@ -291,8 +291,21 @@ pub(super) async fn cancel_session(
 }
 
 /// Turns an [`UploadProgress`] outcome into the response shared by chunks and offset queries.
+///
+/// An offset mismatch is answered here rather than through [`ApiError::status`], because the
+/// authoritative offset has to travel in a header that a generic error response cannot set.
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
-    let progress = progress?;
+    let progress = match progress {
+        Ok(progress) => progress,
+        Err(error @ ApiError::Service(ServiceError::UploadOffsetMismatch { offset })) => {
+            let mut response = error.into_response();
+            response
+                .headers_mut()
+                .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
+            return Ok(response);
+        }
+        Err(error) => return Err(error),
+    };
 
     let response = match progress {
         UploadProgress::Incomplete { offset } => (
@@ -406,9 +419,8 @@ mod tests {
     #[tokio::test]
     async fn offset_mismatch_answers_conflict_with_the_authoritative_offset() {
         let mismatch = ServiceError::UploadOffsetMismatch { offset: 786_432 };
-        let error =
-            progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap_err();
-        let response = error.into_response();
+        let response =
+            progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap();
 
         let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::CONFLICT);
