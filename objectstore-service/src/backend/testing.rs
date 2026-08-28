@@ -240,10 +240,6 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     // --- Resumable upload methods ---
-    //
-    // `InMemoryBackend` does not implement resumable uploads, so these delegate to the
-    // declining `Backend` defaults. A test that exercises the resumable protocol has to
-    // override them.
 
     /// Intercepts [`Backend::create_upload_session`]. Default delegates to `inner`.
     async fn create_upload_session(
