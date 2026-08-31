@@ -24,12 +24,15 @@
 //!
 //! # Resumable Upload Endpoints
 //!
-//! A resumable upload transfers a single object across several requests. The client opens a
-//! session, declaring the object's total size and metadata upfront, and then sends the payload
-//! as a sequence of chunks at increasing byte offsets. If a chunk fails, the client asks the
-//! server which offset it holds and continues from there, so an interrupted transfer resumes
-//! where it stopped instead of starting over. The server knows the total size from the
-//! session, so it recognizes the chunk carrying the last byte and commits the object itself.
+//! A resumable upload transfers a single object across several requests.
+//! The client opens a session, declaring the object's total size and metadata upfront, and
+//! then sends the payload as a sequence of chunks at increasing byte offsets.
+//! If a chunk fails, the client can ask the server which offset it holds and continue from there,
+//! so an interrupted transfer resumes where it stopped instead of starting over.
+//! Clients are still encouraged to send the whole payload in a single request, as that's the most
+//! efficient and reliable approach.
+//! The server knows the total size from the session, so it recognizes the chunk carrying the last
+//! byte and commits the object itself.
 //!
 //! Resumable uploads use the object endpoints above, selected by a query parameter:
 //! `upload_type=resumable` opens a session, and `session=<token>` addresses it from then on.
@@ -53,16 +56,16 @@
 //! `Upload-Offset` header: a byte offset submits the body as the chunk starting there, while
 //! the `*` wildcard submits an empty body and asks which offset the server holds. Both answer
 //! `204 No Content` with the authoritative `Upload-Offset` while bytes remain, and
-//! `201 Created` with `{"key"}` once the object is committed. **The offset in the response
-//! may be lower than the end of the chunk that was sent** — backends persist only aligned
-//! prefixes and discard the remainder — so clients always continue from the returned offset.
-//! A chunk requires `Content-Length` even over HTTP/2; an offset query does not, but its body must
-//! still be empty. The server rejects a session creation or offset query carrying any body bytes
-//! with `400 Bad Request`.
+//! `201 Created` with `{"key"}` once the object is committed.
+//! The offset in the response may be lower than the end of the last chunk that was sent.
+//! Backends can e.g. persist only aligned prefixes and discard the remainder, so clients must
+//! always continue from the returned offset.
+//! Every chunk requires `Content-Length`, even over HTTP/2, while creation and offset queries
+//! must not carry a request body.
 //!
-//! An offset query can commit an object that was assembled but not yet committed, so it
-//! requires write permission despite being read-shaped. Termination likewise needs write
-//! rather than delete permission: it releases an in-progress upload, not an object.
+//! An offset query can commit an object, so it requires write permission despite being read-shaped.
+//! Termination likewise needs write rather than delete permission: it releases an in-progress upload,
+//! not an object.
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
@@ -70,11 +73,6 @@
 //! | `409`  | A chunk's offset does not match, with the authoritative offset in `Upload-Offset` | Resynchronize |
 //! | `410`  | The session expired or was canceled; nothing was retained | Start a new session |
 //! | `501`  | The configured backend does not implement resumable uploads | Fall back to a regular upload |
-//!
-//! Not every backend can support this. Session creation asks the backend that would store the
-//! object to open one, and a backend that cannot declines, which the server reports as
-//! `501 Not Implemented`. No backend implements resumable uploads yet, so every session creation is
-//! currently denied.
 //!
 //! # Multipart Upload Endpoints
 //!
