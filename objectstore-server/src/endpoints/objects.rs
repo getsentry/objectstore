@@ -136,7 +136,7 @@ async fn object_get(
             insert_accept_ranges(&mut response);
             return Ok(response);
         }
-        Err(error) => return Err(error),
+        Err(e) => return Err(e),
     };
 
     let stream = state.meter_stream(stream, &context);
