@@ -13,6 +13,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::BoxStream;
@@ -295,6 +296,26 @@ pub fn single<E: Send + 'static>(
     contents: impl Into<Bytes>,
 ) -> BoxStream<'static, Result<Bytes, E>> {
     futures_util::stream::once(std::future::ready(Ok(contents.into()))).boxed()
+}
+
+/// Wraps a stream to count the total bytes yielded by successful chunks.
+///
+/// Returns the shared counter and the wrapped stream. The counter is incremented
+/// as the stream is consumed, so read it only after the stream is exhausted.
+pub fn counting_stream<S, E>(stream: S) -> (Arc<AtomicU64>, impl Stream<Item = Result<Bytes, E>>)
+where
+    S: Stream<Item = Result<Bytes, E>>,
+{
+    let counter = Arc::new(AtomicU64::new(0));
+
+    (
+        counter.clone(),
+        stream.inspect(move |res| {
+            if let Ok(chunk) = res {
+                counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+        }),
+    )
 }
 
 /// Collects a stream of `Bytes` chunks into a `Vec<u8>`.

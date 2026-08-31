@@ -3,6 +3,7 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -14,6 +15,9 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
+};
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -51,18 +55,37 @@ pub struct FileSystemConfig {
     /// - `OS__STORAGE__TYPE=filesystem`
     /// - `OS__STORAGE__PATH=/path/to/storage`
     pub path: PathBuf,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=filesystem_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Local filesystem backend for development and testing.
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
-    pub fn new(config: FileSystemConfig) -> Self {
-        Self { path: config.path }
+    pub fn new(config: FileSystemConfig, streams: &ChangeStreamFactory) -> Self {
+        let FileSystemConfig { path, cogs } = config;
+        Self {
+            path,
+            change_stream: streams.build(cogs.as_ref()),
+        }
     }
 }
 
@@ -103,7 +126,7 @@ impl Backend for LocalFsBackend {
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
-        tokio::io::copy(&mut reader, &mut writer)
+        let payload_size = tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::Client(ce),
@@ -114,6 +137,10 @@ impl Backend for LocalFsBackend {
         let file = writer.into_inner();
         file.sync_data().await?;
         drop(file);
+
+        let metadata_size = metadata_json.len() as u64 + 1;
+        self.change_stream
+            .write(id, metadata_size + payload_size, metadata.time_expires);
 
         Ok(())
     }
@@ -168,13 +195,23 @@ impl Backend for LocalFsBackend {
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
-        let result = tokio::fs::remove_file(path).await;
-        if let Err(e) = &result
-            && e.kind() == ErrorKind::NotFound
-        {
-            objectstore_log::debug!("Object not found");
-        }
+
+        let result = match tokio::fs::remove_file(path).await {
+            Ok(()) => {
+                self.change_stream.delete(id);
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                objectstore_log::debug!("Object not found");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
         Ok(result?)
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -418,19 +455,24 @@ impl MultipartUploadBackend for LocalFsBackend {
         writer.write_all(metadata_json.as_bytes()).await?;
         writer.write_all(b"\n").await?;
 
+        let mut payload_size = 0;
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
             let file = tokio::fs::File::open(&part_path).await?;
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
             reader.read_line(&mut header_line).await?;
-            tokio::io::copy(&mut reader, &mut writer).await?;
+            payload_size += tokio::io::copy(&mut reader, &mut writer).await?;
         }
 
         writer.flush().await?;
         let file = writer.into_inner();
         file.sync_data().await?;
         drop(file);
+
+        let header_size = metadata_json.len() as u64 + 1;
+        self.change_stream
+            .write(id, header_size + payload_size, metadata.time_expires);
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await?;
@@ -449,6 +491,11 @@ mod tests {
     use objectstore_types::metadata::{Compression, ExpirationPolicy};
     use objectstore_types::scope::{Scope, Scopes};
 
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::OpType;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::test_utils::DummyProducer;
+
     use super::*;
     use crate::id::ObjectContext;
     use crate::stream;
@@ -456,9 +503,13 @@ mod tests {
     #[tokio::test]
     async fn stores_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -497,9 +548,13 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_returns_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -531,9 +586,13 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_nonexistent() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -551,11 +610,32 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "storage-cogs")]
+    fn make_backend_with_change_stream() -> (tempfile::TempDir, LocalFsBackend, DummyProducer) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: Some(CostTrackerStreamConfig {
+                    shared_resource_id: "filesystem_objectstore".into(),
+                    sample_rate: 1.0,
+                }),
+            },
+            &streams,
+        );
+        (tempdir, backend, producer)
+    }
+
     fn make_backend() -> (tempfile::TempDir, LocalFsBackend) {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
         (tempdir, backend)
     }
 
@@ -969,5 +1049,65 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none(), "retry with correct part should succeed");
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_the_size_written_to_disk() {
+        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            ..Default::default()
+        };
+        let payload = b"oh hai!";
+
+        backend
+            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .await
+            .unwrap();
+
+        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
+            .await
+            .unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].shared_resource_id, "filesystem_objectstore");
+        assert_eq!(records[0].app_feature, "testing");
+        assert_eq!(
+            records[0].size,
+            Some(file.len() as u64),
+            "the metadata header line counts towards the reported size"
+        );
+        assert!(records[0].expiration_time.is_some());
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_deletes_on_success() {
+        let (_tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+
+        // Try to delete a non-existent object. Don't emit a message.
+        backend
+            .delete_object(&id)
+            .await
+            .expect("deleting a non-existent object returns Ok(())");
+        assert!(producer.records().is_empty());
+
+        backend
+            .put_object(&id, &Metadata::default(), stream::single(b"hi".to_vec()))
+            .await
+            .unwrap();
+        producer.clear();
+
+        backend.delete_object(&id).await.unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Delete);
     }
 }

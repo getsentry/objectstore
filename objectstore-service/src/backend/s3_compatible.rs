@@ -1,5 +1,7 @@
 //! S3-compatible backend with generic protocol support.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::{fmt, io};
 
@@ -13,9 +15,12 @@ use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+};
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
-use crate::stream::ClientStream;
+use crate::stream::{ClientStream, counting_stream};
 
 /// Configuration for [`S3CompatibleBackend`].
 ///
@@ -52,6 +57,19 @@ pub struct S3CompatibleConfig {
     ///
     /// - `OS__STORAGE__BUCKET=my-bucket`
     pub bucket: String,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=s3_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Prefix used for custom metadata in headers for the GCS backend.
@@ -100,16 +118,36 @@ pub struct S3CompatibleBackend<T> {
     bucket: String,
 
     token_provider: Option<T>,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl<T> S3CompatibleBackend<T> {
     /// Creates a new S3-compatible backend bound to the given bucket.
-    pub fn new(endpoint: &str, bucket: &str, token_provider: T) -> Self {
+    pub fn new(
+        config: S3CompatibleConfig,
+        token_provider: T,
+        streams: &ChangeStreamFactory,
+    ) -> Self {
+        Self::build(config, Some(token_provider), streams)
+    }
+
+    fn build(
+        config: S3CompatibleConfig,
+        token_provider: Option<T>,
+        streams: &ChangeStreamFactory,
+    ) -> Self {
+        let S3CompatibleConfig {
+            endpoint,
+            bucket,
+            cogs,
+        } = config;
         Self {
             client: common::reqwest_client(),
-            endpoint: endpoint.into(),
-            bucket: bucket.into(),
-            token_provider: Some(token_provider),
+            endpoint,
+            bucket,
+            token_provider,
+            change_stream: streams.build(cogs.as_ref()),
         }
     }
 
@@ -117,6 +155,14 @@ impl<T> S3CompatibleBackend<T> {
     fn object_url(&self, id: &ObjectId) -> String {
         format!("{}/{}/{}", self.endpoint, self.bucket, id.as_storage_path())
     }
+}
+
+/// Number of bytes the given headers occupy as stored object metadata.
+fn headers_size(headers: &HeaderMap) -> u64 {
+    headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() as u64 + value.len() as u64)
+        .sum()
 }
 
 /// Wraps [`Metadata::to_headers`] with GCS-specific concerns (tombstone + custom-time).
@@ -262,6 +308,7 @@ where
             let mut bumped = metadata.clone();
             bumped.time_expires = Some(new_expire_at);
             self.update_metadata(id, &bumped).await?;
+            self.change_stream.update(id, Some(new_expire_at));
         }
 
         Ok(Some((metadata, content_range, response)))
@@ -302,13 +349,8 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
 
 impl S3CompatibleBackend<NoToken> {
     /// Creates a new S3-compatible backend that sends unauthenticated requests.
-    pub fn without_token(config: S3CompatibleConfig) -> Self {
-        Self {
-            client: common::reqwest_client(),
-            endpoint: config.endpoint,
-            bucket: config.bucket,
-            token_provider: None,
-        }
+    pub fn without_token(config: S3CompatibleConfig, streams: &ChangeStreamFactory) -> Self {
+        Self::build(config, None, streams)
     }
 }
 
@@ -326,16 +368,28 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         stream: ClientStream,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
+        let headers = metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?;
+        let metadata_size = headers_size(&headers);
+
+        // A successful PUT does not report the stored size back, so count what we send.
+        let (payload_size, counted) = counting_stream(stream);
+
         self.request(Method::PUT, self.object_url(id))
             .await?
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
-            .body(Body::wrap_stream(stream))
+            .headers(headers)
+            .body(Body::wrap_stream(counted))
             .send_traced()
             .await
             .check_error("S3: failed to put object")
             .await?
             .drain_body()
             .await;
+
+        self.change_stream.write(
+            id,
+            metadata_size + payload_size.load(Ordering::Relaxed),
+            metadata.time_expires,
+        );
 
         Ok(())
     }
@@ -385,8 +439,13 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .drain_body()
             .await;
+        self.change_stream.delete(id);
 
         Ok(())
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -410,10 +469,14 @@ mod tests {
     // Refer to the readme for how to set up MinIO via devservices.
 
     fn create_test_backend() -> S3CompatibleBackend<NoToken> {
-        S3CompatibleBackend::without_token(S3CompatibleConfig {
-            endpoint: "http://localhost:8089".into(),
-            bucket: "test-bucket".into(),
-        })
+        S3CompatibleBackend::without_token(
+            S3CompatibleConfig {
+                endpoint: "http://localhost:8089".into(),
+                bucket: "test-bucket".into(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        )
     }
 
     fn make_id() -> ObjectId {
@@ -475,6 +538,18 @@ mod tests {
         let roundtripped = Metadata::from_headers(&headers, GCS_CUSTOM_PREFIX).unwrap();
         assert_eq!(roundtripped.filename, metadata.filename);
         assert_eq!(roundtripped.custom, metadata.custom);
+    }
+
+    #[test]
+    fn headers_size_counts_names_and_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-meta-a", "1".parse().unwrap());
+        headers.insert("x-goog-meta-bb", "22".parse().unwrap());
+
+        assert_eq!(
+            headers_size(&headers),
+            ("x-goog-meta-a".len() + 1 + "x-goog-meta-bb".len() + 2) as u64
+        );
     }
 
     #[tokio::test]
