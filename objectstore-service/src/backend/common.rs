@@ -13,7 +13,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
+use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -79,15 +79,15 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Object metadata and its total length are declared upfront and cannot be mutated
     /// during the upload.
     ///
-    /// Returns `Ok(None)` when the backend refuses to store the described object resumably.
+    /// Returns [`Error::NotImplemented`] when the backend refuses to create a session.
     async fn create_upload_session(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<CreateSessionResponse> {
+    ) -> Result<SessionToken> {
         let _ = (id, metadata, total_length);
-        Ok(None)
+        Err(Error::NotImplemented)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
@@ -119,11 +119,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn cancel_upload(
-        &self,
-        id: &ObjectId,
-        session: &SessionToken,
-    ) -> Result<CancelUploadResponse> {
+    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }

@@ -18,8 +18,9 @@
 //! There is no completion request. The total size is known from session creation, so the
 //! backend recognizes the chunk carrying the last byte and commits the object itself.
 //!
-//! Not every backend supports this. When one declines, session creation answers
-//! `501 Not Implemented` and the client performs a regular upload instead.
+//! Not every backend supports this. When one refuses to create a session, it returns
+//! `NotImplemented`; the endpoint answers `501 Not Implemented` and the client performs a regular
+//! upload instead.
 //!
 //! [TUS]: https://tus.io/protocols/resumable-upload
 
@@ -232,8 +233,9 @@ pub(super) async fn create_session_for_key(
 
 /// Creates a session for the object at `id`.
 ///
-/// Answers `501 Not Implemented` when the backend declines, which tells the client to fall back
-/// to a regular upload. Metadata is declared here and does not change afterwards.
+/// Answers `501 Not Implemented` when the backend refuses to create a session, which tells the
+/// client to fall back to a regular upload. Metadata is declared here and does not change
+/// afterwards.
 async fn create_session_for_id(
     service: AuthAwareService,
     state: ServiceState,
@@ -253,8 +255,7 @@ async fn create_session_for_id(
 
     let session = service
         .create_upload_session(id.clone(), metadata, total_length)
-        .await?
-        .ok_or(ServiceError::NotImplemented)?;
+        .await?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),

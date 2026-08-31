@@ -1,12 +1,12 @@
 //! Integration tests for the resumable upload endpoints.
 //!
-//! No backend implements resumable uploads yet, so the reachable surface is session denial
+//! No backend implements resumable uploads yet, so the reachable surface is unsupported sessions
 //! and request validation. That is deliberate: a deployment must answer `501 Not Implemented` to
 //! every session creation so clients fall back to a regular upload, and it must reject a
 //! malformed request before it reaches a backend.
 //!
 //! The `501 Not Implemented` assertions are the proof that dispatch and header parsing work:
-//! the only way to reach a declining backend method is through a well-formed request.
+//! the only way to reach an unsupported backend method is through a well-formed request.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -159,7 +159,7 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
 // --- Chunks and offset queries ---
 
 #[tokio::test]
-async fn chunk_reaches_the_declining_backend() -> Result<()> {
+async fn chunk_reaches_the_unsupported_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -174,7 +174,7 @@ async fn chunk_reaches_the_declining_backend() -> Result<()> {
 }
 
 #[tokio::test]
-async fn offset_query_reaches_the_declining_backend() -> Result<()> {
+async fn offset_query_reaches_the_unsupported_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -293,7 +293,7 @@ async fn session_token_requires_base64url() -> Result<()> {
 // --- Cancellation ---
 
 #[tokio::test]
-async fn cancel_upload_reaches_the_declining_backend() -> Result<()> {
+async fn cancel_upload_reaches_the_unsupported_backend() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()

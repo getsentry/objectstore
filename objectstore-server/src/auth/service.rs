@@ -3,9 +3,7 @@ use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use objectstore_service::resumable::{
-    CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress,
-};
+use objectstore_service::resumable::{SessionToken, UploadProgress};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 
 use objectstore_service::{ClientStream, StorageService};
@@ -203,7 +201,7 @@ impl AuthAwareService {
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> ApiResult<CreateSessionResponse> {
+    ) -> ApiResult<SessionToken> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service
@@ -238,11 +236,7 @@ impl AuthAwareService {
     }
 
     /// Auth-aware wrapper around [`StorageService::cancel_upload`].
-    pub async fn cancel_upload(
-        &self,
-        id: ObjectId,
-        session: SessionToken,
-    ) -> ApiResult<CancelUploadResponse> {
+    pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> ApiResult<()> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.cancel_upload(id, session).await?)
     }

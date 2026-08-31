@@ -28,7 +28,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
+use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -106,7 +106,7 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<CreateSessionResponse> {
+    ) -> Result<SessionToken> {
         count(&id.context.usecase);
         self.inner
             .create_upload_session(id, metadata, total_length)
@@ -132,11 +132,7 @@ impl Backend for CountingBackend {
         self.inner.upload_offset(id, session).await
     }
 
-    async fn cancel_upload(
-        &self,
-        id: &ObjectId,
-        session: &SessionToken,
-    ) -> Result<CancelUploadResponse> {
+    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
         count(&id.context.usecase);
         self.inner.cancel_upload(id, session).await
     }

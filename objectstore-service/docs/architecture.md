@@ -210,9 +210,9 @@ trips for objects large enough that re-sending the whole payload is expensive.
    the backend recognizes that chunk from the declared total size.
 5. At any time, an upload can be canceled, which discards what its session holds.
 
-Not all backends support resumable uploads and can decline creating a session.
-Support can depend on the declared size, the metadata, or whether resuming is
-possible in principle.
+Not all backends support resumable uploads. A backend that refuses to create a session
+returns `NotImplemented`; support can depend on the declared size, the metadata, or whether
+resuming is possible in principle.
 
 ## Multipart Uploads
 

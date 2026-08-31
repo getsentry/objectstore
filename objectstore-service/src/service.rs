@@ -20,7 +20,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{CancelUploadResponse, CreateSessionResponse, SessionToken, UploadProgress};
+use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -365,15 +365,15 @@ impl StorageService {
 
     /// Opens a resumable upload session for an object of `total_length` bytes.
     ///
-    /// Returns `Ok(None)` when the backend declines resumable uploads for this object, in
-    /// which case the caller should fall back to [`Self::insert_object`]. Unlike the
-    /// multipart operations there is no eager capability probe: support is the return value.
+    /// Returns [`Error::NotImplemented`](crate::error::Error::NotImplemented) when the backend
+    /// refuses to create a session, in which case the caller should fall back to
+    /// [`Self::insert_object`].
     pub async fn create_upload_session(
         &self,
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> Result<CreateSessionResponse> {
+    ) -> Result<SessionToken> {
         metadata.validate()?;
         let inner = Arc::clone(&self.inner);
         self.spawn("create_upload_session", async move {
@@ -425,11 +425,7 @@ impl StorageService {
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
-    pub async fn cancel_upload(
-        &self,
-        id: ObjectId,
-        session: SessionToken,
-    ) -> Result<CancelUploadResponse> {
+    pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> Result<()> {
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
             inner.cancel_upload(&id, &session).await
@@ -862,19 +858,18 @@ mod tests {
     // --- Resumable uploads ---
 
     #[tokio::test]
-    async fn resumable_declines_by_default() {
+    async fn resumable_is_not_implemented_by_default() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
         let session = SessionToken::from("session".to_owned());
 
-        let denied = service
+        let creation = service
             .create_upload_session(id.clone(), Metadata::default(), 1024)
-            .await
-            .unwrap();
-        assert!(denied.is_none(), "expected the backend to decline");
+            .await;
+        assert!(matches!(creation, Err(Error::NotImplemented)));
 
-        // Without a session no other operation is reachable through the API, but the
-        // declining defaults must still be wired up rather than panicking.
+        // Without a session no other operation is reachable through the API, but the defaults
+        // must still be wired up rather than panicking.
         let chunk = service
             .put_chunk(id.clone(), session.clone(), 0, 4, stream::single("data"))
             .await;
@@ -918,8 +913,8 @@ mod tests {
             _id: &ObjectId,
             _metadata: &Metadata,
             total_length: u64,
-        ) -> Result<CreateSessionResponse> {
-            Ok(Some(SessionToken::from(format!("session-{total_length}"))))
+        ) -> Result<SessionToken> {
+            Ok(SessionToken::from(format!("session-{total_length}")))
         }
 
         async fn put_chunk(
@@ -948,7 +943,7 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _session: &SessionToken,
-        ) -> Result<CancelUploadResponse> {
+        ) -> Result<()> {
             Ok(())
         }
     }
@@ -965,8 +960,7 @@ mod tests {
         let session = service
             .create_upload_session(id.clone(), Metadata::default(), 1024)
             .await
-            .unwrap()
-            .expect("session was declined");
+            .unwrap();
         assert_eq!(session.as_str(), "session-1024");
 
         let progress = service

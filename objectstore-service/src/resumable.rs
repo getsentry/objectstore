@@ -6,11 +6,9 @@
 //! lands. See [`objectstore_types::resumable`] for the wire-level types.
 //!
 //! Not every backend can support this. Session creation therefore asks the backend that
-//! would store the object to open one, and a backend that cannot declines by returning
-//! `None` from
-//! [`Backend::create_upload_session`](crate::backend::common::Backend::create_upload_session).
-//! Declining is a routine outcome rather than an error: the server denies the session and
-//! the client falls back to a regular upload.
+//! would store the object to open one. A backend that cannot create a session returns
+//! [`Error::NotImplemented`](crate::error::Error::NotImplemented), and the client falls back to
+//! a regular upload.
 
 pub use objectstore_types::resumable::{SessionToken, UploadOffset};
 
@@ -36,12 +34,3 @@ pub enum UploadProgress {
     /// The last byte arrived and the object is committed and readable.
     Committed,
 }
-
-/// Response for
-/// [`Backend::create_upload_session`](crate::backend::common::Backend::create_upload_session).
-///
-/// `None` means the backend declines resumable uploads for this object.
-pub type CreateSessionResponse = Option<SessionToken>;
-
-/// Response for [`Backend::cancel_upload`](crate::backend::common::Backend::cancel_upload).
-pub type CancelUploadResponse = ();
