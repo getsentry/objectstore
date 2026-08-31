@@ -1,12 +1,8 @@
 //! Resumable upload endpoints.
 //!
 //! Resumable uploads are a variation of the regular object endpoints rather than a separate
-//! resource, following GCS and S3 rather than [TUS]. Every request addresses the same object
-//! path with the session in the query string, so these handlers have no router of their own:
-//! [`ResumableTarget`] classifies the query before thin handlers in [`objects`](super::objects)
-//! dispatch the original request here, where each operation runs with its own Axum extractors.
-//! Session creation returns the opaque backend token unchanged. Subsequent requests encode that
-//! token as unpadded base64url in the `session` query parameter.
+//! resource. Every request addresses a standard object path with the session in the query string
+//! (or `upload_type=resumable` for creation).
 //!
 //! | Operation | Request | Success |
 //! |---|---|---|
@@ -15,15 +11,6 @@
 //! | Chunk | `PUT …/{key}?session=<s>` with `Upload-Offset: <n>` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
-//!
-//! There is no completion request. The total size is known from session creation, so the
-//! backend recognizes the chunk carrying the last byte and commits the object itself.
-//!
-//! Not every backend supports this. When one refuses to create a session, it returns
-//! `NotImplemented`; the endpoint answers `501 Not Implemented` and the client performs a regular
-//! upload instead.
-//!
-//! [TUS]: https://tus.io/protocols/resumable-upload
 
 use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query, State};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
@@ -48,9 +35,6 @@ use crate::extractors::{Xt, body::MeteredBody};
 use crate::state::ServiceState;
 
 /// The `upload_type` query parameter.
-///
-/// Only one value is accepted, so an unrecognized upload type is a deserialization failure
-/// and therefore a `400` rather than being silently treated as a regular upload.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum UploadType {
@@ -59,9 +43,6 @@ pub(super) enum UploadType {
 }
 
 /// The resumable protocol's query parameters, as seen on a regular object route.
-///
-/// Both fields are optional and unknown parameters are ignored, because pre-signed URLs put
-/// their own `os_*` parameters into the same query string.
 #[derive(Debug, Deserialize)]
 struct ResumableQuery {
     /// Present on a session creation request.
@@ -84,8 +65,7 @@ impl ResumableQuery {
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::Client`] if both parameters are present. They address different
-    /// operations, so a request carrying both is ambiguous rather than defaulted.
+    /// Returns [`ApiError::Client`] if both parameters are present.
     fn classify(self) -> ApiResult<Option<ResumableTarget>> {
         match (self.upload_type, self.session) {
             (Some(_), Some(_)) => Err(ApiError::Client(
@@ -251,9 +231,8 @@ pub(super) async fn create_session_for_key(
 
 /// Creates a session for the object at `id`.
 ///
-/// Answers `501 Not Implemented` when the backend refuses to create a session, which tells the
-/// client to fall back to a regular upload. Metadata is declared here and does not change
-/// afterwards.
+/// Answers `501 Not Implemented` when the backend refuses to create a session or doesn't implement
+/// resumable uploads.
 async fn create_session_for_id(
     service: AuthAwareService,
     state: ServiceState,
@@ -332,9 +311,6 @@ pub(super) async fn cancel_session(
 }
 
 /// Turns an [`UploadProgress`] outcome into the response shared by chunks and offset queries.
-///
-/// An offset mismatch is answered here rather than through [`ApiError::status`], because the
-/// authoritative offset has to travel in a header that a generic error response cannot set.
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
     let progress = match progress {
         Ok(progress) => progress,
