@@ -411,7 +411,7 @@ impl StorageService {
 
     /// Reports how far a session has progressed, committing the object if it is assembled.
     ///
-    /// This mutates state and therefore requires write permission at the API layer.
+    /// This can mutate state and therefore requires write permission at the API layer.
     pub async fn upload_offset(
         &self,
         id: ObjectId,
