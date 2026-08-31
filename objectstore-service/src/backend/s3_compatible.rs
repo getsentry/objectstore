@@ -13,7 +13,7 @@ use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::stream::ClientStream;
 
@@ -152,9 +152,11 @@ where
                 provider
                     .get_token()
                     .await
-                    .map_err(|err| Error::Generic {
-                        context: "S3: failed to get authentication token".to_owned(),
-                        cause: Some(err.into()),
+                    .map_err(|err| {
+                        Error::new(
+                            ErrorKind::BackendFailure,
+                            format!("S3: failed to get authentication token: {err}"),
+                        )
                     })?
                     .as_str(),
             );
@@ -180,10 +182,7 @@ where
         let response = builder
             .send_traced()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send request".to_string(),
-                cause,
-            })?;
+            .context(ErrorKind::BackendFailure)?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -198,10 +197,11 @@ where
                 .and_then(|v| v.to_str().ok());
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
             let err = match total {
-                Some(total) => Error::RangeNotSatisfiable { total },
-                None => Error::generic(format!(
-                    "S3: 416 response with invalid Content-Range: {raw:?}"
-                )),
+                Some(total) => ErrorKind::RangeNotSatisfiable { total }.into(),
+                None => Error::new(
+                    ErrorKind::BackendFailure,
+                    format!("S3: 416 response with invalid Content-Range: {raw:?}"),
+                ),
             };
             response.drain_body().await;
             return Err(err);
@@ -210,16 +210,19 @@ where
         let response = response.check_error("S3: failed to get object").await?;
 
         let headers = response.headers();
-        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)?;
+        let mut metadata =
+            Metadata::from_headers(headers, GCS_CUSTOM_PREFIX).context(ErrorKind::CorruptData)?;
 
         let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
             let range = headers
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
-                .ok_or_else(|| Error::Generic {
-                    context: "S3: 206 response missing valid Content-Range header".to_owned(),
-                    cause: None,
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::BackendFailure,
+                        "S3: 206 response missing valid Content-Range header",
+                    )
                 })?;
             metadata.size = Some(range.total as usize);
             Some(range)
@@ -231,10 +234,7 @@ where
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value.parse::<usize>())
                 .transpose()
-                .map_err(|cause| Error::Generic {
-                    context: "S3: failed to parse Content-Length from object response".to_string(),
-                    cause: Some(Box::new(cause)),
-                })?;
+                .context(ErrorKind::CorruptData)?;
 
             if let Some(size) = size {
                 metadata.size = Some(size);
@@ -278,7 +278,10 @@ where
                 format!("/{}/{}", self.bucket, id.as_storage_path()),
             )
             .header("x-goog-metadata-directive", "REPLACE")
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
+                    .context(ErrorKind::InvalidMetadata)?,
+            )
             .send_traced()
             .await
             .check_error("S3: update expiration time")
@@ -328,7 +331,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         objectstore_log::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
             .await?
-            .headers(metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)?)
+            .headers(
+                metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
+                    .context(ErrorKind::InvalidMetadata)?,
+            )
             .body(Body::wrap_stream(stream))
             .send_traced()
             .await
@@ -369,10 +375,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send_traced()
             .await
-            .map_err(|cause| Error::Reqwest {
-                context: "S3: failed to send delete request".to_string(),
-                cause,
-            })?;
+            .context(ErrorKind::BackendFailure)?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {

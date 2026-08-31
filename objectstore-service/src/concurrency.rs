@@ -16,7 +16,7 @@ use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Panic, Result};
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -120,10 +120,10 @@ impl ConcurrencyLimiter {
     /// If a permit is free, returns immediately without touching the
     /// queue. Otherwise, acquires a queue ticket (bounded by the queue
     /// depth) and waits up to the configured timeout. Returns
-    /// [`Error::AtCapacity`] if the queue is full or on timeout.
+    /// [`ErrorKind::AtCapacity`] if the queue is full or on timeout.
     pub async fn acquire(&self) -> Result<ConcurrencyPermit> {
         if self.tasks_total == 0 {
-            return Err(Error::AtCapacity);
+            return Err(ErrorKind::AtCapacity.into());
         }
 
         // Fast path: Instantly grab a free permit without parking.
@@ -141,13 +141,13 @@ impl ConcurrencyLimiter {
             .queue
             .clone()
             .try_acquire_owned()
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| ErrorKind::AtCapacity)?;
 
         let acquire = self.tasks.clone().acquire_owned();
         let task_permit = tokio::time::timeout(self.timeout, acquire)
             .await
-            .map_err(|_| Error::AtCapacity)?
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| ErrorKind::AtCapacity)?
+            .map_err(|_| ErrorKind::AtCapacity)?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -158,13 +158,13 @@ impl ConcurrencyLimiter {
 
     /// Tries to acquire a single permit without waiting.
     ///
-    /// Returns [`Error::AtCapacity`] when no permits are available.
+    /// Returns [`ErrorKind::AtCapacity`] when no permits are available.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
         let task_permit = self
             .tasks
             .clone()
             .try_acquire_owned()
-            .map_err(|_| Error::AtCapacity)?;
+            .map_err(|_| ErrorKind::AtCapacity)?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -181,10 +181,10 @@ impl ConcurrencyLimiter {
     /// acquired under a single timeout deadline configured via
     /// [`with_timeout`](Self::with_timeout).
     ///
-    /// Returns [`Error::AtCapacity`] on timeout or when `max` is zero.
+    /// Returns [`ErrorKind::AtCapacity`] on timeout or when `max` is zero.
     pub async fn acquire_bulk(&self) -> Result<ConcurrencyPermit> {
         if self.tasks_total == 0 {
-            return Err(Error::AtCapacity);
+            return Err(ErrorKind::AtCapacity.into());
         }
 
         let bulk_sem = self.bulk.clone();
@@ -198,8 +198,8 @@ impl ConcurrencyLimiter {
 
         let (task_permit, bulk_permit) = tokio::time::timeout(self.timeout, acquire)
             .await
-            .map_err(|_| Error::AtCapacity)?
-            .map_err(|_: AcquireError| Error::AtCapacity)?;
+            .map_err(|_| ErrorKind::AtCapacity)?
+            .map_err(|_: AcquireError| ErrorKind::AtCapacity)?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -348,7 +348,7 @@ where
             let result = std::panic::AssertUnwindSafe(f)
                 .catch_unwind()
                 .await
-                .unwrap_or_else(|payload| Err(Error::panic(payload)));
+                .unwrap_or_else(|payload| Err(Panic::new(payload).into()));
 
             if let Err(ref e) = result {
                 let error = e as &dyn std::error::Error;
@@ -370,8 +370,9 @@ where
     );
 
     rx.await.map_err(|_| {
-        objectstore_log::error!(!!&Error::Dropped, operation, "Task failed");
-        Error::Dropped
+        let error = Error::new(ErrorKind::Internal, "task dropped");
+        objectstore_log::error!(!!&error, operation, "Task failed");
+        error
     })?
 }
 
@@ -380,7 +381,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::error::Error;
 
     #[test]
     fn available_permits_tracks_held() {
@@ -430,7 +430,7 @@ mod tests {
         let _permit = limiter.try_acquire().unwrap();
 
         let result = limiter.try_acquire();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
     }
 
     #[test]
@@ -505,7 +505,11 @@ mod tests {
 
         let p1 = limiter.try_acquire().unwrap();
         let p2 = limiter.try_acquire().unwrap();
-        assert!(matches!(limiter.try_acquire(), Err(Error::AtCapacity)));
+        assert!(
+            limiter
+                .try_acquire()
+                .is_err_and(|error| error.kind() == ErrorKind::AtCapacity)
+        );
 
         drop(p1);
         assert!(limiter.try_acquire().is_ok());
@@ -520,7 +524,7 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(start.elapsed(), Duration::ZERO);
         drop(bulk_permits);
     }
@@ -568,7 +572,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = waiter.await.unwrap();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(limiter.queued_permits(), 0);
     }
 
@@ -584,7 +588,7 @@ mod tests {
 
         assert_eq!(limiter.queued_permits(), 1);
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
     }
 
     #[tokio::test(start_paused = true)]
@@ -640,7 +644,7 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 
@@ -768,7 +772,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = waiter.await.unwrap();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(limiter.used_bulk_permits(), 0);
     }
 
@@ -797,7 +801,7 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let result = limiter.acquire_bulk().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 
@@ -815,7 +819,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = waiter.await.unwrap();
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         drop(permit);
     }
 
@@ -842,7 +846,7 @@ mod tests {
         // Third waiter exceeds queue depth — rejected instantly.
         let start = tokio::time::Instant::now();
         let result = limiter.acquire().await;
-        assert!(matches!(result, Err(Error::AtCapacity)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(start.elapsed(), Duration::ZERO);
 
         drop(bulk_permits);

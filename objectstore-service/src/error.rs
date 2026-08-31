@@ -1,219 +1,288 @@
-//! Error types for service and backend operations.
+//! Semantic errors for service and backend operations.
 //!
-//! [`Error`] covers I/O, serialization, HTTP, metadata, authentication,
-//! and backend-specific failures. [`Result`] is the corresponding alias.
+//! [`Error`] deliberately exposes only a stable semantic [`ErrorKind`]. Its source chain and an
+//! optional origin backtrace retain diagnostic detail without making backend implementation
+//! details part of the service API.
 
 use std::any::Any;
+use std::backtrace::Backtrace;
+use std::borrow::Cow;
+use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
 use reqwest::StatusCode;
-use thiserror::Error as ThisError;
 
-use crate::stream::ClientError;
-
-/// Structured error detail parsed from a backend HTTP error response.
-///
-/// Formats conditionally: includes only the fields that are non-empty.
+/// A panic captured from a service task.
 #[derive(Debug)]
-pub struct BackendDetail {
-    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
-    pub code: String,
-    /// Human-readable error message from the response body.
-    pub message: String,
+pub struct Panic {
+    message: Cow<'static, str>,
 }
 
-impl BackendDetail {
-    /// Creates a new [`BackendDetail`] with empty code and message.
-    pub fn none() -> Self {
-        Self {
-            code: String::new(),
-            message: String::new(),
-        }
+impl Panic {
+    /// Extracts a message from a panic payload.
+    pub fn new(payload: Box<dyn Any + Send>) -> Self {
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            Cow::Borrowed(*s)
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            Cow::Owned(s.clone())
+        } else {
+            Cow::Borrowed("unknown panic")
+        };
+        Self { message }
     }
 }
 
-impl fmt::Display for BackendDetail {
+impl fmt::Display for Panic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.code.is_empty(), self.message.is_empty()) {
-            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
-            (true, false) => write!(f, "{}", self.message),
-            (false, true) => write!(f, "backend code {}", self.code),
-            (true, true) => Ok(()),
-        }
+        f.write_str(&self.message)
     }
 }
 
-/// Error type for service operations.
-#[derive(Debug, ThisError)]
-pub enum Error {
-    /// IO errors related to payload streaming or file operations.
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+impl StdError for Panic {}
 
-    /// Error originating from a client-supplied input stream.
-    ///
-    /// Indicates the client is at fault (e.g. dropped connection mid-upload) and should
-    /// map to a 4xx response rather than a 5xx.
-    #[error("error reading client stream: {0}")]
-    Client(#[from] ClientError),
-
-    /// Errors related to de/serialization.
-    #[error("serde error: {context}")]
-    Serde {
-        /// Context describing what was being serialized/deserialized.
-        context: String,
-        /// The underlying serde error.
-        #[source]
-        cause: serde_json::Error,
-    },
-
-    /// All errors stemming from the reqwest client, used in multiple backends to send requests to
-    /// e.g. GCP APIs.
-    /// These can be network errors encountered when sending the requests, but can also indicate
-    /// errors returned by the API itself.
-    #[error("reqwest error: {context}")]
-    Reqwest {
-        /// Context describing the request that failed.
-        context: String,
-        /// The underlying reqwest error.
-        #[source]
-        cause: reqwest::Error,
-    },
-
-    /// An HTTP error response from a storage backend (e.g., GCS, S3).
-    ///
-    /// Unlike [`Reqwest`](Self::Reqwest), which covers transport-level failures, this variant
-    /// captures application-level error responses where the server returned a 4xx/5xx status code
-    /// along with a structured error body.
-    #[error("{context} ({status}). {detail}")]
-    BackendResponse {
-        /// Context describing the request that failed.
-        context: &'static str,
-        /// The HTTP status code returned by the backend.
-        status: StatusCode,
-        /// Parsed error code and message from the response body.
-        detail: BackendDetail,
-    },
-
-    /// Errors related to de/serialization and parsing of object metadata.
-    #[error("metadata error: {0}")]
-    Metadata(#[from] objectstore_types::metadata::Error),
-
-    /// Errors encountered when attempting to authenticate with GCP.
-    #[error("GCP authentication error: {0}")]
-    GcpAuth(#[from] gcp_auth::Error),
-
-    /// A spawned service task panicked.
-    #[error("service task failed: {0}")]
-    Panic(String),
-
-    /// A spawned service task was dropped before it could deliver its result.
-    ///
-    /// This is an unexpected condition that can occur when the runtime drops the task for unknown
-    /// reasons.
-    #[error("task dropped")]
-    Dropped,
-
-    /// A redirect tombstone was encountered at a place where it is not supported.
-    ///
-    /// This indicates a caller bug — tombstone-aware reads must go through the
-    /// [`HighVolumeBackend`](crate::backend::common::HighVolumeBackend) methods.
-    #[error("unexpected tombstone")]
-    UnexpectedTombstone,
-
-    /// The requested byte range is not satisfiable for the object's size.
-    #[error("range not satisfiable (object size: {total} bytes)")]
+/// The client-visible semantic classification of a service error.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    /// Object metadata supplied by a client is invalid.
+    InvalidMetadata,
+    /// A multipart upload identifier is invalid.
+    InvalidUploadId,
+    /// A client-provided request stream failed.
+    ClientStream,
+    /// A requested byte range cannot be resolved against the object size.
     RangeNotSatisfiable {
-        /// Total size of the object in bytes.
+        /// Total object length in bytes.
         total: u64,
     },
-
-    /// The service has reached its concurrency limit and cannot accept more operations.
-    #[error("concurrency limit reached")]
+    /// The service cannot accept more work.
     AtCapacity,
+    /// The requested operation is unsupported.
+    Unsupported,
+    /// A storage backend operation failed.
+    BackendFailure,
+    /// A storage backend returned an HTTP error response.
+    BackendResponse(StatusCode),
+    /// A service task panicked.
+    Panic,
+    /// Persisted or remote data is corrupt.
+    CorruptData,
+    /// An unexpected internal service failure occurred.
+    Internal,
+}
 
-    /// Any other error stemming from one of the storage backends, which might be specific to that
-    /// backend or to a certain operation.
-    #[error("storage backend error: {context}")]
-    Generic {
-        /// Context describing the operation that failed.
-        context: String,
-        /// The underlying error, if available.
-        #[source]
-        cause: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMetadata => f.write_str("invalid object metadata"),
+            Self::InvalidUploadId => f.write_str("invalid upload id"),
+            Self::ClientStream => f.write_str("invalid client stream"),
+            Self::RangeNotSatisfiable { total } => {
+                write!(f, "range not satisfiable (object size: {total} bytes)")
+            }
+            Self::AtCapacity => f.write_str("service at capacity"),
+            Self::Unsupported => f.write_str("unsupported operation"),
+            Self::BackendFailure => f.write_str("backend operation failed"),
+            Self::BackendResponse(status) => write!(f, "backend returned HTTP {status}"),
+            Self::CorruptData => f.write_str("corrupt stored data"),
+            Self::Panic => f.write_str("service task panicked"),
+            Self::Internal => f.write_str("internal service error"),
+        }
+    }
+}
 
-    /// The functionality is not implemented by this instance of the service.
-    #[error("not implemented")]
-    NotImplemented,
-
-    /// Invalid upload ID (e.g. path traversal attempt).
-    #[error(transparent)]
-    InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
+/// Opaque service error with a stable semantic kind.
+pub struct Error {
+    kind: ErrorKind,
+    message: Option<Cow<'static, str>>,
+    source: Option<Box<dyn StdError + Send + Sync>>,
+    backtrace: Option<Backtrace>,
 }
 
 impl Error {
-    /// Creates an [`Error::Panic`] from a panic payload, extracting the message.
-    pub fn panic(payload: Box<dyn Any + Send>) -> Self {
-        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-            (*s).to_owned()
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_owned()
-        };
-        Self::Panic(msg)
+    /// Returns this error's semantic kind.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
     }
 
-    /// Creates an [`Error::Reqwest`] from a reqwest error with context.
-    pub fn reqwest(context: impl Into<String>, cause: reqwest::Error) -> Self {
-        Self::Reqwest {
-            context: context.into(),
-            cause,
-        }
+    /// Returns the backtrace captured where this service error originated, if enabled.
+    pub fn backtrace(&self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
     }
 
-    /// Creates an [`Error::Serde`] from a serde error with context.
-    pub fn serde(context: impl Into<String>, cause: serde_json::Error) -> Self {
-        Self::Serde {
-            context: context.into(),
-            cause,
-        }
+    /// Creates an error without an underlying source and with a specific message.
+    pub fn new(kind: ErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
+        Self::build(kind, Some(message.into()), None)
     }
 
-    /// Creates an [`Error::Generic`] with a context string and no cause.
-    pub fn generic(context: impl Into<String>) -> Self {
-        Self::Generic {
-            context: context.into(),
-            cause: None,
+    /// Creates an error with an underlying source.
+    pub fn with_source<E>(kind: ErrorKind, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self::build(kind, None, Some(Box::new(source)))
+    }
+
+    fn build(
+        kind: ErrorKind,
+        message: Option<Cow<'static, str>>,
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    ) -> Self {
+        Self {
+            kind,
+            message,
+            source,
+            backtrace: Some(Backtrace::force_capture()),
         }
     }
 
     /// Returns the appropriate log level for this error.
     pub fn level(&self) -> Level {
-        match self {
-            // Malformed client input at DEBUG level
-            Self::Client(_) => Level::DEBUG,
-            Self::Metadata(_) => Level::DEBUG,
-            Self::RangeNotSatisfiable { .. } => Level::DEBUG,
-            // Like rate limits, we treat capacity errors as warnings
-            Self::AtCapacity => Level::WARN,
-            // All other errors are service or backend failures
-            Self::Io(_) => Level::ERROR,
-            Self::Serde { .. } => Level::ERROR,
-            Self::Reqwest { .. } => Level::ERROR,
-            Self::BackendResponse { .. } => Level::ERROR,
-            Self::GcpAuth(_) => Level::ERROR,
-            Self::Panic(_) => Level::ERROR,
-            Self::Dropped => Level::ERROR,
-            Self::UnexpectedTombstone => Level::ERROR,
-            Self::NotImplemented => Level::ERROR,
-            Self::InvalidUploadId(_) => Level::DEBUG,
-            Self::Generic { .. } => Level::ERROR,
+        match self.kind {
+            ErrorKind::InvalidMetadata
+            | ErrorKind::InvalidUploadId
+            | ErrorKind::ClientStream
+            | ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
+            ErrorKind::AtCapacity => Level::WARN,
+            ErrorKind::Unsupported
+            | ErrorKind::BackendFailure
+            | ErrorKind::BackendResponse(_)
+            | ErrorKind::CorruptData
+            | ErrorKind::Panic
+            | ErrorKind::Internal => Level::ERROR,
         }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.message {
+            Some(message) => f.write_str(message),
+            None => self.kind.fmt(f),
+        }
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("source", &self.source)
+            .field("backtrace", &self.backtrace)
+            .finish()
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.source.as_deref().map(|source| source as _)
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self::build(kind, None, None)
+    }
+}
+
+impl From<Panic> for Error {
+    fn from(source: Panic) -> Self {
+        Self::with_source(ErrorKind::Panic, source)
+    }
+}
+
+/// Adds a semantic kind when converting an external error into a service error.
+pub trait ResultExt<T> {
+    /// Converts an external error into a service error with `kind`.
+    fn context(self, kind: ErrorKind) -> Result<T>;
+}
+
+impl<T, E> ResultExt<T> for std::result::Result<T, E>
+where
+    E: StdError + Send + Sync + 'static,
+{
+    fn context(self, kind: ErrorKind) -> Result<T> {
+        self.map_err(|source| Error::with_source(kind, source))
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(source: std::io::Error) -> Self {
+        Self::with_source(ErrorKind::BackendFailure, source)
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(source: reqwest::Error) -> Self {
+        Self::with_source(ErrorKind::BackendFailure, source)
+    }
+}
+
+impl From<gcp_auth::Error> for Error {
+    fn from(source: gcp_auth::Error) -> Self {
+        Self::with_source(ErrorKind::BackendFailure, source)
+    }
+}
+
+impl From<crate::stream::ClientError> for Error {
+    fn from(source: crate::stream::ClientError) -> Self {
+        Self::with_source(ErrorKind::ClientStream, source)
+    }
+}
+
+impl From<objectstore_types::multipart::InvalidUploadId> for Error {
+    fn from(source: objectstore_types::multipart::InvalidUploadId) -> Self {
+        Self::with_source(ErrorKind::InvalidUploadId, source)
     }
 }
 
 /// Result type for service operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::io;
+
+    use super::{Error, ErrorKind, Panic};
+
+    #[test]
+    fn errors_always_capture_backtraces() {
+        let client: Error = ErrorKind::InvalidMetadata.into();
+        let fault: Error = ErrorKind::BackendFailure.into();
+        assert!(client.backtrace().is_some());
+        assert!(fault.backtrace().is_some());
+    }
+
+    #[test]
+    fn opaque_error_preserves_source_and_origin_trace() {
+        let error = Error::with_source(ErrorKind::BackendFailure, io::Error::other("backend down"));
+        let standard_error: &dyn std::error::Error = &error;
+
+        assert_eq!(error.kind(), ErrorKind::BackendFailure);
+        assert_eq!(standard_error.source().unwrap().to_string(), "backend down");
+        assert!(error.backtrace().is_some());
+    }
+
+    #[test]
+    fn error_kind_default_message_includes_range_size() {
+        let error: Error = ErrorKind::RangeNotSatisfiable { total: 42 }.into();
+
+        assert_eq!(
+            error.to_string(),
+            "range not satisfiable (object size: 42 bytes)"
+        );
+    }
+
+    #[test]
+    fn panic_uses_the_payload_message() {
+        let panic = Panic::new(Box::new("task panicked"));
+        let error: Error = panic.into();
+
+        assert_eq!(error.kind(), ErrorKind::Panic);
+        assert_eq!(error.to_string(), "service task panicked");
+        assert_eq!(error.source().unwrap().to_string(), "task panicked");
+    }
+}

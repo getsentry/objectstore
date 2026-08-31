@@ -6,7 +6,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
-use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,15 +90,20 @@ impl ApiError {
             ApiError::Auth(AuthError::NotPermitted) => StatusCode::FORBIDDEN,
             ApiError::Auth(AuthError::InternalError(_)) => StatusCode::INTERNAL_SERVER_ERROR,
 
-            ApiError::Service(ServiceError::Client(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::Metadata(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::RangeNotSatisfiable { .. }) => {
-                StatusCode::RANGE_NOT_SATISFIABLE
-            }
-            ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
-            ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Service(error) => match error.kind() {
+                ServiceErrorKind::InvalidMetadata
+                | ServiceErrorKind::InvalidUploadId
+                | ServiceErrorKind::ClientStream => StatusCode::BAD_REQUEST,
+                ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
+                ServiceErrorKind::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
+                ServiceErrorKind::BackendFailure
+                | ServiceErrorKind::BackendResponse(_)
+                | ServiceErrorKind::CorruptData
+                | ServiceErrorKind::Panic
+                | ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
 
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

@@ -13,14 +13,15 @@
 //! regular requests.
 //!
 //! The regular acquire timeout applies: Operations that cannot acquire a permit within the
-//! configured queue timeout fail with [`Error::AtCapacity`].
+//! configured queue timeout fail with [`AtCapacity`](crate::error::ErrorKind::AtCapacity).
 //!
 //! ## Concurrency Model
 //!
 //! [`StreamExecutor::execute`] uses `buffer_unordered` with the bulk budget as the concurrency
 //! bound. The input stream is pulled lazily and results are yielded in completion order. Each
 //! operation is wrapped in a [`tokio::spawn`] for panic isolation: a panic in one operation
-//! surfaces as [`Error::Panic`] for that item and does not affect the others.
+//! surfaces as a [`Panic`](crate::error::ErrorKind::Panic) for that item and does not affect
+//! the others.
 
 use std::sync::Arc;
 
@@ -229,8 +230,8 @@ impl StreamExecutor {
     /// that already hold a permit proceeds concurrently.
     ///
     /// Operations that cannot acquire a permit within the configured queue
-    /// timeout fail with [`Error::AtCapacity`]. Results are yielded in
-    /// completion order (not submission order).
+    /// timeout fail with [`AtCapacity`](crate::error::ErrorKind::AtCapacity).
+    /// Results are yielded in completion order (not submission order).
     pub fn execute<E>(
         self,
         context: ObjectContext,
@@ -342,7 +343,7 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::concurrency::ConcurrencyLimiter;
-    use crate::error::Error;
+    use crate::error::{Error, ErrorKind};
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
 
@@ -586,7 +587,10 @@ mod tests {
 
         assert_eq!(outcomes.len(), 1);
         assert!(
-            matches!(&outcomes[0].1, Err(Error::AtCapacity)),
+            outcomes[0]
+                .1
+                .as_ref()
+                .is_err_and(|error| error.kind() == ErrorKind::AtCapacity),
             "expected AtCapacity, got {:?}",
             outcomes[0].1,
         );

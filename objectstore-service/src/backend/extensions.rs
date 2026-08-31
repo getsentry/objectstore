@@ -6,11 +6,15 @@
 //! structured error code and message from it (JSON for GCS JSON API, XML for GCS
 //! XML API and S3).
 
-use reqwest::{Response, header};
+use std::borrow::Cow;
+use std::error::Error as StdError;
+use std::fmt;
+
+use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
 use tracing::Instrument;
 
-use crate::error::{BackendDetail, Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::stream;
 
 /// Extension trait that sends a request inside a tracing span.
@@ -78,7 +82,7 @@ struct XmlApiError {
 /// Use [`check_error`](Self::check_error) instead of
 /// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
 /// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
-/// [`Error::BackendResponse`] with the extracted error code and message.
+/// a backend-failure service error with the extracted error code and message.
 ///
 /// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
 /// chained directly.
@@ -91,7 +95,7 @@ pub trait ResponseExt {
     /// [`reqwest::Response::error_for_status`].
     ///
     /// When called on `Result<Response, reqwest::Error>`, transport errors are
-    /// wrapped as [`Error::Reqwest`] with the same context string.
+    /// classified as a backend failure with the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
 
     /// Drains the response body of a response we are otherwise done with.
@@ -124,14 +128,10 @@ impl ResponseExt for Response {
                 return Ok(self);
             };
             self.drain_body().await;
-            return Err(Error::reqwest(context, e));
+            return Err(e.into());
         };
 
-        Err(Error::BackendResponse {
-            context,
-            status,
-            detail,
-        })
+        Err(BackendResponseError::new(context, status, detail).into())
     }
 
     async fn drain_body(mut self) {
@@ -144,8 +144,8 @@ impl ResponseExt for Result<Response, reqwest::Error> {
         match self {
             Ok(resp) => resp.check_error(context).await,
             Err(e) => Err(match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => Error::reqwest(context, e),
+                Some(ce) => ce.into(),
+                None => e.into(),
             }),
         }
     }
@@ -183,5 +183,111 @@ async fn parse_xml_error(resp: Response) -> BackendDetail {
         BackendDetail { code, message }
     } else {
         BackendDetail::none()
+    }
+}
+
+/// Structured error detail parsed from a backend HTTP error response.
+///
+/// Formats conditionally: includes only the fields that are non-empty.
+#[derive(Debug)]
+struct BackendDetail {
+    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
+    code: String,
+    /// Human-readable error message from the response body.
+    message: String,
+}
+
+impl BackendDetail {
+    /// Creates a new [`BackendDetail`] with empty code and message.
+    fn none() -> Self {
+        Self {
+            code: String::new(),
+            message: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for BackendDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
+            (true, false) => f.write_str(&self.message),
+            (false, true) => write!(f, "backend code {}", self.code),
+            (true, true) => Ok(()),
+        }
+    }
+}
+
+/// An HTTP error response received from a storage backend such as GCS or S3.
+///
+/// Unlike [`reqwest::Error`], which covers transport-level failures, this type captures an
+/// application-level error response where the backend returned a 4xx or 5xx status together with
+/// a structured response body. It retains the request context, HTTP status, and parsed backend
+/// error code and message.
+#[derive(Debug)]
+struct BackendResponseError {
+    context: Cow<'static, str>,
+    status: StatusCode,
+    detail: BackendDetail,
+}
+
+impl BackendResponseError {
+    /// Creates a backend response error from its operation context, status, and detail.
+    pub fn new(
+        context: impl Into<Cow<'static, str>>,
+        status: StatusCode,
+        detail: BackendDetail,
+    ) -> Self {
+        Self {
+            context: context.into(),
+            status,
+            detail,
+        }
+    }
+}
+
+impl fmt::Display for BackendResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({}). {}", self.context, self.status, self.detail)
+    }
+}
+
+impl StdError for BackendResponseError {}
+
+impl From<BackendResponseError> for Error {
+    fn from(source: BackendResponseError) -> Self {
+        Self::with_source(ErrorKind::BackendResponse(source.status), source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use reqwest::StatusCode;
+
+    use super::{BackendDetail, BackendResponseError};
+    use crate::error::{Error, ErrorKind};
+
+    #[test]
+    fn backend_response_preserves_status_and_structured_source() {
+        let error: Error = BackendResponseError::new(
+            "GCS: get object",
+            StatusCode::TOO_MANY_REQUESTS,
+            BackendDetail {
+                code: "rateLimitExceeded".to_owned(),
+                message: "too many requests".to_owned(),
+            },
+        )
+        .into();
+
+        assert_eq!(
+            error.kind(),
+            ErrorKind::BackendResponse(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "GCS: get object (429 Too Many Requests). too many requests (backend code rateLimitExceeded)"
+        );
     }
 }

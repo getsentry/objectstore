@@ -115,7 +115,7 @@ use crate::backend::common::{
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -587,8 +587,7 @@ impl TryInto<UploadId> for TieredUploadId {
     type Error = Error;
 
     fn try_into(self) -> Result<UploadId, Self::Error> {
-        let json =
-            serde_json::to_vec(&self).map_err(|e| Error::serde("encoding multipart token", e))?;
+        let json = serde_json::to_vec(&self).context(ErrorKind::Internal)?;
         Ok(UploadId::new(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json),
         )?)
@@ -601,8 +600,8 @@ impl TryFrom<&UploadId> for TieredUploadId {
     fn try_from(value: &UploadId) -> Result<Self, Self::Error> {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value.as_bytes())
-            .map_err(|e| Error::generic(format!("invalid multipart upload ID: {e}")))?;
-        serde_json::from_slice(&json).map_err(|e| Error::serde("decoding multipart token", e))
+            .map_err(|e| Error::new(ErrorKind::InvalidUploadId, e.to_string()))?;
+        serde_json::from_slice(&json).context(ErrorKind::CorruptData)
     }
 }
 
@@ -821,7 +820,8 @@ impl MultipartUploadBackend for TieredStorage {
                     physical = ?physical,
                     "complete_multipart call succeeded on long_term backend, but subsequent get_metadata found no object"
                 );
-                return Err(Error::generic(
+                return Err(Error::new(
+                    ErrorKind::BackendFailure,
                     "completed multipart object not found in long-term storage",
                 ));
             }
@@ -1151,10 +1151,13 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
         ) -> Result<DeleteResponse> {
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "simulated long-term delete failure",
-            )))
+            Err(Error::with_source(
+                ErrorKind::BackendFailure,
+                std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "simulated long-term delete failure",
+                ),
+            ))
         }
     }
 
@@ -1288,10 +1291,13 @@ mod tests {
                 // simulate a network error _after_ commit went through
                 inner.compare_and_write(id, current, write).await?;
             }
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "simulated compare_and_write failure",
-            )))
+            Err(Error::with_source(
+                ErrorKind::BackendFailure,
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "simulated compare_and_write failure",
+                ),
+            ))
         }
     }
 
@@ -1939,10 +1945,13 @@ mod tests {
                 .complete_multipart(id, upload_id, parts)
                 .await
                 .unwrap();
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "simulated network error on complete_multipart",
-            )))
+            Err(Error::with_source(
+                ErrorKind::BackendFailure,
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "simulated network error on complete_multipart",
+                ),
+            ))
         }
 
         async fn get_metadata(
@@ -1950,10 +1959,13 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
         ) -> Result<MetadataResponse> {
-            Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "simulated network error on get_metadata",
-            )))
+            Err(Error::with_source(
+                ErrorKind::BackendFailure,
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "simulated network error on get_metadata",
+                ),
+            ))
         }
     }
 
@@ -2058,10 +2070,10 @@ mod tests {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
             if *attempt == 1 {
-                Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "simulated network error",
-                )))
+                Err(Error::with_source(
+                    ErrorKind::BackendFailure,
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "simulated network error"),
+                ))
             } else {
                 Ok(inner
                     .complete_multipart(id, upload_id, parts)
@@ -2194,10 +2206,10 @@ mod tests {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
             if *attempt == 1 {
-                Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "simulated network error",
-                )))
+                Err(Error::with_source(
+                    ErrorKind::BackendFailure,
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "simulated network error"),
+                ))
             } else {
                 inner.get_metadata(id).await
             }
