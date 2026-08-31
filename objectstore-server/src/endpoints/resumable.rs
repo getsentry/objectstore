@@ -5,7 +5,8 @@
 //! path with the session in the query string, so these handlers have no router of their own:
 //! [`ResumableTarget`] classifies the query before thin handlers in [`objects`](super::objects)
 //! dispatch the original request here, where each operation runs with its own Axum extractors.
-//! Session tokens are encoded as unpadded base64url at this API boundary.
+//! Session creation returns the opaque backend token unchanged. Subsequent requests encode that
+//! token as unpadded base64url in the `session` query parameter.
 //!
 //! | Operation | Request | Success |
 //! |---|---|---|
@@ -28,6 +29,8 @@ use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query, State};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
@@ -101,7 +104,22 @@ pub(super) struct Session(SessionToken);
 
 #[derive(Debug, Deserialize)]
 struct SessionQuery {
-    session: SessionToken,
+    session: String,
+}
+
+/// Decodes the session token from its query-string representation.
+fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|error| ApiError::Client(error.to_string()))?;
+
+    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+        return Err(ApiError::Client(
+            "session token must use unpadded base64url encoding".into(),
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|error| ApiError::Client(error.to_string()))
 }
 
 impl<S> FromRequestParts<S> for Session
@@ -113,7 +131,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
         let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
             .map_err(|error| ApiError::Client(error.to_string()))?;
-        Ok(Session(session))
+        Ok(Session(decode_session_token(&session)?))
     }
 }
 
@@ -372,6 +390,21 @@ mod tests {
     fn classify_rejects_both_parameters() {
         let result = query(Some(UploadType::Resumable), Some("token")).classify();
         assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
+    }
+
+    #[test]
+    fn session_token_decodes_from_unpadded_base64url() {
+        assert_eq!(decode_session_token("Li4vZXNjYXBl").unwrap(), "../escape");
+    }
+
+    #[test]
+    fn session_token_rejects_invalid_query_encodings() {
+        for invalid in ["%%%", "dG9rM24=", "_w"] {
+            assert!(
+                decode_session_token(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]

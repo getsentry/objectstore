@@ -36,7 +36,8 @@
 //!
 //! Resumable uploads use the object endpoints above, selected by a query parameter:
 //! `upload_type=resumable` opens a session, and `session=<token>` addresses it from then on.
-//! Session tokens are unpadded base64url at the API boundary.
+//! Session creation returns the opaque backend token unchanged; subsequent requests encode it as
+//! unpadded base64url in the `session` query parameter.
 //! The object is named by the request path as usual, and [`objectstore_types::resumable`]
 //! holds the protocol types.
 //!

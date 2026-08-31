@@ -1,37 +1,13 @@
 //! Types for the resumable upload protocol.
-//!
-//! A resumable upload declares the object's total size and metadata upfront, then
-//! sends the payload as a sequence of chunks at increasing byte offsets. If a chunk
-//! fails, the client asks the server which offset it holds and continues from there.
-//! There is no finalize request: the server knows the total length from the session,
-//! so it recognizes the chunk carrying the last byte and commits the object itself.
-//!
-//! Every request addresses the regular object endpoints with the session in the query
-//! string. [`SessionToken`] serializes as unpadded base64url at that API boundary. Header
-//! names are borrowed from [TUS] where they fit, but this is not a TUS implementation: there
-//! is no version negotiation, no capability discovery, and no support for uploads of unknown
-//! length.
-//!
-//! Key types:
-//! - [`SessionToken`] — opaque identifier for an in-progress upload session.
-//! - [`UploadOffset`] — the value of the [`HEADER_UPLOAD_OFFSET`] header.
-//! - [`CreateSessionResponse`] — returned when a new session is created.
-//! - [`CommitResponse`] — returned by the request that commits the object.
-//!
-//! [TUS]: https://tus.io/protocols/resumable-upload
 
 use std::fmt;
-use std::ops::Deref;
 use std::str::FromStr;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 /// Request header declaring the total size of the object, in bytes.
 ///
-/// Required when creating a session. The server needs the total size to select a
-/// backend and to recognize the final chunk.
+/// Required when creating a session.
 pub const HEADER_UPLOAD_LENGTH: &str = "upload-length";
 
 /// Header carrying the byte offset of a chunk, or the offset the server holds.
@@ -47,77 +23,18 @@ const OFFSET_WILDCARD: &str = "*";
 /// Identifier for an in-progress resumable upload session.
 ///
 /// The token is an opaque identifier whose contents are defined and interpreted by the storage
-/// backend. At the API boundary it is serialized as unpadded base64url, keeping the opaque value
-/// out of URL parsing and escaping rules.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SessionToken(String);
-
-impl SessionToken {
-    /// Returns the session token as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SessionToken {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl Deref for SessionToken {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for SessionToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl Serialize for SessionToken {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0.as_bytes()))
-    }
-}
-
-impl<'de> Deserialize<'de> for SessionToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(&encoded)
-            .map_err(serde::de::Error::custom)?;
-        if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
-            return Err(serde::de::Error::custom(
-                "session token must use canonical unpadded base64url",
-            ));
-        }
-
-        let token = String::from_utf8(bytes).map_err(serde::de::Error::custom)?;
-        Ok(Self(token))
-    }
-}
+/// backend.
+pub type SessionToken = String;
 
 /// The value of the [`HEADER_UPLOAD_OFFSET`] request header.
 ///
-/// A concrete offset submits a chunk starting at that byte. The wildcard `*` submits
-/// no payload and instead asks the server which offset it holds, which is also the
-/// request that commits an object that was assembled but not yet committed.
+/// In a request, a concrete offset submits a chunk starting at that byte,
+/// while [`UploadOffset::Unknown`] asks the server which offset it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadOffset {
-    /// `Upload-Offset: <n>` — a chunk whose first byte sits at this offset.
+    /// Denotes a chunk whose first byte sits at this offset.
     At(u64),
-    /// `Upload-Offset: *` — a query for the server's authoritative offset.
+    /// Used to query the server for its authoritative offset.
     Unknown,
 }
 
@@ -159,7 +76,7 @@ impl fmt::Display for UploadOffset {
 pub struct CreateSessionResponse {
     /// The object key (server-generated or client-provided).
     pub key: String,
-    /// The session token for subsequent requests, serialized as unpadded base64url.
+    /// The opaque session token for subsequent requests.
     pub session: SessionToken,
 }
 
@@ -178,28 +95,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_token_serializes_as_unpadded_base64url() -> Result<(), Box<dyn std::error::Error>> {
-        let token = SessionToken::from("tok3n".to_owned());
-        assert_eq!(serde_json::to_string(&token)?, r#""dG9rM24""#);
+    fn create_session_response_serializes_token_verbatim() -> Result<(), serde_json::Error> {
+        let response = CreateSessionResponse {
+            key: "key".into(),
+            session: "../opaque +? ü".into(),
+        };
 
-        let decoded: SessionToken = serde_json::from_str(r#""dG9rM24""#)?;
-        assert_eq!(decoded, token);
-
-        let opaque = SessionToken::from("../escape".to_owned());
-        assert_eq!(serde_json::to_string(&opaque)?, r#""Li4vZXNjYXBl""#);
-        let decoded: SessionToken = serde_json::from_str(r#""Li4vZXNjYXBl""#)?;
-        assert_eq!(decoded, opaque);
+        assert_eq!(
+            serde_json::to_string(&response)?,
+            r#"{"key":"key","session":"../opaque +? ü"}"#
+        );
         Ok(())
-    }
-
-    #[test]
-    fn session_token_rejects_invalid_api_encodings() {
-        for invalid in [r#""%%%""#, r#""dG9rM24=""#, r#""_w""#] {
-            assert!(
-                serde_json::from_str::<SessionToken>(invalid).is_err(),
-                "accepted {invalid}"
-            );
-        }
     }
 
     #[test]

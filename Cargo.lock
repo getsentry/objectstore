@@ -2809,6 +2809,7 @@ dependencies = [
  "argh",
  "async-stream",
  "axum",
+ "base64",
  "bytes",
  "ed25519-dalek",
  "elegant-departure",
