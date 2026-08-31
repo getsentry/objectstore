@@ -595,10 +595,10 @@ mod tests {
             panic!("expected Panic error");
         };
         assert_eq!(error.kind(), ErrorKind::Panic);
-        assert!(
-            error
-                .to_string()
-                .contains("intentional panic in get_object")
+        assert_eq!(error.to_string(), "service task panicked");
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "intentional panic in get_object"
         );
     }
 
