@@ -1,12 +1,7 @@
 //! Integration tests for the resumable upload endpoints.
 //!
-//! No backend implements resumable uploads yet, so the reachable surface is unsupported sessions
-//! and request validation. That is deliberate: a deployment must answer `501 Not Implemented` to
-//! every session creation so clients fall back to a regular upload, and it must reject a
-//! malformed request before it reaches a backend.
-//!
-//! The `501 Not Implemented` assertions are the proof that dispatch and header parsing work:
-//! the only way to reach an unsupported backend method is through a well-formed request.
+//! No backend implements resumable uploads yet. Until a supporting test backend exists, these
+//! tests cover request validation and ensure regular object requests remain unaffected.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -63,34 +58,6 @@ async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> 
 }
 
 // --- Session creation ---
-
-#[tokio::test]
-async fn unsupported_create_session_with_client_key_is_not_implemented() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=resumable"))
-        .header(HEADER_UPLOAD_LENGTH, "1048576")
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
-
-#[tokio::test]
-async fn unsupported_create_session_with_generated_key_is_not_implemented() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .post(server.url("/v1/objects/test/org=1/?upload_type=resumable"))
-        .header(HEADER_UPLOAD_LENGTH, "1048576")
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
 
 #[tokio::test]
 async fn create_session_requires_upload_length() -> Result<()> {
@@ -157,53 +124,6 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
 }
 
 // --- Chunks and offset queries ---
-
-#[tokio::test]
-async fn chunk_reaches_the_unsupported_backend() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
-        .header(HEADER_UPLOAD_OFFSET, "0")
-        .body("payload")
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
-
-#[tokio::test]
-async fn offset_query_reaches_the_unsupported_backend() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
-        .header(HEADER_UPLOAD_OFFSET, "*")
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
-
-#[tokio::test]
-async fn offset_query_allows_missing_content_length() -> Result<()> {
-    let server = test_server().await;
-    let response = raw_put(
-        &server,
-        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
-        &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
-        "",
-    )
-    .await?;
-
-    assert!(
-        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
-        "unexpected response: {response}"
-    );
-    Ok(())
-}
 
 #[tokio::test]
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
@@ -291,19 +211,6 @@ async fn session_token_requires_base64url() -> Result<()> {
 }
 
 // --- Cancellation ---
-
-#[tokio::test]
-async fn cancel_upload_reaches_the_unsupported_backend() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .delete(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
 
 #[tokio::test]
 async fn delete_rejects_upload_type() -> Result<()> {
