@@ -601,7 +601,7 @@ impl TryFrom<&UploadId> for TieredUploadId {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value.as_bytes())
             .map_err(|e| Error::new(ErrorKind::InvalidUploadId, e.to_string()))?;
-        serde_json::from_slice(&json).context(ErrorKind::CorruptData)
+        serde_json::from_slice(&json).context(ErrorKind::InvalidUploadId)
     }
 }
 
@@ -1639,6 +1639,17 @@ mod tests {
         let encoded: UploadId = id.clone().try_into().unwrap();
         let decoded: TieredUploadId = (&encoded.clone()).try_into().unwrap();
         assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn malformed_multipart_upload_ids_are_invalid_upload_ids() {
+        let invalid_base64 = UploadId::new("%%%".into()).unwrap();
+        let malformed_json = UploadId::new("bm90IGpzb24".into()).unwrap();
+
+        for upload_id in [&invalid_base64, &malformed_json] {
+            let error = TieredUploadId::try_from(upload_id).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidUploadId);
+        }
     }
 
     #[tokio::test]

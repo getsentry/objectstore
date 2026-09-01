@@ -205,6 +205,10 @@ impl BackendDetail {
             message: String::new(),
         }
     }
+
+    fn is_empty(&self) -> bool {
+        self.code.is_empty() && self.message.is_empty()
+    }
 }
 
 impl fmt::Display for BackendDetail {
@@ -248,7 +252,11 @@ impl BackendResponseError {
 
 impl fmt::Display for BackendResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}). {}", self.context, self.status, self.detail)
+        write!(f, "{} ({})", self.context, self.status)?;
+        if !self.detail.is_empty() {
+            write!(f, ". {}", self.detail)?;
+        }
+        Ok(())
     }
 }
 
@@ -288,6 +296,20 @@ mod tests {
         assert_eq!(
             error.source().unwrap().to_string(),
             "GCS: get object (429 Too Many Requests). too many requests (backend code rateLimitExceeded)"
+        );
+    }
+
+    #[test]
+    fn backend_response_omits_separator_without_detail() {
+        let error = BackendResponseError::new(
+            "GCS: get object",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BackendDetail::none(),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "GCS: get object (500 Internal Server Error)"
         );
     }
 }
