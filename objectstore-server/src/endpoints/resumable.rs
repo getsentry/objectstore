@@ -12,201 +12,32 @@
 //! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
 
-use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query, State};
-use axum::http::{HeaderMap, StatusCode, request::Parts};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures_util::TryStreamExt;
+use axum_extra::TypedHeader;
+use axum_extra::headers::ContentLength;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::resumable::{SessionToken, UploadOffset, UploadProgress};
+use objectstore_service::resumable::{UploadOffset, UploadProgress};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
-use objectstore_types::resumable::{
-    CommitResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
-};
-use serde::Deserialize;
-use serde::de::IgnoredAny;
+use objectstore_types::resumable::{CommitResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET};
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::{Xt, body::MeteredBody};
+use crate::resumable::{Session, UploadLengthHeader, UploadOffsetHeader, require_empty_body};
 use crate::state::ServiceState;
-
-/// The `upload_type` query parameter.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum UploadType {
-    /// Create a resumable upload session.
-    Resumable,
-}
-
-/// The resumable protocol's query parameters, as seen on a regular object route.
-#[derive(Debug, Deserialize)]
-struct ResumableQuery {
-    /// Present on a session creation request.
-    upload_type: Option<UploadType>,
-    /// Present on a chunk write, offset query, or cancellation; its value is decoded by the
-    /// selected endpoint handler.
-    session: Option<IgnoredAny>,
-}
-
-impl ResumableQuery {
-    /// Classifies a request that may create a session or act on one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiError::Client`] if both parameters are present.
-    fn classify(self) -> ApiResult<Option<ResumableTarget>> {
-        match (self.upload_type, self.session) {
-            (Some(_), Some(_)) => Err(ApiError::Client(
-                "`upload_type` and `session` are mutually exclusive".into(),
-            )),
-            (Some(UploadType::Resumable), None) => Ok(Some(ResumableTarget::NewSession)),
-            (None, Some(_)) => Ok(Some(ResumableTarget::ExistingSession)),
-            (None, None) => Ok(None),
-        }
-    }
-}
-
-/// Which resumable session a request on an object route targets.
-#[derive(Debug)]
-pub(super) enum ResumableTarget {
-    /// A new session to create for the object addressed by the request.
-    NewSession,
-    /// An existing session to continue or cancel.
-    ExistingSession,
-}
-
-/// A session token decoded by a continuation or cancellation handler.
-#[derive(Debug)]
-pub(super) struct Session(SessionToken);
-
-#[derive(Debug, Deserialize)]
-struct SessionQuery {
-    session: String,
-}
-
-/// Decodes the session token from its query-string representation.
-fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|error| ApiError::Client(error.to_string()))?;
-
-    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
-        return Err(ApiError::Client(
-            "session token must use unpadded base64url encoding".into(),
-        ));
-    }
-
-    String::from_utf8(bytes).map_err(|error| ApiError::Client(error.to_string()))
-}
-
-impl<S> FromRequestParts<S> for Session
-where
-    S: Send + Sync,
-{
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
-        let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
-        Ok(Session(decode_session_token(&session)?))
-    }
-}
-
-impl<S> OptionalFromRequestParts<S> for ResumableTarget
-where
-    S: Send + Sync,
-{
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> ApiResult<Option<ResumableTarget>> {
-        if parts.uri.query().is_none() {
-            return Ok(None);
-        }
-
-        let Query(query) = Query::<ResumableQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
-
-        query.classify()
-    }
-}
-
-/// Reads the required [`HEADER_UPLOAD_LENGTH`] header.
-fn upload_length(headers: &HeaderMap) -> ApiResult<u64> {
-    let value = headers
-        .get(HEADER_UPLOAD_LENGTH)
-        .ok_or_else(|| ApiError::Client(format!("{HEADER_UPLOAD_LENGTH} header is required")))?;
-
-    value
-        .to_str()
-        .ok()
-        .filter(|v| v.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| ApiError::Client(format!("{HEADER_UPLOAD_LENGTH} must be a byte count")))
-}
-
-/// Reads the required [`HEADER_UPLOAD_OFFSET`] header.
-fn upload_offset(headers: &HeaderMap) -> ApiResult<UploadOffset> {
-    let value = headers
-        .get(HEADER_UPLOAD_OFFSET)
-        .ok_or_else(|| ApiError::Client(format!("{HEADER_UPLOAD_OFFSET} header is required")))?;
-
-    value
-        .to_str()
-        .map_err(|_| ApiError::Client(format!("{HEADER_UPLOAD_OFFSET} must be ASCII")))?
-        .parse()
-        .map_err(|e: objectstore_types::resumable::InvalidUploadOffset| {
-            ApiError::Client(e.to_string())
-        })
-}
-
-/// Reads the required `Content-Length` header.
-///
-/// Chunks declare their length so the server can forward only the prefix a backend accepts
-/// without buffering the body to find out how long it is.
-fn content_length(headers: &HeaderMap) -> ApiResult<u64> {
-    headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))
-}
-
-/// Confirms that a request neither declares nor streams a non-empty body.
-async fn require_empty_body(
-    headers: &HeaderMap,
-    mut body: ClientStream,
-    request: &str,
-) -> ApiResult<()> {
-    if headers.contains_key(http::header::CONTENT_LENGTH) && content_length(headers)? > 0 {
-        return Err(ApiError::Client(format!(
-            "{request} must be sent with an empty body"
-        )));
-    }
-
-    while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
-        if !chunk.is_empty() {
-            return Err(ApiError::Client(format!(
-                "{request} must be sent with an empty body"
-            )));
-        }
-    }
-
-    Ok(())
-}
 
 /// Creates a session with a server-generated object key.
 pub(super) async fn create_session(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
+    TypedHeader(UploadLengthHeader(total_length)): TypedHeader<UploadLengthHeader>,
+    content_length: Option<TypedHeader<ContentLength>>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
@@ -214,6 +45,8 @@ pub(super) async fn create_session(
         service,
         state,
         ObjectId::optional(context, None),
+        total_length,
+        content_length.map(|TypedHeader(header)| header),
         headers,
         body,
     )
@@ -225,10 +58,21 @@ pub(super) async fn create_session_for_key(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
+    TypedHeader(UploadLengthHeader(total_length)): TypedHeader<UploadLengthHeader>,
+    content_length: Option<TypedHeader<ContentLength>>,
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    create_session_for_id(service, state, id, headers, body).await
+    create_session_for_id(
+        service,
+        state,
+        id,
+        total_length,
+        content_length.map(|TypedHeader(header)| header),
+        headers,
+        body,
+    )
+    .await
 }
 
 /// Creates a session for the object at `id`.
@@ -239,11 +83,12 @@ async fn create_session_for_id(
     service: AuthAwareService,
     state: ServiceState,
     id: ObjectId,
+    total_length: u64,
+    content_length: Option<ContentLength>,
     headers: HeaderMap,
     body: ClientStream,
 ) -> ApiResult<Response> {
-    let total_length = upload_length(&headers)?;
-    require_empty_body(&headers, body, "resumable session creation").await?;
+    require_empty_body(content_length, body, "resumable session creation").await?;
     let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
 
     state
@@ -277,15 +122,17 @@ pub(super) async fn continue_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
     Session(session): Session,
-    headers: HeaderMap,
+    TypedHeader(UploadOffsetHeader(offset)): TypedHeader<UploadOffsetHeader>,
+    content_length: Option<TypedHeader<ContentLength>>,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let offset = upload_offset(&headers)?;
     let key = id.key().to_owned();
 
     let progress = match offset {
         UploadOffset::At(offset) => {
-            let content_length = content_length(&headers)?;
+            let content_length = content_length
+                .map(|TypedHeader(ContentLength(length))| length)
+                .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
             service
                 .put_chunk(id, session, offset, content_length, body)
                 .await
@@ -293,7 +140,12 @@ pub(super) async fn continue_session(
         UploadOffset::Unknown => {
             // The wildcard carries no payload. A body would be silently discarded, so
             // reject it rather than let a client believe those bytes were written.
-            require_empty_body(&headers, body, "Upload-Offset: *").await?;
+            require_empty_body(
+                content_length.map(|TypedHeader(header)| header),
+                body,
+                "Upload-Offset: *",
+            )
+            .await?;
 
             service.upload_offset(id, session).await
         }
@@ -343,76 +195,6 @@ fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiRes
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn query(upload_type: Option<UploadType>, has_session: bool) -> ResumableQuery {
-        ResumableQuery {
-            upload_type,
-            session: has_session.then_some(IgnoredAny),
-        }
-    }
-
-    #[test]
-    fn classify_recognizes_each_operation() {
-        assert!(matches!(
-            query(Some(UploadType::Resumable), false).classify(),
-            Ok(Some(ResumableTarget::NewSession))
-        ));
-        assert!(matches!(
-            query(None, true).classify(),
-            Ok(Some(ResumableTarget::ExistingSession))
-        ));
-        assert!(matches!(query(None, false).classify(), Ok(None)));
-    }
-
-    #[test]
-    fn classify_rejects_both_parameters() {
-        let result = query(Some(UploadType::Resumable), true).classify();
-        assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
-    }
-
-    #[test]
-    fn session_token_decodes_from_unpadded_base64url() {
-        assert_eq!(decode_session_token("Li4vZXNjYXBl").unwrap(), "../escape");
-    }
-
-    #[test]
-    fn session_token_rejects_invalid_query_encodings() {
-        for invalid in ["%%%", "dG9rM24=", "_w"] {
-            assert!(
-                decode_session_token(invalid).is_err(),
-                "accepted {invalid:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn upload_length_requires_a_byte_count() {
-        let mut headers = HeaderMap::new();
-        assert!(upload_length(&headers).is_err(), "missing header");
-
-        for invalid in ["", "-1", "+1", "1.5", "abc", " 1"] {
-            headers.insert(HEADER_UPLOAD_LENGTH, invalid.parse().unwrap());
-            assert!(upload_length(&headers).is_err(), "accepted {invalid:?}");
-        }
-
-        headers.insert(HEADER_UPLOAD_LENGTH, "1048576".parse().unwrap());
-        assert_eq!(upload_length(&headers).unwrap(), 1_048_576);
-    }
-
-    #[test]
-    fn upload_offset_parses_chunk_and_wildcard() {
-        let mut headers = HeaderMap::new();
-        assert!(upload_offset(&headers).is_err(), "missing header");
-
-        headers.insert(HEADER_UPLOAD_OFFSET, "*".parse().unwrap());
-        assert_eq!(upload_offset(&headers).unwrap(), UploadOffset::Unknown);
-
-        headers.insert(HEADER_UPLOAD_OFFSET, "262144".parse().unwrap());
-        assert_eq!(upload_offset(&headers).unwrap(), UploadOffset::At(262_144));
-
-        headers.insert(HEADER_UPLOAD_OFFSET, "nope".parse().unwrap());
-        assert!(upload_offset(&headers).is_err());
-    }
 
     /// Reads a response's status, `Upload-Offset` header, and body.
     async fn parts_of(response: Response) -> (StatusCode, Option<String>, String) {

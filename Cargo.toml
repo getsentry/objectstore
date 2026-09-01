@@ -40,6 +40,7 @@ async-compression = "0.4.42"
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 axum = "0.8.9"
+axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
 bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
 bytes = "1.12.0"

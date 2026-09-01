@@ -16,9 +16,10 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
-use crate::endpoints::resumable::{self, ResumableTarget};
+use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
+use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {

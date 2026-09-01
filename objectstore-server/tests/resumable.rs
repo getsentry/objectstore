@@ -121,6 +121,24 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
 // --- Chunks and offset queries ---
 
 #[tokio::test]
+async fn offset_query_does_not_require_content_length() -> Result<()> {
+    let server = test_server().await;
+    let response = raw_put(
+        &server,
+        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
+        &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
+        "",
+    )
+    .await?;
+
+    assert!(
+        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+        "unexpected response: {response}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
     let server = test_server().await;
     let response = raw_put(
