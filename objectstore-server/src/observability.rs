@@ -50,6 +50,7 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
             }))
         },
         enable_logs: true,
+        attach_stacktrace: config.attach_stacktrace,
         debug: config.debug,
         ..Default::default()
     });
