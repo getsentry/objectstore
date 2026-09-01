@@ -89,7 +89,7 @@ impl fmt::Display for UploadOffset {
 pub struct CreateSessionResponse {
     /// The object key (server-generated or client-provided).
     pub key: String,
-    /// The opaque session token whose bytes identify subsequent requests.
+    /// The opaque session token that identifies the session.
     pub session: SessionToken,
 }
 
