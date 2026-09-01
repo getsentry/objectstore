@@ -120,6 +120,8 @@ async fn create_session_for_id(
 ///
 /// Both answer `204 No Content` with the authoritative offset while bytes remain, and
 /// `201 Created` with the key once the object is committed.
+/// The acknowledged offset may be lower than the submitted chunk's end, so clients should continue
+/// from this response (or from a later explicit offset query), never from local byte accounting alone.
 pub(super) async fn continue_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,

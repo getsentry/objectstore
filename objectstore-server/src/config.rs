@@ -65,6 +65,7 @@ use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
+use objectstore_service::resumable::ResumableUploadEncryption;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -561,6 +562,7 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
+/// - `OS__SERVICE__RESUMABLE_UPLOAD_ENCRYPTION__ACTIVE_KEY_ID`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -615,6 +617,60 @@ pub struct Service {
     ///
     /// `60`
     pub bulk_concurrency_pct: u32,
+
+    /// Optional encryption for resumable-upload session tokens returned to clients.
+    ///
+    /// When configured, only encrypted tokens are accepted. Keep old keys configured while their
+    /// sessions may still be active; removing a key intentionally invalidates those sessions.
+    ///
+    /// ```yaml
+    /// service:
+    ///   resumable_upload_encryption:
+    ///     active_key_id: v1
+    ///     key_files:
+    ///       v1: /var/run/secrets/objectstore/resumable-upload-v1
+    /// ```
+    pub resumable_upload_encryption: Option<ResumableUploadEncryptionConfig>,
+}
+
+impl Service {
+    /// Loads and validates the configured resumable-upload encryption keys.
+    pub(crate) fn resumable_upload_encryption(&self) -> Result<Option<ResumableUploadEncryption>> {
+        let Some(config) = &self.resumable_upload_encryption else {
+            return Ok(None);
+        };
+
+        let mut keys = BTreeMap::new();
+        for (key_id, filename) in &config.key_files {
+            let bytes = std::fs::read(filename).map_err(|error| {
+                anyhow::anyhow!("reading resumable upload key {filename:?}: {error}")
+            })?;
+            keys.insert(key_id.clone(), bytes);
+        }
+
+        ResumableUploadEncryption::new(config.active_key_id.clone(), keys)
+            .map(Some)
+            .map_err(Into::into)
+    }
+}
+
+/// AES-256-GCM keys used to protect externally visible resumable session tokens.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ResumableUploadEncryptionConfig {
+    /// Key used to encrypt newly created sessions.
+    pub active_key_id: String,
+    /// Files containing raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    pub key_files: BTreeMap<String, PathBuf>,
+}
+
+impl fmt::Debug for ResumableUploadEncryptionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResumableUploadEncryptionConfig")
+            .field("active_key_id", &self.active_key_id)
+            .field("key_ids", &self.key_files.keys().collect::<Vec<_>>())
+            .field("key_files", &self.key_files)
+            .finish()
+    }
 }
 
 impl Default for Service {
@@ -624,6 +680,7 @@ impl Default for Service {
             concurrency_queue: 0,
             concurrency_timeout: Duration::from_secs(1),
             bulk_concurrency_pct: 60,
+            resumable_upload_encryption: None,
         }
     }
 }
@@ -846,6 +903,77 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn resumable_upload_encryption_loads_keys_from_files() {
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file.write_all(&[7; 32]).unwrap();
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                format!(
+                    "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                    key_file.path().display(),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert!(
+                config
+                    .service
+                    .resumable_upload_encryption()
+                    .unwrap()
+                    .is_some()
+            );
+
+            let debug = format!("{:?}", config.service);
+            assert!(debug.contains("v1"));
+            assert!(debug.contains(&key_file.path().display().to_string()));
+            assert!(!debug.contains("07070707"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn resumable_upload_encryption_rejects_invalid_configuration() {
+        let mut valid = tempfile::NamedTempFile::new().unwrap();
+        valid.write_all(&[7; 32]).unwrap();
+        let mut short = tempfile::NamedTempFile::new().unwrap();
+        short.write_all(&[7; 31]).unwrap();
+        let missing = valid.path().with_extension("missing");
+        for yaml in [
+            format!(
+                "service:\n  resumable_upload_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
+                valid.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_upload_encryption:\n    active_key_id: bad_key\n    key_files:\n      'bad key': \"{}\"\n",
+                valid.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                short.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                missing.display(),
+            ),
+        ] {
+            let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+            tempfile.write_all(yaml.as_bytes()).unwrap();
+            figment::Jail::expect_with(|_jail| {
+                let config = Config::load(Some(tempfile.path())).unwrap();
+                assert!(
+                    config.service.resumable_upload_encryption().is_err(),
+                    "accepted {yaml}"
+                );
+                Ok(())
+            });
+        }
     }
 
     #[test]

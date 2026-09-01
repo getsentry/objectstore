@@ -21,6 +21,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::ResumableUploadEncryption;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -38,6 +39,18 @@ pub type DeleteResponse = ();
 /// This value is used when no explicit limiter is set via
 /// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
+
+/// Decrypts the externally supplied session only when token protection is configured.
+fn decrypt_resumable_session(
+    encryption: Option<&ResumableUploadEncryption>,
+    id: &ObjectId,
+    session: SessionToken,
+) -> Result<SessionToken> {
+    match encryption {
+        Some(encryption) => encryption.decrypt(id, session),
+        None => Ok(session),
+    }
+}
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -74,6 +87,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 pub struct StorageService {
     inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
+    resumable_upload_encryption: Option<Arc<ResumableUploadEncryption>>,
 }
 
 impl StorageService {
@@ -87,6 +101,7 @@ impl StorageService {
         Self {
             inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
+            resumable_upload_encryption: None,
         }
     }
 
@@ -97,6 +112,15 @@ impl StorageService {
     /// and no queue.
     pub fn with_concurrency(mut self, limiter: ConcurrencyLimiter) -> Self {
         self.concurrency = limiter;
+        self
+    }
+
+    /// Encrypts resumable-upload backend tokens before exposing them to callers.
+    pub fn with_resumable_upload_encryption(
+        mut self,
+        encryption: ResumableUploadEncryption,
+    ) -> Self {
+        self.resumable_upload_encryption = Some(Arc::new(encryption));
         self
     }
 
@@ -375,10 +399,15 @@ impl StorageService {
     ) -> Result<Option<SessionToken>> {
         metadata.validate()?;
         let inner = Arc::clone(&self.inner);
+        let encryption = self.resumable_upload_encryption.clone();
         self.spawn("create_upload_session", async move {
-            inner
+            let session = inner
                 .create_upload_session(&id, &metadata, total_length)
-                .await
+                .await?;
+            match (encryption, session) {
+                (Some(encryption), Some(token)) => encryption.encrypt(&id, token).map(Some),
+                (_, session) => Ok(session),
+            }
         })
         .await
     }
@@ -400,7 +429,9 @@ impl StorageService {
         body: ClientStream,
     ) -> Result<UploadProgress> {
         let inner = Arc::clone(&self.inner);
+        let encryption = self.resumable_upload_encryption.clone();
         self.spawn("put_chunk", async move {
+            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
             inner
                 .put_chunk(&id, &session, offset, content_length, body)
                 .await
@@ -417,7 +448,9 @@ impl StorageService {
         session: SessionToken,
     ) -> Result<UploadProgress> {
         let inner = Arc::clone(&self.inner);
+        let encryption = self.resumable_upload_encryption.clone();
         self.spawn("upload_offset", async move {
+            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
             inner.upload_offset(&id, &session).await
         })
         .await
@@ -426,7 +459,9 @@ impl StorageService {
     /// Cancels an upload session, discarding whatever was uploaded.
     pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> Result<()> {
         let inner = Arc::clone(&self.inner);
+        let encryption = self.resumable_upload_encryption.clone();
         self.spawn("cancel_upload", async move {
+            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
             inner.cancel_upload(&id, &session).await
         })
         .await
@@ -435,7 +470,7 @@ impl StorageService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use bytes::BytesMut;
@@ -455,6 +490,37 @@ mod tests {
     use crate::change_stream::ChangeStreamFactory;
     use crate::error::Error;
     use crate::stream::{self, ClientStream};
+
+    #[derive(Clone, Debug, Default)]
+    struct ResumableTokenHooks {
+        seen_tokens: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for ResumableTokenHooks {
+        async fn create_upload_session(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            _metadata: &Metadata,
+            _total_length: u64,
+        ) -> Result<Option<SessionToken>> {
+            Ok(Some(SessionToken::new([0, 0xff, b'?', b'/'])))
+        }
+
+        async fn upload_offset(
+            &self,
+            _inner: &InMemoryBackend,
+            _id: &ObjectId,
+            session: &SessionToken,
+        ) -> Result<UploadProgress> {
+            self.seen_tokens
+                .lock()
+                .unwrap()
+                .push(session.as_bytes().to_vec());
+            Ok(UploadProgress::Incomplete { offset: 0 })
+        }
+    }
 
     fn make_context() -> ObjectContext {
         ObjectContext {
@@ -898,5 +964,68 @@ mod tests {
 
         let result = service.create_upload_session(id, metadata, 1024).await;
         assert!(matches!(result, Err(Error::Metadata(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn resumable_tokens_pass_through_as_bytes_without_encryption() -> Result<()> {
+        let hooks = ResumableTokenHooks::default();
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())));
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let token = service
+            .create_upload_session(id.clone(), Metadata::default(), 4)
+            .await?
+            .expect("test backend supports resumable uploads");
+        assert_eq!(token.as_bytes(), &[0, 0xff, b'?', b'/']);
+        service.upload_offset(id, token).await?;
+        assert_eq!(
+            hooks.seen_tokens.lock().unwrap().as_slice(),
+            &[vec![0, 0xff, b'?', b'/']]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumable_tokens_are_encrypted_only_across_the_service_boundary() -> Result<()> {
+        let hooks = ResumableTokenHooks::default();
+        let encryption = ResumableUploadEncryption::new(
+            "v1",
+            std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
+        )
+        .unwrap();
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
+            .with_resumable_upload_encryption(encryption);
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let encrypted = service
+            .create_upload_session(id.clone(), Metadata::default(), 4)
+            .await?
+            .expect("test backend supports resumable uploads");
+        assert_ne!(encrypted.as_bytes(), &[0, 0xff, b'?', b'/']);
+        service.upload_offset(id, encrypted).await?;
+        assert_eq!(
+            hooks.seen_tokens.lock().unwrap().as_slice(),
+            &[vec![0, 0xff, b'?', b'/']]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_encryption_rejects_plaintext_tokens() {
+        let hooks = ResumableTokenHooks::default();
+        let encryption = ResumableUploadEncryption::new(
+            "v1",
+            std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
+        )
+        .unwrap();
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
+            .with_resumable_upload_encryption(encryption);
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let result = service
+            .upload_offset(id, SessionToken::new([0, 0xff, b'?', b'/']))
+            .await;
+        assert!(matches!(result, Err(Error::UnknownUploadSession)));
+        assert!(hooks.seen_tokens.lock().unwrap().is_empty());
     }
 }

@@ -3,8 +3,6 @@
 use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query};
 use axum::http::{HeaderName, HeaderValue, request::Parts};
 use axum_extra::headers::{ContentLength, Error as HeaderError, Header};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::stream::ClientStream;
@@ -177,19 +175,7 @@ where
 }
 
 fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|error| ApiError::Client(error.to_string()))?;
-
-    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
-        return Err(ApiError::Client(
-            "session token must use unpadded base64url encoding".into(),
-        ));
-    }
-
-    String::from_utf8(bytes)
-        .map(SessionToken::from)
-        .map_err(|error| ApiError::Client(error.to_string()))
+    SessionToken::from_base64url(encoded).map_err(|error| ApiError::Client(error.to_string()))
 }
 
 /// Confirms that a request neither declares nor streams a non-empty body.
@@ -255,14 +241,14 @@ mod tests {
     #[test]
     fn session_token_decodes_from_unpadded_base64url() {
         assert_eq!(
-            decode_session_token("Li4vZXNjYXBl").unwrap().as_ref(),
-            "../escape"
+            decode_session_token("Li4vZXNjYXBl").unwrap().as_bytes(),
+            b"../escape"
         );
     }
 
     #[test]
     fn session_token_rejects_invalid_query_encodings() {
-        for invalid in ["%%%", "dG9rM24=", "_w"] {
+        for invalid in ["%%%", "dG9rM24="] {
             assert!(
                 decode_session_token(invalid).is_err(),
                 "accepted {invalid:?}"

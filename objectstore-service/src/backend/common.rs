@@ -98,7 +98,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// `offset` must equal the offset the backend currently holds.
+    /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
+    /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
+    /// [`UploadProgress`], or query [`Self::upload_offset`] after an ambiguous failure. A backend
+    /// may or may not accept a replay starting before its persisted offset.
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`Error::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
