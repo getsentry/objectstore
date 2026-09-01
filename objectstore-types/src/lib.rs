@@ -12,4 +12,5 @@ pub mod metadata;
 pub mod multipart;
 pub mod presign;
 pub mod range;
+pub mod resumable;
 pub mod scope;

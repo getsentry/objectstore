@@ -96,6 +96,12 @@ impl ApiError {
                 StatusCode::RANGE_NOT_SATISFIABLE
             }
             ApiError::Service(ServiceError::InvalidUploadId(_)) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::UnknownUploadSession) => StatusCode::BAD_REQUEST,
+            ApiError::Service(ServiceError::ChunkExceedsUploadLength { .. }) => {
+                StatusCode::BAD_REQUEST
+            }
+            ApiError::Service(ServiceError::UploadOffsetMismatch { .. }) => StatusCode::CONFLICT,
+            ApiError::Service(ServiceError::UploadSessionGone) => StatusCode::GONE,
             ApiError::Service(ServiceError::AtCapacity) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Service(ServiceError::NotImplemented) => StatusCode::NOT_IMPLEMENTED,
             ApiError::Service(_) => StatusCode::INTERNAL_SERVER_ERROR,

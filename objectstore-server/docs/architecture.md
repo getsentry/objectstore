@@ -7,49 +7,16 @@ core storage operations.
 
 ## Endpoints
 
-All object operations live under the `/v1/` prefix:
+All object operations live under the `/v1/` prefix. Objects are addressed by a
+usecase, a set of scopes, and a key; scopes are encoded in the URL path using
+Matrix URI syntax (`org=123;project=456`).
 
-| Method   | Path                                      | Description                  |
-|----------|-------------------------------------------|------------------------------|
-| `POST`   | `/v1/objects/{usecase}/{scopes}/`         | Insert with server-generated key |
-| `GET`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve object              |
-| `HEAD`   | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve metadata only       |
-| `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Insert or overwrite with key |
-| `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}`   | Delete object                |
-| `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
+Four families of routes exist: object operations, resumable uploads, multipart
+uploads (being replaced by resumable uploads), and internal probes that stay
+available when the server is under load.
 
-### Multipart Upload Endpoints
-
-| Method    | Path                                                         | Description                          |
-|-----------|--------------------------------------------------------------|--------------------------------------|
-| `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
-| `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
-| `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | Upload a part (`uploadId`, `partNumber` query params) |
-| `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | List uploaded parts (`uploadId` query param) |
-| `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{*key}`   | Complete upload (`uploadId` query param) |
-| `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Abort upload (`uploadId` query param) |
-
-The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
-
-The complete endpoint returns `200 OK` immediately, with a streaming body that
-will contain the error (if any) as JSON. Whitespace is sent in the streaming body
-to keep the connection open.
-Clients must parse the body to determine the actual outcome, and not rely on the
-status code.
-
-Scopes are encoded in the URL path using Matrix URI syntax:
-`org=123;project=456`. An underscore (`_`) represents empty scopes.
-
-### Internal Endpoints
-
-Internal endpoints are exempt from authentication, rate limiting, and the web
-concurrency limit so they remain available when the server is under load.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Liveness probe (always returns 200) |
-| `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
-| `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](#keda-metrics)) |
+See the [`endpoints`] module for the routing table and the request and response
+shape of every route.
 
 ## Request Flow
 

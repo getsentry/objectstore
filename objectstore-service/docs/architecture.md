@@ -243,6 +243,31 @@ The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
 [`StorageService::with_concurrency`] for configuration.
 
+## Resumable Uploads
+
+A resumable upload writes one object across several requests: the payload arrives
+as a sequence of chunks at increasing byte offsets, so an interrupted transfer
+continues where it stopped instead of starting over. That is worth the extra round
+trips for objects large enough that re-sending the whole payload is expensive.
+
+[`StorageService`] exposes four operations, each a method on
+[`Backend`](backend::common::Backend), which run in this sequence:
+
+1. [`create_upload_session`](backend::common::Backend::create_upload_session)
+   declares the total size and metadata, and returns a session token when the backend accepts the
+   upload.
+2. [`put_chunk`](backend::common::Backend::put_chunk) writes bytes at an offset and
+   reports the offset now persisted.
+3. After a failure, [`upload_offset`](backend::common::Backend::upload_offset)
+   reports where the backend stands, so the caller resumes from there.
+4. The chunk carrying the last byte commits the object. There is no finalize call —
+   the backend recognizes that chunk from the declared total size.
+5. At any time, an upload can be canceled, which discards what its session holds.
+
+Not all backends support resumable uploads. A backend returns no session when it declines a
+particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
+declared size, the metadata, or whether resuming is possible in principle.
+
 ## Multipart Uploads
 
 When the configured backend supports it, [`StorageService`] exposes multipart

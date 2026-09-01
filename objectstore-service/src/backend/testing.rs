@@ -40,6 +40,7 @@ use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
@@ -237,6 +238,56 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     ) -> Result<CompleteMultipartResponse> {
         inner.complete_multipart(id, upload_id, parts).await
     }
+
+    // --- Resumable upload methods ---
+
+    /// Intercepts [`Backend::create_upload_session`]. Default delegates to `inner`.
+    async fn create_upload_session(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<Option<SessionToken>> {
+        inner
+            .create_upload_session(id, metadata, total_length)
+            .await
+    }
+
+    /// Intercepts [`Backend::put_chunk`]. Default delegates to `inner`.
+    async fn put_chunk(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        inner
+            .put_chunk(id, session, offset, content_length, stream)
+            .await
+    }
+
+    /// Intercepts [`Backend::upload_offset`]. Default delegates to `inner`.
+    async fn upload_offset(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<UploadProgress> {
+        inner.upload_offset(id, session).await
+    }
+
+    /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
+    async fn cancel_upload(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        session: &SessionToken,
+    ) -> Result<()> {
+        inner.cancel_upload(id, session).await
+    }
 }
 
 /// Generic test backend that implements both [`Backend`] and [`HighVolumeBackend`].
@@ -310,6 +361,38 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
     async fn join(&self) {
         self.hooks.join(&self.inner).await
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<Option<SessionToken>> {
+        self.hooks
+            .create_upload_session(&self.inner, id, metadata, total_length)
+            .await
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        self.hooks
+            .put_chunk(&self.inner, id, session, offset, content_length, stream)
+            .await
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+        self.hooks.upload_offset(&self.inner, id, session).await
+    }
+
+    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
+        self.hooks.cancel_upload(&self.inner, id, session).await
     }
 }
 

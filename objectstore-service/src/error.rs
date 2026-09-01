@@ -151,6 +151,35 @@ pub enum Error {
     /// Invalid upload ID (e.g. path traversal attempt).
     #[error(transparent)]
     InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
+
+    /// A resumable chunk was submitted at an offset that's different from the one held by the
+    /// backend.
+    #[error("upload offset mismatch (server holds {offset} bytes)")]
+    UploadOffsetMismatch {
+        /// The offset the backend currently holds.
+        offset: u64,
+    },
+
+    /// The resumable upload session expired or was canceled, retaining nothing.
+    #[error("upload session gone")]
+    UploadSessionGone,
+
+    /// The backend does not recognize the addressed resumable upload session.
+    #[error("unknown upload session")]
+    UnknownUploadSession,
+
+    /// A resumable upload chunk would exceed the length declared for the session.
+    #[error(
+        "chunk at offset {offset} with length {content_length} exceeds upload length {upload_length}"
+    )]
+    ChunkExceedsUploadLength {
+        /// The offset at which the chunk would be written.
+        offset: u64,
+        /// The declared length of the chunk.
+        content_length: u64,
+        /// The total upload length declared when the session was created.
+        upload_length: u64,
+    },
 }
 
 impl Error {
@@ -197,6 +226,14 @@ impl Error {
             Self::Client(_) => Level::DEBUG,
             Self::Metadata(_) => Level::DEBUG,
             Self::RangeNotSatisfiable { .. } => Level::DEBUG,
+            Self::UploadOffsetMismatch { .. } => Level::DEBUG,
+            Self::UploadSessionGone => Level::DEBUG,
+            Self::UnknownUploadSession => Level::DEBUG,
+            Self::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            // Indicates that optional functionality is not supported.
+            // We don't want a rogue client spamming us with Sentry errors just by calling an API
+            // that the server doesn't support, so we just log it.
+            Self::NotImplemented => Level::INFO,
             // Like rate limits, we treat capacity errors as warnings
             Self::AtCapacity => Level::WARN,
             // All other errors are service or backend failures
@@ -208,7 +245,6 @@ impl Error {
             Self::Panic(_) => Level::ERROR,
             Self::Dropped => Level::ERROR,
             Self::UnexpectedTombstone => Level::ERROR,
-            Self::NotImplemented => Level::ERROR,
             Self::InvalidUploadId(_) => Level::DEBUG,
             Self::Generic { .. } => Level::ERROR,
         }

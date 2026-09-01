@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
@@ -359,6 +360,77 @@ impl StorageService {
         })
         .await
     }
+
+    // --- Resumable upload operations ---
+
+    /// Opens a resumable upload session for an object of `total_length` bytes.
+    ///
+    /// Returns `Ok(None)` when the backend declines resumable uploads for this object, in which case
+    /// the caller should fall back to [`Self::insert_object`].
+    pub async fn create_upload_session(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+        total_length: u64,
+    ) -> Result<Option<SessionToken>> {
+        metadata.validate()?;
+        let inner = Arc::clone(&self.inner);
+        self.spawn("create_upload_session", async move {
+            inner
+                .create_upload_session(&id, &metadata, total_length)
+                .await
+        })
+        .await
+    }
+
+    /// Writes a chunk of `content_length` bytes at `offset` into an open session.
+    ///
+    /// Commits the object once the chunk carrying the last byte is persisted.
+    ///
+    /// # Run-to-completion
+    ///
+    /// Once called, the operation runs to completion even if the returned future is dropped.
+    /// This matters most for the final chunk, which commits the object.
+    pub async fn put_chunk(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+        offset: u64,
+        content_length: u64,
+        body: ClientStream,
+    ) -> Result<UploadProgress> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("put_chunk", async move {
+            inner
+                .put_chunk(&id, &session, offset, content_length, body)
+                .await
+        })
+        .await
+    }
+
+    /// Reports how far a session has progressed, committing the object if it is assembled.
+    ///
+    /// This can mutate state and therefore requires write permission at the API layer.
+    pub async fn upload_offset(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> Result<UploadProgress> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("upload_offset", async move {
+            inner.upload_offset(&id, &session).await
+        })
+        .await
+    }
+
+    /// Cancels an upload session, discarding whatever was uploaded.
+    pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> Result<()> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("cancel_upload", async move {
+            inner.cancel_upload(&id, &session).await
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -368,7 +440,7 @@ mod tests {
 
     use bytes::BytesMut;
     use futures_util::TryStreamExt;
-    use objectstore_types::metadata::Metadata;
+    use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::range::ByteRange;
     use objectstore_types::scope::{Scope, Scopes};
 
@@ -796,5 +868,35 @@ mod tests {
             !matches!(result, Err(Error::AtCapacity)),
             "permit was not released after panic"
         );
+    }
+
+    // --- Resumable uploads ---
+
+    #[tokio::test]
+    async fn resumable_create_preserves_backend_refusal_as_none() {
+        let service = make_service();
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let result = service
+            .create_upload_session(id, Metadata::default(), 1024)
+            .await;
+
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn resumable_create_validates_metadata() {
+        let service = make_service();
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        // A timeout policy with no resolved `time_expires` is rejected before the backend
+        // is consulted, exactly as it is for a regular insert.
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        let result = service.create_upload_session(id, metadata, 1024).await;
+        assert!(matches!(result, Err(Error::Metadata(_))), "{result:?}");
     }
 }

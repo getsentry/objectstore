@@ -96,6 +96,20 @@
 //! already-mutated state and still returns `true` — so callers do not mistakenly
 //! treat a successful commit as a lost race and clean up data that was actually
 //! persisted.
+//!
+//! # Resumable Uploads
+//!
+//! TODO: Update this section when tiered storage implements resumable uploads.
+//!
+//! Not implemented here yet, so [`TieredStorage`] inherits the unsupported defaults from
+//! [`Backend`] and every session creation returns [`Error::NotImplemented`]. A resumable upload
+//! will be a regular
+//! long-term write whose payload arrives across several requests, reusing the revision keys,
+//! changelog phases and compare-and-write commit described above: session creation decides
+//! the tier from the declared total length and returns [`Error::NotImplemented`] if that tier
+//! cannot support it,
+//! non-final chunks pass straight through to the upstream session, and the final chunk runs
+//! the long-term write sequence.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

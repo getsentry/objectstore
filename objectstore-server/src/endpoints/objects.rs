@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
@@ -15,22 +16,64 @@ use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
+use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::{Xt, body::MeteredBody};
+use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
 
 pub fn router() -> Router<ServiceState> {
-    let collection_routes = routing::post(objects_post);
+    let collection_routes = routing::post(dispatch_objects_post);
     let object_routes = routing::get(object_get)
         .head(object_head)
-        .put(object_put)
+        .put(dispatch_object_put)
         // TODO(ja): Implement PATCH (metadata update w/o body)
-        .delete(object_delete);
+        .delete(dispatch_object_delete);
 
     Router::new()
         .route("/objects/{usecase}/{scopes}", collection_routes.clone())
         .route("/objects/{usecase}/{scopes}/", collection_routes)
         .route("/objects/{usecase}/{scopes}/{*key}", object_routes)
+}
+
+async fn dispatch_objects_post(
+    State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
+    request: Request,
+) -> Response {
+    if target.is_some() {
+        resumable::create_session.call(request, state).await
+    } else {
+        create_object.call(request, state).await
+    }
+}
+
+async fn dispatch_object_put(
+    State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
+    request: Request,
+) -> Response {
+    match target {
+        Some(ResumableTarget::NewSession) => {
+            resumable::create_session_for_key.call(request, state).await
+        }
+        Some(ResumableTarget::ExistingSession) => {
+            resumable::continue_session.call(request, state).await
+        }
+        None => insert_object.call(request, state).await,
+    }
+}
+
+async fn dispatch_object_delete(
+    State(state): State<ServiceState>,
+    target: Option<ResumableTarget>,
+    request: Request,
+) -> Response {
+    if target.is_some() {
+        resumable::cancel_session.call(request, state).await
+    } else {
+        delete_object.call(request, state).await
+    }
 }
 
 /// Response returned when inserting an object.
@@ -39,7 +82,7 @@ pub struct InsertObjectResponse {
     pub key: String,
 }
 
-async fn objects_post(
+async fn create_object(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
@@ -195,7 +238,7 @@ fn format_content_disposition(filename: &str) -> http::HeaderValue {
     http::HeaderValue::from_str(&result).expect("content disposition is a valid header value")
 }
 
-async fn object_put(
+async fn insert_object(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
@@ -223,7 +266,7 @@ async fn object_put(
     Ok((StatusCode::OK, response).into_response())
 }
 
-async fn object_delete(
+async fn delete_object(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
 ) -> ApiResult<impl IntoResponse> {
