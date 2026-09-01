@@ -29,7 +29,7 @@ async fn test_server() -> TestServer {
 /// Sends a raw HTTP/1.1 `PUT`, preserving the caller's exact body framing headers.
 async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> Result<String> {
     let url = reqwest::Url::parse(&server.url(path))?;
-    let host = server.host();
+    let ip = server.ip();
     let port = server.port();
     let target = match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
@@ -39,10 +39,10 @@ async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> 
     let body = body.to_owned();
 
     tokio::task::spawn_blocking(move || -> Result<String> {
-        let mut stream = TcpStream::connect((host, port))?;
+        let mut stream = TcpStream::connect((ip, port))?;
         write!(
             stream,
-            "PUT {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{headers}Connection: close\r\n\r\n{body}"
+            "PUT {target} HTTP/1.1\r\nHost: {ip}:{port}\r\n{headers}Connection: close\r\n\r\n{body}"
         )?;
 
         let mut response = String::new();

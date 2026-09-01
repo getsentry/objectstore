@@ -41,13 +41,10 @@ async fn dispatch_objects_post(
     target: Option<ResumableTarget>,
     request: Request,
 ) -> Response {
-    match target {
-        Some(ResumableTarget::NewSession) => resumable::create_session.call(request, state).await,
-        Some(ResumableTarget::ExistingSession) => {
-            ApiError::Client("`session` requires an object key; use PUT on the object path".into())
-                .into_response()
-        }
-        None => create_object.call(request, state).await,
+    if target.is_some() {
+        resumable::create_session.call(request, state).await
+    } else {
+        create_object.call(request, state).await
     }
 }
 
@@ -72,14 +69,10 @@ async fn dispatch_object_delete(
     target: Option<ResumableTarget>,
     request: Request,
 ) -> Response {
-    match target {
-        Some(ResumableTarget::ExistingSession) => {
-            resumable::cancel_session.call(request, state).await
-        }
-        Some(ResumableTarget::NewSession) => {
-            ApiError::Client("`upload_type` is not supported on DELETE".into()).into_response()
-        }
-        None => delete_object.call(request, state).await,
+    if target.is_some() {
+        resumable::cancel_session.call(request, state).await
+    } else {
+        delete_object.call(request, state).await
     }
 }
 

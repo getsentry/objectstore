@@ -40,7 +40,7 @@ impl ResumableQuery {
         match (self.upload_type, self.session) {
             // A session unambiguously selects an existing upload, so a redundant upload_type can
             // be ignored rather than making the request ambiguous.
-            (Some(_), Some(_)) | (None, Some(_)) => Some(ResumableTarget::ExistingSession),
+            (_, Some(_)) => Some(ResumableTarget::ExistingSession),
             (Some(UploadType::Resumable), None) => Some(ResumableTarget::NewSession),
             (None, None) => None,
         }

@@ -99,7 +99,7 @@ impl TestServer {
     }
 
     /// Returns the IP address on which the server is listening.
-    pub fn host(&self) -> IpAddr {
+    pub fn ip(&self) -> IpAddr {
         self.socket.ip()
     }
 
