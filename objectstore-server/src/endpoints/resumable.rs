@@ -51,15 +51,6 @@ struct ResumableQuery {
     session: Option<String>,
 }
 
-/// Which resumable session a request on an object route targets.
-#[derive(Debug)]
-pub(super) enum ResumableTarget {
-    /// A new session to create for the object addressed by the request.
-    NewSession,
-    /// An existing session to continue or cancel.
-    ExistingSession,
-}
-
 impl ResumableQuery {
     /// Classifies a request that may create a session or act on one.
     ///
@@ -76,6 +67,15 @@ impl ResumableQuery {
             (None, None) => Ok(None),
         }
     }
+}
+
+/// Which resumable session a request on an object route targets.
+#[derive(Debug)]
+pub(super) enum ResumableTarget {
+    /// A new session to create for the object addressed by the request.
+    NewSession,
+    /// An existing session to continue or cancel.
+    ExistingSession,
 }
 
 /// A session token decoded by a continuation or cancellation handler.

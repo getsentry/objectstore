@@ -189,11 +189,6 @@ impl AuthAwareService {
     }
 
     // --- Resumable upload operations ---
-    //
-    // Every operation requires `ObjectWrite`, including the two that do not obviously write:
-    // an offset query can commit an assembled object, and canceling a session discards an
-    // in-progress upload rather than deleting an object. So `DELETE ?session=` needs write
-    // permission where a plain `DELETE` on the same path needs delete permission.
 
     /// Auth-aware wrapper around [`StorageService::create_upload_session`].
     pub async fn create_upload_session(
@@ -231,12 +226,14 @@ impl AuthAwareService {
         id: ObjectId,
         session: SessionToken,
     ) -> ApiResult<UploadProgress> {
+        // An offset query can commit an assembled object.
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.upload_offset(id, session).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::cancel_upload`].
     pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> ApiResult<()> {
+        // Canceling a session discards an in-progress upload rather than deleting an object.
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.cancel_upload(id, session).await?)
     }
