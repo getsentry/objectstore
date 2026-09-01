@@ -33,7 +33,7 @@ use crate::multipart::{
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use crate::resumable::{SessionToken, UploadProgress};
-use crate::stream::ClientStream;
+use crate::stream::{ClientError, ClientStream};
 
 /// Configuration for [`GcsBackend`].
 ///
@@ -222,17 +222,29 @@ impl ResumableSession {
             })
     }
 
-    fn from_token(id: &ObjectId, token: &SessionToken) -> Result<Self> {
+    fn from_token(id: &ObjectId, token: &SessionToken, endpoint: &Url) -> Result<Self> {
         let session: Self =
             serde_json::from_slice(token.as_bytes()).map_err(|_| Error::UnknownUploadSession)?;
         if session.version != RESUMABLE_SESSION_VERSION
             || session.object_path != id.as_storage_path().to_string()
-            || Url::parse(&session.session_uri).is_err()
+            || session_uri_from_location(endpoint, &session.session_uri).is_err()
         {
             return Err(Error::UnknownUploadSession);
         }
         Ok(session)
     }
+}
+
+/// Validates and preserves GCS's opaque resumable session URI.
+fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<String> {
+    let session_uri = Url::parse(location)
+        .map_err(|_| Error::generic("GCS: resumable session Location is not a valid URL"))?;
+    if session_uri.origin() != endpoint.origin() {
+        return Err(Error::generic(
+            "GCS: resumable session Location has an unexpected origin",
+        ));
+    }
+    Ok(location.to_owned())
 }
 
 impl GcsObject {
@@ -581,6 +593,62 @@ impl GcsBackend {
         })
     }
 
+    /// Reports a resumable object once GCS confirms that it committed it.
+    fn report_resumable_commit(&self, id: &ObjectId, commit: ResumableCommit) {
+        match commit.stored_size {
+            Some(size) => {
+                self.change_stream
+                    .write(id, size + commit.metadata_size, commit.expires_at)
+            }
+            None => {
+                objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
+            }
+        }
+    }
+
+    /// Parses a resumable GCS response and reports an object if that response committed it.
+    async fn resumable_progress(
+        &self,
+        id: &ObjectId,
+        response: reqwest::Response,
+        total_length: u64,
+    ) -> Result<UploadProgress> {
+        let ResumableProgress { progress, commit } =
+            parse_resumable_progress(response, total_length).await?;
+        if let Some(commit) = commit {
+            self.report_resumable_commit(id, commit);
+        }
+        Ok(progress)
+    }
+
+    /// Queries GCS for the authoritative progress of an existing session.
+    async fn query_resumable_progress(
+        &self,
+        id: &ObjectId,
+        session: &ResumableSession,
+    ) -> Result<UploadProgress> {
+        let session_uri = session.session_uri.clone();
+        self.with_retry("query_resumable_upload", || {
+            let session_uri = session_uri.clone();
+            async move {
+                let response = self
+                    .request(Method::PUT, session_uri)
+                    .await?
+                    .header(header::CONTENT_LENGTH, 0)
+                    .header(
+                        header::CONTENT_RANGE,
+                        format!("bytes */{}", session.total_length),
+                    )
+                    .send_traced()
+                    .await
+                    .map_err(|error| Error::reqwest("GCS: query resumable upload", error))?;
+                self.resumable_progress(id, response, session.total_length)
+                    .await
+            }
+        })
+        .await
+    }
+
     /// Formats the GCS object (metadata) URL for the given key.
     fn object_url(&self, id: &ObjectId) -> Result<Url> {
         let mut url = self.endpoint.clone();
@@ -816,7 +884,7 @@ impl fmt::Debug for GcsBackend {
 async fn parse_resumable_progress(
     response: reqwest::Response,
     total_length: u64,
-) -> Result<UploadProgress> {
+) -> Result<ResumableProgress> {
     let status = response.status();
     match status {
         StatusCode::NOT_FOUND => {
@@ -844,22 +912,42 @@ async fn parse_resumable_progress(
                         .map_err(|_| Error::generic("GCS: resumable Range header is not ASCII"))
                 })
                 .transpose()?;
-            if matches!(status, StatusCode::OK | StatusCode::CREATED) {
+            let commit = if matches!(status, StatusCode::OK | StatusCode::CREATED) {
                 let body = response.bytes().await.map_err(|error| {
                     Error::reqwest("GCS: read committed resumable upload response", error)
                 })?;
-                serde_json::from_slice::<serde_json::Value>(&body).map_err(|cause| {
-                    Error::Serde {
+                let mut object =
+                    serde_json::from_slice::<GcsObject>(&body).map_err(|cause| Error::Serde {
                         context: "GCS: parse committed resumable upload response".to_owned(),
                         cause,
-                    }
-                })?;
+                    })?;
+                object.metadata.remove(&GcsMetaKey::EmulatorIgnored);
+                Some(ResumableCommit {
+                    stored_size: object.size.as_deref().and_then(|size| size.parse().ok()),
+                    metadata_size: object.metadata_size(),
+                    expires_at: object.custom_time,
+                })
             } else {
                 response.drain_body().await;
-            }
-            parse_resumable_status(status, range.as_deref(), total_length)
+                None
+            };
+            let progress = parse_resumable_status(status, range.as_deref(), total_length)?;
+            Ok(ResumableProgress { progress, commit })
         }
     }
+}
+
+/// Progress returned by GCS plus metadata needed to report a committed object.
+struct ResumableProgress {
+    progress: UploadProgress,
+    commit: Option<ResumableCommit>,
+}
+
+/// The committed object's accounting attributes from GCS's object resource.
+struct ResumableCommit {
+    stored_size: Option<u64>,
+    metadata_size: u64,
+    expires_at: Option<SystemTime>,
 }
 
 fn parse_resumable_status(
@@ -892,12 +980,23 @@ fn parse_resumable_range(value: &str, total_length: u64) -> Result<ResumableUplo
     let offset = end
         .checked_add(1)
         .ok_or_else(|| Error::generic("GCS: resumable Range header overflows"))?;
-    if offset >= total_length {
+    if offset > total_length {
         return Err(Error::generic(
             "GCS: incomplete resumable Range reaches declared upload length",
         ));
     }
     Ok(offset)
+}
+
+/// Returns whether GCS rejected a chunk because it starts after its stored prefix.
+fn is_resumable_offset_gap(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::BackendResponse {
+            status: StatusCode::BAD_REQUEST | StatusCode::RANGE_NOT_SATISFIABLE,
+            ..
+        }
+    )
 }
 
 #[async_trait::async_trait]
@@ -963,10 +1062,7 @@ impl Backend for GcsBackend {
                                 "GCS: resumable session response missing valid Location header",
                             )
                         })?;
-                    Url::parse(location).map_err(|_| {
-                        Error::generic("GCS: resumable session Location is not a valid URL")
-                    })?;
-                    let session_uri = location.to_owned();
+                    let session_uri = session_uri_from_location(&self.endpoint, location)?;
                     response.drain_body().await;
                     Ok(session_uri)
                 }
@@ -988,7 +1084,7 @@ impl Backend for GcsBackend {
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         objectstore_log::debug!("Uploading resumable chunk to GCS backend");
-        let session = ResumableSession::from_token(id, token)?;
+        let session = ResumableSession::from_token(id, token, &self.endpoint)?;
         let end = offset
             .checked_add(content_length)
             .ok_or(Error::ChunkExceedsUploadLength {
@@ -1004,7 +1100,10 @@ impl Backend for GcsBackend {
             });
         }
         if content_length == 0 {
-            return Err(Error::generic("GCS: resumable chunks must not be empty"));
+            return Err(Error::Client(ClientError::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "GCS: resumable chunks must not be empty",
+            ))));
         }
 
         let inclusive_end = end
@@ -1024,38 +1123,33 @@ impl Backend for GcsBackend {
                 None => Error::reqwest("GCS: upload resumable chunk", error),
             })?;
 
-        parse_resumable_progress(response, session.total_length).await
+        match self
+            .resumable_progress(id, response, session.total_length)
+            .await
+        {
+            Err(error) if is_resumable_offset_gap(&error) => {
+                match self.query_resumable_progress(id, &session).await {
+                    Ok(UploadProgress::Incomplete { offset }) => {
+                        Err(Error::UploadOffsetMismatch { offset })
+                    }
+                    Ok(UploadProgress::Committed) | Err(_) => Err(error),
+                }
+            }
+            result => result,
+        }
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &SessionToken) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
-        let session = ResumableSession::from_token(id, token)?;
-        let session_uri = session.session_uri.clone();
-        self.with_retry("query_resumable_upload", || {
-            let session_uri = session_uri.clone();
-            async move {
-                let response = self
-                    .request(Method::PUT, session_uri)
-                    .await?
-                    .header(header::CONTENT_LENGTH, 0)
-                    .header(
-                        header::CONTENT_RANGE,
-                        format!("bytes */{}", session.total_length),
-                    )
-                    .send_traced()
-                    .await
-                    .map_err(|error| Error::reqwest("GCS: query resumable upload", error))?;
-                parse_resumable_progress(response, session.total_length).await
-            }
-        })
-        .await
+        let session = ResumableSession::from_token(id, token, &self.endpoint)?;
+        self.query_resumable_progress(id, &session).await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &SessionToken) -> Result<()> {
         objectstore_log::debug!("Cancelling resumable upload on GCS backend");
-        let session = ResumableSession::from_token(id, token)?;
+        let session = ResumableSession::from_token(id, token, &self.endpoint)?;
         let session_uri = session.session_uri;
         self.with_retry("cancel_resumable_upload", || {
             let session_uri = session_uri.clone();
@@ -1070,7 +1164,13 @@ impl Backend for GcsBackend {
                 match response.status() {
                     status
                         if status.as_u16() == RESUMABLE_CANCELLED
-                            || matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) =>
+                            || matches!(
+                                status,
+                                StatusCode::OK
+                                    | StatusCode::NO_CONTENT
+                                    | StatusCode::NOT_FOUND
+                                    | StatusCode::GONE
+                            ) =>
                     {
                         response.drain_body().await;
                         Ok(())
@@ -1734,16 +1834,17 @@ mod tests {
     #[test]
     fn resumable_backend_token_is_versioned_and_object_bound() -> Result<()> {
         let id = make_id_with_key("object");
+        let endpoint = Url::parse("https://example.invalid")?;
         let session_uri = "https://example.invalid/opaque/session?arbitrary=value";
         let token = ResumableSession::new(&id, session_uri.into(), 123).into_token()?;
-        let decoded = ResumableSession::from_token(&id, &token)?;
+        let decoded = ResumableSession::from_token(&id, &token, &endpoint)?;
         assert_eq!(decoded.version, RESUMABLE_SESSION_VERSION);
         assert_eq!(decoded.session_uri, session_uri);
         assert_eq!(decoded.total_length, 123);
         assert_eq!(decoded.object_path, id.as_storage_path().to_string());
 
         assert!(matches!(
-            ResumableSession::from_token(&make_id_with_key("other"), &token),
+            ResumableSession::from_token(&make_id_with_key("other"), &token, &endpoint),
             Err(Error::UnknownUploadSession)
         ));
 
@@ -1755,9 +1856,16 @@ mod tests {
         }
         .into_token()?;
         let malformed_uri = ResumableSession::new(&id, "not a URL".into(), 123).into_token()?;
-        for malformed in [SessionToken::new(b"not json"), wrong_version, malformed_uri] {
+        let wrong_origin =
+            ResumableSession::new(&id, "https://other.invalid/session".into(), 123).into_token()?;
+        for malformed in [
+            SessionToken::new(b"not json"),
+            wrong_version,
+            malformed_uri,
+            wrong_origin,
+        ] {
             assert!(matches!(
-                ResumableSession::from_token(&id, &malformed),
+                ResumableSession::from_token(&id, &malformed, &endpoint),
                 Err(Error::UnknownUploadSession)
             ));
         }
@@ -1782,7 +1890,7 @@ mod tests {
                 "accepted {malformed:?}"
             );
         }
-        assert!(parse_resumable_range("bytes=0-9", 10).is_err());
+        assert_eq!(parse_resumable_range("bytes=0-9", 10)?, 10);
         assert!(parse_resumable_range("bytes=0-18446744073709551615", u64::MAX).is_err());
         Ok(())
     }
@@ -2967,6 +3075,44 @@ mod tests {
         );
         assert!(records[0].expiration_time.is_some());
 
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn resumable_commit_reports_to_change_stream() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let payload = b"resumable payload".to_vec();
+        let metadata = Metadata {
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let token = backend
+            .create_upload_session(&id, &metadata, payload.len() as u64)
+            .await?;
+
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single::<ClientError>(payload.clone()),
+                )
+                .await?,
+            UploadProgress::Committed
+        );
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
+        assert!(records[0].expiration_time.is_some());
         Ok(())
     }
 

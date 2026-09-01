@@ -563,6 +563,7 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 /// - `OS__SERVICE__RESUMABLE_UPLOAD_ENCRYPTION__ACTIVE_KEY_ID`
+/// - `OS__SERVICE__RESUMABLE_UPLOAD_ENCRYPTION__KEY_FILES`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -660,6 +661,7 @@ pub struct ResumableUploadEncryptionConfig {
     /// Key used to encrypt newly created sessions.
     pub active_key_id: String,
     /// Files containing raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    #[serde(default)]
     pub key_files: BTreeMap<String, PathBuf>,
 }
 
@@ -946,6 +948,7 @@ mod tests {
         short.write_all(&[7; 31]).unwrap();
         let missing = valid.path().with_extension("missing");
         for yaml in [
+            "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n".to_owned(),
             format!(
                 "service:\n  resumable_upload_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
                 valid.path().display(),

@@ -99,17 +99,9 @@
 //!
 //! # Resumable Uploads
 //!
-//! TODO: Update this section when tiered storage implements resumable uploads.
-//!
-//! Not implemented here yet, so [`TieredStorage`] inherits the unsupported defaults from
-//! [`Backend`] and every session creation returns [`Error::NotImplemented`]. A resumable upload
-//! will be a regular
-//! long-term write whose payload arrives across several requests, reusing the revision keys,
-//! changelog phases and compare-and-write commit described above: session creation decides
-//! the tier from the declared total length and returns [`Error::NotImplemented`] if that tier
-//! cannot support it,
-//! non-final chunks pass straight through to the upstream session, and the final chunk runs
-//! the long-term write sequence.
+//! Resumable uploads always use long-term storage, regardless of declared size. The session token
+//! binds the long-term session to a unique revision key. Once long-term storage commits the object,
+//! tiered storage publishes its tombstone through the same compare-and-write path as multipart.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,6 +127,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::{ClientStream, SizedPeek};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -376,6 +369,45 @@ impl TieredStorage {
 
         Ok(())
     }
+
+    /// Publishes an already-committed long-term revision at its logical object key.
+    async fn publish_resumable_revision(&self, id: &ObjectId, physical: &ObjectId) -> Result<()> {
+        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
+            TieredMetadata::Tombstone(tombstone) if tombstone.target == *physical => return Ok(()),
+            TieredMetadata::Tombstone(tombstone) => Some(tombstone.target),
+            _ => None,
+        };
+
+        let metadata = self
+            .inner
+            .long_term
+            .get_metadata(physical)
+            .await?
+            .ok_or_else(|| {
+                Error::generic("committed resumable object not found in long-term storage")
+            })?;
+        let mut guard = self
+            .record_change(Change {
+                id: id.clone(),
+                new: Some(physical.clone()),
+                old: current.clone(),
+                cleanup_after: None,
+            })
+            .await?;
+        guard.advance(ChangePhase::Written);
+
+        let tombstone = Tombstone {
+            target: physical.clone(),
+            expiration_policy: metadata.expiration_policy,
+        };
+        let written = self
+            .inner
+            .high_volume
+            .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
+            .await?;
+        guard.advance(ChangePhase::compare_and_write(written));
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -386,6 +418,74 @@ impl Backend for TieredStorage {
 
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<Option<SessionToken>> {
+        let physical = new_long_term_revision(id);
+        let Some(session) = self
+            .inner
+            .long_term
+            .create_upload_session(&physical, metadata, total_length)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        TieredResumableSession {
+            revision: physical.key,
+            session,
+        }
+        .into_token()
+        .map(Some)
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        token: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        let session = TieredResumableSession::from_token(token)?;
+        let physical = session.physical_id(id);
+        let progress = self
+            .inner
+            .long_term
+            .put_chunk(&physical, &session.session, offset, content_length, stream)
+            .await?;
+        if matches!(progress, UploadProgress::Committed) {
+            self.publish_resumable_revision(id, &physical).await?;
+        }
+        Ok(progress)
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, token: &SessionToken) -> Result<UploadProgress> {
+        let session = TieredResumableSession::from_token(token)?;
+        let physical = session.physical_id(id);
+        let progress = self
+            .inner
+            .long_term
+            .upload_offset(&physical, &session.session)
+            .await?;
+        if matches!(progress, UploadProgress::Committed) {
+            self.publish_resumable_revision(id, &physical).await?;
+        }
+        Ok(progress)
+    }
+
+    async fn cancel_upload(&self, id: &ObjectId, token: &SessionToken) -> Result<()> {
+        let session = TieredResumableSession::from_token(token)?;
+        let physical = session.physical_id(id);
+        self.inner
+            .long_term
+            .cancel_upload(&physical, &session.session)
+            .await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -595,6 +695,32 @@ where
 struct TieredUploadId {
     revision: String,
     upload_id: UploadId,
+}
+
+/// The long-term revision and backend session behind a tiered resumable upload.
+#[derive(Debug, Serialize, Deserialize)]
+struct TieredResumableSession {
+    revision: String,
+    session: SessionToken,
+}
+
+impl TieredResumableSession {
+    fn into_token(self) -> Result<SessionToken> {
+        serde_json::to_vec(&self)
+            .map(SessionToken::new)
+            .map_err(|error| Error::serde("encoding resumable session", error))
+    }
+
+    fn from_token(token: &SessionToken) -> Result<Self> {
+        serde_json::from_slice(token.as_bytes()).map_err(|_| Error::UnknownUploadSession)
+    }
+
+    fn physical_id(&self, id: &ObjectId) -> ObjectId {
+        ObjectId {
+            context: id.context.clone(),
+            key: self.revision.clone(),
+        }
+    }
 }
 
 impl TryInto<UploadId> for TieredUploadId {
