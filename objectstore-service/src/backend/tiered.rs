@@ -99,6 +99,8 @@
 //!
 //! # Resumable Uploads
 //!
+//! TODO: Update this section when tiered storage implements resumable uploads.
+//!
 //! Not implemented here yet, so [`TieredStorage`] inherits the unsupported defaults from
 //! [`Backend`] and every session creation returns [`Error::NotImplemented`]. A resumable upload
 //! will be a regular

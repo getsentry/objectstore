@@ -12,7 +12,7 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 
 use objectstore_server::config::{
     AuthZVerificationKey, Config, MultipartUploadStorageConfig, StorageConfig,
@@ -98,12 +98,22 @@ impl TestServer {
         Self::with_config(Config::default()).await
     }
 
+    /// Returns the IP address on which the server is listening.
+    pub fn host(&self) -> IpAddr {
+        self.socket.ip()
+    }
+
+    /// Returns the port on which the server is listening.
+    pub fn port(&self) -> u16 {
+        self.socket.port()
+    }
+
     /// Returns a full URL pointing to the given path.
     ///
     /// This URL uses `localhost` as hostname.
     pub fn url(&self, path: &str) -> String {
         let path = path.trim_start_matches('/');
-        format!("http://localhost:{}/{}", self.socket.port(), path)
+        format!("http://localhost:{}/{}", self.port(), path)
     }
 }
 

@@ -28,6 +28,7 @@ use objectstore_types::resumable::{
     CommitResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
 };
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
@@ -47,8 +48,9 @@ pub(super) enum UploadType {
 struct ResumableQuery {
     /// Present on a session creation request.
     upload_type: Option<UploadType>,
-    /// Present on a chunk write, offset query, or cancellation.
-    session: Option<String>,
+    /// Present on a chunk write, offset query, or cancellation; its value is decoded by the
+    /// selected endpoint handler.
+    session: Option<IgnoredAny>,
 }
 
 impl ResumableQuery {
@@ -342,29 +344,29 @@ fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiRes
 mod tests {
     use super::*;
 
-    fn query(upload_type: Option<UploadType>, session: Option<&str>) -> ResumableQuery {
+    fn query(upload_type: Option<UploadType>, has_session: bool) -> ResumableQuery {
         ResumableQuery {
             upload_type,
-            session: session.map(str::to_owned),
+            session: has_session.then_some(IgnoredAny),
         }
     }
 
     #[test]
     fn classify_recognizes_each_operation() {
         assert!(matches!(
-            query(Some(UploadType::Resumable), None).classify(),
+            query(Some(UploadType::Resumable), false).classify(),
             Ok(Some(ResumableTarget::NewSession))
         ));
         assert!(matches!(
-            query(None, Some("token")).classify(),
+            query(None, true).classify(),
             Ok(Some(ResumableTarget::ExistingSession))
         ));
-        assert!(matches!(query(None, None).classify(), Ok(None)));
+        assert!(matches!(query(None, false).classify(), Ok(None)));
     }
 
     #[test]
     fn classify_rejects_both_parameters() {
-        let result = query(Some(UploadType::Resumable), Some("token")).classify();
+        let result = query(Some(UploadType::Resumable), true).classify();
         assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
     }
 

@@ -1,4 +1,17 @@
-//! Types for the resumable upload protocol.
+//! Types shared by resumable upload clients and servers.
+//!
+//! A resumable upload writes one object across multiple requests. The client first creates a
+//! session, declaring the object's complete size with [`HEADER_UPLOAD_LENGTH`]. The server returns
+//! a [`CreateSessionResponse`] containing an opaque [`SessionToken`] that identifies the upload.
+//!
+//! The client then sends chunks with [`HEADER_UPLOAD_OFFSET`] set to the byte position at which
+//! each chunk starts. If an upload is interrupted, the client can send the wildcard offset
+//! [`UploadOffset::Unknown`] to query the server's authoritative position before resuming. The
+//! request that completes the object returns a [`CommitResponse`].
+//!
+//! Session tokens are defined by the storage backend and clients must treat their contents as
+//! opaque. The token's UTF-8 bytes are encoded as unpadded base64url when the token is placed in a
+//! request's `session` query parameter.
 
 use std::fmt;
 use std::str::FromStr;
@@ -76,7 +89,7 @@ impl fmt::Display for UploadOffset {
 pub struct CreateSessionResponse {
     /// The object key (server-generated or client-provided).
     pub key: String,
-    /// The opaque session token for subsequent requests.
+    /// The opaque session token whose bytes identify subsequent requests.
     pub session: SessionToken,
 }
 

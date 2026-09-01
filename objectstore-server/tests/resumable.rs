@@ -29,13 +29,8 @@ async fn test_server() -> TestServer {
 /// Sends a raw HTTP/1.1 `PUT`, preserving the caller's exact body framing headers.
 async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> Result<String> {
     let url = reqwest::Url::parse(&server.url(path))?;
-    let host = url
-        .host_str()
-        .expect("test server URL has a host")
-        .to_owned();
-    let port = url
-        .port_or_known_default()
-        .expect("test server URL has a port");
+    let host = server.host();
+    let port = server.port();
     let target = match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
         None => url.path().to_owned(),
@@ -44,7 +39,7 @@ async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> 
     let body = body.to_owned();
 
     tokio::task::spawn_blocking(move || -> Result<String> {
-        let mut stream = TcpStream::connect((host.as_str(), port))?;
+        let mut stream = TcpStream::connect((host, port))?;
         write!(
             stream,
             "PUT {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{headers}Connection: close\r\n\r\n{body}"
