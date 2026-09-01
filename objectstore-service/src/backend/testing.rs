@@ -40,6 +40,7 @@ use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
@@ -52,7 +53,6 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -248,7 +248,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<SessionToken> {
+    ) -> Result<Option<SessionToken>> {
         inner
             .create_upload_session(id, metadata, total_length)
             .await
@@ -368,7 +368,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<SessionToken> {
+    ) -> Result<Option<SessionToken>> {
         self.hooks
             .create_upload_session(&self.inner, id, metadata, total_length)
             .await

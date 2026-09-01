@@ -3,13 +3,13 @@ use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use objectstore_service::resumable::{SessionToken, UploadProgress};
 use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
 
 use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::auth::AuthContext;
 use crate::endpoints::common::ApiResult;
@@ -196,7 +196,7 @@ impl AuthAwareService {
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> ApiResult<SessionToken> {
+    ) -> ApiResult<Option<SessionToken>> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
@@ -20,7 +21,6 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -365,15 +365,14 @@ impl StorageService {
 
     /// Opens a resumable upload session for an object of `total_length` bytes.
     ///
-    /// Returns [`Error::NotImplemented`](crate::error::Error::NotImplemented) when the backend
-    /// refuses to create a session, in which case the caller should fall back to
-    /// [`Self::insert_object`].
+    /// Returns `Ok(None)` when the backend declines resumable uploads for this object, in which case
+    /// the caller should fall back to [`Self::insert_object`].
     pub async fn create_upload_session(
         &self,
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> Result<SessionToken> {
+    ) -> Result<Option<SessionToken>> {
         metadata.validate()?;
         let inner = Arc::clone(&self.inner);
         self.spawn("create_upload_session", async move {
@@ -856,6 +855,18 @@ mod tests {
     }
 
     // --- Resumable uploads ---
+
+    #[tokio::test]
+    async fn resumable_create_preserves_backend_refusal_as_none() {
+        let service = make_service();
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let result = service
+            .create_upload_session(id, Metadata::default(), 1024)
+            .await;
+
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
 
     #[tokio::test]
     async fn resumable_create_validates_metadata() {

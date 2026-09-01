@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
@@ -28,7 +29,6 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -106,7 +106,7 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<SessionToken> {
+    ) -> Result<Option<SessionToken>> {
         count(&id.context.usecase);
         self.inner
             .create_upload_session(id, metadata, total_length)

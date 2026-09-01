@@ -37,7 +37,45 @@ const OFFSET_WILDCARD: &str = "*";
 ///
 /// The token is an opaque identifier whose contents are defined and interpreted by the storage
 /// backend.
-pub type SessionToken = String;
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionToken(String);
+
+impl SessionToken {
+    /// Returns the token as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the backend-defined token.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for SessionToken {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<String> for SessionToken {
+    fn from(token: String) -> Self {
+        Self(token)
+    }
+}
+
+impl From<&str> for SessionToken {
+    fn from(token: &str) -> Self {
+        Self(token.to_owned())
+    }
+}
+
+impl fmt::Display for SessionToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// The value of the [`HEADER_UPLOAD_OFFSET`] request header.
 ///
@@ -84,6 +122,26 @@ impl fmt::Display for UploadOffset {
     }
 }
 
+/// How far a resumable upload has progressed.
+///
+/// Both a chunk write and an offset query can commit an object, so both operations have the same
+/// two outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadProgress {
+    /// More bytes are expected. The client continues from `offset`.
+    ///
+    /// This offset is authoritative and may be lower than the end of the chunk that was just
+    /// written: backends can persist only a prefix and discard the remainder. It must remain below
+    /// the session's total length; once every byte has landed, the backend commits the object or
+    /// returns an error instead.
+    Incomplete {
+        /// The offset the backend has persisted.
+        offset: u64,
+    },
+    /// The last byte arrived and the object is committed and readable.
+    Committed,
+}
+
 /// Response from creating a resumable upload session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
@@ -119,6 +177,15 @@ mod tests {
             r#"{"key":"key","session":"../opaque +? ü"}"#
         );
         Ok(())
+    }
+
+    #[test]
+    fn session_token_exposes_and_recovers_its_inner_value() {
+        let token = SessionToken::from("opaque-token");
+
+        assert_eq!(token.as_ref(), "opaque-token");
+        assert_eq!(token.to_string(), "opaque-token");
+        assert_eq!(token.into_inner(), "opaque-token");
     }
 
     #[test]

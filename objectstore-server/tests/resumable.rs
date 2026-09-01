@@ -118,6 +118,20 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn declined_session_creation_returns_not_implemented() -> Result<()> {
+    let server = test_server().await;
+
+    let response = reqwest::Client::new()
+        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=resumable"))
+        .header(HEADER_UPLOAD_LENGTH, "1048576")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    Ok(())
+}
+
 // --- Chunks and offset queries ---
 
 #[tokio::test]
@@ -241,19 +255,18 @@ async fn delete_rejects_upload_type() -> Result<()> {
 // --- Parameter combinations ---
 
 #[tokio::test]
-async fn upload_type_and_session_are_mutually_exclusive() -> Result<()> {
+async fn session_takes_precedence_over_upload_type() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
         .put(server.url(&format!(
             "/v1/objects/test/org=1/my-key?upload_type=resumable&session={SESSION}"
         )))
-        .header(HEADER_UPLOAD_LENGTH, "1048576")
-        .header(HEADER_UPLOAD_OFFSET, "0")
+        .header(HEADER_UPLOAD_OFFSET, "*")
         .send()
         .await?;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     Ok(())
 }
 

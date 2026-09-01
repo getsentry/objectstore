@@ -7,9 +7,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
-use objectstore_service::resumable::{SessionToken, UploadOffset};
 use objectstore_service::stream::ClientStream;
-use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
+use objectstore_types::resumable::{
+    HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET, SessionToken, UploadOffset,
+};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
@@ -35,14 +36,13 @@ struct ResumableQuery {
 
 impl ResumableQuery {
     /// Classifies a request that may create a session or act on one.
-    fn classify(self) -> ApiResult<Option<ResumableTarget>> {
+    fn classify(self) -> Option<ResumableTarget> {
         match (self.upload_type, self.session) {
-            (Some(_), Some(_)) => Err(ApiError::Client(
-                "`upload_type` and `session` are mutually exclusive".into(),
-            )),
-            (Some(UploadType::Resumable), None) => Ok(Some(ResumableTarget::NewSession)),
-            (None, Some(_)) => Ok(Some(ResumableTarget::ExistingSession)),
-            (None, None) => Ok(None),
+            // A session unambiguously selects an existing upload, so a redundant upload_type can
+            // be ignored rather than making the request ambiguous.
+            (Some(_), Some(_)) | (None, Some(_)) => Some(ResumableTarget::ExistingSession),
+            (Some(UploadType::Resumable), None) => Some(ResumableTarget::NewSession),
+            (None, None) => None,
         }
     }
 }
@@ -73,7 +73,7 @@ where
         let Query(query) = Query::<ResumableQuery>::try_from_uri(&parts.uri)
             .map_err(|error| ApiError::Client(error.to_string()))?;
 
-        query.classify()
+        Ok(query.classify())
     }
 }
 
@@ -187,7 +187,9 @@ fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
         ));
     }
 
-    String::from_utf8(bytes).map_err(|error| ApiError::Client(error.to_string()))
+    String::from_utf8(bytes)
+        .map(SessionToken::from)
+        .map_err(|error| ApiError::Client(error.to_string()))
 }
 
 /// Confirms that a request neither declares nor streams a non-empty body.
@@ -233,24 +235,29 @@ mod tests {
     fn classify_recognizes_each_operation() {
         assert!(matches!(
             query(Some(UploadType::Resumable), false).classify(),
-            Ok(Some(ResumableTarget::NewSession))
+            Some(ResumableTarget::NewSession)
         ));
         assert!(matches!(
             query(None, true).classify(),
-            Ok(Some(ResumableTarget::ExistingSession))
+            Some(ResumableTarget::ExistingSession)
         ));
-        assert!(matches!(query(None, false).classify(), Ok(None)));
+        assert!(query(None, false).classify().is_none());
     }
 
     #[test]
-    fn classify_rejects_both_parameters() {
-        let result = query(Some(UploadType::Resumable), true).classify();
-        assert!(matches!(result, Err(ApiError::Client(_))), "{result:?}");
+    fn classify_prefers_session_over_upload_type() {
+        assert!(matches!(
+            query(Some(UploadType::Resumable), true).classify(),
+            Some(ResumableTarget::ExistingSession)
+        ));
     }
 
     #[test]
     fn session_token_decodes_from_unpadded_base64url() {
-        assert_eq!(decode_session_token("Li4vZXNjYXBl").unwrap(), "../escape");
+        assert_eq!(
+            decode_session_token("Li4vZXNjYXBl").unwrap().as_ref(),
+            "../escape"
+        );
     }
 
     #[test]

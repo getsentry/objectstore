@@ -4,6 +4,7 @@ use std::fmt;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use bytes::Bytes;
 
@@ -13,7 +14,6 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{SessionToken, UploadProgress};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -79,15 +79,21 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Object metadata and its total length are declared upfront and cannot be mutated
     /// during the upload.
     ///
-    /// Returns [`Error::NotImplemented`] when the backend refuses to create a session.
+    /// Returns `Ok(None)` when this backend cannot store the described object resumably. Declining
+    /// is a routine outcome rather than an error, and the default implementation declines.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the backend supports resumable uploads but failed to open the
+    /// session.
     async fn create_upload_session(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<SessionToken> {
+    ) -> Result<Option<SessionToken>> {
         let _ = (id, metadata, total_length);
-        Err(Error::NotImplemented)
+        Ok(None)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.

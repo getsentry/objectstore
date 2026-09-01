@@ -20,10 +20,11 @@ use axum_extra::TypedHeader;
 use axum_extra::headers::ContentLength;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_service::resumable::{UploadOffset, UploadProgress};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
-use objectstore_types::resumable::{CommitResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET};
+use objectstore_types::resumable::{
+    CommitResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET, UploadOffset, UploadProgress,
+};
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
@@ -99,7 +100,8 @@ async fn create_session_for_id(
 
     let session = service
         .create_upload_session(id.clone(), metadata, total_length)
-        .await?;
+        .await?
+        .ok_or(ServiceError::NotImplemented)?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),

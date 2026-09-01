@@ -201,7 +201,8 @@ trips for objects large enough that re-sending the whole payload is expensive.
 [`Backend`](backend::common::Backend), which run in this sequence:
 
 1. [`create_upload_session`](backend::common::Backend::create_upload_session)
-   declares the total size and metadata, and returns a session token.
+   declares the total size and metadata, and returns a session token when the backend accepts the
+   upload.
 2. [`put_chunk`](backend::common::Backend::put_chunk) writes bytes at an offset and
    reports the offset now persisted.
 3. After a failure, [`upload_offset`](backend::common::Backend::upload_offset)
@@ -210,9 +211,9 @@ trips for objects large enough that re-sending the whole payload is expensive.
    the backend recognizes that chunk from the declared total size.
 5. At any time, an upload can be canceled, which discards what its session holds.
 
-Not all backends support resumable uploads. A backend that refuses to create a session
-returns `NotImplemented`; support can depend on the declared size, the metadata, or whether
-resuming is possible in principle.
+Not all backends support resumable uploads. A backend returns no session when it declines a
+particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
+declared size, the metadata, or whether resuming is possible in principle.
 
 ## Multipart Uploads
 
