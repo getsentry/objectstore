@@ -128,9 +128,10 @@ impl super::common::Backend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
-            Some(StoreEntry::Tombstone(_)) => {
-                Err(Error::new(ErrorKind::Internal, "unexpected tombstone"))
-            }
+            Some(StoreEntry::Tombstone(_)) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected in-memory tombstone",
+            )),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
@@ -291,7 +292,12 @@ impl MultipartUploadBackend for InMemoryBackend {
         let mut store = self.multipart_store.lock().unwrap();
         let upload = store
             .get_mut(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::new(ErrorKind::BackendFailure, "multipart upload not found"))?;
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::BackendFailure,
+                    "in-memory multipart upload not found",
+                )
+            })?;
 
         upload.parts.insert(
             part_number,
@@ -313,9 +319,12 @@ impl MultipartUploadBackend for InMemoryBackend {
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
         let store = self.multipart_store.lock().unwrap();
-        let upload = store
-            .get(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::new(ErrorKind::BackendFailure, "multipart upload not found"))?;
+        let upload = store.get(&(id.clone(), upload_id.clone())).ok_or_else(|| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "in-memory multipart upload not found",
+            )
+        })?;
 
         let iter = upload
             .parts
@@ -379,7 +388,10 @@ impl MultipartUploadBackend for InMemoryBackend {
         let assembled = {
             let store = self.multipart_store.lock().unwrap();
             let upload = store.get(&key).ok_or_else(|| {
-                Error::new(ErrorKind::BackendFailure, "multipart upload not found")
+                Error::new(
+                    ErrorKind::BackendFailure,
+                    "in-memory multipart upload not found",
+                )
             })?;
 
             for completed in &parts {

@@ -486,7 +486,8 @@ fn object_mutations(
     // Record the payload size in the metadata before persisting it.
     metadata.size = Some(payload.len());
 
-    let metadata_bytes = serde_json::to_vec(&metadata).context(ErrorKind::Internal)?;
+    let metadata_bytes = serde_json::to_vec(&metadata)
+        .context(ErrorKind::Internal, "encoding Bigtable object metadata")?;
 
     let mutations = [
         // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -573,7 +574,8 @@ fn tombstone_mutations(tombstone: &Tombstone, now: SystemTime) -> Result<[v2::Mu
             family_name: family.to_owned(),
             column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
             timestamp_micros,
-            value: serde_json::to_vec(&tombstone_meta).context(ErrorKind::Internal)?,
+            value: serde_json::to_vec(&tombstone_meta)
+                .context(ErrorKind::Internal, "encoding Bigtable tombstone metadata")?,
         })),
     ])
 }
@@ -645,8 +647,10 @@ impl RowData {
                     payload = cell.value;
                 }
                 COLUMN_TOMBSTONE_META => {
-                    tombstone_meta_opt =
-                        Some(serde_json::from_slice(&cell.value).context(ErrorKind::CorruptData)?);
+                    tombstone_meta_opt = Some(serde_json::from_slice(&cell.value).context(
+                        ErrorKind::CorruptData,
+                        "decoding Bigtable tombstone metadata",
+                    )?);
                 }
                 COLUMN_METADATA => {
                     if let Ok(legacy_meta) =
@@ -659,9 +663,10 @@ impl RowData {
                             expiration_policy: legacy_meta.expiration_policy,
                         });
                     } else {
-                        metadata_opt = Some(
-                            serde_json::from_slice(&cell.value).context(ErrorKind::CorruptData)?,
-                        );
+                        metadata_opt = Some(serde_json::from_slice(&cell.value).context(
+                            ErrorKind::CorruptData,
+                            "decoding Bigtable object metadata",
+                        )?);
                     }
                 }
                 _ => {}
@@ -726,9 +731,9 @@ fn parse_redirect_target(redirect_path: &[u8], tombstone_id: &ObjectId) -> Resul
         Ok(tombstone_id.clone())
     } else {
         let redirect_str = std::str::from_utf8(redirect_path)
-            .map_err(|_| Error::new(ErrorKind::CorruptData, "invalid UTF-8 in redirect path"))?;
+            .context(ErrorKind::CorruptData, "decoding Bigtable redirect target")?;
         ObjectId::from_storage_path(redirect_str)
-            .ok_or_else(|| Error::new(ErrorKind::CorruptData, "corrupt redirect path"))
+            .ok_or_else(|| Error::new(ErrorKind::CorruptData, "parsing Bigtable redirect target"))
     }
 }
 
@@ -1004,7 +1009,10 @@ impl Backend for BigTableBackend {
             TieredGet::Object(metadata, content_range, payload) => {
                 Ok(Some((metadata, content_range, payload)))
             }
-            TieredGet::Tombstone(_) => Err(Error::new(ErrorKind::Internal, "unexpected tombstone")),
+            TieredGet::Tombstone(_) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected Bigtable tombstone",
+            )),
             TieredGet::NotFound => Ok(None),
         }
     }
@@ -1013,9 +1021,10 @@ impl Backend for BigTableBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         match self.get_tiered_metadata(id).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
-            TieredMetadata::Tombstone(_) => {
-                Err(Error::new(ErrorKind::Internal, "unexpected tombstone"))
-            }
+            TieredMetadata::Tombstone(_) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected Bigtable tombstone",
+            )),
             TieredMetadata::NotFound => Ok(None),
         }
     }
@@ -1086,7 +1095,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         Err(Error::new(
             ErrorKind::Internal,
-            "BigTable: race loop in put_non_tombstone",
+            "Bigtable put race exhausted",
         ))
     }
 
@@ -1200,7 +1209,7 @@ impl HighVolumeBackend for BigTableBackend {
 
         Err(Error::new(
             ErrorKind::Internal,
-            "BigTable: race loop in delete_non_tombstone",
+            "Bigtable delete race exhausted",
         ))
     }
 
@@ -1270,16 +1279,9 @@ impl HighVolumeBackend for BigTableBackend {
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| {
-        Error::new(
-            ErrorKind::Internal,
-            format!(
-                "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
-                humantime::format_rfc3339_seconds(from),
-                ttl.as_secs()
-            ),
-        )
-    })?;
+    let deadline = from
+        .checked_add(ttl)
+        .ok_or_else(|| Error::new(ErrorKind::Internal, "calculating Bigtable expiration"))?;
 
     system_time_to_micros(deadline)
 }
@@ -1291,10 +1293,12 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
 fn system_time_to_micros(deadline: SystemTime) -> Result<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .context(ErrorKind::Internal)?
+        .context(ErrorKind::Internal, "converting Bigtable timestamp")?
         .as_millis();
 
-    (millis * 1000).try_into().context(ErrorKind::Internal)
+    (millis * 1000)
+        .try_into()
+        .context(ErrorKind::Internal, "converting Bigtable timestamp")
 }
 
 /// Converts a wall-clock time to Bigtable's microsecond timestamp, saturating at `i64::MAX`
@@ -1345,7 +1349,10 @@ where
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
                 objectstore_metrics::count!("bigtable.failures", action = context);
-                return Err(e).context(ErrorKind::BackendFailure);
+                return Err(e).context(
+                    ErrorKind::BackendFailure,
+                    format!("running Bigtable {context}"),
+                );
             }
             Err(e) => {
                 retry_count += 1;

@@ -1,5 +1,7 @@
 //! S3-compatible backend with generic protocol support.
 
+use std::convert::Infallible;
+use std::error::Error as StdError;
 use std::time::SystemTime;
 use std::{fmt, io};
 
@@ -72,8 +74,13 @@ pub trait Token: Send + Sync {
 
 /// Provides authentication tokens for S3-compatible requests.
 pub trait TokenProvider: Send + Sync + 'static {
+    /// Error returned when a token cannot be provided.
+    type Error: StdError + Send + Sync + 'static;
+
     /// Returns a fresh token, fetching or refreshing it as needed.
-    fn get_token(&self) -> impl Future<Output = anyhow::Result<impl Token>> + Send;
+    fn get_token(
+        &self,
+    ) -> impl Future<Output = std::result::Result<impl Token, Self::Error>> + Send;
 }
 
 /// Placeholder [`TokenProvider`] for unauthenticated backends.
@@ -81,8 +88,10 @@ pub trait TokenProvider: Send + Sync + 'static {
 pub struct NoToken;
 
 impl TokenProvider for NoToken {
+    type Error = Infallible;
+
     #[allow(refining_impl_trait)]
-    async fn get_token(&self) -> anyhow::Result<NoToken> {
+    async fn get_token(&self) -> std::result::Result<NoToken, Infallible> {
         unimplemented!()
     }
 }
@@ -152,12 +161,7 @@ where
                 provider
                     .get_token()
                     .await
-                    .map_err(|err| {
-                        Error::new(
-                            ErrorKind::BackendFailure,
-                            format!("S3: failed to get authentication token: {err}"),
-                        )
-                    })?
+                    .context(ErrorKind::BackendFailure, "getting S3 authentication token")?
                     .as_str(),
             );
         }
@@ -182,7 +186,7 @@ where
         let response = builder
             .send_traced()
             .await
-            .context(ErrorKind::BackendFailure)?;
+            .context(ErrorKind::BackendFailure, "sending an S3 object request")?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -198,20 +202,17 @@ where
             let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
             let err = match total {
                 Some(total) => ErrorKind::RangeNotSatisfiable { total }.into(),
-                None => Error::new(
-                    ErrorKind::BackendFailure,
-                    format!("S3: 416 response with invalid Content-Range: {raw:?}"),
-                ),
+                None => Error::new(ErrorKind::BackendFailure, "invalid S3 416 Content-Range"),
             };
             response.drain_body().await;
             return Err(err);
         }
 
-        let response = response.check_error("S3: failed to get object").await?;
+        let response = response.check_error("getting an S3 object").await?;
 
         let headers = response.headers();
-        let mut metadata =
-            Metadata::from_headers(headers, GCS_CUSTOM_PREFIX).context(ErrorKind::CorruptData)?;
+        let mut metadata = Metadata::from_headers(headers, GCS_CUSTOM_PREFIX)
+            .context(ErrorKind::CorruptData, "decoding S3 object metadata")?;
 
         let content_range = if response.status() == StatusCode::PARTIAL_CONTENT {
             let range = headers
@@ -219,10 +220,7 @@ where
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<ContentRange>().ok())
                 .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::BackendFailure,
-                        "S3: 206 response missing valid Content-Range header",
-                    )
+                    Error::new(ErrorKind::BackendFailure, "missing S3 206 Content-Range")
                 })?;
             metadata.size = Some(range.total as usize);
             Some(range)
@@ -234,7 +232,7 @@ where
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value.parse::<usize>())
                 .transpose()
-                .context(ErrorKind::CorruptData)?;
+                .context(ErrorKind::CorruptData, "decoding S3 Content-Length")?;
 
             if let Some(size) = size {
                 metadata.size = Some(size);
@@ -280,11 +278,11 @@ where
             .header("x-goog-metadata-directive", "REPLACE")
             .headers(
                 metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
-                    .context(ErrorKind::InvalidMetadata)?,
+                    .context(ErrorKind::InvalidMetadata, "encoding S3 object metadata")?,
             )
             .send_traced()
             .await
-            .check_error("S3: update expiration time")
+            .check_error("updating S3 expiration")
             .await?
             .drain_body()
             .await;
@@ -333,12 +331,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .headers(
                 metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
-                    .context(ErrorKind::InvalidMetadata)?,
+                    .context(ErrorKind::InvalidMetadata, "encoding S3 object metadata")?,
             )
             .body(Body::wrap_stream(stream))
             .send_traced()
             .await
-            .check_error("S3: failed to put object")
+            .check_error("uploading an S3 object")
             .await?
             .drain_body()
             .await;
@@ -375,7 +373,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await?
             .send_traced()
             .await
-            .context(ErrorKind::BackendFailure)?;
+            .context(ErrorKind::BackendFailure, "sending an S3 delete request")?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {
@@ -384,7 +382,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         }
 
         response
-            .check_error("S3: failed to delete object")
+            .check_error("deleting an S3 object")
             .await?
             .drain_body()
             .await;

@@ -82,7 +82,7 @@ struct XmlApiError {
 /// Use [`check_error`](Self::check_error) instead of
 /// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
 /// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
-/// a backend-failure service error with the extracted error code and message.
+/// a backend-response service error with the extracted error code and message.
 ///
 /// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
 /// chained directly.
@@ -128,7 +128,11 @@ impl ResponseExt for Response {
                 return Ok(self);
             };
             self.drain_body().await;
-            return Err(e.into());
+            return Err(Error::with_context(
+                ErrorKind::BackendResponse(status),
+                context,
+                e,
+            ));
         };
 
         Err(BackendResponseError::new(context, status, detail).into())
@@ -145,7 +149,7 @@ impl ResponseExt for Result<Response, reqwest::Error> {
             Ok(resp) => resp.check_error(context).await,
             Err(e) => Err(match stream::unpack_client_error(&e) {
                 Some(ce) => ce.into(),
-                None => e.into(),
+                None => Error::with_context(ErrorKind::BackendFailure, context, e),
             }),
         }
     }
@@ -264,7 +268,9 @@ impl StdError for BackendResponseError {}
 
 impl From<BackendResponseError> for Error {
     fn from(source: BackendResponseError) -> Self {
-        Self::with_source(ErrorKind::BackendResponse(source.status), source)
+        let kind = ErrorKind::BackendResponse(source.status);
+        let context = source.context.clone();
+        Self::with_context(kind, context, source)
     }
 }
 
@@ -280,7 +286,7 @@ mod tests {
     #[test]
     fn backend_response_preserves_status_and_structured_source() {
         let error: Error = BackendResponseError::new(
-            "GCS: get object",
+            "getting a GCS object",
             StatusCode::TOO_MANY_REQUESTS,
             BackendDetail {
                 code: "rateLimitExceeded".to_owned(),
@@ -294,22 +300,26 @@ mod tests {
             ErrorKind::BackendResponse(StatusCode::TOO_MANY_REQUESTS)
         );
         assert_eq!(
+            error.to_string(),
+            "backend returned HTTP 429 Too Many Requests: getting a GCS object"
+        );
+        assert_eq!(
             error.source().unwrap().to_string(),
-            "GCS: get object (429 Too Many Requests). too many requests (backend code rateLimitExceeded)"
+            "getting a GCS object (429 Too Many Requests). too many requests (backend code rateLimitExceeded)"
         );
     }
 
     #[test]
     fn backend_response_omits_separator_without_detail() {
         let error = BackendResponseError::new(
-            "GCS: get object",
+            "getting a GCS object",
             StatusCode::INTERNAL_SERVER_ERROR,
             BackendDetail::none(),
         );
 
         assert_eq!(
             error.to_string(),
-            "GCS: get object (500 Internal Server Error)"
+            "getting a GCS object (500 Internal Server Error)"
         );
     }
 }

@@ -1,11 +1,10 @@
 //! Semantic errors for service and backend operations.
 //!
-//! [`Error`] deliberately exposes only a stable semantic [`ErrorKind`]. Its source chain and an
-//! optional origin backtrace retain diagnostic detail without making backend implementation
-//! details part of the service API.
+//! [`Error`] deliberately exposes only a stable semantic [`ErrorKind`]. Human-readable context and
+//! the source chain retain diagnostic detail without making backend implementation details part of
+//! the service API.
 
 use std::any::Any;
-use std::backtrace::Backtrace;
 use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::fmt;
@@ -93,11 +92,13 @@ impl fmt::Display for ErrorKind {
 }
 
 /// Opaque service error with a stable semantic kind.
+///
+/// Its string representation is the kind followed by `: ` and human-readable context when context
+/// is present. The underlying source is retained separately through [`StdError::source`].
 pub struct Error {
     kind: ErrorKind,
-    message: Option<Cow<'static, str>>,
+    context: Option<Cow<'static, str>>,
     source: Option<Box<dyn StdError + Send + Sync>>,
-    backtrace: Option<Backtrace>,
 }
 
 impl Error {
@@ -106,14 +107,9 @@ impl Error {
         self.kind
     }
 
-    /// Returns the backtrace captured where this service error originated, if enabled.
-    pub fn backtrace(&self) -> Option<&Backtrace> {
-        self.backtrace.as_ref()
-    }
-
-    /// Creates an error without an underlying source and with a specific message.
-    pub fn new(kind: ErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
-        Self::build(kind, Some(message.into()), None)
+    /// Creates an error without an underlying source and with human-readable context.
+    pub fn new(kind: ErrorKind, context: impl Into<Cow<'static, str>>) -> Self {
+        Self::build(kind, Some(context.into()), None)
     }
 
     /// Creates an error with an underlying source.
@@ -124,16 +120,26 @@ impl Error {
         Self::build(kind, None, Some(Box::new(source)))
     }
 
+    pub(crate) fn with_context<E>(
+        kind: ErrorKind,
+        context: impl Into<Cow<'static, str>>,
+        source: E,
+    ) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self::build(kind, Some(context.into()), Some(Box::new(source)))
+    }
+
     fn build(
         kind: ErrorKind,
-        message: Option<Cow<'static, str>>,
+        context: Option<Cow<'static, str>>,
         source: Option<Box<dyn StdError + Send + Sync>>,
     ) -> Self {
         Self {
             kind,
-            message,
+            context,
             source,
-            backtrace: Some(Backtrace::force_capture()),
         }
     }
 
@@ -157,10 +163,11 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.message {
-            Some(message) => f.write_str(message),
-            None => self.kind.fmt(f),
+        self.kind.fmt(f)?;
+        if let Some(context) = &self.context {
+            write!(f, ": {context}")?;
         }
+        Ok(())
     }
 }
 
@@ -168,9 +175,8 @@ impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Error")
             .field("kind", &self.kind)
-            .field("message", &self.message)
+            .field("context", &self.context)
             .field("source", &self.source)
-            .field("backtrace", &self.backtrace)
             .finish()
     }
 }
@@ -193,17 +199,49 @@ impl From<Panic> for Error {
     }
 }
 
-/// Adds a semantic kind when converting an external error into a service error.
+/// Adds a semantic kind and optional context when converting an external error.
 pub trait ResultExt<T> {
-    /// Converts an external error into a service error with `kind`.
-    fn context(self, kind: ErrorKind) -> Result<T>;
+    /// Converts an external error into a service error with `kind` and human-readable context.
+    ///
+    /// The source error is retained, while the rendered service error contains the semantic kind
+    /// and context.
+    ///
+    /// ```
+    /// use objectstore_service::error::{ErrorKind, ResultExt as _};
+    ///
+    /// let result = std::fs::read("missing")
+    ///     .context(ErrorKind::BackendFailure, "reading local object");
+    /// let error = result.unwrap_err();
+    /// assert_eq!(
+    ///     error.to_string(),
+    ///     "backend operation failed: reading local object"
+    /// );
+    /// ```
+    fn context(self, kind: ErrorKind, context: impl Into<Cow<'static, str>>) -> Result<T>;
+
+    /// Converts an external error into a service error with only `kind`.
+    ///
+    /// Use this when the source already identifies the failure or when the operation is expected to
+    /// be infallible. The source error is still retained.
+    ///
+    /// ```
+    /// use objectstore_service::error::{ErrorKind, ResultExt as _};
+    ///
+    /// let result = "invalid".parse::<u64>().kind(ErrorKind::InvalidMetadata);
+    /// assert_eq!(result.unwrap_err().to_string(), "invalid object metadata");
+    /// ```
+    fn kind(self, kind: ErrorKind) -> Result<T>;
 }
 
 impl<T, E> ResultExt<T> for std::result::Result<T, E>
 where
     E: StdError + Send + Sync + 'static,
 {
-    fn context(self, kind: ErrorKind) -> Result<T> {
+    fn context(self, kind: ErrorKind, context: impl Into<Cow<'static, str>>) -> Result<T> {
+        self.map_err(|source| Error::with_context(kind, context, source))
+    }
+
+    fn kind(self, kind: ErrorKind) -> Result<T> {
         self.map_err(|source| Error::with_source(kind, source))
     }
 }
@@ -249,21 +287,26 @@ mod tests {
     use super::{Error, ErrorKind, Panic};
 
     #[test]
-    fn errors_always_capture_backtraces() {
-        let client: Error = ErrorKind::InvalidMetadata.into();
-        let fault: Error = ErrorKind::BackendFailure.into();
-        assert!(client.backtrace().is_some());
-        assert!(fault.backtrace().is_some());
-    }
-
-    #[test]
-    fn opaque_error_preserves_source_and_origin_trace() {
+    fn opaque_error_preserves_source() {
         let error = Error::with_source(ErrorKind::BackendFailure, io::Error::other("backend down"));
         let standard_error: &dyn std::error::Error = &error;
 
         assert_eq!(error.kind(), ErrorKind::BackendFailure);
         assert_eq!(standard_error.source().unwrap().to_string(), "backend down");
-        assert!(error.backtrace().is_some());
+    }
+
+    #[test]
+    fn context_renders_after_kind() {
+        let error = Error::with_context(
+            ErrorKind::BackendFailure,
+            "reading local object",
+            io::Error::other("backend down"),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "backend operation failed: reading local object"
+        );
     }
 
     #[test]

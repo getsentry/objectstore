@@ -587,7 +587,8 @@ impl TryInto<UploadId> for TieredUploadId {
     type Error = Error;
 
     fn try_into(self) -> Result<UploadId, Self::Error> {
-        let json = serde_json::to_vec(&self).context(ErrorKind::Internal)?;
+        let json =
+            serde_json::to_vec(&self).context(ErrorKind::Internal, "encoding tiered upload ID")?;
         Ok(UploadId::new(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json),
         )?)
@@ -600,8 +601,8 @@ impl TryFrom<&UploadId> for TieredUploadId {
     fn try_from(value: &UploadId) -> Result<Self, Self::Error> {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value.as_bytes())
-            .map_err(|e| Error::new(ErrorKind::InvalidUploadId, e.to_string()))?;
-        serde_json::from_slice(&json).context(ErrorKind::InvalidUploadId)
+            .kind(ErrorKind::InvalidUploadId)?;
+        serde_json::from_slice(&json).kind(ErrorKind::InvalidUploadId)
     }
 }
 
@@ -822,7 +823,7 @@ impl MultipartUploadBackend for TieredStorage {
                 );
                 return Err(Error::new(
                     ErrorKind::BackendFailure,
-                    "completed multipart object not found in long-term storage",
+                    "tiered multipart object missing from long-term storage",
                 ));
             }
             // Failed to `get_metadata`, cannot proceed.

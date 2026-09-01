@@ -205,7 +205,7 @@ impl StorageService {
         metadata: Metadata,
         stream: ClientStream,
     ) -> Result<InsertResponse> {
-        metadata.validate().context(ErrorKind::InvalidMetadata)?;
+        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let id = ObjectId::optional(context, key);
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
@@ -259,7 +259,7 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        metadata.validate().context(ErrorKind::InvalidMetadata)?;
+        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
         let inner = self.inner.clone();
         self.spawn("initiate_multipart", async move {

@@ -95,7 +95,9 @@ async fn object_get(
     };
 
     let stream = state.meter_stream(stream, &context);
-    let mut metadata_headers = metadata.to_headers("").context(ErrorKind::Internal)?;
+    let mut metadata_headers = metadata
+        .to_headers("")
+        .context(ErrorKind::Internal, "encoding object response metadata")?;
 
     let mut response = match content_range {
         Some(ref content_range) => {
@@ -129,7 +131,9 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let mut headers = metadata.to_headers("").context(ErrorKind::Internal)?;
+    let mut headers = metadata
+        .to_headers("")
+        .context(ErrorKind::Internal, "encoding object response metadata")?;
     insert_content_length(&mut headers, &metadata);
 
     let mut response = (StatusCode::OK, headers).into_response();
