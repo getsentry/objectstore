@@ -189,7 +189,7 @@ struct GcsObject {
 struct ResumableSession {
     session_uri: String,
     total_length: u64,
-    object_path: String,
+    storage_path: String,
 }
 
 impl ResumableSession {
@@ -197,7 +197,7 @@ impl ResumableSession {
         Self {
             session_uri,
             total_length,
-            object_path: id.as_storage_path().to_string(),
+            storage_path: id.as_storage_path().to_string(),
         }
     }
 
@@ -213,7 +213,7 @@ impl ResumableSession {
     fn from_token(id: &ObjectId, token: &SessionToken, endpoint: &Url) -> Result<Self> {
         let session: Self =
             serde_json::from_slice(token.as_bytes()).map_err(|_| Error::UnknownUploadSession)?;
-        if session.object_path != id.as_storage_path().to_string()
+        if session.storage_path != id.as_storage_path().to_string()
             || session_uri_from_location(endpoint, &session.session_uri).is_err()
         {
             return Err(Error::UnknownUploadSession);
@@ -1840,7 +1840,7 @@ mod tests {
         let decoded = ResumableSession::from_token(&id, &token, &endpoint)?;
         assert_eq!(decoded.session_uri, session_uri);
         assert_eq!(decoded.total_length, 123);
-        assert_eq!(decoded.object_path, id.as_storage_path().to_string());
+        assert_eq!(decoded.storage_path, id.as_storage_path().to_string());
 
         assert!(matches!(
             ResumableSession::from_token(&make_id_with_key("other"), &token, &endpoint),
