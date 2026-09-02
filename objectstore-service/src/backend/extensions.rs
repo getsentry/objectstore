@@ -57,12 +57,12 @@ impl SendTraced for reqwest::RequestBuilder {
     }
 }
 
-/// Classifies a request transport result while leaving successful responses available for
-/// caller-specific status handling.
-pub(super) fn classify_transport_result(
-    result: reqwest::Result<Response>,
+/// Classifies a reqwest transport result while leaving successful values available for
+/// caller-specific handling.
+pub(super) fn classify_transport_result<T>(
+    result: reqwest::Result<T>,
     context: &'static str,
-) -> Result<Response> {
+) -> Result<T> {
     result.map_err(|source| {
         if let Some(client_error) = stream::unpack_client_error(&source) {
             return Error::with_context(ErrorKind::ClientStream, context, client_error);
@@ -303,10 +303,15 @@ impl From<BackendResponseError> for Error {
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use reqwest::StatusCode;
 
-    use super::{BackendDetail, BackendResponseError};
+    use super::{BackendDetail, BackendResponseError, classify_transport_result, status_to_kind};
     use crate::error::{Error, ErrorKind};
 
     #[test]
@@ -344,5 +349,66 @@ mod tests {
             error.to_string(),
             "getting a GCS object (500 Internal Server Error)"
         );
+    }
+
+    #[test]
+    fn retryable_http_statuses_have_transient_semantic_kinds() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(matches!(
+                status_to_kind(status),
+                ErrorKind::BackendRateLimited
+                    | ErrorKind::BackendTimeout
+                    | ErrorKind::BackendUnavailable
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn response_body_timeout_is_classified_as_backend_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0];
+            connection.read_exact(&mut request).unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n")
+                .unwrap();
+
+            // Keep the body open without sending its promised byte until the client times out.
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let source = response.bytes().await.unwrap_err();
+        assert!(source.is_timeout());
+
+        let error =
+            classify_transport_result::<bytes::Bytes>(Err(source), "reading backend response body")
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BackendTimeout);
+        assert_eq!(
+            error.to_string(),
+            "backend timed out: reading backend response body"
+        );
+
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
     }
 }

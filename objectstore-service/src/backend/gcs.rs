@@ -627,15 +627,17 @@ impl GcsBackend {
                     return Ok(None);
                 }
 
-                let metadata: GcsObject = resp
+                let result = resp
                     .check_error("getting GCS object metadata")
                     .await?
-                    .json()
-                    .await
-                    .context(
-                        ErrorKind::CorruptData,
-                        "decoding GCS object metadata response",
-                    )?;
+                    .bytes()
+                    .await;
+                let body =
+                    classify_transport_result(result, "reading GCS object metadata response")?;
+                let metadata: GcsObject = serde_json::from_slice(&body).context(
+                    ErrorKind::CorruptData,
+                    "decoding GCS object metadata response",
+                )?;
 
                 Ok(Some(metadata))
             })
@@ -1067,8 +1069,8 @@ impl MultipartUploadBackend for GcsBackend {
                     .check_error("initiating a GCS multipart upload")
                     .await?;
 
-                let body = resp.bytes().await.context(
-                    ErrorKind::BackendFailure,
+                let body = classify_transport_result(
+                    resp.bytes().await,
                     "reading GCS initiate-multipart response",
                 )?;
 
@@ -1165,10 +1167,10 @@ impl MultipartUploadBackend for GcsBackend {
                     .check_error("listing GCS multipart parts")
                     .await?;
 
-                let body = resp
-                    .bytes()
-                    .await
-                    .context(ErrorKind::BackendFailure, "reading GCS list-parts response")?;
+                let body = classify_transport_result(
+                    resp.bytes().await,
+                    "reading GCS list-parts response",
+                )?;
 
                 let xml: XmlListPartsResponse = quick_xml::de::from_reader(body.as_ref())
                     .context(ErrorKind::CorruptData, "decoding GCS list-parts response")?;
@@ -1247,8 +1249,8 @@ impl MultipartUploadBackend for GcsBackend {
                 // would have to handle it. It turns out GCS returns 200 instead, so we don't need to
                 // handle that case.
 
-                let body = resp.bytes().await.context(
-                    ErrorKind::BackendFailure,
+                let body = classify_transport_result(
+                    resp.bytes().await,
                     "reading GCS complete-multipart response",
                 )?;
 
