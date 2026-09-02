@@ -9,9 +9,9 @@
 //! [`UploadOffset::Unknown`] to query the server's authoritative position before resuming. The
 //! request that completes the object returns a [`CommitResponse`].
 //!
-//! Session tokens are defined by the storage backend and clients must treat their contents as
-//! opaque. The token's UTF-8 bytes are encoded as unpadded base64url when the token is placed in a
-//! request's `session` query parameter.
+//! Session tokens contain backend state protected by the storage service, and clients must treat
+//! their contents as opaque. The token bytes are encoded as unpadded base64url when the token is
+//! placed in a request's `session` query parameter.
 
 use std::fmt;
 use std::str::FromStr;
