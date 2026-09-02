@@ -1,5 +1,6 @@
 //! Common types and utilities for API endpoints.
 
+use std::borrow::Cow;
 use std::error::Error;
 
 use axum::Json;
@@ -33,8 +34,14 @@ pub enum ApiError {
     Batch(#[from] BatchError),
 
     /// Internal server errors.
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("internal error: {context}")]
+    Internal {
+        /// Context describing the operation that failed.
+        context: Cow<'static, str>,
+        /// The underlying error, if available.
+        #[source]
+        cause: Option<Box<dyn Error + Send + Sync>>,
+    },
 }
 
 /// Result type for API operations.
@@ -68,6 +75,17 @@ impl ApiErrorResponse {
 }
 
 impl ApiError {
+    /// Creates an internal server error with context and an underlying cause.
+    pub fn internal<E>(context: impl Into<Cow<'static, str>>, cause: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::Internal {
+            context: context.into(),
+            cause: Some(Box::new(cause)),
+        }
+    }
+
     /// Returns the HTTP status code appropriate for this error variant.
     pub fn status(&self) -> StatusCode {
         match &self {
@@ -112,7 +130,7 @@ impl ApiError {
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
 
-            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -178,5 +196,23 @@ mod tests {
         for (kind, expected) in cases {
             assert_eq!(ApiError::Service(kind.into()).status(), expected);
         }
+    }
+
+    #[test]
+    fn internal_errors_preserve_context_and_cause() {
+        let error = ApiError::internal(
+            "encoding object response metadata",
+            std::io::Error::other("invalid header value"),
+        );
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.to_string(),
+            "internal error: encoding object response metadata"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some("invalid header value".to_owned())
+        );
     }
 }

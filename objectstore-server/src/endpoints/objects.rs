@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use objectstore_service::error::{ErrorKind, ResultExt as _};
+use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::Metadata;
@@ -140,7 +140,7 @@ async fn object_get(
     let stream = state.meter_stream(stream, &context);
     let mut metadata_headers = metadata
         .to_headers("")
-        .context(ErrorKind::Internal, "encoding object response metadata")?;
+        .map_err(|error| ApiError::internal("encoding object response metadata", error))?;
 
     let mut response = match content_range {
         Some(ref content_range) => {
@@ -176,7 +176,7 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
 
     let mut headers = metadata
         .to_headers("")
-        .context(ErrorKind::Internal, "encoding object response metadata")?;
+        .map_err(|error| ApiError::internal("encoding object response metadata", error))?;
     insert_content_length(&mut headers, &metadata);
 
     let mut response = (StatusCode::OK, headers).into_response();
