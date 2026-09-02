@@ -616,13 +616,11 @@ impl GcsBackend {
     ) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
-                let response_result = self
-                    .request(Method::GET, object_url.clone())
-                    .await?
-                    .send_traced()
-                    .await;
-                let resp =
-                    classify_transport_result(response_result, "getting GCS object metadata")?;
+                let request = self.request(Method::GET, object_url.clone()).await?;
+                let resp = classify_transport_result(
+                    request.send_traced().await,
+                    "getting GCS object metadata",
+                )?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
@@ -708,13 +706,12 @@ impl GcsBackend {
             .append_pair("ifMetagenerationMatch", metageneration);
 
         self.with_retry("update_custom_time", || async {
-            let response_result = self
+            let request = self
                 .request(Method::PATCH, object_url.clone())
                 .await?
-                .json(&CustomTimeRequest { custom_time })
-                .send_traced()
-                .await;
-            let response = classify_transport_result(response_result, "updating GCS custom time")?;
+                .json(&CustomTimeRequest { custom_time });
+            let response =
+                classify_transport_result(request.send_traced().await, "updating GCS custom time")?;
 
             // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race, so
             // leave its update intact and let a future read evaluate the TTI again.
@@ -892,12 +889,11 @@ impl Backend for GcsBackend {
 
         let deleted = self
             .with_retry("delete", || async {
-                let response_result = self
-                    .request(Method::DELETE, object_url.clone())
-                    .await?
-                    .send_traced()
-                    .await;
-                let resp = classify_transport_result(response_result, "deleting a GCS object")?;
+                let request = self.request(Method::DELETE, object_url.clone()).await?;
+                let resp = classify_transport_result(
+                    request.send_traced().await,
+                    "deleting a GCS object",
+                )?;
 
                 // Do not error for objects that do not exist
                 if resp.status() == StatusCode::NOT_FOUND {

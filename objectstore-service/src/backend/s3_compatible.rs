@@ -366,12 +366,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
-        let response_result = self
-            .request(Method::DELETE, self.object_url(id))
-            .await?
-            .send_traced()
-            .await;
-        let response = classify_transport_result(response_result, "sending an S3 delete request")?;
+        let request = self.request(Method::DELETE, self.object_url(id)).await?;
+        let response =
+            classify_transport_result(request.send_traced().await, "sending an S3 delete request")?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {
