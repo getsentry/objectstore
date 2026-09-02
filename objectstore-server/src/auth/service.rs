@@ -9,6 +9,7 @@ use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::auth::AuthContext;
 use crate::endpoints::common::ApiResult;
@@ -185,5 +186,55 @@ impl AuthAwareService {
             .service
             .complete_multipart(id, upload_id, parts)
             .await?)
+    }
+
+    // --- Resumable upload operations ---
+
+    /// Auth-aware wrapper around [`StorageService::create_upload_session`].
+    pub async fn create_upload_session(
+        &self,
+        id: ObjectId,
+        metadata: Metadata,
+        total_length: u64,
+    ) -> ApiResult<Option<SessionToken>> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .create_upload_session(id, metadata, total_length)
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::put_chunk`].
+    pub async fn put_chunk(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+        offset: u64,
+        content_length: u64,
+        body: ClientStream,
+    ) -> ApiResult<UploadProgress> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self
+            .service
+            .put_chunk(id, session, offset, content_length, body)
+            .await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::upload_offset`].
+    pub async fn upload_offset(
+        &self,
+        id: ObjectId,
+        session: SessionToken,
+    ) -> ApiResult<UploadProgress> {
+        // An offset query can commit an assembled object.
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.upload_offset(id, session).await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::cancel_upload`].
+    pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> ApiResult<()> {
+        // Canceling a session discards an in-progress upload rather than deleting an object.
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.cancel_upload(id, session).await?)
     }
 }

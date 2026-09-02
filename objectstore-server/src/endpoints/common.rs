@@ -93,8 +93,12 @@ impl ApiError {
             ApiError::Service(error) => match error.kind() {
                 ServiceErrorKind::InvalidMetadata
                 | ServiceErrorKind::InvalidUploadId
-                | ServiceErrorKind::ClientStream => StatusCode::BAD_REQUEST,
+                | ServiceErrorKind::ClientStream
+                | ServiceErrorKind::UnknownUploadSession
+                | ServiceErrorKind::ChunkExceedsUploadLength { .. } => StatusCode::BAD_REQUEST,
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
+                ServiceErrorKind::UploadOffsetMismatch { .. } => StatusCode::CONFLICT,
+                ServiceErrorKind::UploadSessionGone => StatusCode::GONE,
                 ServiceErrorKind::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
                 ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
                 ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -142,4 +146,37 @@ pub fn insert_accept_ranges(response: &mut Response) {
         http::header::ACCEPT_RANGES,
         HeaderValue::from_static("bytes"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resumable_service_errors_map_to_protocol_statuses() {
+        let cases = [
+            (
+                ServiceErrorKind::UnknownUploadSession,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ServiceErrorKind::ChunkExceedsUploadLength {
+                    offset: 8,
+                    content_length: 4,
+                    upload_length: 10,
+                },
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ServiceErrorKind::UploadOffsetMismatch { offset: 8 },
+                StatusCode::CONFLICT,
+            ),
+            (ServiceErrorKind::UploadSessionGone, StatusCode::GONE),
+            (ServiceErrorKind::Unsupported, StatusCode::NOT_IMPLEMENTED),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(ApiError::Service(kind.into()).status(), expected);
+        }
+    }
 }

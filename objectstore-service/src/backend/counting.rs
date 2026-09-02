@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
@@ -98,6 +99,42 @@ impl Backend for CountingBackend {
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         self.inner.as_multipart_upload_backend()?;
         Ok(self)
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: u64,
+    ) -> Result<Option<SessionToken>> {
+        count(&id.context.usecase);
+        self.inner
+            .create_upload_session(id, metadata, total_length)
+            .await
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        session: &SessionToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        count(&id.context.usecase);
+        self.inner
+            .put_chunk(id, session, offset, content_length, stream)
+            .await
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+        count(&id.context.usecase);
+        self.inner.upload_offset(id, session).await
+    }
+
+    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
+        count(&id.context.usecase);
+        self.inner.cancel_upload(id, session).await
     }
 }
 

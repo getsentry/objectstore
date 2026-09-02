@@ -53,6 +53,24 @@ pub enum ErrorKind {
         /// Total object length in bytes.
         total: u64,
     },
+    /// A resumable chunk starts at a different offset than the backend currently holds.
+    UploadOffsetMismatch {
+        /// The offset the backend currently holds.
+        offset: u64,
+    },
+    /// A resumable upload session expired or was canceled.
+    UploadSessionGone,
+    /// The backend does not recognize a resumable upload session.
+    UnknownUploadSession,
+    /// A resumable chunk would exceed the total upload length.
+    ChunkExceedsUploadLength {
+        /// The offset at which the chunk would be written.
+        offset: u64,
+        /// The declared length of the chunk.
+        content_length: u64,
+        /// The total upload length declared when the session was created.
+        upload_length: u64,
+    },
     /// The service cannot accept more work.
     AtCapacity,
     /// The requested operation is unsupported.
@@ -82,6 +100,19 @@ impl fmt::Display for ErrorKind {
             Self::RangeNotSatisfiable { total } => {
                 write!(f, "range not satisfiable (object size: {total} bytes)")
             }
+            Self::UploadOffsetMismatch { offset } => {
+                write!(f, "upload offset mismatch (server holds {offset} bytes)")
+            }
+            Self::UploadSessionGone => f.write_str("upload session gone"),
+            Self::UnknownUploadSession => f.write_str("unknown upload session"),
+            Self::ChunkExceedsUploadLength {
+                offset,
+                content_length,
+                upload_length,
+            } => write!(
+                f,
+                "chunk at offset {offset} with length {content_length} exceeds upload length {upload_length}"
+            ),
             Self::AtCapacity => f.write_str("service at capacity"),
             Self::Unsupported => f.write_str("unsupported operation"),
             Self::BackendFailure => f.write_str("backend operation failed"),
@@ -153,13 +184,17 @@ impl Error {
             ErrorKind::InvalidMetadata
             | ErrorKind::InvalidUploadId
             | ErrorKind::ClientStream
-            | ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
+            | ErrorKind::RangeNotSatisfiable { .. }
+            | ErrorKind::UploadOffsetMismatch { .. }
+            | ErrorKind::UploadSessionGone
+            | ErrorKind::UnknownUploadSession
+            | ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            ErrorKind::Unsupported => Level::INFO,
             ErrorKind::AtCapacity
             | ErrorKind::BackendRateLimited
             | ErrorKind::BackendTimeout
             | ErrorKind::BackendUnavailable => Level::WARN,
-            ErrorKind::Unsupported
-            | ErrorKind::BackendFailure
+            ErrorKind::BackendFailure
             | ErrorKind::CorruptData
             | ErrorKind::Panic
             | ErrorKind::Internal => Level::ERROR,

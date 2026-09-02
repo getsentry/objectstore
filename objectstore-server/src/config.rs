@@ -267,6 +267,19 @@ pub struct Sentry {
     /// `OS__SENTRY__INHERIT_SAMPLING_DECISION`
     pub inherit_sampling_decision: bool,
 
+    /// Whether to attach stack traces to captured errors and messages.
+    ///
+    /// When enabled, the attached stack trace starts where the event is captured.
+    ///
+    /// # Default
+    ///
+    /// `false`
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__SENTRY__ATTACH_STACKTRACE`
+    pub attach_stacktrace: bool,
+
     /// Enable Sentry SDK debug mode.
     ///
     /// When enabled, the Sentry SDK will output debug information to stderr, which can be useful
@@ -326,6 +339,7 @@ impl Default for Sentry {
             sample_rate: 1.0,
             traces_sample_rate: 0.01,
             inherit_sampling_decision: true,
+            attach_stacktrace: false,
             debug: false,
             tags: BTreeMap::new(),
         }
@@ -780,6 +794,7 @@ mod tests {
             jail.set_env("OS__SENTRY__ENVIRONMENT", "production");
             jail.set_env("OS__SENTRY__SERVER_NAME", "objectstore-deadbeef");
             jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
+            jail.set_env("OS__SENTRY__ATTACH_STACKTRACE", "true");
 
             let config = Config::load(None).unwrap();
 
@@ -801,6 +816,7 @@ mod tests {
             );
             assert_eq!(config.sentry.sample_rate, 0.5);
             assert_eq!(config.sentry.traces_sample_rate, 0.5);
+            assert!(config.sentry.attach_stacktrace);
 
             Ok(())
         });
@@ -822,6 +838,7 @@ mod tests {
                 server_name: objectstore-deadbeef
                 sample_rate: 0.5
                 traces_sample_rate: 0.5
+                attach_stacktrace: true
             "#,
             )
             .unwrap();
@@ -843,6 +860,7 @@ mod tests {
             );
             assert_eq!(config.sentry.sample_rate, 0.5);
             assert_eq!(config.sentry.traces_sample_rate, 0.5);
+            assert!(config.sentry.attach_stacktrace);
 
             Ok(())
         });
