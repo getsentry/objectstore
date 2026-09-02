@@ -31,7 +31,6 @@ const TOKEN_NONCE_LENGTH: usize = 12;
 const TOKEN_TAG_LENGTH: usize = 16;
 /// Long enough for rotation labels while keeping the envelope's length field compact.
 const MAX_KEY_ID_LENGTH: usize = 64;
-
 /// Validated encryption keys for resumable-upload session tokens.
 ///
 /// This type intentionally redacts key material from its debug representation. The active key is
@@ -44,34 +43,50 @@ pub struct ResumableUploadEncryption {
 }
 
 impl ResumableUploadEncryption {
+    /// Constructs an encryptor with a fresh process-local AES-256 key.
+    ///
+    /// Tokens encrypted with this key cannot be decrypted after a service restart. Configure a
+    /// persistent keyring with [`Self::new`] when resumable sessions must survive restarts.
+    ///
+    /// Returns an error if secure random key generation fails.
+    pub fn ephemeral() -> anyhow::Result<Self> {
+        let key_id = "ephemeral";
+        let random = SystemRandom::new();
+        let mut key = [0; 32];
+        random
+            .fill(&mut key)
+            .map_err(|_| anyhow::anyhow!("failed to generate resumable upload encryption key"))?;
+        Self::new(key_id, BTreeMap::from([(key_id.to_owned(), key.to_vec())]))
+    }
+
     /// Validates and constructs a token encryptor from raw AES-256 keys.
+    ///
+    /// Returns an error for invalid key IDs or sizes, or when the active key is absent.
     pub fn new(
         active_key_id: impl Into<String>,
         keys: BTreeMap<String, Vec<u8>>,
-    ) -> std::result::Result<Self, ResumableUploadEncryptionConfigError> {
+    ) -> anyhow::Result<Self> {
         let active_key_id = active_key_id.into();
         validate_key_id(&active_key_id)?;
 
         let mut validated = BTreeMap::new();
         for (key_id, key) in keys {
             validate_key_id(&key_id)?;
-            if key.len() != AES_256_GCM.key_len() {
-                return Err(ResumableUploadEncryptionConfigError::InvalidKeyLength {
-                    key_id,
-                    actual: key.len(),
-                });
-            }
+            anyhow::ensure!(
+                key.len() == AES_256_GCM.key_len(),
+                "resumable upload encryption key {key_id:?} must contain exactly 32 bytes, got {}",
+                key.len()
+            );
             let key = UnboundKey::new(&AES_256_GCM, &key)
                 .map(LessSafeKey::new)
-                .map_err(|_| ResumableUploadEncryptionConfigError::InvalidKeyMaterial)?;
+                .map_err(|_| anyhow::anyhow!("invalid resumable upload encryption key material"))?;
             validated.insert(key_id, key);
         }
 
-        if !validated.contains_key(&active_key_id) {
-            return Err(ResumableUploadEncryptionConfigError::MissingActiveKey(
-                active_key_id,
-            ));
-        }
+        anyhow::ensure!(
+            validated.contains_key(&active_key_id),
+            "active resumable upload encryption key {active_key_id:?} is not configured"
+        );
 
         Ok(Self {
             active_key_id,
@@ -163,41 +178,15 @@ impl fmt::Debug for ResumableUploadEncryption {
     }
 }
 
-/// Invalid resumable-upload encryption configuration.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ResumableUploadEncryptionConfigError {
-    /// A key ID is empty, too long, or contains characters outside the safe configuration alphabet.
-    #[error("invalid resumable upload encryption key ID {0:?}")]
-    InvalidKeyId(String),
-    /// An AES-256 key did not contain exactly 32 bytes.
-    #[error(
-        "resumable upload encryption key {key_id:?} must contain exactly 32 bytes, got {actual}"
-    )]
-    InvalidKeyLength {
-        /// The invalid key's ID.
-        key_id: String,
-        /// Decoded byte length.
-        actual: usize,
-    },
-    /// The configured active key ID has no corresponding key.
-    #[error("active resumable upload encryption key {0:?} is not configured")]
-    MissingActiveKey(String),
-    /// The cryptographic provider rejected otherwise length-validated key material.
-    #[error("invalid resumable upload encryption key material")]
-    InvalidKeyMaterial,
-}
-
-fn validate_key_id(key_id: &str) -> std::result::Result<(), ResumableUploadEncryptionConfigError> {
-    if key_id.is_empty()
-        || key_id.len() > MAX_KEY_ID_LENGTH
-        || !key_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(ResumableUploadEncryptionConfigError::InvalidKeyId(
-            key_id.to_owned(),
-        ));
-    }
+fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !key_id.is_empty()
+            && key_id.len() <= MAX_KEY_ID_LENGTH
+            && key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "invalid resumable upload encryption key ID {key_id:?}"
+    );
     Ok(())
 }
 
@@ -305,8 +294,8 @@ mod tests {
     fn configuration_validates_ids_lengths_and_active_key() {
         let error = ResumableUploadEncryption::new("missing", BTreeMap::new()).unwrap_err();
         assert_eq!(
-            error,
-            ResumableUploadEncryptionConfigError::MissingActiveKey("missing".into())
+            error.to_string(),
+            "active resumable upload encryption key \"missing\" is not configured"
         );
 
         let error = ResumableUploadEncryption::new(
@@ -315,19 +304,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
-            error,
-            ResumableUploadEncryptionConfigError::InvalidKeyId("bad key".into())
+            error.to_string(),
+            "invalid resumable upload encryption key ID \"bad key\""
         );
 
         let error =
             ResumableUploadEncryption::new("v1", BTreeMap::from([("v1".into(), vec![0; 31])]))
                 .unwrap_err();
         assert_eq!(
-            error,
-            ResumableUploadEncryptionConfigError::InvalidKeyLength {
-                key_id: "v1".into(),
-                actual: 31,
-            }
+            error.to_string(),
+            "resumable upload encryption key \"v1\" must contain exactly 32 bytes, got 31"
         );
     }
 

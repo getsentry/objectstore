@@ -74,7 +74,7 @@ impl Services {
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
-        let mut service = StorageService::new(backend).with_concurrency(concurrency);
+        let mut service = StorageService::new(backend)?.with_concurrency(concurrency);
         if let Some(resumable_upload_encryption) = resumable_upload_encryption {
             service = service.with_resumable_upload_encryption(resumable_upload_encryption);
         }

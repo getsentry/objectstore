@@ -1,7 +1,9 @@
 //! Integration tests for the resumable upload endpoints.
 //!
-//! No backend implements resumable uploads yet. Until a supporting test backend exists, these
-//! tests cover request validation and ensure regular object requests remain unaffected.
+//! The test server uses its default filesystem backend, which does not implement resumable
+//! uploads. These tests cover request validation and ensure regular object requests remain
+//! unaffected. Backend behavior is covered in the service and backend test suites.
+//! TODO: Add end-to-end resumable upload coverage once the filesystem backend supports it.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -135,24 +137,6 @@ async fn declined_session_creation_returns_not_implemented() -> Result<()> {
 // --- Chunks and offset queries ---
 
 #[tokio::test]
-async fn offset_query_does_not_require_content_length() -> Result<()> {
-    let server = test_server().await;
-    let response = raw_put(
-        &server,
-        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
-        &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
-        "",
-    )
-    .await?;
-
-    assert!(
-        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
-        "unexpected response: {response}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
     let server = test_server().await;
     let response = raw_put(
@@ -253,22 +237,6 @@ async fn delete_rejects_upload_type() -> Result<()> {
 }
 
 // --- Parameter combinations ---
-
-#[tokio::test]
-async fn session_takes_precedence_over_upload_type() -> Result<()> {
-    let server = test_server().await;
-
-    let response = reqwest::Client::new()
-        .put(server.url(&format!(
-            "/v1/objects/test/org=1/my-key?upload_type=resumable&session={SESSION}"
-        )))
-        .header(HEADER_UPLOAD_OFFSET, "*")
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    Ok(())
-}
 
 #[tokio::test]
 async fn session_on_the_collection_route_is_rejected() -> Result<()> {

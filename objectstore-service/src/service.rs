@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use anyhow::Context;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken, UploadProgress};
@@ -39,18 +40,6 @@ pub type DeleteResponse = ();
 /// This value is used when no explicit limiter is set via
 /// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
-
-/// Decrypts the externally supplied session only when token protection is configured.
-fn decrypt_resumable_session(
-    encryption: Option<&ResumableUploadEncryption>,
-    id: &ObjectId,
-    session: SessionToken,
-) -> Result<SessionToken> {
-    match encryption {
-        Some(encryption) => encryption.decrypt(id, session),
-        None => Ok(session),
-    }
-}
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -87,7 +76,7 @@ fn decrypt_resumable_session(
 pub struct StorageService {
     inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
-    resumable_upload_encryption: Option<Arc<ResumableUploadEncryption>>,
+    resumable_upload_encryption: Arc<ResumableUploadEncryption>,
 }
 
 impl StorageService {
@@ -97,12 +86,17 @@ impl StorageService {
     /// each operation run. Single-object operations served directly by `StorageService` are covered
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
-    pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self {
+    ///
+    /// Returns an error if the process-local resumable-upload encryption key cannot be generated.
+    pub fn new(backend: Box<dyn Backend>) -> anyhow::Result<Self> {
+        Ok(Self {
             inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
-            resumable_upload_encryption: None,
-        }
+            resumable_upload_encryption: Arc::new(
+                ResumableUploadEncryption::ephemeral()
+                    .context("failed to initialize resumable upload encryption")?,
+            ),
+        })
     }
 
     /// Replaces the default concurrency limiter.
@@ -115,12 +109,12 @@ impl StorageService {
         self
     }
 
-    /// Encrypts resumable-upload backend tokens before exposing them to callers.
+    /// Replaces the process-local resumable-upload encryption key with a persistent keyring.
     pub fn with_resumable_upload_encryption(
         mut self,
         encryption: ResumableUploadEncryption,
     ) -> Self {
-        self.resumable_upload_encryption = Some(Arc::new(encryption));
+        self.resumable_upload_encryption = Arc::new(encryption);
         self
     }
 
@@ -404,10 +398,9 @@ impl StorageService {
             let session = inner
                 .create_upload_session(&id, &metadata, total_length)
                 .await?;
-            match (encryption, session) {
-                (Some(encryption), Some(token)) => encryption.encrypt(&id, token).map(Some),
-                (_, session) => Ok(session),
-            }
+            session
+                .map(|token| encryption.encrypt(&id, token))
+                .transpose()
         })
         .await
     }
@@ -431,7 +424,7 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         let encryption = self.resumable_upload_encryption.clone();
         self.spawn("put_chunk", async move {
-            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
+            let session = encryption.decrypt(&id, session)?;
             inner
                 .put_chunk(&id, &session, offset, content_length, body)
                 .await
@@ -450,7 +443,7 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         let encryption = self.resumable_upload_encryption.clone();
         self.spawn("upload_offset", async move {
-            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
+            let session = encryption.decrypt(&id, session)?;
             inner.upload_offset(&id, &session).await
         })
         .await
@@ -461,7 +454,7 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         let encryption = self.resumable_upload_encryption.clone();
         self.spawn("cancel_upload", async move {
-            let session = decrypt_resumable_session(encryption.as_deref(), &id, session)?;
+            let session = encryption.decrypt(&id, session)?;
             inner.cancel_upload(&id, &session).await
         })
         .await
@@ -530,7 +523,7 @@ mod tests {
     }
 
     fn make_service() -> StorageService {
-        StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
+        StorageService::new(Box::new(InMemoryBackend::new("in-memory"))).unwrap()
     }
 
     #[tokio::test]
@@ -581,7 +574,7 @@ mod tests {
         let backend = GcsBackend::new(config, &ChangeStreamFactory::default())
             .await
             .unwrap();
-        let service = StorageService::new(Box::new(backend));
+        let service = StorageService::new(Box::new(backend)).unwrap();
 
         let key = service
             .insert_object(
@@ -626,7 +619,7 @@ mod tests {
                 .unwrap(),
         );
         let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend));
+        let service = StorageService::new(Box::new(backend)).unwrap();
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
@@ -725,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_in_backend_returns_task_failed() {
-        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)));
+        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet))).unwrap();
 
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id, None).await;
@@ -795,7 +788,7 @@ mod tests {
         let hv = Box::new(TestBackend::new(GateOnPut::default()));
         let lt = Box::new(TestBackend::new(GateOnPut::with_pause()));
         let backend = TieredStorage::new(hv.clone(), lt.clone(), Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend));
+        let service = StorageService::new(Box::new(backend)).unwrap();
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
@@ -838,6 +831,7 @@ mod tests {
     fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
         let service = StorageService::new(Box::new(backend.clone()))
+            .unwrap()
             .with_concurrency(ConcurrencyLimiter::new(limit));
         (service, backend)
     }
@@ -890,7 +884,9 @@ mod tests {
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
         let backend = Box::new(InMemoryBackend::new("cap"));
-        let service = StorageService::new(backend).with_concurrency(ConcurrencyLimiter::new(7));
+        let service = StorageService::new(backend)
+            .unwrap()
+            .with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
     }
 
@@ -921,6 +917,7 @@ mod tests {
     #[tokio::test]
     async fn permits_released_after_panic() {
         let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)))
+            .unwrap()
             .with_concurrency(ConcurrencyLimiter::new(1));
 
         // First operation panics — the permit must still be released.
@@ -967,16 +964,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumable_tokens_pass_through_as_bytes_without_encryption() -> Result<()> {
+    async fn resumable_tokens_are_encrypted_by_default() -> Result<()> {
         let hooks = ResumableTokenHooks::default();
-        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())));
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone()))).unwrap();
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let token = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
-        assert_eq!(token.as_bytes(), &[0, 0xff, b'?', b'/']);
+        assert_ne!(token.as_bytes(), &[0, 0xff, b'?', b'/']);
+        assert!(matches!(
+            service
+                .upload_offset(id.clone(), SessionToken::new([0, 0xff, b'?', b'/']))
+                .await,
+            Err(Error::UnknownUploadSession)
+        ));
+        assert!(hooks.seen_tokens.lock().unwrap().is_empty());
         service.upload_offset(id, token).await?;
         assert_eq!(
             hooks.seen_tokens.lock().unwrap().as_slice(),
@@ -986,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumable_tokens_are_encrypted_only_across_the_service_boundary() -> Result<()> {
+    async fn configured_encryption_only_crosses_the_service_boundary() -> Result<()> {
         let hooks = ResumableTokenHooks::default();
         let encryption = ResumableUploadEncryption::new(
             "v1",
@@ -994,6 +998,7 @@ mod tests {
         )
         .unwrap();
         let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
+            .unwrap()
             .with_resumable_upload_encryption(encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 
@@ -1019,6 +1024,7 @@ mod tests {
         )
         .unwrap();
         let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
+            .unwrap()
             .with_resumable_upload_encryption(encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 

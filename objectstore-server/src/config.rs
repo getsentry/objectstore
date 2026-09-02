@@ -619,10 +619,12 @@ pub struct Service {
     /// `60`
     pub bulk_concurrency_pct: u32,
 
-    /// Optional encryption for resumable-upload session tokens returned to clients.
+    /// Persistent encryption keys for resumable-upload session tokens returned to clients.
     ///
-    /// When configured, only encrypted tokens are accepted. Keep old keys configured while their
-    /// sessions may still be active; removing a key intentionally invalidates those sessions.
+    /// Tokens are always encrypted. When this is absent, Objectstore generates a fresh in-memory
+    /// AES-256 key at startup, so resumable sessions become invalid after a restart. Configure a
+    /// persistent keyring for sessions that must survive restarts. Keep old keys configured while
+    /// their sessions may still be active; removing a key intentionally invalidates those sessions.
     ///
     /// ```yaml
     /// service:
@@ -649,9 +651,7 @@ impl Service {
             keys.insert(key_id.clone(), bytes);
         }
 
-        ResumableUploadEncryption::new(config.active_key_id.clone(), keys)
-            .map(Some)
-            .map_err(Into::into)
+        ResumableUploadEncryption::new(config.active_key_id.clone(), keys).map(Some)
     }
 }
 
