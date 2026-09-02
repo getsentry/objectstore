@@ -407,12 +407,12 @@ impl StorageService {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// Commits the object once the chunk carrying the last byte is persisted.
+    /// Completes the upload once the chunk carrying the last byte is persisted.
     ///
     /// # Run-to-completion
     ///
     /// Once called, the operation runs to completion even if the returned future is dropped.
-    /// This matters most for the final chunk, which commits the object.
+    /// This matters most for the final chunk, which completes the upload.
     pub async fn put_chunk(
         &self,
         id: ObjectId,
@@ -432,9 +432,11 @@ impl StorageService {
         .await
     }
 
-    /// Reports how far a session has progressed, committing the object if it is assembled.
+    /// Reports how far a session has progressed.
     ///
-    /// This can mutate state and therefore requires write permission at the API layer.
+    /// This can observe completion after the final chunk's response was lost. A composed backend
+    /// may also finish pending publication work, so this requires write permission at the API
+    /// layer.
     pub async fn upload_offset(
         &self,
         id: ObjectId,

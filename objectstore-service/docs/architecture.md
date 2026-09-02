@@ -260,8 +260,9 @@ trips for objects large enough that re-sending the whole payload is expensive.
    reports the offset now persisted.
 3. After a failure, [`upload_offset`](backend::common::Backend::upload_offset)
    reports where the backend stands, so the caller resumes from there.
-4. The chunk carrying the last byte commits the object. There is no finalize call —
-   the backend recognizes that chunk from the declared total size.
+4. The chunk carrying the last byte completes the upload. There is no separate completion call —
+   the backend recognizes that chunk from the declared total size and makes the object available
+   through its normal read path before reporting completion.
 5. At any time, an upload can be canceled, which discards what its session holds.
 
 Backend session tokens remain private to the service. Before returning a token to a client,

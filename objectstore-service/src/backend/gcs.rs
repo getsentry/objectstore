@@ -593,12 +593,12 @@ impl GcsBackend {
         })
     }
 
-    /// Reports a resumable object once GCS confirms that it committed it.
-    fn report_resumable_commit(&self, id: &ObjectId, commit: ResumableCommit) {
-        match commit.stored_size {
+    /// Reports a resumable object once GCS confirms that the upload completed.
+    fn report_resumable_completion(&self, id: &ObjectId, completion: ResumableCompletion) {
+        match completion.stored_size {
             Some(size) => {
                 self.change_stream
-                    .write(id, size + commit.metadata_size, commit.expires_at)
+                    .write(id, size + completion.metadata_size, completion.expires_at)
             }
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
@@ -606,17 +606,19 @@ impl GcsBackend {
         }
     }
 
-    /// Parses a resumable GCS response and reports an object if that response committed it.
+    /// Parses a resumable GCS response and reports an object if the upload completed.
     async fn resumable_progress(
         &self,
         id: &ObjectId,
         response: reqwest::Response,
         total_length: u64,
     ) -> Result<UploadProgress> {
-        let ResumableProgress { progress, commit } =
-            parse_resumable_progress(response, total_length).await?;
-        if let Some(commit) = commit {
-            self.report_resumable_commit(id, commit);
+        let ResumableProgress {
+            progress,
+            completion,
+        } = parse_resumable_progress(response, total_length).await?;
+        if let Some(completion) = completion {
+            self.report_resumable_completion(id, completion);
         }
         Ok(progress)
     }
@@ -912,17 +914,17 @@ async fn parse_resumable_progress(
                         .map_err(|_| Error::generic("GCS: resumable Range header is not ASCII"))
                 })
                 .transpose()?;
-            let commit = if matches!(status, StatusCode::OK | StatusCode::CREATED) {
+            let completion = if matches!(status, StatusCode::OK | StatusCode::CREATED) {
                 let body = response.bytes().await.map_err(|error| {
-                    Error::reqwest("GCS: read committed resumable upload response", error)
+                    Error::reqwest("GCS: read completed resumable upload response", error)
                 })?;
                 let mut object =
                     serde_json::from_slice::<GcsObject>(&body).map_err(|cause| Error::Serde {
-                        context: "GCS: parse committed resumable upload response".to_owned(),
+                        context: "GCS: parse completed resumable upload response".to_owned(),
                         cause,
                     })?;
                 object.metadata.remove(&GcsMetaKey::EmulatorIgnored);
-                Some(ResumableCommit {
+                Some(ResumableCompletion {
                     stored_size: object.size.as_deref().and_then(|size| size.parse().ok()),
                     metadata_size: object.metadata_size(),
                     expires_at: object.custom_time,
@@ -932,19 +934,22 @@ async fn parse_resumable_progress(
                 None
             };
             let progress = parse_resumable_status(status, range.as_deref(), total_length)?;
-            Ok(ResumableProgress { progress, commit })
+            Ok(ResumableProgress {
+                progress,
+                completion,
+            })
         }
     }
 }
 
-/// Progress returned by GCS plus metadata needed to report a committed object.
+/// Progress returned by GCS plus metadata needed to report a completed upload.
 struct ResumableProgress {
     progress: UploadProgress,
-    commit: Option<ResumableCommit>,
+    completion: Option<ResumableCompletion>,
 }
 
-/// The committed object's accounting attributes from GCS's object resource.
-struct ResumableCommit {
+/// The completed object's accounting attributes from GCS's object resource.
+struct ResumableCompletion {
     stored_size: Option<u64>,
     metadata_size: u64,
     expires_at: Option<SystemTime>,
@@ -963,7 +968,7 @@ fn parse_resumable_status(
                 .unwrap_or(0);
             Ok(UploadProgress::Incomplete { offset })
         }
-        StatusCode::OK | StatusCode::CREATED => Ok(UploadProgress::Committed),
+        StatusCode::OK | StatusCode::CREATED => Ok(UploadProgress::Complete),
         _ => Err(Error::generic(format!(
             "GCS: unexpected resumable upload status {status}"
         ))),
@@ -1132,7 +1137,7 @@ impl Backend for GcsBackend {
                     Ok(UploadProgress::Incomplete { offset }) => {
                         Err(Error::UploadOffsetMismatch { offset })
                     }
-                    Ok(UploadProgress::Committed) | Err(_) => Err(error),
+                    Ok(UploadProgress::Complete) | Err(_) => Err(error),
                 }
             }
             result => result,
@@ -1907,11 +1912,11 @@ mod tests {
         );
         assert_eq!(
             parse_resumable_status(StatusCode::OK, None, 10)?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
         assert_eq!(
             parse_resumable_status(StatusCode::CREATED, None, 10)?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
         assert!(parse_resumable_status(StatusCode::NO_CONTENT, None, 10).is_err());
         assert!(parse_resumable_status(RESUMABLE_INCOMPLETE, Some("bytes=1-4"), 10).is_err());
@@ -1931,7 +1936,7 @@ mod tests {
         let token = backend.create_upload_session(&id, &metadata, 0).await?;
         assert_eq!(
             backend.upload_offset(&id, &token).await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
 
         let (stored_metadata, _, payload) = backend.get_object(&id, None).await?.unwrap();
@@ -1960,7 +1965,7 @@ mod tests {
                     stream::single(single.clone()),
                 )
                 .await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
         let (_, _, payload) = backend.get_object(&single_id, None).await?.unwrap();
         assert_eq!(stream::read_to_vec(payload).await?, single);
@@ -2005,7 +2010,7 @@ mod tests {
                     stream::single(b"final".to_vec()),
                 )
                 .await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
         let (_, _, payload) = backend.get_object(&multi_id, None).await?.unwrap();
         assert_eq!(stream::read_to_vec(payload).await?, expected);
@@ -2043,7 +2048,7 @@ mod tests {
                     stream::single(b"BADxyz".to_vec()),
                 )
                 .await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
 
         let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
@@ -2190,11 +2195,11 @@ mod tests {
                     stream::single(data[1024..].to_vec()),
                 )
                 .await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
 
         // GCS persists the final bytes, but storage-testbench truncates the successful JSON
-        // response. The chunk is not retried; an explicit status query recovers the commit.
+        // response. The chunk is not retried; an explicit status query observes completion.
         let mut backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-failure-final");
         let token = backend
@@ -2214,7 +2219,7 @@ mod tests {
         ));
         assert_eq!(
             backend.upload_offset(&id, &token).await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
         Ok(())
     }
@@ -3080,7 +3085,7 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
-    async fn resumable_commit_reports_to_change_stream() -> Result<()> {
+    async fn resumable_completion_reports_to_change_stream() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
         let id = make_id();
         let payload = b"resumable payload".to_vec();
@@ -3102,7 +3107,7 @@ mod tests {
                     stream::single::<ClientError>(payload.clone()),
                 )
                 .await?,
-            UploadProgress::Committed
+            UploadProgress::Complete
         );
 
         let records = producer.records();

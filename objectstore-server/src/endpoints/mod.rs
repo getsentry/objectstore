@@ -32,7 +32,7 @@
 //! Clients are still encouraged to send the whole payload in a single request, as that's the most
 //! efficient and reliable approach.
 //! The server knows the total size from the session, so it recognizes the chunk carrying the last
-//! byte and commits the object itself.
+//! byte and completes the upload itself.
 //!
 //! Resumable uploads use the object endpoints above, selected by a query parameter:
 //! `upload_type=resumable` opens a session, and `session=<token>` addresses it from then on.
@@ -57,14 +57,16 @@
 //! `Upload-Offset` header: a byte offset submits the body as the chunk starting there, while
 //! the `*` wildcard submits an empty body and asks which offset the server holds. Both answer
 //! `204 No Content` with the authoritative `Upload-Offset` while bytes remain, and
-//! `201 Created` with `{"key"}` once the object is committed.
+//! `201 Created` with `{"key"}` once the upload is complete and the object is available through
+//! the normal object endpoints. The session is terminal at that point.
 //! The offset in the response may be lower than the end of the last chunk that was sent.
 //! Backends can e.g. persist only aligned prefixes and discard the remainder, so clients must
 //! always continue from the returned offset.
 //! Every chunk requires `Content-Length`, even over HTTP/2, while creation and offset queries
 //! must not carry a request body.
 //!
-//! An offset query can commit an object, so it requires write permission despite being read-shaped.
+//! An offset query can finish pending backend publication work, so it requires write permission
+//! despite being read-shaped.
 //! Termination likewise needs write rather than delete permission: it releases an in-progress upload,
 //! not an object.
 //!

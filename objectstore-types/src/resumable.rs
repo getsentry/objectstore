@@ -7,7 +7,7 @@
 //! The client then sends chunks with [`HEADER_UPLOAD_OFFSET`] set to the byte position at which
 //! each chunk starts. If an upload is interrupted, the client can send the wildcard offset
 //! [`UploadOffset::Unknown`] to query the server's authoritative position before resuming. The
-//! request that completes the object returns a [`CommitResponse`].
+//! request that completes the upload returns a [`CompleteUploadResponse`].
 //!
 //! Session tokens contain backend state protected by the storage service, and clients must treat
 //! their contents as opaque. The token bytes are encoded as unpadded base64url when the token is
@@ -153,22 +153,28 @@ impl fmt::Display for UploadOffset {
 
 /// How far a resumable upload has progressed.
 ///
-/// Both a chunk write and an offset query can commit an object, so both operations have the same
-/// two outcomes.
+/// Both a chunk write and an offset query can observe that an upload is complete, so both
+/// operations have the same two outcomes. Completion is relative to the backend handling the
+/// operation: it means the session is terminal and the object is available through that backend's
+/// normal read methods. A backend that composes another backend must finish its own publication
+/// work before returning [`UploadProgress::Complete`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadProgress {
     /// More bytes are expected. The client continues from `offset`.
     ///
     /// This offset is authoritative and may be lower than the end of the chunk that was just
     /// written: backends can persist only a prefix and discard the remainder. It must remain below
-    /// the session's total length; once every byte has landed, the backend commits the object or
+    /// the session's total length; once every byte has landed, the backend completes the upload or
     /// returns an error instead.
     Incomplete {
         /// The offset the backend has persisted.
         offset: u64,
     },
-    /// The last byte arrived and the object is committed and readable.
-    Committed,
+    /// The session is terminal and the object is available through the backend's normal reads.
+    ///
+    /// This is an observable status rather than a one-time event. A later offset query can return
+    /// `Complete` again, for example when the response to the final chunk was lost.
+    Complete,
 }
 
 /// Response from creating a resumable upload session.
@@ -180,12 +186,12 @@ pub struct CreateSessionResponse {
     pub session: SessionToken,
 }
 
-/// Response from the request that commits the object.
+/// Response from the request that completes the upload.
 ///
 /// This is either the chunk carrying the last byte, or an offset query against a
-/// session whose object was already assembled.
+/// session whose final chunk completed but whose response was not observed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommitResponse {
+pub struct CompleteUploadResponse {
     /// The object key.
     pub key: String,
 }

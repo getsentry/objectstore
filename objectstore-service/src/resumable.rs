@@ -2,7 +2,7 @@
 //!
 //! A resumable upload is a regular write whose payload arrives across several requests.
 //! A session declares the object's total size and metadata upfront; chunks then arrive at
-//! byte offsets, and the backend commits the object itself once the last byte lands. A chunk may
+//! byte offsets, and the backend completes the upload itself once the last byte lands. A chunk may
 //! be acknowledged only partially, so clients always continue from the backend's returned offset
 //! rather than assuming the whole request was persisted. See [`objectstore_types::resumable`] for
 //! the wire-level types.

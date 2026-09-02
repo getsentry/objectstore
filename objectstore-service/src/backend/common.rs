@@ -102,6 +102,11 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
     /// [`UploadProgress`], or query [`Self::upload_offset`] after an ambiguous failure. A backend
     /// may or may not accept a replay starting before its persisted offset.
+    ///
+    /// [`UploadProgress::Complete`] means the upload is terminal and the object is available
+    /// through this backend's normal read methods. A backend that composes another backend must
+    /// finish its own publication work before returning that outcome.
+    ///
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`Error::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
@@ -119,7 +124,11 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Reports how far the session has progressed.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
+    /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
+    /// when its original response was lost. A composed backend may finish pending idempotent
+    /// publication work before returning that terminal outcome.
+    ///
+    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify a known session.
     async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
         let _ = (id, session);
         Err(Error::NotImplemented)
