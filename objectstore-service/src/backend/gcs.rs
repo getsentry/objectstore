@@ -184,20 +184,19 @@ struct GcsObject {
     pub metageneration: String,
 }
 
-/// Backend-private state needed to address a resumable upload after creation.
 #[derive(Debug, Serialize, Deserialize)]
 struct ResumableSession {
-    session_uri: String,
-    total_length: u64,
+    session_uri: Url,
     storage_path: String,
+    total_length: u64,
 }
 
 impl ResumableSession {
-    fn new(id: &ObjectId, session_uri: String, total_length: u64) -> Self {
+    fn new(id: &ObjectId, session_uri: Url, total_length: u64) -> Self {
         Self {
             session_uri,
-            total_length,
             storage_path: id.as_storage_path().to_string(),
+            total_length,
         }
     }
 
@@ -214,7 +213,7 @@ impl ResumableSession {
         let session: Self =
             serde_json::from_slice(token.as_bytes()).map_err(|_| Error::UnknownUploadSession)?;
         if session.storage_path != id.as_storage_path().to_string()
-            || session_uri_from_location(endpoint, &session.session_uri).is_err()
+            || session.session_uri.origin() != endpoint.origin()
         {
             return Err(Error::UnknownUploadSession);
         }
@@ -223,7 +222,7 @@ impl ResumableSession {
 }
 
 /// Validates and preserves GCS's opaque resumable session URI.
-fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<String> {
+fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<Url> {
     let session_uri = Url::parse(location)
         .map_err(|_| Error::generic("GCS: resumable session Location is not a valid URL"))?;
     if session_uri.origin() != endpoint.origin() {
@@ -231,7 +230,7 @@ fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<String> {
             "GCS: resumable session Location has an unexpected origin",
         ));
     }
-    Ok(location.to_owned())
+    Ok(session_uri)
 }
 
 impl GcsObject {
@@ -1836,9 +1835,9 @@ mod tests {
         let id = make_id_with_key("object");
         let endpoint = Url::parse("https://example.invalid")?;
         let session_uri = "https://example.invalid/opaque/session?arbitrary=value";
-        let token = ResumableSession::new(&id, session_uri.into(), 123).into_token()?;
+        let token = ResumableSession::new(&id, Url::parse(session_uri)?, 123).into_token()?;
         let decoded = ResumableSession::from_token(&id, &token, &endpoint)?;
-        assert_eq!(decoded.session_uri, session_uri);
+        assert_eq!(decoded.session_uri.as_str(), session_uri);
         assert_eq!(decoded.total_length, 123);
         assert_eq!(decoded.storage_path, id.as_storage_path().to_string());
 
@@ -1847,9 +1846,14 @@ mod tests {
             Err(Error::UnknownUploadSession)
         ));
 
-        let malformed_uri = ResumableSession::new(&id, "not a URL".into(), 123).into_token()?;
+        let malformed_uri = SessionToken::new(serde_json::to_vec(&serde_json::json!({
+            "session_uri": "not a URL",
+            "storage_path": id.as_storage_path().to_string(),
+            "total_length": 123,
+        }))?);
         let wrong_origin =
-            ResumableSession::new(&id, "https://other.invalid/session".into(), 123).into_token()?;
+            ResumableSession::new(&id, Url::parse("https://other.invalid/session")?, 123)
+                .into_token()?;
         for malformed in [SessionToken::new(b"not json"), malformed_uri, wrong_origin] {
             assert!(matches!(
                 ResumableSession::from_token(&id, &malformed, &endpoint),
