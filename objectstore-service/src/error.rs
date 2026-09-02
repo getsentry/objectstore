@@ -181,23 +181,29 @@ impl Error {
     /// Returns the appropriate log level for this error.
     pub fn level(&self) -> Level {
         match self.kind {
-            ErrorKind::InvalidMetadata
-            | ErrorKind::InvalidUploadId
-            | ErrorKind::ClientStream
-            | ErrorKind::RangeNotSatisfiable { .. }
-            | ErrorKind::UploadOffsetMismatch { .. }
-            | ErrorKind::UploadSessionGone
-            | ErrorKind::UnknownUploadSession
-            | ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            // Malformed client input at DEBUG level
+            ErrorKind::InvalidMetadata => Level::DEBUG,
+            ErrorKind::InvalidUploadId => Level::DEBUG,
+            ErrorKind::ClientStream => Level::DEBUG,
+            ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
+            ErrorKind::UploadOffsetMismatch { .. } => Level::DEBUG,
+            ErrorKind::UploadSessionGone => Level::DEBUG,
+            ErrorKind::UnknownUploadSession => Level::DEBUG,
+            ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            // Indicates that optional functionality is not supported.
+            // We don't want a rogue client spamming us with Sentry errors just by calling an API
+            // that the server doesn't support, so we just log it.
             ErrorKind::Unsupported => Level::INFO,
-            ErrorKind::AtCapacity
-            | ErrorKind::BackendRateLimited
-            | ErrorKind::BackendTimeout
-            | ErrorKind::BackendUnavailable => Level::WARN,
-            ErrorKind::BackendFailure
-            | ErrorKind::CorruptData
-            | ErrorKind::Panic
-            | ErrorKind::Internal => Level::ERROR,
+            // Capacity, rate-limit, and transient backend errors are warnings.
+            ErrorKind::AtCapacity => Level::WARN,
+            ErrorKind::BackendRateLimited => Level::WARN,
+            ErrorKind::BackendTimeout => Level::WARN,
+            ErrorKind::BackendUnavailable => Level::WARN,
+            // All other errors are service or backend failures. These become Sentry errors.
+            ErrorKind::BackendFailure => Level::ERROR,
+            ErrorKind::Panic => Level::ERROR,
+            ErrorKind::CorruptData => Level::ERROR,
+            ErrorKind::Internal => Level::ERROR,
         }
     }
 }
