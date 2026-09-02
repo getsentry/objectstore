@@ -276,7 +276,7 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
     }
 }
 
-/// Builds a raw row filter that matches any tombstone row, new- or legacy-format.
+/// Builds a raw row filter that matches any live tombstone row, new- or legacy-format.
 ///
 /// New format: presence of the `r` column.
 /// Legacy format: `is_redirect_tombstone: true` in the `m` column JSON.
@@ -294,13 +294,45 @@ fn tombstone_filter() -> v2::RowFilter {
     live_row_filter(filter)
 }
 
-/// Returns a [`MutatePredicate`] that matches any tombstone row.
+/// Returns a [`MutatePredicate`] that matches any live tombstone row.
 ///
-/// Mutations run only when no tombstone is present (`predicate_matched == false`).
-/// Used by [`BigTableBackend::put_non_tombstone`], [`BigTableBackend::delete_non_tombstone`],
-/// and [`BigTableBackend::compare_and_write`] as the `CheckAndMutateRow` predicate.
+/// Mutations will not run on live tombstones (`predicate_matched == false`). They _will_
+/// run on expired tombstones as well as non-tombstones. Used by
+/// [`BigTableBackend::put_non_tombstone`] and [`BigTableBackend::compare_and_write`] as
+/// the `CheckAndMutateRow` predicate.
+///
+/// This predicate cannot distinguish an empty row from a row holding a regular object; a caller
+/// that needs to know whether its mutation hit anything wants [`non_tombstone_predicate`].
 fn tombstone_predicate() -> MutatePredicate {
     MutatePredicate::Exclude(tombstone_filter())
+}
+
+/// Returns a [`MutatePredicate`] that is the logical negation of [`tombstone_predicate`];
+/// it matches everything _except_ live tombstones.
+///
+/// Mutations run only when the predicate matches (`predicate_matched == true`). They will
+/// run on expired tombstones as well as non-tombstones. The match result doubles as a
+/// "was a row removed?" signal. Used by [`BigTableBackend::delete_non_tombstone`] as the
+/// `CheckAndMutateRow` predicate.
+///
+/// Built as a `Condition` filter:
+/// - Predicate: [`tombstone_filter`] -> is a live tombstone present?
+/// - True branch: `BlockAllFilter` -> match nothing; live tombstones should be preserved
+/// - False branch: `PassAllFilter` -> match everything: expired tombstones and non-tombstones
+fn non_tombstone_predicate() -> MutatePredicate {
+    MutatePredicate::Include(v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Condition(Box::new(
+            v2::row_filter::Condition {
+                predicate_filter: Some(Box::new(tombstone_filter())),
+                true_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
+                })),
+                false_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::PassAllFilter(true)),
+                })),
+            },
+        ))),
+    })
 }
 
 /// Builds an anchored regex pattern (`^…$`) that matches `value` literally.
@@ -1163,23 +1195,22 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
 
         for _ in 0..CAS_RETRY_COUNT {
-            let write_succeeded = self
+            let deleted = self
                 .check_and_mutate(
                     path.clone(),
-                    tombstone_predicate(),
+                    non_tombstone_predicate(),
                     [delete_row_mutation()],
                     "delete_non_tombstone",
                 )
                 .await?;
 
-            if write_succeeded {
-                // TODO(FS-492): `write_succeeded` is `true` even when there was no tombstone to
-                // delete so, while harmless, we emit an extra DELETE to the changestream here
+            if deleted {
                 self.change_stream.delete(id);
                 return Ok(None);
             }
 
-            // A tombstone was present: read its data for the caller.
+            // Nothing was deleted: either a tombstone is in the way, or the row is absent.
+            // Read the row to find out which, and to hand the tombstone to the caller.
             let row = self
                 .read_row(&path, Some(metadata_filter()), "delete_non_tombstone")
                 .await?;
@@ -1191,9 +1222,9 @@ impl HighVolumeBackend for BigTableBackend {
                         expiration_policy: meta.expiration_policy,
                     }));
                 }
-                // Race: An object replaced the tombstone, delete the new object now.
+                // Race: An object appeared since the predicate ran, delete the new object now.
                 Some(RowData::Object { .. }) => continue,
-                // Race: Entry was deleted in the meanwhile, nothing left to do.
+                // The row is absent or expired, nothing left to do.
                 None => return Ok(None),
             }
         }
@@ -1926,7 +1957,7 @@ mod tests {
     /// - **tombstone**: returns Some(Tombstone) with correct target; tombstone still intact.
     ///
     /// Verifies that the `r` column is correctly detected by both the `ReadRows` column
-    /// filter and the `CheckAndMutate` `tombstone_predicate`.
+    /// filter and the `CheckAndMutate` `non_tombstone_predicate`.
     #[tokio::test]
     async fn test_delete_non_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2582,6 +2613,44 @@ mod tests {
         assert_eq!(records[1].op_type, OpType::Delete);
         assert_eq!(records[1].size, None);
         assert_eq!(records[1].record_id, records[0].record_id);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn delete_non_tombstone_reclaims_expired_rows() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+
+        // An expired tombstone is past its lifetime: reclaimed, not handed to the caller.
+        // This test serves as documentation of that potentially surprising behavior.
+        let id = make_id();
+        let tombstone = Tombstone {
+            target: ObjectId::random(id.context().clone()),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        assert_eq!(
+            backend.delete_non_tombstone(&id).await?,
+            None,
+            "an expired tombstone must not be returned to the caller"
+        );
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "the expired tombstone must be reclaimed");
+        assert_eq!(records[0].op_type, OpType::Delete);
+
+        // The same holds for an object row (expired or otherwise).
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &metadata, b"gone", SystemTime::now()).await?;
+        producer.clear();
+        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "the object row must be reclaimed");
+        assert_eq!(records[0].op_type, OpType::Delete);
 
         Ok(())
     }
