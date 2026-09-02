@@ -17,6 +17,18 @@ use tracing::Instrument;
 use crate::error::{Error, ErrorKind, Result};
 use crate::stream;
 
+/// Classifies a backend HTTP error status into a semantic [`ErrorKind`].
+fn status_to_kind(status: StatusCode) -> ErrorKind {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ErrorKind::BackendTimeout,
+        StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
+        _ => ErrorKind::BackendFailure,
+    }
+}
+
 /// Extension trait that sends a request inside a tracing span.
 pub trait SendTraced {
     /// Sends the request, wrapping it in a span that covers the full request
@@ -43,6 +55,28 @@ impl SendTraced for reqwest::RequestBuilder {
         };
         send_future.instrument(span).await
     }
+}
+
+/// Classifies a request transport result while leaving successful responses available for
+/// caller-specific status handling.
+pub(super) fn classify_transport_result(
+    result: reqwest::Result<Response>,
+    context: &'static str,
+) -> Result<Response> {
+    result.map_err(|source| {
+        if let Some(client_error) = stream::unpack_client_error(&source) {
+            return Error::with_context(ErrorKind::ClientStream, context, client_error);
+        }
+
+        let kind = if source.is_timeout() {
+            ErrorKind::BackendTimeout
+        } else if source.is_connect() || source.is_request() {
+            ErrorKind::BackendUnavailable
+        } else {
+            ErrorKind::BackendFailure
+        };
+        Error::with_context(kind, context, source)
+    })
 }
 
 /// GCS JSON API error envelope (`{"error": {"message": "...", ...}}`).
@@ -81,8 +115,8 @@ struct XmlApiError {
 ///
 /// Use [`check_error`](Self::check_error) instead of
 /// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
-/// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
-/// a backend-response service error with the extracted error code and message.
+/// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns a
+/// semantic backend service error with the extracted error code and message.
 ///
 /// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
 /// chained directly.
@@ -94,8 +128,8 @@ pub trait ResponseExt {
     /// For other error statuses (e.g., redirects), falls back to
     /// [`reqwest::Response::error_for_status`].
     ///
-    /// When called on `Result<Response, reqwest::Error>`, transport errors are
-    /// classified as a backend failure with the same context string.
+    /// When called on `Result<Response, reqwest::Error>`, transport errors are semantically
+    /// classified and given the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
 
     /// Drains the response body of a response we are otherwise done with.
@@ -128,11 +162,7 @@ impl ResponseExt for Response {
                 return Ok(self);
             };
             self.drain_body().await;
-            return Err(Error::with_context(
-                ErrorKind::BackendResponse(status),
-                context,
-                e,
-            ));
+            return Err(Error::with_context(status_to_kind(status), context, e));
         };
 
         Err(BackendResponseError::new(context, status, detail).into())
@@ -145,13 +175,9 @@ impl ResponseExt for Response {
 
 impl ResponseExt for Result<Response, reqwest::Error> {
     async fn check_error(self, context: &'static str) -> Result<Response> {
-        match self {
-            Ok(resp) => resp.check_error(context).await,
-            Err(e) => Err(match stream::unpack_client_error(&e) {
-                Some(ce) => ce.into(),
-                None => Error::with_context(ErrorKind::BackendFailure, context, e),
-            }),
-        }
+        classify_transport_result(self, context)?
+            .check_error(context)
+            .await
     }
 
     async fn drain_body(self) {
@@ -268,7 +294,7 @@ impl StdError for BackendResponseError {}
 
 impl From<BackendResponseError> for Error {
     fn from(source: BackendResponseError) -> Self {
-        let kind = ErrorKind::BackendResponse(source.status);
+        let kind = status_to_kind(source.status);
         let context = source.context.clone();
         Self::with_context(kind, context, source)
     }
@@ -295,13 +321,10 @@ mod tests {
         )
         .into();
 
-        assert_eq!(
-            error.kind(),
-            ErrorKind::BackendResponse(StatusCode::TOO_MANY_REQUESTS)
-        );
+        assert_eq!(error.kind(), ErrorKind::BackendRateLimited);
         assert_eq!(
             error.to_string(),
-            "backend returned HTTP 429 Too Many Requests: getting a GCS object"
+            "backend rate limited: getting a GCS object"
         );
         assert_eq!(
             error.source().unwrap().to_string(),

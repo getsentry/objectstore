@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::error::Error as _;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -17,7 +16,7 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{ResponseExt, SendTraced};
+use super::extensions::{ResponseExt, SendTraced, classify_transport_result};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
@@ -462,34 +461,11 @@ fn insert_gcs_meta_header(
     Ok(())
 }
 
-/// Returns `true` if the error is a transient reqwest failure worth retrying.
+/// Returns `true` if the error is a transient backend failure worth retrying.
 fn error_is_retryable(error: &Error) -> bool {
-    if let Some(cause) = error
-        .source()
-        .and_then(|source| source.downcast_ref::<reqwest::Error>())
-    {
-        cause.is_timeout()
-            || cause.is_connect()
-            || cause.is_request()
-            || cause.status().is_some_and(status_is_retryable)
-    } else {
-        matches!(
-            error.kind(),
-            ErrorKind::BackendResponse(status) if status_is_retryable(status)
-        )
-    }
-}
-
-fn status_is_retryable(status: StatusCode) -> bool {
-    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
+        error.kind(),
+        ErrorKind::BackendRateLimited | ErrorKind::BackendTimeout | ErrorKind::BackendUnavailable
     )
 }
 
@@ -640,12 +616,13 @@ impl GcsBackend {
     ) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
-                let resp = self
+                let response_result = self
                     .request(Method::GET, object_url.clone())
                     .await?
                     .send_traced()
-                    .await
-                    .context(ErrorKind::BackendFailure, "getting GCS object metadata")?;
+                    .await;
+                let resp =
+                    classify_transport_result(response_result, "getting GCS object metadata")?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
@@ -731,29 +708,27 @@ impl GcsBackend {
             .append_pair("ifMetagenerationMatch", metageneration);
 
         self.with_retry("update_custom_time", || async {
-            match self
+            let response_result = self
                 .request(Method::PATCH, object_url.clone())
                 .await?
                 .json(&CustomTimeRequest { custom_time })
                 .send_traced()
-                .await
-                .check_error("updating GCS custom time")
-                .await
-            {
-                Ok(response) => {
-                    response.drain_body().await;
-                    Ok(true)
-                }
-                // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
-                // so leave its update intact and let a future read evaluate the TTI again.
-                Err(error)
-                    if error.kind()
-                        == ErrorKind::BackendResponse(StatusCode::PRECONDITION_FAILED) =>
-                {
-                    Ok(false)
-                }
-                Err(error) => Err(error),
+                .await;
+            let response = classify_transport_result(response_result, "updating GCS custom time")?;
+
+            // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race, so
+            // leave its update intact and let a future read evaluate the TTI again.
+            if response.status() == StatusCode::PRECONDITION_FAILED {
+                response.drain_body().await;
+                return Ok(false);
             }
+
+            response
+                .check_error("updating GCS custom time")
+                .await?
+                .drain_body()
+                .await;
+            Ok(true)
         })
         .await
     }
@@ -855,10 +830,10 @@ impl Backend for GcsBackend {
                 if let Some(r) = range {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
-                let resp = req
-                    .send_traced()
-                    .await
-                    .context(ErrorKind::BackendFailure, "getting a GCS object payload")?;
+                let resp = classify_transport_result(
+                    req.send_traced().await,
+                    "getting a GCS object payload",
+                )?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     let raw = resp
@@ -917,12 +892,12 @@ impl Backend for GcsBackend {
 
         let deleted = self
             .with_retry("delete", || async {
-                let resp = self
+                let response_result = self
                     .request(Method::DELETE, object_url.clone())
                     .await?
                     .send_traced()
-                    .await
-                    .context(ErrorKind::BackendFailure, "deleting a GCS object")?;
+                    .await;
+                let resp = classify_transport_result(response_result, "deleting a GCS object")?;
 
                 // Do not error for objects that do not exist
                 if resp.status() == StatusCode::NOT_FOUND {
@@ -1221,12 +1196,10 @@ impl MultipartUploadBackend for GcsBackend {
         self.with_retry("abort_multipart", || {
             let url = url.clone();
             async move {
-                let resp = self
-                    .request(Method::DELETE, url)
-                    .await?
-                    .send_traced()
-                    .await
-                    .context(ErrorKind::BackendFailure, "aborting a GCS multipart upload")?;
+                let resp = classify_transport_result(
+                    self.request(Method::DELETE, url).await?.send_traced().await,
+                    "aborting a GCS multipart upload",
+                )?;
 
                 // XXX: real S3 would return 404 here if the upload has been recently completed and we
                 // would have to handle it. It turns out GCS returns 204 instead, so we don't need to

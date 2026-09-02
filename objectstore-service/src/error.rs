@@ -10,8 +10,6 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
-use reqwest::StatusCode;
-
 /// A panic captured from a service task.
 #[derive(Debug)]
 pub struct Panic {
@@ -61,8 +59,12 @@ pub enum ErrorKind {
     Unsupported,
     /// A storage backend operation failed.
     BackendFailure,
-    /// A storage backend returned an HTTP error response.
-    BackendResponse(StatusCode),
+    /// A storage backend rejected the operation because it is rate limited.
+    BackendRateLimited,
+    /// A storage backend operation timed out.
+    BackendTimeout,
+    /// A storage backend is temporarily unavailable.
+    BackendUnavailable,
     /// A service task panicked.
     Panic,
     /// Persisted or remote data is corrupt.
@@ -83,7 +85,9 @@ impl fmt::Display for ErrorKind {
             Self::AtCapacity => f.write_str("service at capacity"),
             Self::Unsupported => f.write_str("unsupported operation"),
             Self::BackendFailure => f.write_str("backend operation failed"),
-            Self::BackendResponse(status) => write!(f, "backend returned HTTP {status}"),
+            Self::BackendRateLimited => f.write_str("backend rate limited"),
+            Self::BackendTimeout => f.write_str("backend timed out"),
+            Self::BackendUnavailable => f.write_str("backend unavailable"),
             Self::CorruptData => f.write_str("corrupt stored data"),
             Self::Panic => f.write_str("service task panicked"),
             Self::Internal => f.write_str("internal service error"),
@@ -150,10 +154,12 @@ impl Error {
             | ErrorKind::InvalidUploadId
             | ErrorKind::ClientStream
             | ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
-            ErrorKind::AtCapacity => Level::WARN,
+            ErrorKind::AtCapacity
+            | ErrorKind::BackendRateLimited
+            | ErrorKind::BackendTimeout
+            | ErrorKind::BackendUnavailable => Level::WARN,
             ErrorKind::Unsupported
             | ErrorKind::BackendFailure
-            | ErrorKind::BackendResponse(_)
             | ErrorKind::CorruptData
             | ErrorKind::Panic
             | ErrorKind::Internal => Level::ERROR,

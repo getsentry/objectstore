@@ -97,8 +97,11 @@ impl ApiError {
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
                 ServiceErrorKind::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
                 ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
+                ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::BackendTimeout | ServiceErrorKind::BackendUnavailable => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
                 ServiceErrorKind::BackendFailure
-                | ServiceErrorKind::BackendResponse(_)
                 | ServiceErrorKind::CorruptData
                 | ServiceErrorKind::Panic
                 | ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
