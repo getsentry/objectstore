@@ -1,16 +1,4 @@
 //! Shared types for Objectstore's resumable upload protocol.
-//!
-//! A resumable upload is a regular write whose payload arrives across several requests.
-//! A session declares the object's total size and metadata upfront; chunks then arrive at
-//! byte offsets, and the backend completes the upload itself once the last byte lands. A chunk may
-//! be acknowledged only partially, so clients always continue from the backend's returned offset
-//! rather than assuming the whole request was persisted. See [`objectstore_types::resumable`] for
-//! the wire-level types.
-//!
-//! Not every backend can support this. Session creation therefore asks the backend that
-//! would store the object to open one. A backend that cannot create a session returns
-//! [`Error::NotImplemented`], and the client falls back to
-//! a regular upload.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,8 +17,7 @@ const TOKEN_ENVELOPE_VERSION: u8 = 1;
 const TOKEN_NONCE_LENGTH: usize = 12;
 /// AES-GCM authentication tag length in bytes.
 const TOKEN_TAG_LENGTH: usize = 16;
-/// Long enough for rotation labels while keeping the envelope's length field compact.
-const MAX_KEY_ID_LENGTH: usize = 64;
+
 /// Validated encryption keys for resumable-upload session tokens.
 ///
 /// This type intentionally redacts key material from its debug representation. The active key is
@@ -142,7 +129,7 @@ impl ResumableUploadEncryption {
         }
         let (&key_id_length, rest) = rest.split_first()?;
         let key_id_length = usize::from(key_id_length);
-        if key_id_length == 0 || key_id_length > MAX_KEY_ID_LENGTH {
+        if key_id_length == 0 {
             return None;
         }
         let (key_id, rest) = rest.split_at_checked(key_id_length)?;
@@ -181,7 +168,6 @@ impl fmt::Debug for ResumableUploadEncryption {
 fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !key_id.is_empty()
-            && key_id.len() <= MAX_KEY_ID_LENGTH
             && key_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
