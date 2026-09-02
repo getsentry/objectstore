@@ -226,7 +226,7 @@ impl AuthAwareService {
         id: ObjectId,
         session: SessionToken,
     ) -> ApiResult<UploadProgress> {
-        // A status query can finish pending backend publication work.
+        // A status query can detect an upload to be complete and cause logical object creation.
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.upload_offset(id, session).await?)
     }
