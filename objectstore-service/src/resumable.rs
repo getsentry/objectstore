@@ -11,8 +11,6 @@ use crate::id::ObjectId;
 
 pub use objectstore_types::resumable::{SessionToken, UploadOffset, UploadProgress};
 
-/// Version of the encrypted session-token envelope.
-const TOKEN_ENVELOPE_VERSION: u8 = 1;
 /// AES-GCM nonce length in bytes.
 const TOKEN_NONCE_LENGTH: usize = 12;
 /// AES-GCM authentication tag length in bytes.
@@ -146,8 +144,7 @@ impl ResumableUploadEncryption {
     pub(crate) fn encrypt(&self, id: &ObjectId, token: SessionToken) -> Result<SessionToken> {
         let key_id = self.active_key_id.as_bytes();
 
-        let mut header = Vec::with_capacity(2 + key_id.len());
-        header.push(TOKEN_ENVELOPE_VERSION);
+        let mut header = Vec::with_capacity(1 + key_id.len());
         header.push(key_id.len() as u8);
         header.extend_from_slice(key_id);
 
@@ -172,11 +169,7 @@ impl ResumableUploadEncryption {
 
     fn decrypt_inner(&self, id: &ObjectId, token: SessionToken) -> Option<SessionToken> {
         let envelope = token.into_bytes();
-        let (&version, rest) = envelope.split_first()?;
-        if version != TOKEN_ENVELOPE_VERSION {
-            return None;
-        }
-        let (&key_id_length, rest) = rest.split_first()?;
+        let (&key_id_length, rest) = envelope.split_first()?;
         let key_id_length = usize::from(key_id_length);
         if key_id_length == 0 {
             return None;
@@ -190,7 +183,7 @@ impl ResumableUploadEncryption {
         } else {
             self.decryption_keys.get(key_id)?
         };
-        let header_length = 2 + key_id_length;
+        let header_length = 1 + key_id_length;
         let header = &envelope[..header_length];
         let nonce: [u8; TOKEN_NONCE_LENGTH] = nonce.try_into().ok()?;
         let aad = aad(header, id);
@@ -315,7 +308,7 @@ mod tests {
         let new_token = rotated
             .encrypt(&object, SessionToken::new(b"new token"))
             .unwrap();
-        assert_eq!(new_token.as_bytes()[2..4], *b"v2");
+        assert_eq!(new_token.as_bytes()[1..3], *b"v2");
 
         let removed = encryption("v2", &[("v2", 2)]);
         assert!(matches!(
