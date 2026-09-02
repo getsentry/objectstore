@@ -25,13 +25,72 @@ const TOKEN_TAG_LENGTH: usize = 16;
 /// to decrypt it.
 pub struct ResumableUploadEncryption {
     active_key: EncryptionKey,
-    decryption_keys: BTreeMap<String, LessSafeKey>,
-    random: SystemRandom,
+    decryption_keys: BTreeMap<String, TokenEncryptionKey>,
 }
 
 struct EncryptionKey {
     id: String,
+    key: TokenEncryptionKey,
+}
+
+struct TokenEncryptionKey {
     key: LessSafeKey,
+    random: SystemRandom,
+}
+
+struct SealedToken {
+    nonce: [u8; TOKEN_NONCE_LENGTH],
+    ciphertext: Vec<u8>,
+}
+
+impl TokenEncryptionKey {
+    fn new(key: &[u8]) -> anyhow::Result<Self> {
+        let key = UnboundKey::new(&AES_256_GCM, key)
+            .map(LessSafeKey::new)
+            .map_err(|_| anyhow::anyhow!("invalid resumable upload encryption key material"))?;
+        Ok(Self {
+            key,
+            random: SystemRandom::new(),
+        })
+    }
+
+    fn seal(&self, aad: &[u8], mut plaintext: Vec<u8>) -> Result<SealedToken> {
+        let mut nonce = [0; TOKEN_NONCE_LENGTH];
+        self.random
+            .fill(&mut nonce)
+            .map_err(|_| Error::generic("failed to generate resumable token nonce"))?;
+        self.key
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad),
+                &mut plaintext,
+            )
+            .map_err(|_| Error::generic("failed to encrypt resumable token"))?;
+        Ok(SealedToken {
+            nonce,
+            ciphertext: plaintext,
+        })
+    }
+
+    fn open(
+        &self,
+        nonce: [u8; TOKEN_NONCE_LENGTH],
+        aad: &[u8],
+        mut ciphertext: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        if ciphertext.len() < TOKEN_TAG_LENGTH {
+            return None;
+        }
+        let plaintext = self
+            .key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad),
+                &mut ciphertext,
+            )
+            .ok()?;
+        Some(plaintext.to_vec())
+    }
 }
 
 impl ResumableUploadEncryption {
@@ -69,9 +128,7 @@ impl ResumableUploadEncryption {
                 "resumable upload encryption key {key_id:?} must contain exactly 32 bytes, got {}",
                 key.len()
             );
-            let key = UnboundKey::new(&AES_256_GCM, &key)
-                .map(LessSafeKey::new)
-                .map_err(|_| anyhow::anyhow!("invalid resumable upload encryption key material"))?;
+            let key = TokenEncryptionKey::new(&key)?;
             validated.insert(key_id, key);
         }
 
@@ -87,7 +144,6 @@ impl ResumableUploadEncryption {
                 key: active_key,
             },
             decryption_keys: validated,
-            random: SystemRandom::new(),
         })
     }
 
@@ -95,30 +151,19 @@ impl ResumableUploadEncryption {
     pub(crate) fn encrypt(&self, id: &ObjectId, token: SessionToken) -> Result<SessionToken> {
         let key_id = self.active_key.id.as_bytes();
 
-        let mut nonce_bytes = [0; TOKEN_NONCE_LENGTH];
-        self.random
-            .fill(&mut nonce_bytes)
-            .map_err(|_| Error::generic("failed to generate resumable token nonce"))?;
-
         let mut header = Vec::with_capacity(2 + key_id.len());
         header.push(TOKEN_ENVELOPE_VERSION);
         header.push(key_id.len() as u8);
         header.extend_from_slice(key_id);
 
-        let mut ciphertext = token.into_bytes();
-        self.active_key
-            .key
-            .seal_in_place_append_tag(
-                Nonce::assume_unique_for_key(nonce_bytes),
-                Aad::from(aad(&header, id)),
-                &mut ciphertext,
-            )
-            .map_err(|_| Error::generic("failed to encrypt resumable token"))?;
+        let aad = aad(&header, id);
+        let sealed = self.active_key.key.seal(&aad, token.into_bytes())?;
 
-        let mut envelope = Vec::with_capacity(header.len() + nonce_bytes.len() + ciphertext.len());
+        let mut envelope =
+            Vec::with_capacity(header.len() + sealed.nonce.len() + sealed.ciphertext.len());
         envelope.extend_from_slice(&header);
-        envelope.extend_from_slice(&nonce_bytes);
-        envelope.extend_from_slice(&ciphertext);
+        envelope.extend_from_slice(&sealed.nonce);
+        envelope.extend_from_slice(&sealed.ciphertext);
         Ok(SessionToken::new(envelope))
     }
 
@@ -141,9 +186,6 @@ impl ResumableUploadEncryption {
         }
         let (key_id, rest) = rest.split_at_checked(key_id_length)?;
         let (nonce, ciphertext) = rest.split_at_checked(TOKEN_NONCE_LENGTH)?;
-        if ciphertext.len() < TOKEN_TAG_LENGTH {
-            return None;
-        }
 
         let key_id = std::str::from_utf8(key_id).ok()?;
         let key = if key_id == self.active_key.id {
@@ -154,15 +196,9 @@ impl ResumableUploadEncryption {
         let header_length = 2 + key_id_length;
         let header = &envelope[..header_length];
         let nonce: [u8; TOKEN_NONCE_LENGTH] = nonce.try_into().ok()?;
-        let mut ciphertext = ciphertext.to_vec();
-        let plaintext = key
-            .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(aad(header, id)),
-                &mut ciphertext,
-            )
-            .ok()?;
-        Some(SessionToken::new(plaintext.to_vec()))
+        let aad = aad(header, id);
+        let plaintext = key.open(nonce, &aad, ciphertext.to_vec())?;
+        Some(SessionToken::new(plaintext))
     }
 }
 
