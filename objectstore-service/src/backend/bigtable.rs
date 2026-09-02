@@ -312,7 +312,7 @@ fn tombstone_predicate() -> MutatePredicate {
 ///
 /// Mutations run only when the predicate matches (`predicate_matched == true`). They will
 /// run on expired tombstones as well as non-tombstones. The match result doubles as a
-/// "was a row removed?" signal. Used by [`BigtableBackend::delete_non_tombstone`] as the
+/// "was a row removed?" signal. Used by [`BigTableBackend::delete_non_tombstone`] as the
 /// `CheckAndMutateRow` predicate.
 ///
 /// Built as a `Condition` filter:
