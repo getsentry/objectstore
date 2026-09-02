@@ -5,17 +5,22 @@
 //! unaffected. Backend behavior is covered in the service and backend test suites.
 //! TODO: Add end-to-end resumable upload coverage once the filesystem backend supports it.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config};
+use objectstore_server::config::{AuthZ, Config, ResumableUploadEncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
 use reqwest::StatusCode;
+use tempfile::NamedTempFile;
 
 /// Unpadded base64url for the opaque backend token `some-token`.
 const SESSION: &str = "c29tZS10b2tlbg";
+
+/// Protected `some-token`, bound to `test/org.1/objects/my-key` with the test key below.
+const PROTECTED_SESSION: &str = "AQR0ZXN0AAAAAAAAAAAAAAAAErfJ19bmZIOEaf88vnTRvOEdH3gM5Zi0FBU";
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -26,6 +31,27 @@ async fn test_server() -> TestServer {
         ..Default::default()
     })
     .await
+}
+
+async fn test_server_with_protected_session() -> Result<TestServer> {
+    let mut key_file = NamedTempFile::new()?;
+    key_file.write_all(&[7; 32])?;
+
+    Ok(TestServer::with_config(Config {
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        service: Service {
+            resumable_upload_encryption: Some(ResumableUploadEncryptionConfig {
+                active_key_id: "test".into(),
+                key_files: BTreeMap::from([("test".into(), key_file.path().into())]),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await)
 }
 
 /// Sends a raw HTTP/1.1 `PUT`, preserving the caller's exact body framing headers.
@@ -137,6 +163,24 @@ async fn declined_session_creation_returns_not_implemented() -> Result<()> {
 // --- Chunks and offset queries ---
 
 #[tokio::test]
+async fn offset_query_does_not_require_content_length() -> Result<()> {
+    let server = test_server_with_protected_session().await?;
+    let response = raw_put(
+        &server,
+        &format!("/v1/objects/test/org=1/my-key?session={PROTECTED_SESSION}"),
+        &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
+        "",
+    )
+    .await?;
+
+    assert!(
+        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+        "unexpected response: {response}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
     let server = test_server().await;
     let response = raw_put(
@@ -237,6 +281,22 @@ async fn delete_rejects_upload_type() -> Result<()> {
 }
 
 // --- Parameter combinations ---
+
+#[tokio::test]
+async fn session_takes_precedence_over_upload_type() -> Result<()> {
+    let server = test_server_with_protected_session().await?;
+
+    let response = reqwest::Client::new()
+        .put(server.url(&format!(
+            "/v1/objects/test/org=1/my-key?upload_type=resumable&session={PROTECTED_SESSION}"
+        )))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    Ok(())
+}
 
 #[tokio::test]
 async fn session_on_the_collection_route_is_rejected() -> Result<()> {
