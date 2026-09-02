@@ -128,15 +128,6 @@ const TOKEN_SCOPES: &[&str] = &["https://www.googleapis.com/auth/devstorage.read
 /// How many times to retry failed operations.
 const REQUEST_RETRY_COUNT: usize = 2;
 
-/// GCS JSON API status used to acknowledge an incomplete resumable upload.
-const RESUMABLE_INCOMPLETE: StatusCode = StatusCode::PERMANENT_REDIRECT;
-/// GCS JSON API status documenting successful resumable-upload cancellation.
-const RESUMABLE_CANCELLED: u16 = 499;
-/// Version of the backend-specific resumable session payload.
-const RESUMABLE_SESSION_VERSION: u8 = 1;
-/// Byte position within a resumable upload.
-type ResumableUploadOffset = u64;
-
 /// Prefix for our built-in metadata stored in GCS metadata field
 const BUILTIN_META_PREFIX: &str = "x-sn-";
 /// Prefix for user custom metadata stored in GCS metadata field
@@ -206,7 +197,7 @@ struct ResumableSession {
 impl ResumableSession {
     fn new(id: &ObjectId, session_uri: String, total_length: u64) -> Self {
         Self {
-            version: RESUMABLE_SESSION_VERSION,
+            version: 1,
             session_uri,
             total_length,
             object_path: id.as_storage_path().to_string(),
@@ -225,7 +216,7 @@ impl ResumableSession {
     fn from_token(id: &ObjectId, token: &SessionToken, endpoint: &Url) -> Result<Self> {
         let session: Self =
             serde_json::from_slice(token.as_bytes()).map_err(|_| Error::UnknownUploadSession)?;
-        if session.version != RESUMABLE_SESSION_VERSION
+        if session.version != 1
             || session.object_path != id.as_storage_path().to_string()
             || session_uri_from_location(endpoint, &session.session_uri).is_err()
         {
@@ -961,7 +952,7 @@ fn parse_resumable_status(
     total_length: u64,
 ) -> Result<UploadProgress> {
     match status {
-        RESUMABLE_INCOMPLETE => {
+        StatusCode::PERMANENT_REDIRECT => {
             let offset = range
                 .map(|value| parse_resumable_range(value, total_length))
                 .transpose()?
@@ -976,7 +967,7 @@ fn parse_resumable_status(
 }
 
 /// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
-fn parse_resumable_range(value: &str, total_length: u64) -> Result<ResumableUploadOffset> {
+fn parse_resumable_range(value: &str, total_length: u64) -> Result<u64> {
     let end = value
         .strip_prefix("bytes=0-")
         .filter(|end| !end.is_empty() && end.bytes().all(|byte| byte.is_ascii_digit()))
@@ -1096,7 +1087,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         token: &SessionToken,
-        offset: ResumableUploadOffset,
+        offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
@@ -1176,7 +1167,7 @@ impl Backend for GcsBackend {
                     .map_err(|error| Error::reqwest("GCS: cancel resumable upload", error))?;
                 match response.status() {
                     status
-                        if status.as_u16() == RESUMABLE_CANCELLED
+                        if status.as_u16() == 499
                             || matches!(
                                 status,
                                 StatusCode::OK
@@ -1851,7 +1842,7 @@ mod tests {
         let session_uri = "https://example.invalid/opaque/session?arbitrary=value";
         let token = ResumableSession::new(&id, session_uri.into(), 123).into_token()?;
         let decoded = ResumableSession::from_token(&id, &token, &endpoint)?;
-        assert_eq!(decoded.version, RESUMABLE_SESSION_VERSION);
+        assert_eq!(decoded.version, 1);
         assert_eq!(decoded.session_uri, session_uri);
         assert_eq!(decoded.total_length, 123);
         assert_eq!(decoded.object_path, id.as_storage_path().to_string());
@@ -1911,11 +1902,11 @@ mod tests {
     #[test]
     fn resumable_status_validates_success_responses() -> Result<()> {
         assert_eq!(
-            parse_resumable_status(RESUMABLE_INCOMPLETE, None, 10)?,
+            parse_resumable_status(StatusCode::PERMANENT_REDIRECT, None, 10)?,
             UploadProgress::Incomplete { offset: 0 }
         );
         assert_eq!(
-            parse_resumable_status(RESUMABLE_INCOMPLETE, Some("bytes=0-4"), 10)?,
+            parse_resumable_status(StatusCode::PERMANENT_REDIRECT, Some("bytes=0-4"), 10)?,
             UploadProgress::Incomplete { offset: 5 }
         );
         assert_eq!(
@@ -1927,7 +1918,9 @@ mod tests {
             UploadProgress::Complete
         );
         assert!(parse_resumable_status(StatusCode::NO_CONTENT, None, 10).is_err());
-        assert!(parse_resumable_status(RESUMABLE_INCOMPLETE, Some("bytes=1-4"), 10).is_err());
+        assert!(
+            parse_resumable_status(StatusCode::PERMANENT_REDIRECT, Some("bytes=1-4"), 10).is_err()
+        );
         Ok(())
     }
 
