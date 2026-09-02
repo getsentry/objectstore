@@ -1004,6 +1004,18 @@ fn is_resumable_offset_gap(error: &Error) -> bool {
     )
 }
 
+/// Reconciles an offset-gap response with GCS's authoritative session status.
+fn reconcile_resumable_offset_gap(
+    error: Error,
+    progress: Result<UploadProgress>,
+) -> Result<UploadProgress> {
+    match progress {
+        Ok(UploadProgress::Incomplete { offset }) => Err(Error::UploadOffsetMismatch { offset }),
+        Ok(UploadProgress::Complete) => Ok(UploadProgress::Complete),
+        Err(_) => Err(error),
+    }
+}
+
 #[async_trait::async_trait]
 impl Backend for GcsBackend {
     fn name(&self) -> &'static str {
@@ -1133,12 +1145,8 @@ impl Backend for GcsBackend {
             .await
         {
             Err(error) if is_resumable_offset_gap(&error) => {
-                match self.query_resumable_progress(id, &session).await {
-                    Ok(UploadProgress::Incomplete { offset }) => {
-                        Err(Error::UploadOffsetMismatch { offset })
-                    }
-                    Ok(UploadProgress::Complete) | Err(_) => Err(error),
-                }
+                let progress = self.query_resumable_progress(id, &session).await;
+                reconcile_resumable_offset_gap(error, progress)
             }
             result => result,
         }
@@ -2221,6 +2229,26 @@ mod tests {
             backend.upload_offset(&id, &token).await?,
             UploadProgress::Complete
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resumable_offset_gap_recovery_uses_authoritative_progress() -> Result<()> {
+        assert_eq!(
+            reconcile_resumable_offset_gap(Error::NotImplemented, Ok(UploadProgress::Complete))?,
+            UploadProgress::Complete
+        );
+
+        assert!(matches!(
+            reconcile_resumable_offset_gap(
+                Error::NotImplemented,
+                Ok(UploadProgress::Incomplete { offset: 7 }),
+            ),
+            Err(Error::UploadOffsetMismatch { offset: 7 })
+        ));
+        let query_error =
+            reconcile_resumable_offset_gap(Error::NotImplemented, Err(Error::UnknownUploadSession));
+        assert!(matches!(query_error, Err(Error::NotImplemented)));
         Ok(())
     }
 
