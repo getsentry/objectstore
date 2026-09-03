@@ -5,6 +5,7 @@ use std::fmt;
 
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::id::ObjectId;
@@ -33,6 +34,12 @@ struct TokenAead(LessSafeKey);
 struct EncryptedToken {
     nonce: [u8; TOKEN_NONCE_LENGTH],
     ciphertext: Vec<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct SessionTokenEnvelope {
+    storage_path: String,
+    backend_token: String,
 }
 
 impl TokenAead {
@@ -141,17 +148,22 @@ impl ResumableUploadEncryption {
     }
 
     /// Encrypts a backend token and binds it to the canonical object identity.
-    pub(crate) fn encrypt(&self, id: &ObjectId, token: SessionToken) -> Result<SessionToken> {
+    pub(crate) fn encrypt(&self, id: &ObjectId, backend_token: String) -> Result<SessionToken> {
         let key_id = self.active_key_id.as_bytes();
 
         let mut header = Vec::with_capacity(1 + key_id.len());
         header.push(key_id.len() as u8);
         header.extend_from_slice(key_id);
 
-        let aad = aad(&header, id);
-        let encrypted = self
-            .active_key
-            .encrypt(&self.random, &aad, token.into_bytes())?;
+        let plaintext = serde_json::to_vec(&SessionTokenEnvelope {
+            storage_path: id.as_storage_path().to_string(),
+            backend_token,
+        })
+        .map_err(|cause| Error::Serde {
+            context: "failed to serialize resumable session token".to_owned(),
+            cause,
+        })?;
+        let encrypted = self.active_key.encrypt(&self.random, &header, plaintext)?;
 
         let mut envelope =
             Vec::with_capacity(header.len() + encrypted.nonce.len() + encrypted.ciphertext.len());
@@ -162,12 +174,12 @@ impl ResumableUploadEncryption {
     }
 
     /// Decrypts an external token, returning one uniform error for every invalid envelope.
-    pub(crate) fn decrypt(&self, id: &ObjectId, token: SessionToken) -> Result<SessionToken> {
+    pub(crate) fn decrypt(&self, id: &ObjectId, token: SessionToken) -> Result<String> {
         self.decrypt_inner(id, token)
             .ok_or(Error::UnknownUploadSession)
     }
 
-    fn decrypt_inner(&self, id: &ObjectId, token: SessionToken) -> Option<SessionToken> {
+    fn decrypt_inner(&self, id: &ObjectId, token: SessionToken) -> Option<String> {
         let envelope = token.into_bytes();
         let (&key_id_length, rest) = envelope.split_first()?;
         let key_id_length = usize::from(key_id_length);
@@ -186,9 +198,12 @@ impl ResumableUploadEncryption {
         let header_length = 1 + key_id_length;
         let header = &envelope[..header_length];
         let nonce: [u8; TOKEN_NONCE_LENGTH] = nonce.try_into().ok()?;
-        let aad = aad(header, id);
-        let plaintext = key.decrypt(nonce, &aad, ciphertext.to_vec())?;
-        Some(SessionToken::new(plaintext))
+        let plaintext = key.decrypt(nonce, header, ciphertext.to_vec())?;
+        let envelope: SessionTokenEnvelope = serde_json::from_slice(&plaintext).ok()?;
+        if envelope.storage_path != id.as_storage_path().to_string() {
+            return None;
+        }
+        Some(envelope.backend_token)
     }
 }
 
@@ -215,14 +230,6 @@ fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
         "invalid resumable upload encryption key ID {key_id:?}"
     );
     Ok(())
-}
-
-fn aad(header: &[u8], id: &ObjectId) -> Vec<u8> {
-    let object_name = id.as_storage_path().to_string();
-    let mut aad = Vec::with_capacity(header.len() + object_name.len());
-    aad.extend_from_slice(header);
-    aad.extend_from_slice(object_name.as_bytes());
-    aad
 }
 
 #[cfg(test)]
@@ -253,25 +260,23 @@ mod tests {
     }
 
     #[test]
-    fn encryption_is_randomized_and_round_trips_arbitrary_bytes() {
+    fn encryption_is_randomized_and_round_trips_backend_tokens() {
         let encryption = encryption("v1", &[("v1", 7)]);
         let id = id("object");
-        let plaintext = SessionToken::new([0, 0xff, b'?', b'/', 0]);
+        let backend_token = "backend token".to_owned();
 
-        let first = encryption.encrypt(&id, plaintext.clone()).unwrap();
-        let second = encryption.encrypt(&id, plaintext.clone()).unwrap();
+        let first = encryption.encrypt(&id, backend_token.clone()).unwrap();
+        let second = encryption.encrypt(&id, backend_token.clone()).unwrap();
         assert_ne!(first, second);
-        assert_eq!(encryption.decrypt(&id, first).unwrap(), plaintext);
-        assert_eq!(encryption.decrypt(&id, second).unwrap(), plaintext);
+        assert_eq!(encryption.decrypt(&id, first).unwrap(), backend_token);
+        assert_eq!(encryption.decrypt(&id, second).unwrap(), backend_token);
     }
 
     #[test]
     fn encryption_rejects_tampering_wrong_objects_and_plaintext() {
         let encryption = encryption("v1", &[("v1", 7)]);
         let object = id("object");
-        let token = encryption
-            .encrypt(&object, SessionToken::new(b"backend token"))
-            .unwrap();
+        let token = encryption.encrypt(&object, "backend token".into()).unwrap();
 
         let mut tampered = token.clone().into_bytes();
         *tampered.last_mut().unwrap() ^= 1;
@@ -293,21 +298,14 @@ mod tests {
     fn rotation_decrypts_old_keys_and_removal_invalidates_them() {
         let object = id("object");
         let old = encryption("v1", &[("v1", 1)]);
-        let old_token = old
-            .encrypt(&object, SessionToken::new(b"backend token"))
-            .unwrap();
+        let old_token = old.encrypt(&object, "backend token".into()).unwrap();
 
         let rotated = encryption("v2", &[("v1", 1), ("v2", 2)]);
         assert_eq!(
-            rotated
-                .decrypt(&object, old_token.clone())
-                .unwrap()
-                .as_bytes(),
-            b"backend token"
+            rotated.decrypt(&object, old_token.clone()).unwrap(),
+            "backend token"
         );
-        let new_token = rotated
-            .encrypt(&object, SessionToken::new(b"new token"))
-            .unwrap();
+        let new_token = rotated.encrypt(&object, "new token".into()).unwrap();
         assert_eq!(new_token.as_bytes()[1..3], *b"v2");
 
         let removed = encryption("v2", &[("v2", 2)]);

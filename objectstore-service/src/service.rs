@@ -488,7 +488,7 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct ResumableTokenHooks {
-        seen_tokens: Arc<Mutex<Vec<Vec<u8>>>>,
+        seen_tokens: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -499,20 +499,17 @@ mod tests {
             _id: &ObjectId,
             _metadata: &Metadata,
             _total_length: u64,
-        ) -> Result<Option<SessionToken>> {
-            Ok(Some(SessionToken::new([0, 0xff, b'?', b'/'])))
+        ) -> Result<Option<String>> {
+            Ok(Some("backend token".to_owned()))
         }
 
         async fn upload_offset(
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
-            session: &SessionToken,
+            session: &str,
         ) -> Result<UploadProgress> {
-            self.seen_tokens
-                .lock()
-                .unwrap()
-                .push(session.as_bytes().to_vec());
+            self.seen_tokens.lock().unwrap().push(session.to_owned());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }
@@ -975,10 +972,10 @@ mod tests {
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
-        assert_ne!(token.as_bytes(), &[0, 0xff, b'?', b'/']);
+        assert_ne!(token.as_bytes(), b"backend token");
         assert!(matches!(
             service
-                .upload_offset(id.clone(), SessionToken::new([0, 0xff, b'?', b'/']))
+                .upload_offset(id.clone(), SessionToken::new(b"backend token"))
                 .await,
             Err(Error::UnknownUploadSession)
         ));
@@ -986,7 +983,7 @@ mod tests {
         service.upload_offset(id, token).await?;
         assert_eq!(
             hooks.seen_tokens.lock().unwrap().as_slice(),
-            &[vec![0, 0xff, b'?', b'/']]
+            &["backend token"]
         );
         Ok(())
     }
@@ -1008,11 +1005,11 @@ mod tests {
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
-        assert_ne!(encrypted.as_bytes(), &[0, 0xff, b'?', b'/']);
+        assert_ne!(encrypted.as_bytes(), b"backend token");
         service.upload_offset(id, encrypted).await?;
         assert_eq!(
             hooks.seen_tokens.lock().unwrap().as_slice(),
-            &[vec![0, 0xff, b'?', b'/']]
+            &["backend token"]
         );
         Ok(())
     }
@@ -1031,7 +1028,7 @@ mod tests {
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let result = service
-            .upload_offset(id, SessionToken::new([0, 0xff, b'?', b'/']))
+            .upload_offset(id, SessionToken::new(b"backend token"))
             .await;
         assert!(matches!(result, Err(Error::UnknownUploadSession)));
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());

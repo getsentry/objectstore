@@ -4,7 +4,7 @@ use std::fmt;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
-use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::resumable::UploadProgress;
 
 use bytes::Bytes;
 
@@ -79,6 +79,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Object metadata and its total length are declared upfront and cannot be mutated
     /// during the upload.
     ///
+    /// The returned string is opaque backend-defined state. [`StorageService`](crate::StorageService)
+    /// protects it before exposing the session token outside the service layer.
+    ///
     /// Returns `Ok(None)` when this backend cannot store the described object resumably. Declining
     /// is a routine outcome rather than an error, and the default implementation declines.
     ///
@@ -91,7 +94,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+    ) -> Result<Option<String>> {
         let _ = (id, metadata, total_length);
         Ok(None)
     }
@@ -113,7 +116,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &SessionToken,
+        session: &str,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -129,7 +132,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// publication work before returning that terminal outcome.
     ///
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify a known session.
-    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, id: &ObjectId, session: &str) -> Result<UploadProgress> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }
@@ -137,7 +140,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, id: &ObjectId, session: &str) -> Result<()> {
         let _ = (id, session);
         Err(Error::NotImplemented)
     }

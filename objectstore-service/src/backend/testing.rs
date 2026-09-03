@@ -40,7 +40,7 @@ use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
 use objectstore_types::range::ByteRange;
-use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
@@ -248,7 +248,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+    ) -> Result<Option<String>> {
         inner
             .create_upload_session(id, metadata, total_length)
             .await
@@ -259,7 +259,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        session: &str,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -274,7 +274,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        session: &str,
     ) -> Result<UploadProgress> {
         inner.upload_offset(id, session).await
     }
@@ -284,7 +284,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        session: &str,
     ) -> Result<()> {
         inner.cancel_upload(id, session).await
     }
@@ -368,7 +368,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+    ) -> Result<Option<String>> {
         self.hooks
             .create_upload_session(&self.inner, id, metadata, total_length)
             .await
@@ -377,7 +377,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &SessionToken,
+        session: &str,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -387,11 +387,11 @@ impl<H: Hooks> Backend for TestBackend<H> {
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, id: &ObjectId, session: &str) -> Result<UploadProgress> {
         self.hooks.upload_offset(&self.inner, id, session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, id: &ObjectId, session: &str) -> Result<()> {
         self.hooks.cancel_upload(&self.inner, id, session).await
     }
 }

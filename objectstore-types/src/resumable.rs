@@ -9,9 +9,9 @@
 //! [`UploadOffset::Unknown`] to query the server's authoritative position before resuming. The
 //! request that completes the upload returns a [`CompleteUploadResponse`].
 //!
-//! Session tokens contain backend state protected by the storage service, and clients must treat
-//! their contents as opaque. The token bytes are encoded as unpadded base64url when the token is
-//! placed in a request's `session` query parameter.
+//! Session tokens contain the canonical object path and backend state protected by the storage
+//! service, and clients must treat their contents as opaque. The token bytes are encoded as
+//! unpadded base64url when the token is placed in a request's `session` query parameter.
 
 use std::fmt;
 use std::str::FromStr;
@@ -37,9 +37,9 @@ const OFFSET_WILDCARD: &str = "*";
 
 /// Identifier for an in-progress resumable upload session.
 ///
-/// Internally, this is an opaque byte string whose contents are defined and interpreted by the
-/// storage service and backend. At the HTTP API boundary it serializes as canonical unpadded
-/// base64url, so the serialized value can be placed directly in a subsequent request URL.
+/// Internally, this is an opaque byte string interpreted by the storage service. At the HTTP API
+/// boundary it serializes as canonical unpadded base64url, so the serialized value can be placed
+/// directly in a subsequent request URL.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionToken(Vec<u8>);
 

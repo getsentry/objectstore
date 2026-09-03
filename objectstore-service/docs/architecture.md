@@ -266,9 +266,10 @@ trips for objects large enough that re-sending the whole payload is expensive.
 5. At any time, an upload can be canceled, which discards what its session holds.
 
 Backend session tokens remain private to the service. Before returning a token to a client,
-[`StorageService`] seals the backend-defined bytes in an AES-256-GCM envelope. Continuation,
-offset-query, and cancellation operations authenticate and open that envelope before passing the
-original bytes back to the backend.
+[`StorageService`] places the canonical object path and backend-defined token string in an
+AES-256-GCM envelope. Continuation, offset-query, and cancellation operations authenticate and
+open that envelope, reject an object-path mismatch, and pass the original string back to the
+backend.
 
 Not all backends support resumable uploads. A backend returns no session when it declines a
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
