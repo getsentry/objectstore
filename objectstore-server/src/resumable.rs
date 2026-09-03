@@ -71,7 +71,7 @@ where
         }
 
         let Query(query) = Query::<ResumableQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
+            .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
 
         Ok(query.classify())
     }
@@ -94,7 +94,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
         let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
+            .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
         Ok(Session(decode_session_token(&session)?))
     }
 }
@@ -179,17 +179,17 @@ where
 fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
-        .map_err(|error| ApiError::Client(error.to_string()))?;
+        .map_err(|error| ApiError::map_client("invalid session token", error))?;
 
     if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
-        return Err(ApiError::Client(
-            "session token must use unpadded base64url encoding".into(),
+        return Err(ApiError::client(
+            "session token must use unpadded base64 URL encoding",
         ));
     }
 
     String::from_utf8(bytes)
         .map(SessionToken::from)
-        .map_err(|error| ApiError::Client(error.to_string()))
+        .map_err(|error| ApiError::map_client("session token is not valid UTF-8", error))
 }
 
 /// Confirms that a request neither declares nor streams a non-empty body.
@@ -199,14 +199,14 @@ pub(crate) async fn require_empty_body(
     request: &str,
 ) -> ApiResult<()> {
     if content_length.is_some_and(|ContentLength(length)| length > 0) {
-        return Err(ApiError::Client(format!(
+        return Err(ApiError::client(format!(
             "{request} must be sent with an empty body"
         )));
     }
 
     while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
         if !chunk.is_empty() {
-            return Err(ApiError::Client(format!(
+            return Err(ApiError::client(format!(
                 "{request} must be sent with an empty body"
             )));
         }

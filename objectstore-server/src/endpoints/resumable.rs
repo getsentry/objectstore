@@ -90,14 +90,12 @@ async fn create_session_for_id(
     body: ClientStream,
 ) -> ApiResult<Response> {
     require_empty_body(content_length, body, "resumable session creation").await?;
-    let metadata = Metadata::from_insert_headers(&headers, "")
-        .map_err(|error| ApiError::Client(error.to_string()))?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     state
         .config
         .usecases
-        .validate(&id.context().usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&id.context().usecase, &metadata)?;
 
     let session = service
         .create_upload_session(id.clone(), metadata, total_length)
@@ -135,7 +133,7 @@ pub(super) async fn continue_session(
         UploadOffset::At(offset) => {
             let content_length = content_length
                 .map(|TypedHeader(ContentLength(length))| length)
-                .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
+                .ok_or_else(|| ApiError::client("content-length header is required"))?;
             service
                 .put_chunk(id, session, offset, content_length, body)
                 .await

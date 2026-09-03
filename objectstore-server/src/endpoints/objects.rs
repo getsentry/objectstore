@@ -89,14 +89,12 @@ async fn create_object(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "")
-        .map_err(|error| ApiError::Client(error.to_string()))?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     state
         .config
         .usecases
-        .validate(&context.usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&context.usecase, &metadata)?;
 
     let response_id = service.insert_object(context, None, metadata, body).await?;
     let response = Json(InsertObjectResponse {
@@ -253,16 +251,14 @@ async fn insert_object(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "")
-        .map_err(|error| ApiError::Client(error.to_string()))?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     let ObjectId { context, key } = id;
 
     state
         .config
         .usecases
-        .validate(&context.usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&context.usecase, &metadata)?;
 
     let response_id = service
         .insert_object(context, Some(key), metadata, body)

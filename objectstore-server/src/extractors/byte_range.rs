@@ -23,7 +23,7 @@ impl FromRequestParts<ServiceState> for OptionalByteRange {
         };
         let range = range
             .to_str()
-            .map_err(|_| ApiError::Client("invalid Range header".into()))?;
+            .map_err(|_| ApiError::client("invalid range header"))?;
 
         match range.parse::<ByteRange>() {
             Ok(range) => Ok(Self(Some(range))),
@@ -43,7 +43,7 @@ impl FromRequestParts<ServiceState> for OptionalByteRange {
             // The client requested an invalid unit or sent a malformed header.
             // We could fall back, but better fail hard and let them know they sent something
             // invalid.
-            Err(err) => Err(ApiError::Client(format!("invalid Range header: {err}"))),
+            Err(err) => Err(ApiError::map_client("invalid range header", err)),
         }
     }
 }

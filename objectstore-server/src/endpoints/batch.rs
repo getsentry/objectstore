@@ -93,11 +93,7 @@ async fn batch(
         let usecase = context.usecase.clone();
         move |op| {
             if let Operation::Insert(ins) = op {
-                state
-                    .config
-                    .usecases
-                    .validate(&usecase, &ins.metadata)
-                    .map_err(|e| ApiError::Client(e.to_string()))?;
+                state.config.usecases.validate(&usecase, &ins.metadata)?;
             }
             Ok(())
         }

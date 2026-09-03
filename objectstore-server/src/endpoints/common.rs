@@ -14,39 +14,6 @@ use thiserror::Error;
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
 
-/// Error type for API operations.
-#[derive(Debug, Error)]
-pub enum ApiError {
-    /// Errors indicating malformed or illegal requests.
-    #[error("client error: {0}")]
-    Client(String),
-
-    /// Authorization/authentication errors.
-    #[error("auth error: {0}")]
-    Auth(#[from] AuthError),
-
-    /// Service errors, indicating that something went wrong when receiving or executing a request.
-    #[error("service error: {0}")]
-    Service(#[from] ServiceError),
-
-    /// Errors encountered when parsing or executing a batch request.
-    #[error("batch error: {0}")]
-    Batch(#[from] BatchError),
-
-    /// Internal server errors.
-    #[error("internal error: {context}")]
-    Internal {
-        /// Context describing the operation that failed.
-        context: Cow<'static, str>,
-        /// The underlying error, if available.
-        #[source]
-        cause: Option<Box<dyn Error + Send + Sync>>,
-    },
-}
-
-/// Result type for API operations.
-pub type ApiResult<T> = Result<T, ApiError>;
-
 /// A JSON error response returned by the API.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ApiErrorResponse {
@@ -74,7 +41,61 @@ impl ApiErrorResponse {
     }
 }
 
+/// Error type for API operations.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    /// Errors indicating malformed or illegal requests.
+    #[error("client error: {context}")]
+    Client {
+        /// Context describing the operation that failed.
+        context: Cow<'static, str>,
+        /// The underlying error, if available.
+        #[source]
+        cause: Option<Box<dyn Error + Send + Sync>>,
+    },
+
+    /// Authorization/authentication errors.
+    #[error("auth error: {0}")]
+    Auth(#[from] AuthError),
+
+    /// Service errors, indicating that something went wrong when receiving or executing a request.
+    #[error("service error: {0}")]
+    Service(#[from] ServiceError),
+
+    /// Errors encountered when parsing or executing a batch request.
+    #[error("batch error: {0}")]
+    Batch(#[from] BatchError),
+
+    /// Internal server errors.
+    #[error("internal error: {context}")]
+    Internal {
+        /// Context describing the operation that failed.
+        context: Cow<'static, str>,
+        /// The underlying error, if available.
+        #[source]
+        cause: Option<Box<dyn Error + Send + Sync>>,
+    },
+}
+
 impl ApiError {
+    /// Creates a client error with context and an underlying cause.
+    pub fn map_client<E>(context: impl Into<Cow<'static, str>>, cause: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::Client {
+            context: context.into(),
+            cause: Some(Box::new(cause)),
+        }
+    }
+
+    pub fn client(context: impl Into<Cow<'static, str>>) -> Self {
+        Self::Client {
+            context: context.into(),
+            cause: None,
+        }
+    }
+
     /// Creates an internal server error with context and an underlying cause.
     pub fn internal<E>(context: impl Into<Cow<'static, str>>, cause: E) -> Self
     where
@@ -89,7 +110,7 @@ impl ApiError {
     /// Returns the HTTP status code appropriate for this error variant.
     pub fn status(&self) -> StatusCode {
         match &self {
-            ApiError::Client(_) => StatusCode::BAD_REQUEST,
+            ApiError::Client { .. } => StatusCode::BAD_REQUEST,
 
             ApiError::Batch(BatchError::BadRequest(_))
             | ApiError::Batch(BatchError::Metadata(_))
@@ -156,6 +177,21 @@ impl IntoResponse for ApiError {
         (self.status(), Json(body)).into_response()
     }
 }
+
+impl From<crate::usecases::UseCaseError> for ApiError {
+    fn from(error: crate::usecases::UseCaseError) -> Self {
+        ApiError::map_client("use case policy violation", error)
+    }
+}
+
+impl From<objectstore_types::metadata::Error> for ApiError {
+    fn from(error: objectstore_types::metadata::Error) -> Self {
+        ApiError::map_client("invalid metadata", error)
+    }
+}
+
+/// Result type for API operations.
+pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Inserts `Accept-Ranges: bytes` into the response headers.
 pub fn insert_accept_ranges(response: &mut Response) {
