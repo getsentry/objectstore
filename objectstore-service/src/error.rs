@@ -299,18 +299,6 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(source: reqwest::Error) -> Self {
-        Self::with_source(ErrorKind::BackendFailure, source)
-    }
-}
-
-impl From<gcp_auth::Error> for Error {
-    fn from(source: gcp_auth::Error) -> Self {
-        Self::with_source(ErrorKind::BackendFailure, source)
-    }
-}
-
 impl From<crate::stream::ClientError> for Error {
     fn from(source: crate::stream::ClientError) -> Self {
         Self::with_source(ErrorKind::ClientStream, source)

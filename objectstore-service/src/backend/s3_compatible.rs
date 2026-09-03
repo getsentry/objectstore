@@ -11,10 +11,11 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
-use super::extensions::{ResponseExt, SendTraced, classify_transport_result};
+use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
 };
+use crate::backend::extensions::ReqwestResultExt;
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::stream::ClientStream;
@@ -183,8 +184,10 @@ where
         if let Some(r) = range {
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
-        let response =
-            classify_transport_result(builder.send_traced().await, "sending an S3 object request")?;
+        let response = builder
+            .send_traced()
+            .await
+            .reqwest_context("sending an S3 object request")?;
 
         if response.status() == StatusCode::NOT_FOUND {
             objectstore_log::debug!("Object not found");
@@ -366,9 +369,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
-        let request = self.request(Method::DELETE, self.object_url(id)).await?;
-        let response =
-            classify_transport_result(request.send_traced().await, "sending an S3 delete request")?;
+        let response = self
+            .request(Method::DELETE, self.object_url(id))
+            .await?
+            .send_traced()
+            .await
+            .reqwest_context("sending an S3 delete request")?;
 
         // Do not error for objects that do not exist.
         if response.status() == StatusCode::NOT_FOUND {

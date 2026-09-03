@@ -16,11 +16,11 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{ResponseExt, SendTraced, classify_transport_result};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
 };
+use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
@@ -616,28 +616,24 @@ impl GcsBackend {
     ) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
-                let request = self.request(Method::GET, object_url.clone()).await?;
-                let resp = classify_transport_result(
-                    request.send_traced().await,
-                    "getting GCS object metadata",
-                )?;
+                let resp = self
+                    .request(Method::GET, object_url.clone())
+                    .await?
+                    .send_traced()
+                    .await
+                    .reqwest_context("getting GCS object metadata")?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
                     return Ok(None);
                 }
 
-                let result = resp
+                let metadata: GcsObject = resp
                     .check_error("getting GCS object metadata")
                     .await?
-                    .bytes()
-                    .await;
-                let body =
-                    classify_transport_result(result, "reading GCS object metadata response")?;
-                let metadata: GcsObject = serde_json::from_slice(&body).context(
-                    ErrorKind::CorruptData,
-                    "decoding GCS object metadata response",
-                )?;
+                    .json()
+                    .await
+                    .reqwest_context("getting GCS object metadata")?;
 
                 Ok(Some(metadata))
             })
@@ -708,12 +704,13 @@ impl GcsBackend {
             .append_pair("ifMetagenerationMatch", metageneration);
 
         self.with_retry("update_custom_time", || async {
-            let request = self
+            let response = self
                 .request(Method::PATCH, object_url.clone())
                 .await?
-                .json(&CustomTimeRequest { custom_time });
-            let response =
-                classify_transport_result(request.send_traced().await, "updating GCS custom time")?;
+                .json(&CustomTimeRequest { custom_time })
+                .send_traced()
+                .await
+                .reqwest_context("updating GCS custom time")?;
 
             // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race, so
             // leave its update intact and let a future read evaluate the TTI again.
@@ -727,6 +724,7 @@ impl GcsBackend {
                 .await?
                 .drain_body()
                 .await;
+
             Ok(true)
         })
         .await
@@ -829,10 +827,11 @@ impl Backend for GcsBackend {
                 if let Some(r) = range {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
-                let resp = classify_transport_result(
-                    req.send_traced().await,
-                    "getting a GCS object payload",
-                )?;
+
+                let resp = req
+                    .send_traced()
+                    .await
+                    .reqwest_context("getting a GCS object payload")?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     let raw = resp
@@ -891,11 +890,12 @@ impl Backend for GcsBackend {
 
         let deleted = self
             .with_retry("delete", || async {
-                let request = self.request(Method::DELETE, object_url.clone()).await?;
-                let resp = classify_transport_result(
-                    request.send_traced().await,
-                    "deleting a GCS object",
-                )?;
+                let resp = self
+                    .request(Method::DELETE, object_url.clone())
+                    .await?
+                    .send_traced()
+                    .await
+                    .reqwest_context("deleting a GCS object")?;
 
                 // Do not error for objects that do not exist
                 if resp.status() == StatusCode::NOT_FOUND {
@@ -1069,10 +1069,10 @@ impl MultipartUploadBackend for GcsBackend {
                     .check_error("initiating a GCS multipart upload")
                     .await?;
 
-                let body = classify_transport_result(
-                    resp.bytes().await,
-                    "reading GCS initiate-multipart response",
-                )?;
+                let body = resp
+                    .bytes()
+                    .await
+                    .reqwest_context("reading GCS initiate-multipart response")?;
 
                 let xml: XmlInitiateMultipartUploadResponse =
                     quick_xml::de::from_reader(body.as_ref()).context(
@@ -1167,10 +1167,10 @@ impl MultipartUploadBackend for GcsBackend {
                     .check_error("listing GCS multipart parts")
                     .await?;
 
-                let body = classify_transport_result(
-                    resp.bytes().await,
-                    "reading GCS list-parts response",
-                )?;
+                let body = resp
+                    .bytes()
+                    .await
+                    .reqwest_context("reading GCS list-parts response")?;
 
                 let xml: XmlListPartsResponse = quick_xml::de::from_reader(body.as_ref())
                     .context(ErrorKind::CorruptData, "decoding GCS list-parts response")?;
@@ -1194,10 +1194,12 @@ impl MultipartUploadBackend for GcsBackend {
         self.with_retry("abort_multipart", || {
             let url = url.clone();
             async move {
-                let resp = classify_transport_result(
-                    self.request(Method::DELETE, url).await?.send_traced().await,
-                    "aborting a GCS multipart upload",
-                )?;
+                let resp = self
+                    .request(Method::DELETE, url)
+                    .await?
+                    .send_traced()
+                    .await
+                    .reqwest_context("aborting a GCS multipart upload")?;
 
                 // XXX: real S3 would return 404 here if the upload has been recently completed and we
                 // would have to handle it. It turns out GCS returns 204 instead, so we don't need to
@@ -1249,10 +1251,10 @@ impl MultipartUploadBackend for GcsBackend {
                 // would have to handle it. It turns out GCS returns 200 instead, so we don't need to
                 // handle that case.
 
-                let body = classify_transport_result(
-                    resp.bytes().await,
-                    "reading GCS complete-multipart response",
-                )?;
+                let body = resp
+                    .bytes()
+                    .await
+                    .reqwest_context("reading GCS complete-multipart response")?;
 
                 let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
                     .ok()

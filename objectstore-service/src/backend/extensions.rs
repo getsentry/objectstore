@@ -57,28 +57,6 @@ impl SendTraced for reqwest::RequestBuilder {
     }
 }
 
-/// Classifies a reqwest transport result while leaving successful values available for
-/// caller-specific handling.
-pub(super) fn classify_transport_result<T>(
-    result: reqwest::Result<T>,
-    context: &'static str,
-) -> Result<T> {
-    result.map_err(|source| {
-        if let Some(client_error) = stream::unpack_client_error(&source) {
-            return Error::with_context(ErrorKind::ClientStream, context, client_error);
-        }
-
-        let kind = if source.is_timeout() {
-            ErrorKind::BackendTimeout
-        } else if source.is_connect() || source.is_request() {
-            ErrorKind::BackendUnavailable
-        } else {
-            ErrorKind::BackendFailure
-        };
-        Error::with_context(kind, context, source)
-    })
-}
-
 /// GCS JSON API error envelope (`{"error": {"message": "...", ...}}`).
 #[derive(Deserialize)]
 struct JsonApiError {
@@ -175,15 +153,39 @@ impl ResponseExt for Response {
 
 impl ResponseExt for Result<Response, reqwest::Error> {
     async fn check_error(self, context: &'static str) -> Result<Response> {
-        classify_transport_result(self, context)?
-            .check_error(context)
-            .await
+        self.reqwest_context(context)?.check_error(context).await
     }
 
     async fn drain_body(self) {
         if let Ok(resp) = self {
             resp.drain_body().await;
         }
+    }
+}
+
+pub trait ReqwestResultExt<T> {
+    fn reqwest_context(self, context: &'static str) -> Result<T>;
+}
+
+impl<T> ReqwestResultExt<T> for Result<T, reqwest::Error> {
+    fn reqwest_context(self, context: &'static str) -> Result<T> {
+        self.map_err(|error| {
+            if let Some(ce) = stream::unpack_client_error(&error) {
+                return Error::with_context(ErrorKind::ClientStream, context, ce);
+            }
+
+            let kind = if error.is_timeout() {
+                ErrorKind::BackendTimeout
+            } else if error.is_connect() || error.is_request() {
+                ErrorKind::BackendUnavailable
+            } else if error.is_decode() {
+                ErrorKind::CorruptData
+            } else {
+                ErrorKind::BackendFailure
+            };
+
+            Error::with_context(kind, context, error)
+        })
     }
 }
 
@@ -311,7 +313,8 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{BackendDetail, BackendResponseError, classify_transport_result, status_to_kind};
+    use super::{BackendDetail, BackendResponseError, status_to_kind};
+    use crate::backend::extensions::ReqwestResultExt;
     use crate::error::{Error, ErrorKind};
 
     #[test]
@@ -396,12 +399,13 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let source = response.bytes().await.unwrap_err();
-        assert!(source.is_timeout());
 
-        let error =
-            classify_transport_result::<bytes::Bytes>(Err(source), "reading backend response body")
-                .unwrap_err();
+        let result = response.bytes().await;
+        assert!(result.as_ref().unwrap_err().is_timeout());
+
+        let error = result
+            .reqwest_context("reading backend response body")
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::BackendTimeout);
         assert_eq!(
             error.to_string(),
