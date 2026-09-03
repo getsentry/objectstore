@@ -176,7 +176,7 @@ where
 
 fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
     SessionToken::from_base64url(encoded)
-        .map_err(|error| ApiError::map_client("invalid session token", error))?;
+        .map_err(|error| ApiError::map_client("invalid session token", error))
 }
 
 /// Confirms that a request neither declares nor streams a non-empty body.
