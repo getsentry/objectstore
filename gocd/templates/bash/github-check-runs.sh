@@ -1,6 +1,6 @@
 #!/bin/bash
 
-checks-githubactions-checkruns \
+checks-githubactions-checkruns2 \
     getsentry/objectstore \
     "${GO_REVISION_OBJECTSTORE_REPO}" \
     "Test (all features)" \
