@@ -33,7 +33,7 @@ use crate::multipart::{
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use crate::resumable::UploadProgress;
-use crate::stream::{ClientError, ClientStream};
+use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
 ///
@@ -183,6 +183,10 @@ struct GcsObject {
     #[serde(skip_serializing)]
     pub metageneration: String,
 }
+
+/// Special status code returned by GCS when a Resumable Upload is canceled successfully or when
+/// making other requests to a session that was recently canceled.
+const CLIENT_CLOSED_REQUEST_STATUS: u16 = 499;
 
 /// Represents a resumable upload session in GCS.
 ///
@@ -593,25 +597,8 @@ impl GcsBackend {
         }
     }
 
-    /// Parses a resumable GCS response and reports an object if the upload completed.
-    async fn resumable_progress(
-        &self,
-        id: &ObjectId,
-        response: reqwest::Response,
-        total_length: u64,
-    ) -> Result<UploadProgress> {
-        let ResumableProgress {
-            progress,
-            completion,
-        } = parse_resumable_progress(response, total_length).await?;
-        if let Some(completion) = completion {
-            self.report_resumable_completion(id, completion);
-        }
-        Ok(progress)
-    }
-
     /// Queries GCS for the authoritative progress of an existing session.
-    async fn query_resumable_progress(
+    async fn query_offset(
         &self,
         id: &ObjectId,
         session: &ResumableSession,
@@ -631,8 +618,12 @@ impl GcsBackend {
                     .send_traced()
                     .await
                     .map_err(|error| Error::reqwest("GCS: query resumable upload", error))?;
-                self.resumable_progress(id, response, session.total_length)
-                    .await
+                let (progress, completion) =
+                    parse_upload_progress_response(response, session.total_length).await?;
+                if let Some(completion) = completion {
+                    self.report_resumable_completion(id, completion);
+                }
+                Ok(progress)
             }
         })
         .await
@@ -869,11 +860,11 @@ impl fmt::Debug for GcsBackend {
     }
 }
 
-/// Parses the status shared by GCS chunk writes and explicit status queries.
-async fn parse_resumable_progress(
+/// Parses the Resumable Upload response shared by chunk writes and status queries.
+async fn parse_upload_progress_response(
     response: reqwest::Response,
     total_length: u64,
-) -> Result<ResumableProgress> {
+) -> Result<(UploadProgress, Option<ResumableCompletion>)> {
     let status = response.status();
     match status {
         StatusCode::NOT_FOUND => {
@@ -898,7 +889,7 @@ async fn parse_resumable_progress(
                     value
                         .to_str()
                         .map(str::to_owned)
-                        .map_err(|_| Error::generic("GCS: resumable Range header is not ASCII"))
+                        .map_err(|_| Error::generic("GCS: invalid Range header"))
                 })
                 .transpose()?;
             let completion = if matches!(status, StatusCode::OK | StatusCode::CREATED) {
@@ -921,18 +912,9 @@ async fn parse_resumable_progress(
                 None
             };
             let progress = parse_resumable_status(status, range.as_deref(), total_length)?;
-            Ok(ResumableProgress {
-                progress,
-                completion,
-            })
+            Ok((progress, completion))
         }
     }
-}
-
-/// Progress returned by GCS plus metadata needed to report a completed upload.
-struct ResumableProgress {
-    progress: UploadProgress,
-    completion: Option<ResumableCompletion>,
 }
 
 /// The completed object's accounting attributes from GCS's object resource.
@@ -1246,10 +1228,9 @@ impl Backend for GcsBackend {
                 }
             })
             .await?;
+        let session = ResumableSession::new(session_uri, total_length);
 
-        Ok(Some(
-            ResumableSession::new(session_uri, total_length).into_token(),
-        ))
+        Ok(Some(session.into_token()))
     }
 
     #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
@@ -1263,6 +1244,7 @@ impl Backend for GcsBackend {
     ) -> Result<UploadProgress> {
         objectstore_log::debug!("Uploading resumable chunk to GCS backend");
         let session = ResumableSession::from_token(token, &self.endpoint)?;
+
         let end = offset
             .checked_add(content_length)
             .ok_or(Error::ChunkExceedsUploadLength {
@@ -1277,16 +1259,8 @@ impl Backend for GcsBackend {
                 upload_length: session.total_length,
             });
         }
-        if content_length == 0 {
-            return Err(Error::Client(ClientError::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "GCS: resumable chunks must not be empty",
-            ))));
-        }
+        let inclusive_end = end.checked_sub(1).unwrap_or(end);
 
-        let inclusive_end = end
-            .checked_sub(1)
-            .expect("a non-empty chunk has a positive exclusive end");
         let content_range = format!("bytes {offset}-{inclusive_end}/{}", session.total_length);
         let response = self
             .request(Method::PUT, session.session_uri.as_str())
@@ -1301,12 +1275,18 @@ impl Backend for GcsBackend {
                 None => Error::reqwest("GCS: upload resumable chunk", error),
             })?;
 
-        match self
-            .resumable_progress(id, response, session.total_length)
+        let progress = parse_upload_progress_response(response, session.total_length)
             .await
-        {
+            .map(|(progress, completion)| {
+                if let Some(completion) = completion {
+                    self.report_resumable_completion(id, completion);
+                }
+                progress
+            });
+
+        match progress {
             Err(error) if is_resumable_offset_gap(&error) => {
-                let progress = self.query_resumable_progress(id, &session).await;
+                let progress = self.query_offset(id, &session).await;
                 reconcile_resumable_offset_gap(error, progress)
             }
             result => result,
@@ -1317,7 +1297,7 @@ impl Backend for GcsBackend {
     async fn upload_offset(&self, id: &ObjectId, token: &str) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
         let session = ResumableSession::from_token(token, &self.endpoint)?;
-        self.query_resumable_progress(id, &session).await
+        self.query_offset(id, &session).await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1331,21 +1311,17 @@ impl Backend for GcsBackend {
                 let response = self
                     .request(Method::DELETE, session_uri)
                     .await?
-                    .header(header::CONTENT_LENGTH, 0)
                     .send_traced()
                     .await
                     .map_err(|error| Error::reqwest("GCS: cancel resumable upload", error))?;
                 match response.status() {
-                    status
-                        if status.as_u16() == 499
-                            || matches!(
-                                status,
-                                StatusCode::OK
-                                    | StatusCode::NO_CONTENT
-                                    | StatusCode::NOT_FOUND
-                                    | StatusCode::GONE
-                            ) =>
-                    {
+                    // Expected status code when canceling a recently created upload.
+                    status if status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
+                        response.drain_body().await;
+                        Ok(())
+                    }
+                    // The upload was already canceled or never existed.
+                    StatusCode::GONE | StatusCode::NOT_FOUND => {
                         response.drain_body().await;
                         Ok(())
                     }
@@ -1356,7 +1332,7 @@ impl Backend for GcsBackend {
                             .drain_body()
                             .await;
                         Err(Error::generic(
-                            "GCS: unexpected successful resumable cancellation status",
+                            "GCS: unexpected resumable cancellation status",
                         ))
                     }
                 }
