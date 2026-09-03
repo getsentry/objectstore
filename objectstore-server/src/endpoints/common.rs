@@ -89,6 +89,7 @@ impl ApiError {
         }
     }
 
+    /// Creates a client error with context and no underlying cause.
     pub fn client(context: impl Into<Cow<'static, str>>) -> Self {
         Self::Client {
             context: context.into(),
