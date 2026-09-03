@@ -155,6 +155,126 @@ existing_parts = resumed.list_parts()
 key = resumed.complete(new_parts + existing_parts)
 ```
 
+### Many API (batch operations)
+
+`session.many()` executes a number of operations with as few requests as
+possible. Those within the batch protocol's per-part limit of 1 MB are grouped
+into requests to Objectstore's batch endpoint which cuts network overhead
+considerably. Inserts too large for that, or of unknown size, are sent as
+individual requests instead.
+
+Pass any iterable of `Get`, `Put`, `Delete`, and `Head` operations, which live in
+the `many` module. Results come back as `GetResult`, `PutResult`, `DeleteResult`,
+and `HeadResult` objects, each carrying the object's `key` and an `error` that is
+`None` when the operation succeeded:
+
+```python
+from objectstore_client import Client, Usecase, many
+
+client = Client("http://localhost:8888")
+session = client.session(Usecase("attachments"), org=42, project=1337)
+
+results = session.many(
+    [
+        many.Put(b"file1 contents", key="file1"),
+        many.Put(b"file2 contents", key="file2"),
+        many.Get("file3"),
+        many.Delete("file4"),
+        many.Head("file5"),
+    ]
+)
+
+for result in results:
+    if result.error is not None:
+        ...  # this operation failed
+    elif isinstance(result, many.GetResult):
+        # `response` is None if the object does not exist.
+        payload = result.response.payload if result.response else None
+```
+
+`session.many()` returns an `OperationResults` object which is a lazy iterator.
+As the iterator is consumed, it assembles batch requests and sends them to
+Objectstore. As responses come in, the operation results are yielded. Abandoning
+the iterator without fully consuming it will cancel whatever has not been
+dispatched yet.
+
+If successful results don't need to be processed or inspected, callers can call
+`raise_for_failures()` to drain the results and raise an `ExceptionGroup` with
+all per-operation errors, or `failures()` which returns the failed results as a
+list:
+
+```python
+session.many([many.Delete("file1"), many.Delete("file2")]).raise_for_failures()
+
+for failure in session.many([many.Delete("file3")]).failures():
+    print(failure.key, failure.error)
+```
+
+#### Concurrency
+
+`concurrency` caps how many requests are in flight, and defaults to `3`.
+Requests run on a thread pool created by `session.many()`, which is shut down
+when the results are exhausted or abandoned. When `concurrency` is set to `1`,
+requests are run serially on the caller thread instead, with no thread pool.
+
+```python
+client = Client("http://localhost:8888")
+session = client.session(Usecase("attachments"), org=42, project=1337)
+
+for result in session.many(operations, concurrency=8):
+    ...
+```
+
+Note: when a `Client` is built with custom `connection_kwargs` that include
+`"block": True`, the `concurrency` argument is clamped to the connection pool's
+configured size. An illustrative example:
+
+```python
+# Client created with a pool size of 4 and block=True
+client = Client(
+    "http://localhost:8888",
+    connection_kwargs={"maxsize": 4, "block": True},
+)
+session = client.session(Usecase("attachments"), org=42, project=1337)
+
+# `concurrency` is clamped to `4` because `block=True` was set
+for failure in session.many(operations, concurrency=16).failures():
+    print(failure.key, failure.error)
+```
+
+Results are yielded as responses are received, and the order isn't necessarily
+the same order that operations were given in. Each result carries an `index`
+field that corresponds to the index of the `Get` / `Put` / `Delete` / `Head`
+operation in the operation iterable passed into `session.many()`. This `index`
+allows a keyless `Put` operation to be linked with its result to learn the key
+that was assigned.
+
+```python
+uploads = [many.Put(b"first"), many.Put(b"second")]
+
+for result in session.many(uploads):
+    print(f"{uploads[result.index].contents!r} was stored as {result.key}")
+```
+
+An `ErrorResult` carries `index=None` when the response part it came from could
+not be attributed to any operation at all.
+
+Within a single batch, the Objectstore server processes individual operations
+concurrently and each operation's relative order is undefined. Two operations on
+the same key therefore race, and `session.many()` does nothing to prevent that.
+
+#### Metrics
+
+When a metrics backend is configured, `session.many()` emits some metrics:
+- `storage.batch.latency`: a timer recording a batch request's execution time,
+  tagged with a (bucketed) number of operations included in the batch
+- `stoarge.batch.operations`: a simple counter of individual operations, tagged
+  with each operation's kind (i.e. `PUT`/`GET`/`DELETE`).
+
+An operation that doesn't qualify for batching will be sent through the
+`session`'s regular single-operation API for that operation and will emit
+single-object metrics on that path rather than batch metrics here.
+
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication
