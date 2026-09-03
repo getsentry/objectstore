@@ -237,7 +237,7 @@ A concurrency limiter caps in-flight
 backend operations. When all execution permits are held, new operations are
 queued — adding latency instead of rejecting immediately. The queue itself is
 bounded in both depth and time: operations that cannot be served within those
-limits fail with [`Error::AtCapacity`](error::Error::AtCapacity).
+limits fail with [`ErrorKind::AtCapacity`](error::ErrorKind::AtCapacity).
 
 The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See

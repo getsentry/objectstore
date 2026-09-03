@@ -8,7 +8,7 @@ use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use bytes::Bytes;
 
-use crate::error::{Error, Result};
+use crate::error::{ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -68,10 +68,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
     ///
-    /// The default returns [`Error::NotImplemented`]. Backends that implement
+    /// The default returns an [`ErrorKind::Unsupported`]. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Creates a resumable upload session for the object at `id`.
@@ -99,8 +99,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
     /// `offset` must equal the offset the backend currently holds.
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session,
-    /// and [`Error::ChunkExceedsUploadLength`] when the chunk would exceed the total length
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
+    /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
     async fn put_chunk(
         &self,
@@ -111,23 +111,23 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         let _ = (id, session, offset, content_length, stream);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Reports how far the session has progressed.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
     async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
         let _ = (id, session);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
     async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
         let _ = (id, session);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 }
 

@@ -1,6 +1,6 @@
 //! Local filesystem backend for development and testing.
 
-use std::io::ErrorKind;
+use std::io;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::time::SystemTime;
@@ -15,7 +15,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -85,34 +85,56 @@ impl Backend for LocalFsBackend {
     ) -> Result<PutResponse> {
         let path = self.path.join(id.as_storage_path().to_string());
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
-        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object directory",
+            )?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(path)
-            .await?;
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "opening local-fs object for writing",
+            )?;
 
         let mut reader = pin!(StreamReader::new(stream));
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata".to_string(),
-            cause,
-        })?;
-        writer.write_all(metadata_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+        let metadata_json = serde_json::to_string(metadata)
+            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+        writer.write_all(metadata_json.as_bytes()).await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
+        writer.write_all(b"\n").await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
 
         tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => e.into(),
+                Some(ce) => Error::from(ce),
+                None => Error::with_context(
+                    ErrorKind::BackendFailure,
+                    "writing local-fs object payload",
+                    e,
+                ),
             })?;
 
-        writer.flush().await?;
+        writer
+            .flush()
+            .await
+            .context(ErrorKind::BackendFailure, "flushing local-fs object")?;
         let file = writer.into_inner();
-        file.sync_data().await?;
+        file.sync_data()
+            .await
+            .context(ErrorKind::BackendFailure, "syncing local-fs object")?;
         drop(file);
 
         Ok(())
@@ -125,25 +147,35 @@ impl Backend for LocalFsBackend {
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
                 return Ok(None);
             }
-            err => err?,
+            err => err.context(
+                ErrorKind::BackendFailure,
+                "opening local-fs object for reading",
+            )?,
         };
 
         let mut reader = BufReader::new(file);
         let mut metadata_line = String::new();
-        reader.read_line(&mut metadata_line).await?;
-        let file_len = reader.get_ref().metadata().await?.len();
-        let mut metadata: Metadata =
-            serde_json::from_str(metadata_line.trim_end()).map_err(|cause| Error::Serde {
-                context: "failed to deserialize metadata".to_string(),
-                cause,
-            })?;
+        reader.read_line(&mut metadata_line).await.context(
+            ErrorKind::BackendFailure,
+            "reading local-fs object metadata",
+        )?;
+        let file_len = reader
+            .get_ref()
+            .metadata()
+            .await
+            .context(ErrorKind::BackendFailure, "reading local-fs object size")?
+            .len();
+        let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())
+            .context(ErrorKind::CorruptData, "decoding local-fs object metadata")?;
         let payload_size = file_len
             .checked_sub(metadata_line.len() as u64)
-            .ok_or_else(|| Error::generic("local-fs file corrupted: shorter than header"))?;
+            .ok_or_else(|| {
+                Error::new(ErrorKind::CorruptData, "reading truncated local-fs object")
+            })?;
         metadata.size = Some(payload_size as usize);
 
         let (content_range, stream) = match range {
@@ -151,11 +183,14 @@ impl Backend for LocalFsBackend {
                 let content_range =
                     byte_range
                         .resolve(payload_size)
-                        .ok_or(Error::RangeNotSatisfiable {
+                        .ok_or(ErrorKind::RangeNotSatisfiable {
                             total: payload_size,
                         })?;
                 let payload_start = metadata_line.len() as u64 + content_range.start;
-                reader.seek(std::io::SeekFrom::Start(payload_start)).await?;
+                reader
+                    .seek(std::io::SeekFrom::Start(payload_start))
+                    .await
+                    .context(ErrorKind::BackendFailure, "seeking local-fs object payload")?;
                 let limited = reader.take(content_range.len());
                 (Some(content_range), ReaderStream::new(limited).boxed())
             }
@@ -170,11 +205,12 @@ impl Backend for LocalFsBackend {
         let path = self.path.join(id.as_storage_path().to_string());
         let result = tokio::fs::remove_file(path).await;
         if let Err(e) = &result
-            && e.kind() == ErrorKind::NotFound
+            && e.kind() == io::ErrorKind::NotFound
         {
             objectstore_log::debug!("Object not found");
         }
-        Ok(result?)
+        result.context(ErrorKind::BackendFailure, "deleting local-fs object")?;
+        Ok(())
     }
 }
 
@@ -196,14 +232,18 @@ impl MultipartUploadBackend for LocalFsBackend {
     ) -> Result<InitiateMultipartResponse> {
         let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
         let dir = self.multipart_dir(id, &upload_id);
-        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::create_dir_all(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs multipart upload",
+        )?;
 
         let meta_path = dir.join("metadata.json");
-        let metadata_json = serde_json::to_string(metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize multipart metadata".to_string(),
-            cause,
-        })?;
-        tokio::fs::write(meta_path, metadata_json).await?;
+        let metadata_json = serde_json::to_string(metadata)
+            .context(ErrorKind::Internal, "encoding local-fs multipart metadata")?;
+        tokio::fs::write(meta_path, metadata_json).await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs multipart metadata",
+        )?;
 
         Ok(upload_id)
     }
@@ -218,8 +258,14 @@ impl MultipartUploadBackend for LocalFsBackend {
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
         let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await? {
-            return Err(Error::generic("multipart upload not found"));
+        if !tokio::fs::try_exists(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "checking local-fs multipart upload",
+        )? {
+            return Err(Error::new(
+                ErrorKind::BackendFailure,
+                "local-fs multipart upload not found",
+            ));
         }
 
         let etag = format!("\"etag-{part_number}-{content_length}\"");
@@ -229,10 +275,8 @@ impl MultipartUploadBackend for LocalFsBackend {
             "uploaded_at": SystemTime::now(),
             "size": content_length,
         });
-        let header_line = serde_json::to_string(&header).map_err(|cause| Error::Serde {
-            context: "failed to serialize part header".to_string(),
-            cause,
-        })?;
+        let header_line = serde_json::to_string(&header)
+            .context(ErrorKind::Internal, "encoding local-fs part header")?;
 
         let part_path = dir.join(format!("{part_number}.part"));
         let file = OpenOptions::new()
@@ -240,27 +284,46 @@ impl MultipartUploadBackend for LocalFsBackend {
             .write(true)
             .truncate(true)
             .open(part_path)
-            .await?;
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "opening local-fs multipart part for writing",
+            )?;
 
         let mut reader = pin!(StreamReader::new(body));
         let mut writer = BufWriter::new(file);
-        writer.write_all(header_line.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+        writer
+            .write_all(header_line.as_bytes())
+            .await
+            .context(ErrorKind::BackendFailure, "writing local-fs part header")?;
+        writer
+            .write_all(b"\n")
+            .await
+            .context(ErrorKind::BackendFailure, "writing local-fs part header")?;
 
         let _bytes_copied = tokio::io::copy(&mut reader, &mut writer)
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => e.into(),
+                Some(ce) => Error::from(ce),
+                None => Error::with_context(
+                    ErrorKind::BackendFailure,
+                    "writing local-fs multipart part payload",
+                    e,
+                ),
             })?;
 
         // TODO: validate bytes_copied against content_length and return a BadRequest-style
         // error. Needs a service-layer error variant that maps to HTTP 400 without abusing
         // ClientError (which is meant for stream errors).
 
-        writer.flush().await?;
+        writer.flush().await.context(
+            ErrorKind::BackendFailure,
+            "flushing local-fs multipart part",
+        )?;
         let file = writer.into_inner();
-        file.sync_data().await?;
+        file.sync_data()
+            .await
+            .context(ErrorKind::BackendFailure, "syncing local-fs multipart part")?;
         drop(file);
 
         Ok(etag)
@@ -274,14 +337,26 @@ impl MultipartUploadBackend for LocalFsBackend {
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
         let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await? {
-            return Err(Error::generic("multipart upload not found"));
+        if !tokio::fs::try_exists(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "checking local-fs multipart upload",
+        )? {
+            return Err(Error::new(
+                ErrorKind::BackendFailure,
+                "local-fs multipart upload not found",
+            ));
         }
 
-        let mut entries = tokio::fs::read_dir(&dir).await?;
+        let mut entries = tokio::fs::read_dir(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "listing local-fs multipart parts",
+        )?;
         let mut parts = Vec::new();
 
-        while let Some(entry) = entries.next_entry().await? {
+        while let Some(entry) = entries.next_entry().await.context(
+            ErrorKind::BackendFailure,
+            "listing local-fs multipart parts",
+        )? {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             let Some(pn_str) = name_str.strip_suffix(".part") else {
@@ -295,15 +370,17 @@ impl MultipartUploadBackend for LocalFsBackend {
                 continue;
             }
 
-            let file = tokio::fs::File::open(entry.path()).await?;
+            let file = tokio::fs::File::open(entry.path())
+                .await
+                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
-            reader.read_line(&mut header_line).await?;
-            let header: serde_json::Value =
-                serde_json::from_str(header_line.trim_end()).map_err(|cause| Error::Serde {
-                    context: "failed to deserialize part header".to_string(),
-                    cause,
-                })?;
+            reader
+                .read_line(&mut header_line)
+                .await
+                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
+            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
+                .context(ErrorKind::CorruptData, "decoding local-fs part header")?;
 
             parts.push(Part {
                 part_number: pn,
@@ -339,8 +416,14 @@ impl MultipartUploadBackend for LocalFsBackend {
         upload_id: &UploadId,
     ) -> Result<AbortMultipartResponse> {
         let dir = self.multipart_dir(id, upload_id);
-        if tokio::fs::try_exists(&dir).await? {
-            tokio::fs::remove_dir_all(dir).await?;
+        if tokio::fs::try_exists(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "checking local-fs multipart upload",
+        )? {
+            tokio::fs::remove_dir_all(dir).await.context(
+                ErrorKind::BackendFailure,
+                "removing local-fs multipart upload",
+            )?;
         }
         Ok(())
     }
@@ -352,18 +435,26 @@ impl MultipartUploadBackend for LocalFsBackend {
         parts: Vec<CompletedPart>,
     ) -> Result<CompleteMultipartResponse> {
         let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await? {
-            return Err(Error::generic("multipart upload not found"));
+        if !tokio::fs::try_exists(&dir).await.context(
+            ErrorKind::BackendFailure,
+            "checking local-fs multipart upload",
+        )? {
+            return Err(Error::new(
+                ErrorKind::BackendFailure,
+                "local-fs multipart upload not found",
+            ));
         }
 
         // Read metadata
         let meta_path = dir.join("metadata.json");
-        let meta_bytes = tokio::fs::read(&meta_path).await?;
-        let metadata: Metadata =
-            serde_json::from_slice(&meta_bytes).map_err(|cause| Error::Serde {
-                context: "failed to deserialize multipart metadata".to_string(),
-                cause,
-            })?;
+        let meta_bytes = tokio::fs::read(&meta_path).await.context(
+            ErrorKind::BackendFailure,
+            "reading local-fs multipart metadata",
+        )?;
+        let metadata: Metadata = serde_json::from_slice(&meta_bytes).context(
+            ErrorKind::CorruptData,
+            "decoding local-fs multipart metadata",
+        )?;
 
         // TODO: validate that parts are in ascending part_number order and reject with
         // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
@@ -371,22 +462,27 @@ impl MultipartUploadBackend for LocalFsBackend {
         // Validate all parts (headers only) before writing anything
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
-            if !tokio::fs::try_exists(&part_path).await? {
+            if !tokio::fs::try_exists(&part_path).await.context(
+                ErrorKind::BackendFailure,
+                "checking local-fs multipart part",
+            )? {
                 return Ok(Some(crate::multipart::CompleteMultipartError {
                     code: "InvalidPart".into(),
                     message: format!("part number {} was not uploaded", completed.part_number),
                 }));
             }
 
-            let file = tokio::fs::File::open(&part_path).await?;
+            let file = tokio::fs::File::open(&part_path)
+                .await
+                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
-            reader.read_line(&mut header_line).await?;
-            let header: serde_json::Value =
-                serde_json::from_str(header_line.trim_end()).map_err(|cause| Error::Serde {
-                    context: "failed to deserialize part header".to_string(),
-                    cause,
-                })?;
+            reader
+                .read_line(&mut header_line)
+                .await
+                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
+            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
+                .context(ErrorKind::CorruptData, "decoding local-fs part header")?;
 
             let stored_etag = header["etag"].as_str().unwrap_or("");
             if stored_etag != completed.etag {
@@ -402,38 +498,67 @@ impl MultipartUploadBackend for LocalFsBackend {
 
         // Stream parts directly to the final object file
         let path = self.path.join(id.as_storage_path().to_string());
-        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object directory",
+            )?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(path)
-            .await?;
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "opening local-fs object for writing",
+            )?;
         let mut writer = BufWriter::new(file);
 
-        let metadata_json = serde_json::to_string(&metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata".to_string(),
-            cause,
-        })?;
-        writer.write_all(metadata_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+        let metadata_json = serde_json::to_string(&metadata)
+            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+        writer.write_all(metadata_json.as_bytes()).await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
+        writer.write_all(b"\n").await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
 
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
-            let file = tokio::fs::File::open(&part_path).await?;
+            let file = tokio::fs::File::open(&part_path)
+                .await
+                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
             let mut reader = BufReader::new(file);
             let mut header_line = String::new();
-            reader.read_line(&mut header_line).await?;
-            tokio::io::copy(&mut reader, &mut writer).await?;
+            reader
+                .read_line(&mut header_line)
+                .await
+                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
+            tokio::io::copy(&mut reader, &mut writer).await.context(
+                ErrorKind::BackendFailure,
+                "assembling local-fs object payload",
+            )?;
         }
 
-        writer.flush().await?;
+        writer
+            .flush()
+            .await
+            .context(ErrorKind::BackendFailure, "flushing local-fs object")?;
         let file = writer.into_inner();
-        file.sync_data().await?;
+        file.sync_data()
+            .await
+            .context(ErrorKind::BackendFailure, "syncing local-fs object")?;
         drop(file);
 
         // Clean up multipart state
-        tokio::fs::remove_dir_all(dir).await?;
+        tokio::fs::remove_dir_all(dir).await.context(
+            ErrorKind::BackendFailure,
+            "removing local-fs multipart upload",
+        )?;
 
         Ok(None)
     }
@@ -841,7 +966,7 @@ mod tests {
             .unwrap();
 
         match backend.get_object(&id, Some(ByteRange::From(100))).await {
-            Err(Error::RangeNotSatisfiable { total: 5 }) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::RangeNotSatisfiable { total: 5 }) => {}
             Err(other) => panic!("expected RangeNotSatisfiable, got: {other:?}"),
             Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
         }

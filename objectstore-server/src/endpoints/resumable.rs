@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use axum_extra::TypedHeader;
 use axum_extra::headers::ContentLength;
-use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::{Error as ServiceError, ErrorKind};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
@@ -90,18 +90,17 @@ async fn create_session_for_id(
     body: ClientStream,
 ) -> ApiResult<Response> {
     require_empty_body(content_length, body, "resumable session creation").await?;
-    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     state
         .config
         .usecases
-        .validate(&id.context().usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&id.context().usecase, &metadata)?;
 
     let session = service
         .create_upload_session(id.clone(), metadata, total_length)
         .await?
-        .ok_or(ServiceError::NotImplemented)?;
+        .ok_or_else(|| ServiceError::from(ErrorKind::Unsupported))?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),
@@ -134,7 +133,7 @@ pub(super) async fn continue_session(
         UploadOffset::At(offset) => {
             let content_length = content_length
                 .map(|TypedHeader(ContentLength(length))| length)
-                .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
+                .ok_or_else(|| ApiError::client("content-length header is required"))?;
             service
                 .put_chunk(id, session, offset, content_length, body)
                 .await
@@ -170,13 +169,17 @@ pub(super) async fn cancel_session(
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
     let progress = match progress {
         Ok(progress) => progress,
-        Err(error @ ApiError::Service(ServiceError::UploadOffsetMismatch { offset })) => {
-            let mut response = error.into_response();
-            response
-                .headers_mut()
-                .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
-            return Ok(response);
-        }
+        Err(ApiError::Service(error)) => match error.kind() {
+            ErrorKind::UploadOffsetMismatch { offset } => {
+                let error = ApiError::Service(error);
+                let mut response = error.into_response();
+                response
+                    .headers_mut()
+                    .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
+                return Ok(response);
+            }
+            _ => return Err(ApiError::Service(error)),
+        },
         Err(error) => return Err(error),
     };
 
@@ -236,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn offset_mismatch_answers_conflict_with_the_authoritative_offset() {
-        let mismatch = ServiceError::UploadOffsetMismatch { offset: 786_432 };
+        let mismatch = ErrorKind::UploadOffsetMismatch { offset: 786_432 }.into();
         let response =
             progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap();
 
@@ -252,15 +255,16 @@ mod tests {
 
     #[tokio::test]
     async fn other_errors_propagate_unchanged() {
-        let gone = ApiError::Service(ServiceError::UploadSessionGone);
+        let gone = ApiError::Service(ErrorKind::UploadSessionGone.into());
         let error = progress_response(Err(gone), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::GONE);
 
-        let oversized = ApiError::Service(ServiceError::ChunkExceedsUploadLength {
-            offset: 8,
-            content_length: 4,
-            upload_length: 10,
-        });
+        let oversized =
+            ApiError::Service(ServiceError::from(ErrorKind::ChunkExceedsUploadLength {
+                offset: 8,
+                content_length: 4,
+                upload_length: 10,
+            }));
         let error = progress_response(Err(oversized), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }

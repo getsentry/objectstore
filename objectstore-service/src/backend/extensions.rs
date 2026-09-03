@@ -6,12 +6,28 @@
 //! structured error code and message from it (JSON for GCS JSON API, XML for GCS
 //! XML API and S3).
 
-use reqwest::{Response, header};
+use std::borrow::Cow;
+use std::error::Error as StdError;
+use std::fmt;
+
+use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
 use tracing::Instrument;
 
-use crate::error::{BackendDetail, Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::stream;
+
+/// Classifies a backend HTTP error status into a semantic [`ErrorKind`].
+fn status_to_kind(status: StatusCode) -> ErrorKind {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => ErrorKind::BackendRateLimited,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ErrorKind::BackendTimeout,
+        StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE => ErrorKind::BackendUnavailable,
+        _ => ErrorKind::BackendFailure,
+    }
+}
 
 /// Extension trait that sends a request inside a tracing span.
 pub trait SendTraced {
@@ -77,8 +93,8 @@ struct XmlApiError {
 ///
 /// Use [`check_error`](Self::check_error) instead of
 /// [`error_for_status`](reqwest::Response::error_for_status) to avoid losing the response body on
-/// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns an
-/// [`Error::BackendResponse`] with the extracted error code and message.
+/// 4xx/5xx errors. The method parses the structured error body (JSON or XML) and returns a
+/// semantic backend service error with the extracted error code and message.
 ///
 /// Implemented for both [`reqwest::Response`] and `Result<Response, reqwest::Error>` so it can be
 /// chained directly.
@@ -90,8 +106,8 @@ pub trait ResponseExt {
     /// For other error statuses (e.g., redirects), falls back to
     /// [`reqwest::Response::error_for_status`].
     ///
-    /// When called on `Result<Response, reqwest::Error>`, transport errors are
-    /// wrapped as [`Error::Reqwest`] with the same context string.
+    /// When called on `Result<Response, reqwest::Error>`, transport errors are semantically
+    /// classified and given the same context string.
     async fn check_error(self, context: &'static str) -> Result<Response>;
 
     /// Drains the response body of a response we are otherwise done with.
@@ -124,14 +140,10 @@ impl ResponseExt for Response {
                 return Ok(self);
             };
             self.drain_body().await;
-            return Err(Error::reqwest(context, e));
+            return Err(Error::with_context(status_to_kind(status), context, e));
         };
 
-        Err(Error::BackendResponse {
-            context,
-            status,
-            detail,
-        })
+        Err(BackendResponseError::new(context, status, detail).into())
     }
 
     async fn drain_body(mut self) {
@@ -141,19 +153,39 @@ impl ResponseExt for Response {
 
 impl ResponseExt for Result<Response, reqwest::Error> {
     async fn check_error(self, context: &'static str) -> Result<Response> {
-        match self {
-            Ok(resp) => resp.check_error(context).await,
-            Err(e) => Err(match stream::unpack_client_error(&e) {
-                Some(ce) => Error::Client(ce),
-                None => Error::reqwest(context, e),
-            }),
-        }
+        self.reqwest_context(context)?.check_error(context).await
     }
 
     async fn drain_body(self) {
         if let Ok(resp) = self {
             resp.drain_body().await;
         }
+    }
+}
+
+pub trait ReqwestResultExt<T> {
+    fn reqwest_context(self, context: &'static str) -> Result<T>;
+}
+
+impl<T> ReqwestResultExt<T> for Result<T, reqwest::Error> {
+    fn reqwest_context(self, context: &'static str) -> Result<T> {
+        self.map_err(|error| {
+            if let Some(ce) = stream::unpack_client_error(&error) {
+                return Error::with_context(ErrorKind::ClientStream, context, ce);
+            }
+
+            let kind = if error.is_timeout() {
+                ErrorKind::BackendTimeout
+            } else if error.is_connect() || error.is_request() {
+                ErrorKind::BackendUnavailable
+            } else if error.is_decode() {
+                ErrorKind::CorruptData
+            } else {
+                ErrorKind::BackendFailure
+            };
+
+            Error::with_context(kind, context, error)
+        })
     }
 }
 
@@ -183,5 +215,204 @@ async fn parse_xml_error(resp: Response) -> BackendDetail {
         BackendDetail { code, message }
     } else {
         BackendDetail::none()
+    }
+}
+
+/// Structured error detail parsed from a backend HTTP error response.
+///
+/// Formats conditionally: includes only the fields that are non-empty.
+#[derive(Debug)]
+struct BackendDetail {
+    /// Machine-readable error code (e.g., "InvalidArgument", "NoSuchKey").
+    code: String,
+    /// Human-readable error message from the response body.
+    message: String,
+}
+
+impl BackendDetail {
+    /// Creates a new [`BackendDetail`] with empty code and message.
+    fn none() -> Self {
+        Self {
+            code: String::new(),
+            message: String::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.code.is_empty() && self.message.is_empty()
+    }
+}
+
+impl fmt::Display for BackendDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (false, false) => write!(f, "{} (backend code {})", self.message, self.code),
+            (true, false) => f.write_str(&self.message),
+            (false, true) => write!(f, "backend code {}", self.code),
+            (true, true) => Ok(()),
+        }
+    }
+}
+
+/// An HTTP error response received from a storage backend such as GCS or S3.
+///
+/// Unlike [`reqwest::Error`], which covers transport-level failures, this type captures an
+/// application-level error response where the backend returned a 4xx or 5xx status together with
+/// a structured response body. It retains the request context, HTTP status, and parsed backend
+/// error code and message.
+#[derive(Debug)]
+struct BackendResponseError {
+    context: Cow<'static, str>,
+    status: StatusCode,
+    detail: BackendDetail,
+}
+
+impl BackendResponseError {
+    /// Creates a backend response error from its operation context, status, and detail.
+    pub fn new(
+        context: impl Into<Cow<'static, str>>,
+        status: StatusCode,
+        detail: BackendDetail,
+    ) -> Self {
+        Self {
+            context: context.into(),
+            status,
+            detail,
+        }
+    }
+}
+
+impl fmt::Display for BackendResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.context, self.status)?;
+        if !self.detail.is_empty() {
+            write!(f, ". {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl StdError for BackendResponseError {}
+
+impl From<BackendResponseError> for Error {
+    fn from(source: BackendResponseError) -> Self {
+        let kind = status_to_kind(source.status);
+        let context = source.context.clone();
+        Self::with_context(kind, context, source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use reqwest::StatusCode;
+
+    use super::{BackendDetail, BackendResponseError, status_to_kind};
+    use crate::backend::extensions::ReqwestResultExt;
+    use crate::error::{Error, ErrorKind};
+
+    #[test]
+    fn backend_response_preserves_status_and_structured_source() {
+        let error: Error = BackendResponseError::new(
+            "getting a GCS object",
+            StatusCode::TOO_MANY_REQUESTS,
+            BackendDetail {
+                code: "rateLimitExceeded".to_owned(),
+                message: "too many requests".to_owned(),
+            },
+        )
+        .into();
+
+        assert_eq!(error.kind(), ErrorKind::BackendRateLimited);
+        assert_eq!(
+            error.to_string(),
+            "backend rate limited: getting a GCS object"
+        );
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "getting a GCS object (429 Too Many Requests). too many requests (backend code rateLimitExceeded)"
+        );
+    }
+
+    #[test]
+    fn backend_response_omits_separator_without_detail() {
+        let error = BackendResponseError::new(
+            "getting a GCS object",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BackendDetail::none(),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "getting a GCS object (500 Internal Server Error)"
+        );
+    }
+
+    #[test]
+    fn retryable_http_statuses_have_transient_semantic_kinds() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(matches!(
+                status_to_kind(status),
+                ErrorKind::BackendRateLimited
+                    | ErrorKind::BackendTimeout
+                    | ErrorKind::BackendUnavailable
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn response_body_timeout_is_classified_as_backend_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0];
+            connection.read_exact(&mut request).unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n")
+                .unwrap();
+
+            // Keep the body open without sending its promised byte until the client times out.
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+
+        let result = response.bytes().await;
+        assert!(result.as_ref().unwrap_err().is_timeout());
+
+        let error = result
+            .reqwest_context("reading backend response body")
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BackendTimeout);
+        assert_eq!(
+            error.to_string(),
+            "backend timed out: reading backend response body"
+        );
+
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
     }
 }

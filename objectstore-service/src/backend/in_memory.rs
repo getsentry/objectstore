@@ -19,7 +19,7 @@ use super::common::{
     DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
     TieredMetadata, TieredWrite, Tombstone,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -128,7 +128,10 @@ impl super::common::Backend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
-            Some(StoreEntry::Tombstone(_)) => Err(Error::UnexpectedTombstone),
+            Some(StoreEntry::Tombstone(_)) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected in-memory tombstone",
+            )),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
@@ -136,7 +139,7 @@ impl super::common::Backend for InMemoryBackend {
                     Some(range) => {
                         let content_range = range
                             .resolve(total)
-                            .ok_or(Error::RangeNotSatisfiable { total })?;
+                            .ok_or(ErrorKind::RangeNotSatisfiable { total })?;
                         let sliced =
                             bytes.slice(content_range.start as usize..=content_range.end as usize);
                         (Some(content_range), sliced)
@@ -193,7 +196,7 @@ impl HighVolumeBackend for InMemoryBackend {
                     Some(range) => {
                         let content_range = range
                             .resolve(total)
-                            .ok_or(Error::RangeNotSatisfiable { total })?;
+                            .ok_or(ErrorKind::RangeNotSatisfiable { total })?;
                         let sliced =
                             bytes.slice(content_range.start as usize..=content_range.end as usize);
                         (Some(content_range), sliced)
@@ -289,7 +292,12 @@ impl MultipartUploadBackend for InMemoryBackend {
         let mut store = self.multipart_store.lock().unwrap();
         let upload = store
             .get_mut(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::BackendFailure,
+                    "in-memory multipart upload not found",
+                )
+            })?;
 
         upload.parts.insert(
             part_number,
@@ -311,9 +319,12 @@ impl MultipartUploadBackend for InMemoryBackend {
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
         let store = self.multipart_store.lock().unwrap();
-        let upload = store
-            .get(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| Error::generic("multipart upload not found"))?;
+        let upload = store.get(&(id.clone(), upload_id.clone())).ok_or_else(|| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "in-memory multipart upload not found",
+            )
+        })?;
 
         let iter = upload
             .parts
@@ -376,9 +387,12 @@ impl MultipartUploadBackend for InMemoryBackend {
         // the client can retry.
         let assembled = {
             let store = self.multipart_store.lock().unwrap();
-            let upload = store
-                .get(&key)
-                .ok_or_else(|| Error::generic("multipart upload not found"))?;
+            let upload = store.get(&key).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::BackendFailure,
+                    "in-memory multipart upload not found",
+                )
+            })?;
 
             for completed in &parts {
                 match upload.parts.get(&completed.part_number) {
