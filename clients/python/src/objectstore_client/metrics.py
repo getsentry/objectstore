@@ -75,10 +75,18 @@ class NoOpMetricsBackend(MetricsBackend):
 
 
 class StorageMetricEmitter:
-    def __init__(self, backend: MetricsBackend, operation: str, usecase: str):
+    def __init__(
+        self,
+        backend: MetricsBackend,
+        operation: str,
+        usecase: str,
+        tags: Tags | None = None,
+    ):
         self.backend = backend
         self.operation = operation
         self.usecase = usecase
+        self.tags: Tags = {"usecase": usecase, **(tags or {})}
+        """Tags common to every metric of this operation."""
 
         # These may be set during or after the enclosed operation
         self.start: int | None = None
@@ -89,28 +97,28 @@ class StorageMetricEmitter:
         self.compression: str = "unknown"
 
     def record_latency(self, elapsed: float) -> None:
-        tags = {"usecase": self.usecase}
+        tags = dict(self.tags)
         self.backend.distribution(
             f"storage.{self.operation}.latency", elapsed, tags=tags
         )
         self.elapsed = elapsed
 
     def record_uncompressed_size(self, value: int) -> None:
-        tags = {"usecase": self.usecase, "compression": "none"}
+        tags = {**self.tags, "compression": "none"}
         self.backend.distribution(
             f"storage.{self.operation}.size", value, tags=tags, unit="byte"
         )
         self.uncompressed_size = value
 
     def record_size(self, value: int) -> None:
-        tags = {"usecase": self.usecase}
+        tags = dict(self.tags)
         self.backend.distribution(
             f"storage.{self.operation}.size", value, tags=tags, unit="byte"
         )
         self.size = value
 
     def record_compressed_size(self, value: int, compression: str = "unknown") -> None:
-        tags = {"usecase": self.usecase, "compression": compression}
+        tags = {**self.tags, "compression": compression}
         self.backend.distribution(
             f"storage.{self.operation}.size", value, tags=tags, unit="byte"
         )
@@ -121,7 +129,7 @@ class StorageMetricEmitter:
         if not self.uncompressed_size or not self.compressed_size:
             return None
 
-        tags = {"usecase": self.usecase, "compression": self.compression}
+        tags = {**self.tags, "compression": self.compression}
         self.backend.distribution(
             f"storage.{self.operation}.compression_ratio",
             self.compressed_size / self.uncompressed_size,
@@ -141,7 +149,7 @@ class StorageMetricEmitter:
             sizes.append((self.compressed_size, self.compression))
 
         for size, compression in sizes:
-            tags: dict[str, str] = {"usecase": self.usecase}
+            tags: dict[str, str] = dict(self.tags)
             if compression is not None:
                 tags["compression"] = compression
             self.backend.distribution(
@@ -154,6 +162,31 @@ class StorageMetricEmitter:
             )
 
 
+def batch_size_bucket(count: int) -> str:
+    """
+    Buckets a count of batch operations into buckets between powers of 2. Used
+    to tag batch latency metrics with a rough indication of the batch size.
+    """
+    if count <= 1:
+        return str(count)
+    low = 1 << (count.bit_length() - 1)
+    return f"{low}-{2 * low - 1}"
+
+
+def count_batch_operations(
+    backend: MetricsBackend, usecase: str, kinds: Mapping[str, int]
+) -> None:
+    """
+    Counts the operations of one batch request, given as a count per kind.
+    """
+    for kind, count in kinds.items():
+        backend.increment(
+            "storage.batch.operations",
+            count,
+            tags={"usecase": usecase, "operation": kind},
+        )
+
+
 @contextmanager
 def measure_storage_operation(
     backend: MetricsBackend,
@@ -162,6 +195,7 @@ def measure_storage_operation(
     uncompressed_size: int | None = None,
     compressed_size: int | None = None,
     compression: str = "unknown",
+    tags: Tags | None = None,
 ) -> Generator[StorageMetricEmitter]:
     """
     Context manager which records the latency of the enclosed storage operation.
@@ -170,8 +204,10 @@ def measure_storage_operation(
 
     Yields a `StorageMetricEmitter` because for some operations (GET) the size
     is not known until the inside of the enclosed block.
+
+    Any `tags` are added to every metric recorded for this operation.
     """
-    emitter = StorageMetricEmitter(backend, operation, usecase)
+    emitter = StorageMetricEmitter(backend, operation, usecase, tags)
 
     if uncompressed_size:
         emitter.record_uncompressed_size(uncompressed_size)

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import signal
@@ -19,6 +20,18 @@ import zstandard
 from objectstore_client import Client, Session, Usecase
 from objectstore_client.auth import Permission, SecretKey
 from objectstore_client.errors import RequestError
+from objectstore_client.many import (
+    DEFAULT_CONCURRENCY,
+    Delete,
+    DeleteResult,
+    Get,
+    GetResult,
+    Head,
+    HeadResult,
+    Operation,
+    Put,
+    PutResult,
+)
 from objectstore_client.metadata import TimeToLive
 from objectstore_client.multipart import CompletePart, MultipartCompleteError
 from objectstore_client.scope import Scope
@@ -40,6 +53,13 @@ class UnrewindableStream(BytesIO):
 
     def tell(self) -> int:
         raise OSError("stream does not expose a stable position")
+
+
+class UnseekableStream(BytesIO):
+    """Read-only stream whose size cannot be determined without reading it."""
+
+    def seekable(self) -> bool:
+        return False
 
 
 class TestSecretKey:
@@ -782,6 +802,171 @@ def test_multipart_resume(server_url: str) -> None:
     retrieved = session.get(final_key)
     assert retrieved is not None
     assert retrieved.payload.read() == b"firstsecond"
+
+
+def _many_session(server_url: str, **client_kwargs: object) -> Session:
+    client = Client(server_url, token=TestSecretKey.get(), **client_kwargs)  # type: ignore[arg-type]
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    return client.session(usecase, org=12345, project=1337)
+
+
+@pytest.mark.parametrize("concurrency", [1, 3])
+def test_many_operations(server_url: str, concurrency: int) -> None:
+    session = _many_session(server_url, connection_kwargs={"maxsize": 4})
+
+    session.many(
+        [
+            Put(b"first object", key="many-1", compress="none", filename="report.pdf"),
+            Put(b"second object", key="many-2", compress="zstd"),
+            Put(b"third object", key="many-3", metadata={"foo": "bar"}),
+            Put(b"fourth object", key="many-4", compress="none"),
+        ],
+        concurrency=concurrency,
+    ).raise_for_failures()
+
+    results = list(
+        session.many(
+            [Get("many-1"), Get("many-2"), Head("many-3"), Delete("many-4")],
+            concurrency=concurrency,
+        )
+    )
+    assert len(results) == 4
+    by_key = {result.key: result for result in results}  # type: ignore[union-attr]
+
+    first = by_key["many-1"]
+    assert isinstance(first, GetResult) and first.response is not None
+    assert first.response.metadata.compression is None
+    assert first.response.metadata.filename == "report.pdf"
+    assert first.response.payload.read() == b"first object"
+
+    second = by_key["many-2"]
+    assert isinstance(second, GetResult) and second.response is not None
+    # Transparently decompressed on the way out.
+    assert second.response.metadata.compression is None
+    assert second.response.payload.read() == b"second object"
+
+    third = by_key["many-3"]
+    assert isinstance(third, HeadResult) and third.metadata is not None
+    assert third.metadata.custom == {"foo": "bar"}
+
+    fourth = by_key["many-4"]
+    assert isinstance(fourth, DeleteResult) and fourth.error is None
+    assert session.head("many-4") is None
+
+
+def test_many_reports_the_index_of_each_operation(server_url: str) -> None:
+    session = _many_session(server_url)
+    keys = [f"many-index-{index}" for index in range(6)]
+
+    session.many(
+        [Put(f"object {key}".encode(), key=key) for key in keys]
+    ).raise_for_failures()
+
+    results = list(session.many([Get(key) for key in keys]))
+    assert {result.index: result.key for result in results} == dict(  # type: ignore[union-attr]
+        enumerate(keys)
+    )
+
+
+def test_many_insert_without_key(server_url: str) -> None:
+    session = _many_session(server_url)
+
+    (result,) = list(session.many([Put(b"keyless object", compress="none")]))
+    assert isinstance(result, PutResult)
+    assert result.error is None
+    assert result.key
+
+    retrieved = session.get(result.key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"keyless object"
+
+
+def test_many_partial_failures(server_url: str) -> None:
+    # A read-only token: writes and deletes fail with 403, reads 404 on misses.
+    client = Client(
+        server_url,
+        token=TestSecretKey.create(permissions=[Permission.OBJECT_READ]),
+    )
+    usecase = Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1)))
+    session = client.session(usecase, org=12345, project=1337)
+
+    results = list(
+        session.many(
+            [
+                Get("many-nonexistent-1"),
+                Put(b"should fail", key="many-write-key", compress="none"),
+                Delete("many-delete-key"),
+                Get("many-nonexistent-2"),
+            ]
+        )
+    )
+    assert len(results) == 4
+
+    put = next(result for result in results if isinstance(result, PutResult))
+    assert isinstance(put.error, RequestError) and put.error.status == 403
+
+    delete = next(result for result in results if isinstance(result, DeleteResult))
+    assert isinstance(delete.error, RequestError) and delete.error.status == 403
+
+    # Missing objects are successful "not found" results, not errors.
+    gets = [result for result in results if isinstance(result, GetResult)]
+    assert all(get.error is None and get.response is None for get in gets)
+
+
+def test_many_oversized_insert_falls_back_to_individual(server_url: str) -> None:
+    session = _many_session(server_url, connection_kwargs={"maxsize": 4})
+
+    big = b"x" * (2 * 1024 * 1024)  # 2 MB, above the per-part batch limit
+    session.many(
+        [Put(big, key="many-big", compress="none"), Put(b"small", key="many-small")]
+    ).raise_for_failures()
+
+    assert session.get("many-big").payload.read() == big  # type: ignore[union-attr]
+    assert session.get("many-small").payload.read() == b"small"  # type: ignore[union-attr]
+
+
+def test_many_streams_insert_bodies(server_url: str) -> None:
+    session = _many_session(server_url, connection_kwargs={"maxsize": 4})
+    payload = b"streamed object " * 1000
+
+    # A seekable stream can be sized, so it goes into a batch and is compressed
+    # while the request is written. An unseekable one is sent individually.
+    session.many(
+        [
+            Put(BytesIO(payload), key="many-stream", compress="zstd"),
+            Put(UnseekableStream(payload), key="many-unseekable"),
+        ]
+    ).raise_for_failures()
+
+    for key in ("many-stream", "many-unseekable"):
+        retrieved = session.get(key)
+        assert retrieved is not None
+        assert retrieved.payload.read() == payload
+
+
+@pytest.mark.parametrize("concurrency", [None, 6])
+def test_many_pools_connections_for_concurrent_requests(
+    server_url: str, caplog: pytest.LogCaptureFixture, concurrency: int | None
+) -> None:
+    """A `Client` needs no pool configuration, for the default or a chosen value."""
+    session = _many_session(server_url)
+    keys = [f"many-pooled-{concurrency}-{index}" for index in range(8)]
+
+    # Unsized inserts are sent individually, so this is one request per key.
+    inserts: list[Operation] = [
+        Put(UnseekableStream(b"payload"), key=key) for key in keys
+    ]
+    with caplog.at_level(logging.WARNING, logger="urllib3"):
+        session.many(inserts, concurrency=concurrency).raise_for_failures()
+
+    # A pool that cannot hold the connections logs one warning per discard
+    noise = [r for r in caplog.records if "pool is full" in r.getMessage()]
+    assert noise == []
+
+    pool = session._pool
+    assert pool.num_requests == len(keys)
+    in_flight = DEFAULT_CONCURRENCY if concurrency is None else concurrency
+    assert pool.num_connections <= in_flight, "connections were reopened, not reused"
 
 
 def test_multipart_concurrent_part_uploads(server_url: str) -> None:
