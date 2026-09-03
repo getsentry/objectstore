@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use axum_extra::TypedHeader;
 use axum_extra::headers::ContentLength;
-use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
+use objectstore_service::error::{Error as ServiceError, ErrorKind};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
@@ -100,7 +100,7 @@ async fn create_session_for_id(
     let session = service
         .create_upload_session(id.clone(), metadata, total_length)
         .await?
-        .ok_or_else(|| ServiceError::from(ServiceErrorKind::Unsupported))?;
+        .ok_or_else(|| ServiceError::from(ErrorKind::Unsupported))?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),
@@ -169,19 +169,17 @@ pub(super) async fn cancel_session(
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
     let progress = match progress {
         Ok(progress) => progress,
-        Err(ApiError::Service(error))
-            if matches!(error.kind(), ServiceErrorKind::UploadOffsetMismatch { .. }) =>
-        {
-            let ServiceErrorKind::UploadOffsetMismatch { offset } = error.kind() else {
-                unreachable!("guard checks the error kind")
-            };
-            let error = ApiError::Service(error);
-            let mut response = error.into_response();
-            response
-                .headers_mut()
-                .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
-            return Ok(response);
-        }
+        Err(ApiError::Service(error)) => match error.kind() {
+            ErrorKind::UploadOffsetMismatch { offset } => {
+                let error = ApiError::Service(error);
+                let mut response = error.into_response();
+                response
+                    .headers_mut()
+                    .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
+                return Ok(response);
+            }
+            _ => return Err(ApiError::Service(error)),
+        },
         Err(error) => return Err(error),
     };
 
@@ -241,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn offset_mismatch_answers_conflict_with_the_authoritative_offset() {
-        let mismatch = ServiceErrorKind::UploadOffsetMismatch { offset: 786_432 }.into();
+        let mismatch = ErrorKind::UploadOffsetMismatch { offset: 786_432 }.into();
         let response =
             progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap();
 
@@ -257,12 +255,12 @@ mod tests {
 
     #[tokio::test]
     async fn other_errors_propagate_unchanged() {
-        let gone = ApiError::Service(ServiceErrorKind::UploadSessionGone.into());
+        let gone = ApiError::Service(ErrorKind::UploadSessionGone.into());
         let error = progress_response(Err(gone), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::GONE);
 
         let oversized = ApiError::Service(
-            ServiceErrorKind::ChunkExceedsUploadLength {
+            ErrorKind::ChunkExceedsUploadLength {
                 offset: 8,
                 content_length: 4,
                 upload_length: 10,
