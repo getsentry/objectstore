@@ -501,7 +501,7 @@ impl GcsBackend {
             client: common::reqwest_client(),
             endpoint: endpoint_str
                 .parse()
-                .map_err(|error| anyhow::anyhow!("invalid GCS endpoint URL: {error}"))?,
+                .map_err(|e| anyhow::Error::new(e).context("invalid GCS endpoint URL"))?,
             bucket,
             token_provider,
             change_stream,
