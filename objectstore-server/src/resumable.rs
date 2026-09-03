@@ -69,7 +69,7 @@ where
         }
 
         let Query(query) = Query::<ResumableQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
+            .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
 
         Ok(query.classify())
     }
@@ -92,7 +92,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
         let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
-            .map_err(|error| ApiError::Client(error.to_string()))?;
+            .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
         Ok(Session(decode_session_token(&session)?))
     }
 }
@@ -175,7 +175,8 @@ where
 }
 
 fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
-    SessionToken::from_base64url(encoded).map_err(|error| ApiError::Client(error.to_string()))
+    SessionToken::from_base64url(encoded)
+        .map_err(|error| ApiError::map_client("invalid session token", error))?;
 }
 
 /// Confirms that a request neither declares nor streams a non-empty body.
@@ -185,14 +186,14 @@ pub(crate) async fn require_empty_body(
     request: &str,
 ) -> ApiResult<()> {
     if content_length.is_some_and(|ContentLength(length)| length > 0) {
-        return Err(ApiError::Client(format!(
+        return Err(ApiError::client(format!(
             "{request} must be sent with an empty body"
         )));
     }
 
     while let Some(chunk) = body.try_next().await.map_err(ServiceError::from)? {
         if !chunk.is_empty() {
-            return Err(ApiError::Client(format!(
+            return Err(ApiError::client(format!(
                 "{request} must be sent with an empty body"
             )));
         }

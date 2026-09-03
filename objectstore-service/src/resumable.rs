@@ -7,7 +7,7 @@ use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 
 pub use objectstore_types::resumable::{SessionToken, UploadOffset, UploadProgress};
@@ -57,16 +57,19 @@ impl TokenAead {
         mut plaintext: Vec<u8>,
     ) -> Result<EncryptedToken> {
         let mut nonce = [0; TOKEN_NONCE_LENGTH];
-        random
-            .fill(&mut nonce)
-            .map_err(|_| Error::generic("failed to generate resumable token nonce"))?;
+        random.fill(&mut nonce).map_err(|_| {
+            Error::new(
+                ErrorKind::Internal,
+                "failed to generate resumable token nonce",
+            )
+        })?;
         self.0
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce),
                 Aad::from(aad),
                 &mut plaintext,
             )
-            .map_err(|_| Error::generic("failed to encrypt resumable token"))?;
+            .map_err(|_| Error::new(ErrorKind::Internal, "failed to encrypt resumable token"))?;
         Ok(EncryptedToken {
             nonce,
             ciphertext: plaintext,
@@ -159,10 +162,10 @@ impl ResumableUploadEncryption {
             storage_path: id.as_storage_path().to_string(),
             backend_token,
         })
-        .map_err(|cause| Error::Serde {
-            context: "failed to serialize resumable session token".to_owned(),
-            cause,
-        })?;
+        .context(
+            ErrorKind::Internal,
+            "failed to serialize resumable session token",
+        )?;
         let encrypted = self.active_key.encrypt(&self.random, &header, plaintext)?;
 
         let mut envelope =
@@ -176,7 +179,7 @@ impl ResumableUploadEncryption {
     /// Decrypts an external token, returning one uniform error for every invalid envelope.
     pub(crate) fn decrypt(&self, id: &ObjectId, token: SessionToken) -> Result<String> {
         self.decrypt_inner(id, token)
-            .ok_or(Error::UnknownUploadSession)
+            .ok_or_else(|| ErrorKind::UnknownUploadSession.into())
     }
 
     fn decrypt_inner(&self, id: &ObjectId, token: SessionToken) -> Option<String> {
@@ -282,15 +285,15 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(matches!(
             encryption.decrypt(&object, SessionToken::new(tampered)),
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         assert!(matches!(
             encryption.decrypt(&id("other"), token),
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         assert!(matches!(
             encryption.decrypt(&object, SessionToken::new(b"backend token")),
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
     }
 
@@ -311,7 +314,7 @@ mod tests {
         let removed = encryption("v2", &[("v2", 2)]);
         assert!(matches!(
             removed.decrypt(&object, old_token),
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
     }
 

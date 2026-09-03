@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fmt, io};
 
-use anyhow::Context;
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::headers;
@@ -17,15 +16,15 @@ use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
-use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
     PutResponse,
 };
+use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -212,15 +211,16 @@ impl ResumableSession {
     }
 
     fn from_token(token: &str, endpoint: &Url) -> Result<Self> {
-        let (total_length, session_uri) =
-            token.split_once('.').ok_or(Error::UnknownUploadSession)?;
+        let (total_length, session_uri) = token
+            .split_once('.')
+            .ok_or(ErrorKind::UnknownUploadSession)?;
         let total_length = total_length
             .parse()
-            .map_err(|_| Error::UnknownUploadSession)?;
-        let session_uri = Url::parse(session_uri).map_err(|_| Error::UnknownUploadSession)?;
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
         let session = Self::new(session_uri, total_length);
         if session.session_uri.origin() != endpoint.origin() {
-            return Err(Error::UnknownUploadSession);
+            return Err(ErrorKind::UnknownUploadSession.into());
         }
         Ok(session)
     }
@@ -228,10 +228,15 @@ impl ResumableSession {
 
 /// Parses and validates GCS's resumable session URI from the contents of the `Location` header.
 fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<Url> {
-    let session_uri = Url::parse(location)
-        .map_err(|_| Error::generic("GCS: resumable session Location is not a valid URL"))?;
+    let session_uri = Url::parse(location).map_err(|_| {
+        Error::new(
+            ErrorKind::BackendFailure,
+            "GCS: resumable session Location is not a valid URL",
+        )
+    })?;
     if session_uri.origin() != endpoint.origin() {
-        return Err(Error::generic(
+        return Err(Error::new(
+            ErrorKind::BackendFailure,
             "GCS: resumable session Location has an unexpected origin",
         ));
     }
@@ -313,44 +318,47 @@ impl GcsObject {
             .metadata
             .remove(&GcsMetaKey::Expiration)
             .map(|s| s.parse())
-            .transpose()?
+            .transpose()
+            .context(ErrorKind::CorruptData, "decoding GCS expiration policy")?
             .unwrap_or_default();
 
         let origin = self
             .metadata
             .remove(&GcsMetaKey::Origin)
-            .map(|value| decode_gcs_meta_value(&value))
+            .map(|value| decode_gcs_meta_value(&value, "decoding GCS origin metadata"))
             .transpose()?;
         let filename = self
             .metadata
             .remove(&GcsMetaKey::Filename)
-            .map(|value| decode_gcs_meta_value(&value))
+            .map(|value| decode_gcs_meta_value(&value, "decoding GCS filename metadata"))
             .transpose()?;
 
         let content_type = self.content_type;
-        let compression = self.content_encoding.map(|s| s.parse()).transpose()?;
+        let compression = self
+            .content_encoding
+            .map(|s| s.parse())
+            .transpose()
+            .context(ErrorKind::CorruptData, "decoding GCS compression")?;
         let size = self
             .size
             .map(|size| size.parse())
             .transpose()
-            .map_err(|e| Error::Generic {
-                context: "GCS: failed to parse size from object metadata".to_string(),
-                cause: Some(Box::new(e)),
-            })?;
+            .context(ErrorKind::CorruptData, "decoding GCS object size")?;
         let time_created = self.time_created;
 
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
         for (key, value) in self.metadata {
             if let GcsMetaKey::Custom(custom_key) = key {
-                custom.insert(custom_key, decode_gcs_meta_value(&value)?);
+                custom.insert(
+                    custom_key,
+                    decode_gcs_meta_value(&value, "decoding GCS custom metadata")?,
+                );
             } else {
-                return Err(Error::Generic {
-                    context: format!(
-                        "GCS: unexpected built-in metadata key in object metadata: {key}"
-                    ),
-                    cause: None,
-                });
+                return Err(Error::new(
+                    ErrorKind::CorruptData,
+                    format!("unexpected GCS metadata key: {key}"),
+                ));
             }
         }
 
@@ -443,10 +451,10 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
         let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
-            formatted.to_string().parse().map_err(|e| Error::Generic {
-                context: "GCS: invalid custom-time header value".into(),
-                cause: Some(Box::new(e)),
-            })?,
+            formatted
+                .to_string()
+                .parse()
+                .context(ErrorKind::Internal, "encoding GCS custom-time header")?,
         );
     }
 
@@ -456,10 +464,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
             compression
                 .to_string()
                 .parse()
-                .map_err(|e| Error::Generic {
-                    context: "GCS: invalid content-encoding header value".into(),
-                    cause: Some(Box::new(e)),
-                })?,
+                .context(ErrorKind::Internal, "encoding GCS content-encoding header")?,
         );
     }
 
@@ -487,11 +492,8 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
 }
 
 /// Decodes a stored GCS metadata value into its logical string.
-fn decode_gcs_meta_value(value: &str) -> Result<String> {
-    headers::decode_header_str(value).map_err(|cause| Error::Generic {
-        context: "GCS: invalid percent-encoded UTF-8 in object metadata".to_owned(),
-        cause: Some(Box::new(cause)),
-    })
+fn decode_gcs_meta_value(value: &str, context: &'static str) -> Result<String> {
+    headers::decode_header_str(value).context(ErrorKind::CorruptData, context)
 }
 
 /// Inserts a single `x-goog-meta-*` header, escaping the value for transport.
@@ -511,39 +513,20 @@ fn insert_gcs_meta_header(
 ) -> Result<()> {
     let header_name = format!("x-goog-meta-{key}");
     headers.insert(
-        HeaderName::try_from(&header_name).map_err(|e| Error::Generic {
-            context: format!("GCS: invalid header name: {header_name}"),
-            cause: Some(Box::new(e)),
-        })?,
+        HeaderName::try_from(&header_name).context(
+            ErrorKind::Internal,
+            format!("encoding GCS metadata header {header_name}"),
+        )?,
         headers::encode_header_value(value),
     );
     Ok(())
 }
 
-/// Returns `true` if the error is a transient reqwest failure worth retrying.
+/// Returns `true` if the error is a transient backend failure worth retrying.
 fn error_is_retryable(error: &Error) -> bool {
-    match error {
-        Error::Reqwest { cause, .. } => {
-            cause.is_timeout()
-                || cause.is_connect()
-                || cause.is_request()
-                || cause.status().is_some_and(status_is_retryable)
-        }
-        Error::BackendResponse { status, .. } => status_is_retryable(*status),
-        _ => false,
-    }
-}
-
-fn status_is_retryable(status: StatusCode) -> bool {
-    // https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
     matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
+        error.kind(),
+        ErrorKind::BackendRateLimited | ErrorKind::BackendTimeout | ErrorKind::BackendUnavailable
     )
 }
 
@@ -577,7 +560,9 @@ impl GcsBackend {
 
         Ok(Self {
             client: common::reqwest_client(),
-            endpoint: endpoint_str.parse().context("invalid GCS endpoint URL")?,
+            endpoint: endpoint_str
+                .parse()
+                .map_err(|e| anyhow::Error::new(e).context("invalid GCS endpoint URL"))?,
             bucket,
             token_provider,
             change_stream,
@@ -617,7 +602,7 @@ impl GcsBackend {
                     )
                     .send_traced()
                     .await
-                    .map_err(|error| Error::reqwest("GCS: query resumable upload", error))?;
+                    .reqwest_context("GCS: query resumable upload")?;
                 let (progress, completion) =
                     parse_upload_progress_response(response, session.total_length).await?;
                 if let Some(completion) = completion {
@@ -635,12 +620,11 @@ impl GcsBackend {
 
         let path = id.as_storage_path().to_string();
         url.path_segments_mut()
-            .map_err(|()| Error::Generic {
-                context: format!(
-                    "GCS: invalid endpoint URL, {} cannot be a base",
-                    self.endpoint
-                ),
-                cause: None,
+            .map_err(|()| {
+                Error::new(
+                    ErrorKind::Internal,
+                    format!("building GCS object URL from {}", self.endpoint),
+                )
             })?
             .extend(&["storage", "v1", "b", &self.bucket, "o", &path]);
 
@@ -652,12 +636,11 @@ impl GcsBackend {
         let mut url = self.endpoint.clone();
 
         url.path_segments_mut()
-            .map_err(|()| Error::Generic {
-                context: format!(
-                    "GCS: invalid endpoint URL, {} cannot be a base",
-                    self.endpoint
-                ),
-                cause: None,
+            .map_err(|()| {
+                Error::new(
+                    ErrorKind::Internal,
+                    format!("building GCS object URL from {}", self.endpoint),
+                )
             })?
             .extend(&["upload", "storage", "v1", "b", &self.bucket, "o"]);
 
@@ -677,12 +660,11 @@ impl GcsBackend {
     fn xml_object_url(&self, id: &ObjectId) -> Result<Url> {
         let mut url = self.endpoint.clone();
         {
-            let mut segments = url.path_segments_mut().map_err(|()| Error::Generic {
-                context: format!(
-                    "GCS: invalid endpoint URL, {} cannot be a base",
-                    self.endpoint
-                ),
-                cause: None,
+            let mut segments = url.path_segments_mut().map_err(|()| {
+                Error::new(
+                    ErrorKind::Internal,
+                    format!("building GCS object URL from {}", self.endpoint),
+                )
             })?;
             segments.push(&self.bucket);
             for part in id.as_storage_path().to_string().split('/') {
@@ -696,7 +678,10 @@ impl GcsBackend {
     async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
         let mut builder = self.client.request(method, url);
         if let Some(provider) = &self.token_provider {
-            let token = provider.token(TOKEN_SCOPES).await?;
+            let token = provider.token(TOKEN_SCOPES).await.context(
+                ErrorKind::BackendFailure,
+                "getting GCS authentication token",
+            )?;
             builder = builder.bearer_auth(token.as_str());
         }
         Ok(builder)
@@ -742,7 +727,7 @@ impl GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: get metadata request", e))?;
+                    .reqwest_context("getting GCS object metadata")?;
 
                 if resp.status() == StatusCode::NOT_FOUND {
                     resp.drain_body().await;
@@ -750,11 +735,11 @@ impl GcsBackend {
                 }
 
                 let metadata: GcsObject = resp
-                    .check_error("GCS: get metadata status")
+                    .check_error("getting GCS object metadata")
                     .await?
                     .json()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: get metadata parse", e))?;
+                    .reqwest_context("getting GCS object metadata")?;
 
                 Ok(Some(metadata))
             })
@@ -825,27 +810,28 @@ impl GcsBackend {
             .append_pair("ifMetagenerationMatch", metageneration);
 
         self.with_retry("update_custom_time", || async {
-            match self
+            let response = self
                 .request(Method::PATCH, object_url.clone())
                 .await?
                 .json(&CustomTimeRequest { custom_time })
                 .send_traced()
                 .await
-                .check_error("GCS: update custom time")
-                .await
-            {
-                Ok(response) => {
-                    response.drain_body().await;
-                    Ok(true)
-                }
-                // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race,
-                // so leave its update intact and let a future read evaluate the TTI again.
-                Err(Error::BackendResponse {
-                    status: StatusCode::PRECONDITION_FAILED,
-                    ..
-                }) => Ok(false),
-                Err(error) => Err(error),
+                .reqwest_context("updating GCS custom time")?;
+
+            // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race, so
+            // leave its update intact and let a future read evaluate the TTI again.
+            if response.status() == StatusCode::PRECONDITION_FAILED {
+                response.drain_body().await;
+                return Ok(false);
             }
+
+            response
+                .check_error("updating GCS custom time")
+                .await?
+                .drain_body()
+                .await;
+
+            Ok(true)
         })
         .await
     }
@@ -869,38 +855,38 @@ async fn parse_upload_progress_response(
     match status {
         StatusCode::NOT_FOUND => {
             response.drain_body().await;
-            Err(Error::UnknownUploadSession)
+            Err(ErrorKind::UnknownUploadSession.into())
         }
         StatusCode::GONE => {
             response.drain_body().await;
-            Err(Error::UploadSessionGone)
+            Err(ErrorKind::UploadSessionGone.into())
         }
         status if status.is_client_error() || status.is_server_error() => {
             response.check_error("GCS: resumable upload status").await?;
-            Err(Error::generic(format!(
-                "GCS: unexpected resumable upload error status {status}"
-            )))
+            Err(Error::new(
+                ErrorKind::BackendFailure,
+                format!("GCS: unexpected resumable upload error status {status}"),
+            ))
         }
         _ => {
             let range = response
                 .headers()
                 .get(header::RANGE)
                 .map(|value| {
-                    value
-                        .to_str()
-                        .map(str::to_owned)
-                        .map_err(|_| Error::generic("GCS: invalid Range header"))
+                    value.to_str().map(str::to_owned).map_err(|_| {
+                        Error::new(ErrorKind::BackendFailure, "GCS: invalid Range header")
+                    })
                 })
                 .transpose()?;
             let completion = if matches!(status, StatusCode::OK | StatusCode::CREATED) {
-                let body = response.bytes().await.map_err(|error| {
-                    Error::reqwest("GCS: read completed resumable upload response", error)
-                })?;
-                let mut object =
-                    serde_json::from_slice::<GcsObject>(&body).map_err(|cause| Error::Serde {
-                        context: "GCS: parse completed resumable upload response".to_owned(),
-                        cause,
-                    })?;
+                let body = response
+                    .bytes()
+                    .await
+                    .reqwest_context("GCS: read completed resumable upload response")?;
+                let mut object = serde_json::from_slice::<GcsObject>(&body).context(
+                    ErrorKind::CorruptData,
+                    "GCS: parse completed resumable upload response",
+                )?;
                 object.metadata.remove(&GcsMetaKey::EmulatorIgnored);
                 Some(ResumableCompletion {
                     stored_size: object.size.as_deref().and_then(|size| size.parse().ok()),
@@ -938,9 +924,10 @@ fn parse_resumable_status(
             Ok(UploadProgress::Incomplete { offset })
         }
         StatusCode::OK | StatusCode::CREATED => Ok(UploadProgress::Complete),
-        _ => Err(Error::generic(format!(
-            "GCS: unexpected resumable upload status {status}"
-        ))),
+        _ => Err(Error::new(
+            ErrorKind::BackendFailure,
+            format!("GCS: unexpected resumable upload status {status}"),
+        )),
     }
 }
 
@@ -950,12 +937,21 @@ fn parse_resumable_range(value: &str, total_length: u64) -> Result<u64> {
         .strip_prefix("bytes=0-")
         .filter(|end| !end.is_empty() && end.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|end| end.parse::<u64>().ok())
-        .ok_or_else(|| Error::generic("GCS: malformed resumable Range header"))?;
-    let offset = end
-        .checked_add(1)
-        .ok_or_else(|| Error::generic("GCS: resumable Range header overflows"))?;
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "GCS: malformed resumable Range header",
+            )
+        })?;
+    let offset = end.checked_add(1).ok_or_else(|| {
+        Error::new(
+            ErrorKind::BackendFailure,
+            "GCS: resumable Range header overflows",
+        )
+    })?;
     if offset > total_length {
-        return Err(Error::generic(
+        return Err(Error::new(
+            ErrorKind::BackendFailure,
             "GCS: incomplete resumable Range reaches declared upload length",
         ));
     }
@@ -963,13 +959,10 @@ fn parse_resumable_range(value: &str, total_length: u64) -> Result<u64> {
 }
 
 /// Returns whether GCS rejected a chunk because it starts after its stored prefix.
-fn is_resumable_offset_gap(error: &Error) -> bool {
+fn is_resumable_offset_gap(status: StatusCode) -> bool {
     matches!(
-        error,
-        Error::BackendResponse {
-            status: StatusCode::BAD_REQUEST | StatusCode::RANGE_NOT_SATISFIABLE,
-            ..
-        }
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::RANGE_NOT_SATISFIABLE
     )
 }
 
@@ -979,7 +972,9 @@ fn reconcile_resumable_offset_gap(
     progress: Result<UploadProgress>,
 ) -> Result<UploadProgress> {
     match progress {
-        Ok(UploadProgress::Incomplete { offset }) => Err(Error::UploadOffsetMismatch { offset }),
+        Ok(UploadProgress::Incomplete { offset }) => {
+            Err(ErrorKind::UploadOffsetMismatch { offset }.into())
+        }
         Ok(UploadProgress::Complete) => Ok(UploadProgress::Complete),
         Err(_) => Err(error),
     }
@@ -1007,10 +1002,8 @@ impl Backend for GcsBackend {
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
         // are required by the GCS API.
-        let metadata_json = serde_json::to_string(&gcs_metadata).map_err(|cause| Error::Serde {
-            context: "failed to serialize metadata for GCS upload".to_string(),
-            cause,
-        })?;
+        let metadata_json = serde_json::to_string(&gcs_metadata)
+            .context(ErrorKind::Internal, "encoding GCS upload metadata")?;
 
         let multipart = multipart::Form::new()
             .part(
@@ -1023,10 +1016,7 @@ impl Backend for GcsBackend {
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream.boxed()))
                     .mime_str(&metadata.content_type)
-                    .map_err(|e| Error::Generic {
-                        context: format!("invalid mime type: {}", metadata.content_type),
-                        cause: Some(Box::new(e)),
-                    })?,
+                    .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?,
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -1041,7 +1031,7 @@ impl Backend for GcsBackend {
             .header(header::CONTENT_TYPE, content_type)
             .send_traced()
             .await
-            .check_error("GCS: upload object")
+            .check_error("uploading a GCS object")
             .await?;
 
         let stored_size = read_stored_content_length(response).await;
@@ -1077,10 +1067,11 @@ impl Backend for GcsBackend {
                 if let Some(r) = range {
                     req = req.header(header::RANGE, r.to_header_value());
                 }
+
                 let resp = req
                     .send_traced()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: get payload", e))?;
+                    .reqwest_context("getting a GCS object payload")?;
 
                 if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     let raw = resp
@@ -1089,16 +1080,16 @@ impl Backend for GcsBackend {
                         .and_then(|v| v.to_str().ok());
                     let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
                     let err = match total {
-                        Some(total) => Error::RangeNotSatisfiable { total },
-                        None => Error::generic(format!(
-                            "GCS: 416 response with invalid Content-Range: {raw:?}"
-                        )),
+                        Some(total) => ErrorKind::RangeNotSatisfiable { total }.into(),
+                        None => {
+                            Error::new(ErrorKind::BackendFailure, "invalid GCS 416 Content-Range")
+                        }
                     };
                     resp.drain_body().await;
                     return Err(err);
                 }
 
-                resp.check_error("GCS: get payload").await
+                resp.check_error("getting a GCS object payload").await
             })
             .await?;
 
@@ -1109,9 +1100,8 @@ impl Backend for GcsBackend {
                     .get(header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<ContentRange>().ok())
-                    .ok_or_else(|| Error::Generic {
-                        context: "GCS: 206 response missing valid Content-Range header".to_owned(),
-                        cause: None,
+                    .ok_or_else(|| {
+                        Error::new(ErrorKind::BackendFailure, "missing GCS 206 Content-Range")
                     })?,
             )
         } else {
@@ -1145,7 +1135,7 @@ impl Backend for GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: delete object", e))?;
+                    .reqwest_context("deleting a GCS object")?;
 
                 // Do not error for objects that do not exist
                 if resp.status() == StatusCode::NOT_FOUND {
@@ -1153,7 +1143,7 @@ impl Backend for GcsBackend {
                     return Ok(false);
                 }
 
-                resp.check_error("GCS: delete object")
+                resp.check_error("deleting a GCS object")
                     .await?
                     .drain_body()
                     .await;
@@ -1178,13 +1168,10 @@ impl Backend for GcsBackend {
     ) -> Result<Option<String>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
         let url = self.upload_url(id, "resumable")?;
-        let metadata_json =
-            serde_json::to_vec(&GcsObject::from_metadata(metadata)).map_err(|cause| {
-                Error::Serde {
-                    context: "GCS: failed to serialize resumable upload metadata".to_owned(),
-                    cause,
-                }
-            })?;
+        let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
+            ErrorKind::Internal,
+            "GCS: failed to serialize resumable upload metadata",
+        )?;
         let content_type = metadata.content_type.clone();
 
         let session_uri = self
@@ -1208,9 +1195,10 @@ impl Backend for GcsBackend {
                     if response.status() != StatusCode::OK {
                         let status = response.status();
                         response.drain_body().await;
-                        return Err(Error::generic(format!(
-                            "GCS: unexpected resumable session creation status {status}"
-                        )));
+                        return Err(Error::new(
+                            ErrorKind::BackendFailure,
+                            format!("GCS: unexpected resumable session creation status {status}"),
+                        ));
                     }
 
                     let location = response
@@ -1218,7 +1206,8 @@ impl Backend for GcsBackend {
                         .get(header::LOCATION)
                         .and_then(|value| value.to_str().ok())
                         .ok_or_else(|| {
-                            Error::generic(
+                            Error::new(
+                                ErrorKind::BackendFailure,
                                 "GCS: resumable session response missing valid Location header",
                             )
                         })?;
@@ -1245,19 +1234,21 @@ impl Backend for GcsBackend {
         objectstore_log::debug!("Uploading resumable chunk to GCS backend");
         let session = ResumableSession::from_token(token, &self.endpoint)?;
 
-        let end = offset
-            .checked_add(content_length)
-            .ok_or(Error::ChunkExceedsUploadLength {
-                offset,
-                content_length,
-                upload_length: session.total_length,
-            })?;
+        let end =
+            offset
+                .checked_add(content_length)
+                .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                    offset,
+                    content_length,
+                    upload_length: session.total_length,
+                })?;
         if end > session.total_length {
-            return Err(Error::ChunkExceedsUploadLength {
+            return Err(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
                 upload_length: session.total_length,
-            });
+            }
+            .into());
         }
         let inclusive_end = end.checked_sub(1).unwrap_or(end);
 
@@ -1270,10 +1261,9 @@ impl Backend for GcsBackend {
             .body(Body::wrap_stream(stream))
             .send_traced()
             .await
-            .map_err(|error| match crate::stream::unpack_client_error(&error) {
-                Some(error) => Error::Client(error),
-                None => Error::reqwest("GCS: upload resumable chunk", error),
-            })?;
+            .reqwest_context("GCS: upload resumable chunk")?;
+
+        let response_status = response.status();
 
         let progress = parse_upload_progress_response(response, session.total_length)
             .await
@@ -1285,7 +1275,7 @@ impl Backend for GcsBackend {
             });
 
         match progress {
-            Err(error) if is_resumable_offset_gap(&error) => {
+            Err(error) if is_resumable_offset_gap(response_status) => {
                 let progress = self.query_offset(id, &session).await;
                 reconcile_resumable_offset_gap(error, progress)
             }
@@ -1313,7 +1303,7 @@ impl Backend for GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .map_err(|error| Error::reqwest("GCS: cancel resumable upload", error))?;
+                    .reqwest_context("GCS: cancel resumable upload")?;
                 match response.status() {
                     // Expected status code when canceling a recently created upload.
                     status if status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
@@ -1331,7 +1321,8 @@ impl Backend for GcsBackend {
                             .await?
                             .drain_body()
                             .await;
-                        Err(Error::generic(
+                        Err(Error::new(
+                            ErrorKind::BackendFailure,
                             "GCS: unexpected resumable cancellation status",
                         ))
                     }
@@ -1468,10 +1459,10 @@ impl MultipartUploadBackend for GcsBackend {
         let mut headers = metadata_to_gcs_headers(metadata)?;
         headers.insert(
             header::CONTENT_TYPE,
-            metadata.content_type.parse().map_err(|e| Error::Generic {
-                context: "GCS: invalid content-type header value".into(),
-                cause: Some(Box::new(e)),
-            })?,
+            metadata
+                .content_type
+                .parse()
+                .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?,
         );
         headers.insert(
             header::CONTENT_LENGTH,
@@ -1488,19 +1479,19 @@ impl MultipartUploadBackend for GcsBackend {
                     .headers(headers)
                     .send_traced()
                     .await
-                    .check_error("GCS: initiate multipart upload")
+                    .check_error("initiating a GCS multipart upload")
                     .await?;
 
                 let body = resp
                     .bytes()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: read initiate multipart body", e))?;
+                    .reqwest_context("reading GCS initiate-multipart response")?;
 
                 let xml: XmlInitiateMultipartUploadResponse =
-                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
-                        context: "GCS: failed to parse initiate multipart response".to_owned(),
-                        cause: Some(Box::new(e)),
-                    })?;
+                    quick_xml::de::from_reader(body.as_ref()).context(
+                        ErrorKind::CorruptData,
+                        "decoding GCS initiate-multipart response",
+                    )?;
 
                 xml.try_into()
             }
@@ -1537,7 +1528,7 @@ impl MultipartUploadBackend for GcsBackend {
         let resp = builder
             .send_traced()
             .await
-            .check_error("GCS: upload part")
+            .check_error("uploading a GCS multipart part")
             .await?;
 
         let etag = resp
@@ -1545,7 +1536,12 @@ impl MultipartUploadBackend for GcsBackend {
             .get(header::ETAG)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned())
-            .ok_or_else(|| Error::generic("GCS: upload part response missing ETag header"))?;
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::BackendFailure,
+                    "GCS upload-part response missing ETag",
+                )
+            })?;
 
         resp.drain_body().await;
 
@@ -1581,19 +1577,16 @@ impl MultipartUploadBackend for GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .check_error("GCS: list parts")
+                    .check_error("listing GCS multipart parts")
                     .await?;
 
                 let body = resp
                     .bytes()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: read list parts body", e))?;
+                    .reqwest_context("reading GCS list-parts response")?;
 
-                let xml: XmlListPartsResponse =
-                    quick_xml::de::from_reader(body.as_ref()).map_err(|e| Error::Generic {
-                        context: "GCS: failed to parse list parts response".to_owned(),
-                        cause: Some(Box::new(e)),
-                    })?;
+                let xml: XmlListPartsResponse = quick_xml::de::from_reader(body.as_ref())
+                    .context(ErrorKind::CorruptData, "decoding GCS list-parts response")?;
 
                 Ok(xml.into())
             }
@@ -1619,13 +1612,13 @@ impl MultipartUploadBackend for GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: abort multipart upload", e))?;
+                    .reqwest_context("aborting a GCS multipart upload")?;
 
                 // XXX: real S3 would return 404 here if the upload has been recently completed and we
                 // would have to handle it. It turns out GCS returns 204 instead, so we don't need to
                 // handle that case.
 
-                resp.check_error("GCS: abort multipart upload")
+                resp.check_error("aborting a GCS multipart upload")
                     .await?
                     .drain_body()
                     .await;
@@ -1648,10 +1641,10 @@ impl MultipartUploadBackend for GcsBackend {
         url.query_pairs_mut().append_pair("uploadId", upload_id);
 
         let body = XmlCompleteMultipartUpload::from(parts);
-        let xml = quick_xml::se::to_string(&body).map_err(|e| Error::Generic {
-            context: "GCS: failed to serialize complete multipart request".into(),
-            cause: Some(Box::new(e)),
-        })?;
+        let xml = quick_xml::se::to_string(&body).context(
+            ErrorKind::Internal,
+            "encoding GCS complete-multipart request",
+        )?;
 
         self.with_retry("complete_multipart", || {
             let url = url.clone();
@@ -1664,7 +1657,7 @@ impl MultipartUploadBackend for GcsBackend {
                     .body(xml)
                     .send_traced()
                     .await
-                    .check_error("GCS: complete multipart upload")
+                    .check_error("completing a GCS multipart upload")
                     .await?;
 
                 // XXX: real S3 would return 404 here if the upload has been recently completed and we
@@ -1674,7 +1667,7 @@ impl MultipartUploadBackend for GcsBackend {
                 let body = resp
                     .bytes()
                     .await
-                    .map_err(|e| Error::reqwest("GCS: read complete multipart body", e))?;
+                    .reqwest_context("reading GCS complete-multipart response")?;
 
                 let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
                     .ok()
@@ -1719,7 +1712,7 @@ mod tests {
         ) -> Result<String> {
             <Self as Backend>::create_upload_session(self, id, metadata, total_length)
                 .await?
-                .ok_or(Error::NotImplemented.into())
+                .ok_or_else(|| Error::from(ErrorKind::Unsupported).into())
         }
     }
 
@@ -1826,7 +1819,7 @@ mod tests {
         ] {
             assert!(matches!(
                 ResumableSession::from_token(&malformed, &endpoint),
-                Err(Error::UnknownUploadSession)
+                Err(error) if error.kind() == ErrorKind::UnknownUploadSession
             ));
         }
         Ok(())
@@ -2022,21 +2015,26 @@ mod tests {
             .create_upload_session(&id, &Metadata::default(), 10)
             .await?;
 
-        assert!(matches!(
-            backend
-                .put_chunk(&id, &token, 8, 3, stream::single(b"abc".to_vec()))
-                .await,
-            Err(Error::ChunkExceedsUploadLength {
+        let error = backend
+            .put_chunk(&id, &token, 8, 3, stream::single(b"abc".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::ChunkExceedsUploadLength {
                 offset: 8,
                 content_length: 3,
                 upload_length: 10
-            })
-        ));
+            }
+        );
+
+        let error = backend
+            .put_chunk(&id, &token, u64::MAX, 2, stream::single(b"ab".to_vec()))
+            .await
+            .unwrap_err();
         assert!(matches!(
-            backend
-                .put_chunk(&id, &token, u64::MAX, 2, stream::single(b"ab".to_vec()))
-                .await,
-            Err(Error::ChunkExceedsUploadLength { .. })
+            error.kind(),
+            ErrorKind::ChunkExceedsUploadLength { .. }
         ));
         Ok(())
     }
@@ -2053,7 +2051,7 @@ mod tests {
         backend.cancel_upload(&id, &token).await?;
         assert!(matches!(
             backend.upload_offset(&id, &token).await,
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         Ok(())
     }
@@ -2093,10 +2091,7 @@ mod tests {
             backend
                 .put_chunk(&id, &token, 0, 4, stream::single(b"data".to_vec()))
                 .await,
-            Err(Error::BackendResponse {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                ..
-            })
+            Err(error) if error.kind() == ErrorKind::BackendUnavailable
         ));
         assert_eq!(
             backend.upload_offset(&id, &token).await?,
@@ -2127,10 +2122,7 @@ mod tests {
                     stream::single(data.clone()),
                 )
                 .await,
-            Err(Error::BackendResponse {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                ..
-            })
+            Err(error) if error.kind() == ErrorKind::BackendUnavailable
         ));
         assert_eq!(
             backend.upload_offset(&id, &token).await?,
@@ -2166,7 +2158,7 @@ mod tests {
             backend
                 .put_chunk(&id, &token, 0, 5, stream::single(b"final".to_vec()))
                 .await,
-            Err(Error::Serde { .. })
+            Err(error) if error.kind() == ErrorKind::CorruptData
         ));
         assert_eq!(
             backend.upload_offset(&id, &token).await?,
@@ -2178,20 +2170,26 @@ mod tests {
     #[test]
     fn resumable_offset_gap_recovery_uses_authoritative_progress() -> Result<()> {
         assert_eq!(
-            reconcile_resumable_offset_gap(Error::NotImplemented, Ok(UploadProgress::Complete))?,
+            reconcile_resumable_offset_gap(
+                ErrorKind::Unsupported.into(),
+                Ok(UploadProgress::Complete),
+            )?,
             UploadProgress::Complete
         );
 
-        assert!(matches!(
-            reconcile_resumable_offset_gap(
-                Error::NotImplemented,
-                Ok(UploadProgress::Incomplete { offset: 7 }),
-            ),
-            Err(Error::UploadOffsetMismatch { offset: 7 })
-        ));
-        let query_error =
-            reconcile_resumable_offset_gap(Error::NotImplemented, Err(Error::UnknownUploadSession));
-        assert!(matches!(query_error, Err(Error::NotImplemented)));
+        let error = reconcile_resumable_offset_gap(
+            ErrorKind::Unsupported.into(),
+            Ok(UploadProgress::Incomplete { offset: 7 }),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 7 });
+
+        let query_error = reconcile_resumable_offset_gap(
+            ErrorKind::Unsupported.into(),
+            Err(ErrorKind::UnknownUploadSession.into()),
+        )
+        .unwrap_err();
+        assert_eq!(query_error.kind(), ErrorKind::Unsupported);
         Ok(())
     }
 
@@ -2204,11 +2202,14 @@ mod tests {
             .await?
             .send_traced()
             .await
-            .check_error("GCS: get metadata request")
+            .check_error("getting GCS object metadata")
             .await?
             .json::<GcsObject>()
             .await
-            .map_err(|e| Error::reqwest("GCS: get metadata parse", e))
+            .context(
+                ErrorKind::BackendFailure,
+                "decoding GCS object metadata response",
+            )
             .map(|object| (object.generation, object.metageneration))?)
     }
 

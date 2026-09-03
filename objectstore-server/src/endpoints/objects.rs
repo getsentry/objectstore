@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use objectstore_service::error::Error as ServiceError;
+use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::Metadata;
@@ -89,13 +89,12 @@ async fn create_object(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     state
         .config
         .usecases
-        .validate(&context.usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&context.usecase, &metadata)?;
 
     let response_id = service.insert_object(context, None, metadata, body).await?;
     let response = Json(InsertObjectResponse {
@@ -118,23 +117,28 @@ async fn object_get(
     let (metadata, content_range, stream) = match result {
         Ok(Some(result)) => result,
         Ok(None) => return Ok(StatusCode::NOT_FOUND.into_response()),
-        Err(ApiError::Service(ServiceError::RangeNotSatisfiable { total })) => {
-            let mut response = (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    http::header::CONTENT_RANGE,
-                    ContentRange::unsatisfiable_total_to_header_value(total),
-                )],
-            )
-                .into_response();
-            insert_accept_ranges(&mut response);
-            return Ok(response);
-        }
+        Err(ApiError::Service(e)) => match e.kind() {
+            ErrorKind::RangeNotSatisfiable { total } => {
+                let mut response = (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [(
+                        http::header::CONTENT_RANGE,
+                        ContentRange::unsatisfiable_total_to_header_value(total),
+                    )],
+                )
+                    .into_response();
+                insert_accept_ranges(&mut response);
+                return Ok(response);
+            }
+            _ => return Err(e.into()),
+        },
         Err(e) => return Err(e),
     };
 
     let stream = state.meter_stream(stream, &context);
-    let mut metadata_headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let mut metadata_headers = metadata
+        .to_headers("")
+        .map_err(|error| ApiError::internal("encoding object response metadata", error))?;
 
     let mut response = match content_range {
         Some(ref content_range) => {
@@ -168,7 +172,9 @@ async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResu
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let mut headers = metadata.to_headers("").map_err(ServiceError::from)?;
+    let mut headers = metadata
+        .to_headers("")
+        .map_err(|error| ApiError::internal("encoding object response metadata", error))?;
     insert_content_length(&mut headers, &metadata);
 
     let mut response = (StatusCode::OK, headers).into_response();
@@ -245,15 +251,14 @@ async fn insert_object(
     headers: HeaderMap,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     let ObjectId { context, key } = id;
 
     state
         .config
         .usecases
-        .validate(&context.usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&context.usecase, &metadata)?;
 
     let response_id = service
         .insert_object(context, Some(key), metadata, body)

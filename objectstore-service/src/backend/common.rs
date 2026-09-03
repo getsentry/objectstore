@@ -8,7 +8,7 @@ use objectstore_types::resumable::UploadProgress;
 
 use bytes::Bytes;
 
-use crate::error::{Error, Result};
+use crate::error::{ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -68,10 +68,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
     ///
-    /// The default returns [`Error::NotImplemented`]. Backends that implement
+    /// The default returns an [`ErrorKind::Unsupported`]. Backends that implement
     /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Creates a resumable upload session for the object at `id`.
@@ -122,7 +122,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         let _ = (id, session, offset, content_length, stream);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Reports how far the session has progressed.
@@ -134,7 +134,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify a known session.
     async fn upload_offset(&self, id: &ObjectId, session: &str) -> Result<UploadProgress> {
         let _ = (id, session);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
@@ -142,7 +142,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
     async fn cancel_upload(&self, id: &ObjectId, session: &str) -> Result<()> {
         let _ = (id, session);
-        Err(Error::NotImplemented)
+        Err(ErrorKind::Unsupported.into())
     }
 }
 

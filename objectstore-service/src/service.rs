@@ -16,7 +16,7 @@ use objectstore_types::resumable::{SessionToken, UploadProgress};
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
 use crate::concurrency::ConcurrencyLimiter;
-use crate::error::Result;
+use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::{ObjectContext, ObjectId};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -224,7 +224,7 @@ impl StorageService {
         metadata: Metadata,
         stream: ClientStream,
     ) -> Result<InsertResponse> {
-        metadata.validate()?;
+        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let id = ObjectId::optional(context, key);
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
@@ -278,7 +278,7 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        metadata.validate()?;
+        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
         let inner = self.inner.clone();
         self.spawn("initiate_multipart", async move {
@@ -391,7 +391,7 @@ impl StorageService {
         metadata: Metadata,
         total_length: u64,
     ) -> Result<Option<SessionToken>> {
-        metadata.validate()?;
+        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let inner = Arc::clone(&self.inner);
         let encryption = self.resumable_upload_encryption.clone();
         self.spawn("create_upload_session", async move {
@@ -483,7 +483,6 @@ mod tests {
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
     use crate::change_stream::ChangeStreamFactory;
-    use crate::error::Error;
     use crate::stream::{self, ClientStream};
 
     #[derive(Clone, Debug, Default)]
@@ -722,10 +721,15 @@ mod tests {
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id, None).await;
 
-        let Err(Error::Panic(msg)) = result else {
+        let Err(error) = result else {
             panic!("expected Panic error");
         };
-        assert!(msg.contains("intentional panic in get_object"), "{msg}");
+        assert_eq!(error.kind(), ErrorKind::Panic);
+        assert_eq!(error.to_string(), "service task panicked");
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "intentional panic in get_object"
+        );
     }
 
     /// In-memory backend with optional synchronization for `put_object`.
@@ -865,7 +869,9 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(Error::AtCapacity)),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == ErrorKind::AtCapacity),
             "expected AtCapacity, got {result:?}"
         );
 
@@ -922,12 +928,12 @@ mod tests {
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
         let result = service.get_object(id.clone(), None).await;
-        assert!(matches!(result, Err(Error::Panic(_))));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::Panic));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
         let result = service.get_object(id, None).await;
         assert!(
-            !matches!(result, Err(Error::AtCapacity)),
+            !result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity),
             "permit was not released after panic"
         );
     }
@@ -959,7 +965,7 @@ mod tests {
         };
 
         let result = service.create_upload_session(id, metadata, 1024).await;
-        assert!(matches!(result, Err(Error::Metadata(_))), "{result:?}");
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::InvalidMetadata));
     }
 
     #[tokio::test]
@@ -977,7 +983,7 @@ mod tests {
             service
                 .upload_offset(id.clone(), SessionToken::new(b"backend token"))
                 .await,
-            Err(Error::UnknownUploadSession)
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());
         service.upload_offset(id, token).await?;
@@ -1030,7 +1036,7 @@ mod tests {
         let result = service
             .upload_offset(id, SessionToken::new(b"backend token"))
             .await;
-        assert!(matches!(result, Err(Error::UnknownUploadSession)));
+        assert!(result.is_err_and(|error| error.kind() == ErrorKind::UnknownUploadSession));
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());
     }
 }

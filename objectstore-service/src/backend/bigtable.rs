@@ -50,7 +50,7 @@ use crate::backend::common::{
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
 use crate::stream::{ChunkedBytes, ClientStream};
@@ -276,7 +276,7 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
     }
 }
 
-/// Builds a raw row filter that matches any tombstone row, new- or legacy-format.
+/// Builds a raw row filter that matches any live tombstone row, new- or legacy-format.
 ///
 /// New format: presence of the `r` column.
 /// Legacy format: `is_redirect_tombstone: true` in the `m` column JSON.
@@ -294,13 +294,45 @@ fn tombstone_filter() -> v2::RowFilter {
     live_row_filter(filter)
 }
 
-/// Returns a [`MutatePredicate`] that matches any tombstone row.
+/// Returns a [`MutatePredicate`] that matches any live tombstone row.
 ///
-/// Mutations run only when no tombstone is present (`predicate_matched == false`).
-/// Used by [`BigTableBackend::put_non_tombstone`], [`BigTableBackend::delete_non_tombstone`],
-/// and [`BigTableBackend::compare_and_write`] as the `CheckAndMutateRow` predicate.
+/// Mutations will not run on live tombstones (`predicate_matched == false`). They _will_
+/// run on expired tombstones as well as non-tombstones. Used by
+/// [`BigTableBackend::put_non_tombstone`] and [`BigTableBackend::compare_and_write`] as
+/// the `CheckAndMutateRow` predicate.
+///
+/// This predicate cannot distinguish an empty row from a row holding a regular object; a caller
+/// that needs to know whether its mutation hit anything wants [`non_tombstone_predicate`].
 fn tombstone_predicate() -> MutatePredicate {
     MutatePredicate::Exclude(tombstone_filter())
+}
+
+/// Returns a [`MutatePredicate`] that is the logical negation of [`tombstone_predicate`];
+/// it matches everything _except_ live tombstones.
+///
+/// Mutations run only when the predicate matches (`predicate_matched == true`). They will
+/// run on expired tombstones as well as non-tombstones. The match result doubles as a
+/// "was a row removed?" signal. Used by [`BigTableBackend::delete_non_tombstone`] as the
+/// `CheckAndMutateRow` predicate.
+///
+/// Built as a `Condition` filter:
+/// - Predicate: [`tombstone_filter`] -> is a live tombstone present?
+/// - True branch: `BlockAllFilter` -> match nothing; live tombstones should be preserved
+/// - False branch: `PassAllFilter` -> match everything: expired tombstones and non-tombstones
+fn non_tombstone_predicate() -> MutatePredicate {
+    MutatePredicate::Include(v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Condition(Box::new(
+            v2::row_filter::Condition {
+                predicate_filter: Some(Box::new(tombstone_filter())),
+                true_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
+                })),
+                false_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::PassAllFilter(true)),
+                })),
+            },
+        ))),
+    })
 }
 
 /// Builds an anchored regex pattern (`^…$`) that matches `value` literally.
@@ -487,7 +519,7 @@ fn object_mutations(
     metadata.size = Some(payload.len());
 
     let metadata_bytes = serde_json::to_vec(&metadata)
-        .map_err(|cause| Error::serde("failed to serialize metadata", cause))?;
+        .context(ErrorKind::Internal, "encoding Bigtable object metadata")?;
 
     let mutations = [
         // NB: We explicitly delete the row to clear metadata on overwrite.
@@ -575,7 +607,7 @@ fn tombstone_mutations(tombstone: &Tombstone, now: SystemTime) -> Result<[v2::Mu
             column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
             timestamp_micros,
             value: serde_json::to_vec(&tombstone_meta)
-                .map_err(|cause| Error::serde("failed to serialize tombstone", cause))?,
+                .context(ErrorKind::Internal, "encoding Bigtable tombstone metadata")?,
         })),
     ])
 }
@@ -647,10 +679,10 @@ impl RowData {
                     payload = cell.value;
                 }
                 COLUMN_TOMBSTONE_META => {
-                    tombstone_meta_opt =
-                        Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                            Error::serde("failed to deserialize tombstone meta", cause)
-                        })?);
+                    tombstone_meta_opt = Some(serde_json::from_slice(&cell.value).context(
+                        ErrorKind::CorruptData,
+                        "decoding Bigtable tombstone metadata",
+                    )?);
                 }
                 COLUMN_METADATA => {
                     if let Ok(legacy_meta) =
@@ -663,10 +695,10 @@ impl RowData {
                             expiration_policy: legacy_meta.expiration_policy,
                         });
                     } else {
-                        metadata_opt =
-                            Some(serde_json::from_slice(&cell.value).map_err(|cause| {
-                                Error::serde("failed to deserialize metadata", cause)
-                            })?);
+                        metadata_opt = Some(serde_json::from_slice(&cell.value).context(
+                            ErrorKind::CorruptData,
+                            "decoding Bigtable object metadata",
+                        )?);
                     }
                 }
                 _ => {}
@@ -731,9 +763,9 @@ fn parse_redirect_target(redirect_path: &[u8], tombstone_id: &ObjectId) -> Resul
         Ok(tombstone_id.clone())
     } else {
         let redirect_str = std::str::from_utf8(redirect_path)
-            .map_err(|_| Error::generic("invalid UTF-8 in redirect path"))?;
+            .context(ErrorKind::CorruptData, "decoding Bigtable redirect target")?;
         ObjectId::from_storage_path(redirect_str)
-            .ok_or_else(|| Error::generic("corrupt redirect path"))
+            .ok_or_else(|| Error::new(ErrorKind::CorruptData, "parsing Bigtable redirect target"))
     }
 }
 
@@ -1009,7 +1041,10 @@ impl Backend for BigTableBackend {
             TieredGet::Object(metadata, content_range, payload) => {
                 Ok(Some((metadata, content_range, payload)))
             }
-            TieredGet::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredGet::Tombstone(_) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected Bigtable tombstone",
+            )),
             TieredGet::NotFound => Ok(None),
         }
     }
@@ -1018,7 +1053,10 @@ impl Backend for BigTableBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         match self.get_tiered_metadata(id).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
-            TieredMetadata::Tombstone(_) => Err(Error::UnexpectedTombstone),
+            TieredMetadata::Tombstone(_) => Err(Error::new(
+                ErrorKind::Internal,
+                "unexpected Bigtable tombstone",
+            )),
             TieredMetadata::NotFound => Ok(None),
         }
     }
@@ -1087,7 +1125,10 @@ impl HighVolumeBackend for BigTableBackend {
             }
         }
 
-        Err(Error::generic("BigTable: race loop in put_non_tombstone"))
+        Err(Error::new(
+            ErrorKind::Internal,
+            "Bigtable put race exhausted",
+        ))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1163,23 +1204,22 @@ impl HighVolumeBackend for BigTableBackend {
         let path = id.as_storage_path().to_string().into_bytes();
 
         for _ in 0..CAS_RETRY_COUNT {
-            let write_succeeded = self
+            let deleted = self
                 .check_and_mutate(
                     path.clone(),
-                    tombstone_predicate(),
+                    non_tombstone_predicate(),
                     [delete_row_mutation()],
                     "delete_non_tombstone",
                 )
                 .await?;
 
-            if write_succeeded {
-                // TODO(FS-492): `write_succeeded` is `true` even when there was no tombstone to
-                // delete so, while harmless, we emit an extra DELETE to the changestream here
+            if deleted {
                 self.change_stream.delete(id);
                 return Ok(None);
             }
 
-            // A tombstone was present: read its data for the caller.
+            // Nothing was deleted: either a tombstone is in the way, or the row is absent.
+            // Read the row to find out which, and to hand the tombstone to the caller.
             let row = self
                 .read_row(&path, Some(metadata_filter()), "delete_non_tombstone")
                 .await?;
@@ -1191,15 +1231,16 @@ impl HighVolumeBackend for BigTableBackend {
                         expiration_policy: meta.expiration_policy,
                     }));
                 }
-                // Race: An object replaced the tombstone, delete the new object now.
+                // Race: An object appeared since the predicate ran, delete the new object now.
                 Some(RowData::Object { .. }) => continue,
-                // Race: Entry was deleted in the meanwhile, nothing left to do.
+                // The row is absent or expired, nothing left to do.
                 None => return Ok(None),
             }
         }
 
-        Err(Error::generic(
-            "BigTable: race loop in delete_non_tombstone",
+        Err(Error::new(
+            ErrorKind::Internal,
+            "Bigtable delete race exhausted",
         ))
     }
 
@@ -1269,14 +1310,9 @@ impl HighVolumeBackend for BigTableBackend {
 /// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
 /// 0.
 fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
-    let deadline = from.checked_add(ttl).ok_or_else(|| Error::Generic {
-        context: format!(
-            "TTL duration overflow: {} plus {}s cannot be represented as SystemTime",
-            humantime::format_rfc3339_seconds(from),
-            ttl.as_secs()
-        ),
-        cause: None,
-    })?;
+    let deadline = from
+        .checked_add(ttl)
+        .ok_or_else(|| Error::new(ErrorKind::Internal, "calculating Bigtable expiration"))?;
 
     system_time_to_micros(deadline)
 }
@@ -1288,19 +1324,12 @@ fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
 fn system_time_to_micros(deadline: SystemTime) -> Result<i64> {
     let millis = deadline
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| Error::Generic {
-            context: format!(
-                "unable to get duration since UNIX_EPOCH for SystemTime {}",
-                humantime::format_rfc3339_seconds(deadline)
-            ),
-            cause: Some(Box::new(e)),
-        })?
+        .context(ErrorKind::Internal, "converting Bigtable timestamp")?
         .as_millis();
 
-    (millis * 1000).try_into().map_err(|e| Error::Generic {
-        context: format!("failed to convert {millis}ms to i64 microseconds"),
-        cause: Some(Box::new(e)),
-    })
+    (millis * 1000)
+        .try_into()
+        .context(ErrorKind::Internal, "converting Bigtable timestamp")
 }
 
 /// Converts a wall-clock time to Bigtable's microsecond timestamp, saturating at `i64::MAX`
@@ -1351,10 +1380,10 @@ where
             Ok(res) => return Ok(res),
             Err(e) if retry_count >= REQUEST_RETRY_COUNT || !is_retryable(&e) => {
                 objectstore_metrics::count!("bigtable.failures", action = context);
-                return Err(Error::Generic {
-                    context: format!("Bigtable: `{context}` failed"),
-                    cause: Some(Box::new(e)),
-                });
+                return Err(e).context(
+                    ErrorKind::BackendFailure,
+                    format!("running Bigtable {context}"),
+                );
             }
             Err(e) => {
                 retry_count += 1;
@@ -1408,7 +1437,7 @@ fn apply_range(payload: Bytes, range: Option<ByteRange>) -> Result<(Option<Conte
     let total = payload.len() as u64;
     let content_range = byte_range
         .resolve(total)
-        .ok_or(Error::RangeNotSatisfiable { total })?;
+        .ok_or(ErrorKind::RangeNotSatisfiable { total })?;
 
     let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
     Ok((Some(content_range), sliced))
@@ -1926,7 +1955,7 @@ mod tests {
     /// - **tombstone**: returns Some(Tombstone) with correct target; tombstone still intact.
     ///
     /// Verifies that the `r` column is correctly detected by both the `ReadRows` column
-    /// filter and the `CheckAndMutate` `tombstone_predicate`.
+    /// filter and the `CheckAndMutate` `non_tombstone_predicate`.
     #[tokio::test]
     async fn test_delete_non_tombstone() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2000,14 +2029,18 @@ mod tests {
         }
 
         // Legacy reads must error rather than leak tombstone data.
-        assert!(matches!(
-            backend.get_object(&hv_id, None).await,
-            Err(Error::UnexpectedTombstone)
-        ));
-        assert!(matches!(
-            backend.get_metadata(&hv_id).await,
-            Err(Error::UnexpectedTombstone)
-        ));
+        assert!(
+            backend
+                .get_object(&hv_id, None)
+                .await
+                .is_err_and(|error| error.kind() == ErrorKind::Internal)
+        );
+        assert!(
+            backend
+                .get_metadata(&hv_id)
+                .await
+                .is_err_and(|error| error.kind() == ErrorKind::Internal)
+        );
 
         // Idempotent retry: retry with the same target succeeds
         let second = backend
@@ -2481,7 +2514,7 @@ mod tests {
         let id = put_range_test_object(&backend).await?;
 
         match backend.get_object(&id, Some(ByteRange::From(100))).await {
-            Err(Error::RangeNotSatisfiable { total }) => assert_eq!(total, 22),
+            Err(error) if matches!(error.kind(), ErrorKind::RangeNotSatisfiable { total: 22 }) => {}
             Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
             Err(e) => panic!("expected RangeNotSatisfiable, got {e:?}"),
         }
@@ -2582,6 +2615,44 @@ mod tests {
         assert_eq!(records[1].op_type, OpType::Delete);
         assert_eq!(records[1].size, None);
         assert_eq!(records[1].record_id, records[0].record_id);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn delete_non_tombstone_reclaims_expired_rows() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+
+        // An expired tombstone is past its lifetime: reclaimed, not handed to the caller.
+        // This test serves as documentation of that potentially surprising behavior.
+        let id = make_id();
+        let tombstone = Tombstone {
+            target: ObjectId::random(id.context().clone()),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+        };
+        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        assert_eq!(
+            backend.delete_non_tombstone(&id).await?,
+            None,
+            "an expired tombstone must not be returned to the caller"
+        );
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "the expired tombstone must be reclaimed");
+        assert_eq!(records[0].op_type, OpType::Delete);
+
+        // The same holds for an object row (expired or otherwise).
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &metadata, b"gone", SystemTime::now()).await?;
+        producer.clear();
+        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+        let records = producer.records();
+        assert_eq!(records.len(), 1, "the object row must be reclaimed");
+        assert_eq!(records[0].op_type, OpType::Delete);
 
         Ok(())
     }

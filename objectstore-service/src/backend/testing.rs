@@ -24,7 +24,7 @@
 //!         _inner: &InMemoryBackend,
 //!         _id: &ObjectId,
 //!     ) -> Result<DeleteResponse> {
-//!         Err(crate::error::Error::Io(std::io::Error::new(
+//!         Err(crate::error::Error::with_source(crate::error::ErrorKind::BackendFailure, std::io::Error::new(
 //!             std::io::ErrorKind::ConnectionRefused,
 //!             "simulated delete failure",
 //!         )))

@@ -16,7 +16,6 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::HeaderValue;
 use http::header;
-use objectstore_service::error::Error as ServiceError;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{CompletedPart, PartNumber, UploadId};
 use objectstore_types::metadata::Metadata;
@@ -96,13 +95,12 @@ async fn initiate_inner(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     // TODO: Update time_created in `complete`, when we have a Service API to mutate metadata.
-    let metadata = Metadata::from_insert_headers(&headers, "").map_err(ServiceError::from)?;
+    let metadata = Metadata::from_insert_headers(&headers, "")?;
 
     state
         .config
         .usecases
-        .validate(&id.context().usecase, &metadata)
-        .map_err(|e| ApiError::Client(e.to_string()))?;
+        .validate(&id.context().usecase, &metadata)?;
 
     let upload_id = service.initiate_multipart(id.clone(), metadata).await?;
 
@@ -125,7 +123,7 @@ async fn upload_part(
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(|| ApiError::Client("Content-Length header is required".into()))?;
+        .ok_or_else(|| ApiError::client("content-length header is required"))?;
 
     let content_md5 = headers
         .get("content-md5")
