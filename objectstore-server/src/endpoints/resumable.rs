@@ -259,14 +259,12 @@ mod tests {
         let error = progress_response(Err(gone), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::GONE);
 
-        let oversized = ApiError::Service(
-            ErrorKind::ChunkExceedsUploadLength {
+        let oversized =
+            ApiError::Service(ServiceError::from(ErrorKind::ChunkExceedsUploadLength {
                 offset: 8,
                 content_length: 4,
                 upload_length: 10,
-            }
-            .into(),
-        );
+            }));
         let error = progress_response(Err(oversized), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }
