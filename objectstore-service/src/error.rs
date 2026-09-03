@@ -39,7 +39,6 @@ impl fmt::Display for Panic {
 impl StdError for Panic {}
 
 /// The client-visible semantic classification of a service error.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     /// Object metadata supplied by a client is invalid.

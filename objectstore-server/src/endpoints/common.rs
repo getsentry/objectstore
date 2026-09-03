@@ -127,7 +127,6 @@ impl ApiError {
                 | ServiceErrorKind::CorruptData
                 | ServiceErrorKind::Panic
                 | ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
 
             ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
