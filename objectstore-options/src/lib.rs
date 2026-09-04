@@ -39,7 +39,7 @@ pub fn init() -> Result<(), Error> {
 ///
 /// Obtain a snapshot of the current options via [`Options::get`]. Before calling `get`,
 /// the global instance must be initialized with [`Options::init`].
-#[derive(Debug, SentryOptions)]
+#[derive(Debug, Deserialize, SentryOptions)]
 #[sentry_options(namespace = "objectstore", path = "../../sentry-options")]
 pub struct Options {
     /// Active killswitches that may disable access to specific object contexts.
