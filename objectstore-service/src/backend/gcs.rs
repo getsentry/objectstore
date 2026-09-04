@@ -505,23 +505,6 @@ impl ResumableUpload {
     }
 }
 
-/// Parses and validates GCS's resumable session URI from the contents of the `Location` header.
-fn session_uri_from_location(endpoint: &Url, location: &str) -> Result<Url> {
-    let session_uri = Url::parse(location).map_err(|_| {
-        Error::new(
-            ErrorKind::BackendFailure,
-            "GCS: resumable session Location is not a valid URL",
-        )
-    })?;
-    if session_uri.origin() != endpoint.origin() {
-        return Err(Error::new(
-            ErrorKind::BackendFailure,
-            "GCS: resumable session Location has an unexpected origin",
-        ));
-    }
-    Ok(session_uri)
-}
-
 /// Returns `true` if the error is a transient backend failure worth retrying.
 fn error_is_retryable(error: &Error) -> bool {
     matches!(
@@ -1135,7 +1118,7 @@ impl Backend for GcsBackend {
         )?;
         let content_type = metadata.content_type.clone();
 
-        let session_uri = self
+        let location = self
             .with_retry("create_resumable_upload", || {
                 let url = url.clone();
                 let metadata_json = metadata_json.clone();
@@ -1166,18 +1149,33 @@ impl Backend for GcsBackend {
                         .headers()
                         .get(header::LOCATION)
                         .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned)
                         .ok_or_else(|| {
                             Error::new(
                                 ErrorKind::BackendFailure,
                                 "GCS: resumable session response missing valid Location header",
                             )
                         })?;
-                    let session_uri = session_uri_from_location(&self.endpoint, location)?;
                     response.drain_body().await;
-                    Ok(session_uri)
+                    Ok(location)
                 }
             })
             .await?;
+
+        let session_uri = Url::parse(&location).map_err(|_| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "GCS: resumable session Location is not a valid URL",
+            )
+        })?;
+        // The session URI must stay on the configured endpoint's origin: every later request to
+        // it carries our bearer token, so a Location pointing elsewhere would send it off-origin.
+        if session_uri.origin() != self.endpoint.origin() {
+            return Err(Error::new(
+                ErrorKind::BackendFailure,
+                "GCS: resumable session Location has an unexpected origin",
+            ));
+        }
         let session = ResumableUpload::new(session_uri, total_length);
 
         Ok(Some(session.into_token()))
