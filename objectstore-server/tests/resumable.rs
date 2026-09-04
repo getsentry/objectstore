@@ -20,7 +20,7 @@ use tempfile::NamedTempFile;
 const SESSION: &str = "c29tZS10b2tlbg";
 
 /// Protected `some-token`, bound to `test/org.1/objects/my-key` with the test key below.
-const PROTECTED_SESSION: &str = "BHRlc3QAAAAAAAAAAAAAAAAa-tfGlOBqj4RY_wWwE2mUn5vMigfzxClxO7HnIItwA469Onvui0aVocPaU7rFKckt5cYr1ohbg6xApSYkWJYXtqNEDcZQxks39a8Pobn7tlSglUyTbMHmtQ";
+const PROTECTED_SESSION: &str = "BHRlc3QAAAAAAAAAAAAAAAAa-svQkfdonL5u60b-WT_LzpuGlgG7hWo5euKiKopuFcKkMHnolxLc6JiaHvvMLcQi39wg4playvMM9HNrTtQOvOVVDI9IXylpxwkWmu5yFrCGsPj7BA";
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {

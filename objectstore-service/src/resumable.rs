@@ -5,7 +5,7 @@ use std::fmt;
 
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
@@ -15,18 +15,41 @@ pub use objectstore_types::resumable::{
 };
 
 /// AES-GCM nonce length in bytes.
-const TOKEN_NONCE_LENGTH: usize = 12;
+const NONCE_LENGTH: usize = 12;
 /// AES-GCM authentication tag length in bytes.
-const TOKEN_TAG_LENGTH: usize = 16;
+const TAG_LENGTH: usize = 16;
 
-/// Structured token that's enc/decrypted at the service boundary.
-#[derive(Debug, Deserialize, Serialize)]
-struct SessionToken {
-    storage_path: String,
-    backend_token: String,
+/// Opaque session state encoded and decoded by a storage backend.
+pub type BackendToken = String;
+
+/// Structured token encrypted at the service boundary.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct SessionToken {
+    #[serde(
+        serialize_with = "serialize_object_id",
+        deserialize_with = "deserialize_object_id"
+    )]
+    pub(crate) object_id: ObjectId,
+    pub(crate) backend_token: BackendToken,
 }
 
-/// Enc/decryption abstraction for Resumable Upload tokens.
+fn serialize_object_id<S>(id: &ObjectId, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_str(&id.as_storage_path())
+}
+
+fn deserialize_object_id<'de, D>(deserializer: D) -> std::result::Result<ObjectId, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = String::deserialize(deserializer)?;
+    ObjectId::from_storage_path(&path)
+        .ok_or_else(|| de::Error::custom("invalid object storage path"))
+}
+
+/// Encrypts and decrypts Resumable Upload session tokens.
 ///
 /// The active key encrypts new sessions, while the key ID embedded in an existing token selects
 /// its decryption key.
@@ -54,7 +77,7 @@ impl Encryptor {
         Self::new(key_id, BTreeMap::from([(key_id.to_owned(), key.to_vec())]))
     }
 
-    /// Validates and constructs a token encryptor from raw AES-256 keys.
+    /// Validates and constructs an encryptor from raw AES-256 keys.
     ///
     /// Returns an error for invalid key IDs or sizes, or when the active key is absent.
     pub fn new(
@@ -92,24 +115,20 @@ impl Encryptor {
         })
     }
 
-    /// Encrypts a backend token and binds it to the canonical object identity.
-    pub fn encrypt(&self, id: &ObjectId, backend_token: String) -> Result<EncryptedSessionToken> {
+    /// Encrypts a structured Resumable Upload session token.
+    pub(crate) fn encrypt(&self, session: SessionToken) -> Result<EncryptedSessionToken> {
         let key_id = self.active_key_id.as_bytes();
 
         let mut header = Vec::with_capacity(1 + key_id.len());
         header.push(key_id.len() as u8);
         header.extend_from_slice(key_id);
 
-        let mut ciphertext = serde_json::to_vec(&SessionToken {
-            storage_path: id.as_storage_path().to_string(),
-            backend_token,
-        })
-        .context(
+        let mut ciphertext = serde_json::to_vec(&session).context(
             ErrorKind::Internal,
             "failed to serialize resumable session token",
         )?;
 
-        let mut nonce = [0; TOKEN_NONCE_LENGTH];
+        let mut nonce = [0; NONCE_LENGTH];
         self.random.fill(&mut nonce).map_err(|_| {
             Error::new(
                 ErrorKind::Internal,
@@ -131,13 +150,13 @@ impl Encryptor {
         Ok(EncryptedSessionToken::new(envelope))
     }
 
-    /// Decrypts an external token, returning one uniform error for every invalid envelope.
-    pub(crate) fn decrypt(&self, id: &ObjectId, token: EncryptedSessionToken) -> Result<String> {
-        self.decrypt_inner(id, token)
+    /// Decrypts a Resumable Upload session token.
+    pub(crate) fn decrypt(&self, token: EncryptedSessionToken) -> Result<SessionToken> {
+        self.decrypt_inner(token)
             .ok_or_else(|| ErrorKind::UnknownUploadSession.into())
     }
 
-    fn decrypt_inner(&self, id: &ObjectId, token: EncryptedSessionToken) -> Option<String> {
+    fn decrypt_inner(&self, token: EncryptedSessionToken) -> Option<SessionToken> {
         let envelope = token.into_bytes();
         let (&key_id_length, rest) = envelope.split_first()?;
         let key_id_length = usize::from(key_id_length);
@@ -145,7 +164,7 @@ impl Encryptor {
             return None;
         }
         let (key_id, rest) = rest.split_at_checked(key_id_length)?;
-        let (nonce, ciphertext) = rest.split_at_checked(TOKEN_NONCE_LENGTH)?;
+        let (nonce, ciphertext) = rest.split_at_checked(NONCE_LENGTH)?;
 
         let key_id = std::str::from_utf8(key_id).ok()?;
         let key = if key_id == self.active_key_id {
@@ -155,8 +174,8 @@ impl Encryptor {
         };
         let header_length = 1 + key_id_length;
         let header = &envelope[..header_length];
-        let nonce: [u8; TOKEN_NONCE_LENGTH] = nonce.try_into().ok()?;
-        if ciphertext.len() < TOKEN_TAG_LENGTH {
+        let nonce: [u8; NONCE_LENGTH] = nonce.try_into().ok()?;
+        if ciphertext.len() < TAG_LENGTH {
             return None;
         }
         let mut ciphertext = ciphertext.to_vec();
@@ -167,11 +186,7 @@ impl Encryptor {
                 &mut ciphertext,
             )
             .ok()?;
-        let payload: SessionToken = serde_json::from_slice(plaintext).ok()?;
-        if payload.storage_path != id.as_storage_path().to_string() {
-            return None;
-        }
-        Some(payload.backend_token)
+        serde_json::from_slice(plaintext).ok()
     }
 }
 
@@ -181,7 +196,7 @@ impl fmt::Debug for Encryptor {
         key_ids.push(&self.active_key_id);
         key_ids.sort_unstable();
 
-        f.debug_struct("ResumableTokenEncryption")
+        f.debug_struct("Encryptor")
             .field("active_key_id", &self.active_key_id)
             .field("key_ids", &key_ids)
             .field("keys", &"[redacted]")
@@ -233,31 +248,46 @@ mod tests {
         let id = id("object");
         let backend_token = "backend token".to_owned();
 
-        let first = encryption.encrypt(&id, backend_token.clone()).unwrap();
-        let second = encryption.encrypt(&id, backend_token.clone()).unwrap();
+        let first = encryption
+            .encrypt(SessionToken {
+                object_id: id.clone(),
+                backend_token: backend_token.clone(),
+            })
+            .unwrap();
+        let second = encryption
+            .encrypt(SessionToken {
+                object_id: id.clone(),
+                backend_token: backend_token.clone(),
+            })
+            .unwrap();
         assert_ne!(first, second);
-        assert_eq!(encryption.decrypt(&id, first).unwrap(), backend_token);
-        assert_eq!(encryption.decrypt(&id, second).unwrap(), backend_token);
+        let first = encryption.decrypt(first).unwrap();
+        let second = encryption.decrypt(second).unwrap();
+        assert_eq!(first.object_id, id);
+        assert_eq!(first.backend_token, backend_token);
+        assert_eq!(second.object_id, id);
+        assert_eq!(second.backend_token, backend_token);
     }
 
     #[test]
-    fn encryption_rejects_tampering_wrong_objects_and_plaintext() {
+    fn encryption_rejects_tampering_and_plaintext() {
         let encryption = encryption("v1", &[("v1", 7)]);
         let object = id("object");
-        let token = encryption.encrypt(&object, "backend token".into()).unwrap();
+        let token = encryption
+            .encrypt(SessionToken {
+                object_id: object,
+                backend_token: "backend token".to_owned(),
+            })
+            .unwrap();
 
         let mut tampered = token.clone().into_bytes();
         *tampered.last_mut().unwrap() ^= 1;
         assert!(matches!(
-            encryption.decrypt(&object, EncryptedSessionToken::new(tampered)),
+            encryption.decrypt(EncryptedSessionToken::new(tampered)),
             Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         assert!(matches!(
-            encryption.decrypt(&id("other"), token),
-            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
-        ));
-        assert!(matches!(
-            encryption.decrypt(&object, EncryptedSessionToken::new(b"backend token")),
+            encryption.decrypt(EncryptedSessionToken::new(b"backend token")),
             Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
     }
@@ -266,19 +296,29 @@ mod tests {
     fn rotation_decrypts_old_keys_and_removal_invalidates_them() {
         let object = id("object");
         let old = encryption("v1", &[("v1", 1)]);
-        let old_token = old.encrypt(&object, "backend token".into()).unwrap();
+        let old_token = old
+            .encrypt(SessionToken {
+                object_id: object.clone(),
+                backend_token: "backend token".to_owned(),
+            })
+            .unwrap();
 
         let rotated = encryption("v2", &[("v1", 1), ("v2", 2)]);
         assert_eq!(
-            rotated.decrypt(&object, old_token.clone()).unwrap(),
+            rotated.decrypt(old_token.clone()).unwrap().backend_token,
             "backend token"
         );
-        let new_token = rotated.encrypt(&object, "new token".into()).unwrap();
+        let new_token = rotated
+            .encrypt(SessionToken {
+                object_id: object,
+                backend_token: "new token".to_owned(),
+            })
+            .unwrap();
         assert_eq!(new_token.as_bytes()[1..3], *b"v2");
 
         let removed = encryption("v2", &[("v2", 2)]);
         assert!(matches!(
-            removed.decrypt(&object, old_token),
+            removed.decrypt(old_token),
             Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
     }

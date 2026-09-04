@@ -31,7 +31,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::UploadProgress;
+use crate::resumable::{BackendToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
@@ -206,11 +206,11 @@ impl ResumableSession {
         }
     }
 
-    fn into_token(self) -> String {
+    fn into_token(self) -> BackendToken {
         format!("{}.{}", self.total_length, self.session_uri)
     }
 
-    fn from_token(token: &str, endpoint: &Url) -> Result<Self> {
+    fn from_token(token: &BackendToken, endpoint: &Url) -> Result<Self> {
         let (total_length, session_uri) = token
             .split_once('.')
             .ok_or(ErrorKind::UnknownUploadSession)?;
@@ -1165,7 +1165,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         total_length: u64,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<BackendToken>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
         let url = self.upload_url(id, "resumable")?;
         let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
@@ -1226,7 +1226,7 @@ impl Backend for GcsBackend {
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        token: &str,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -1284,14 +1284,14 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn upload_offset(&self, id: &ObjectId, token: &str) -> Result<UploadProgress> {
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
         let session = ResumableSession::from_token(token, &self.endpoint)?;
         self.query_offset(id, &session).await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn cancel_upload(&self, id: &ObjectId, token: &str) -> Result<()> {
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
         objectstore_log::debug!("Cancelling resumable upload on GCS backend");
         let session = ResumableSession::from_token(token, &self.endpoint)?;
         let session_uri = session.session_uri;
@@ -1709,7 +1709,7 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             total_length: u64,
-        ) -> Result<String> {
+        ) -> Result<BackendToken> {
             <Self as Backend>::create_upload_session(self, id, metadata, total_length)
                 .await?
                 .ok_or_else(|| Error::from(ErrorKind::Unsupported).into())

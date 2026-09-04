@@ -65,7 +65,7 @@ use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
-use objectstore_service::resumable::ResumableTokenEncryption;
+use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -652,7 +652,7 @@ pub struct Service {
 
 impl Service {
     /// Loads and validates the configured resumable token encryption keys.
-    pub(crate) fn resumable_token_encryption(&self) -> Result<Option<ResumableTokenEncryption>> {
+    pub(crate) fn resumable_token_encryption(&self) -> Result<Option<Encryptor>> {
         let Some(config) = &self.resumable_token_encryption else {
             return Ok(None);
         };
@@ -665,7 +665,7 @@ impl Service {
             keys.insert(key_id.clone(), bytes);
         }
 
-        ResumableTokenEncryption::new(config.active_key_id.clone(), keys).map(Some)
+        Encryptor::new(config.active_key_id.clone(), keys).map(Some)
     }
 }
 
