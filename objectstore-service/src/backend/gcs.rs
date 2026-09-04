@@ -792,40 +792,6 @@ impl GcsBackend {
             }
         }
     }
-
-    /// Queries GCS for the progress of an existing session, reporting completion to the
-    /// [`ChangeStream`] if completion is detected.
-    async fn query_upload_offset(
-        &self,
-        id: &ObjectId,
-        session: &ResumableUpload,
-    ) -> Result<UploadProgress> {
-        self.with_retry("query_resumable_upload", || async {
-            let response = self
-                .request(Method::PUT, session.session_uri.as_str())
-                .await?
-                .header(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{}", session.total_length),
-                )
-                .send_traced()
-                .await
-                .reqwest_context("GCS: query resumable upload")?;
-            let (progress, completed) =
-                range_response_to_upload_progress(session, response).await?;
-            if let Some(object) = completed {
-                let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-                self.report_object_write(
-                    id,
-                    stored_size,
-                    object.metadata_size(),
-                    object.custom_time,
-                );
-            }
-            Ok(progress)
-        })
-        .await
-    }
 }
 
 impl fmt::Debug for GcsBackend {
@@ -902,6 +868,7 @@ async fn range_response_to_upload_progress(
             )?;
             Ok((UploadProgress::Complete, Some(object)))
         }
+        // GCS calls it "308 Resume Incomplete"
         StatusCode::PERMANENT_REDIRECT => {
             let offset = match response.headers().get(header::RANGE) {
                 Some(range) => {
@@ -910,7 +877,7 @@ async fn range_response_to_upload_progress(
                     })?;
                     range_header_to_offset(range, session.total_length)?
                 }
-                // GCS omits the header entirely while it holds nothing.
+                // GCS omits this header while it holds nothing
                 None => 0,
             };
             response.drain_body().await;
@@ -1199,8 +1166,9 @@ impl Backend for GcsBackend {
             })?;
 
         let content_range = match content_length {
-            // Edge case: a user could create an upload with length 0 and send an empty request to
-            // complete it. The correct format to finish it in that case is `*/0`.
+            // If `total_length` of this upload is 0, the only way to complete it is to
+            // put a an empty chunk, which is accomplished by putting `*/0` in this header.
+            // Otherwise, this request is equivalent to an offset query.
             0 => format!("bytes */{}", session.total_length),
             _ => format!("bytes {offset}-{}/{}", end - 1, session.total_length),
         };
@@ -1215,8 +1183,7 @@ impl Backend for GcsBackend {
             .await
             .reqwest_context("GCS: upload resumable chunk")?;
 
-        let status = response.status();
-        let progress = range_response_to_upload_progress(&session, response)
+        range_response_to_upload_progress(&session, response)
             .await
             .map(|(progress, completed)| {
                 if let Some(object) = completed {
@@ -1229,36 +1196,42 @@ impl Backend for GcsBackend {
                     );
                 }
                 progress
-            });
-
-        match progress {
-            // GCS answers 400 when a chunk starts past the prefix it holds, and 416 when the
-            // range is unsatisfiable. 400 is broad enough to cover other malformed requests, so
-            // rather than trust the status we ask GCS where it stands: only an offset it reports
-            // back turns this into a mismatch the client can act on.
-            Err(error)
-                if matches!(
-                    status,
-                    StatusCode::BAD_REQUEST | StatusCode::RANGE_NOT_SATISFIABLE
-                ) =>
-            {
-                match self.query_upload_offset(id, &session).await {
-                    Ok(UploadProgress::Incomplete { offset }) => {
-                        Err(ErrorKind::UploadOffsetMismatch { offset }.into())
-                    }
-                    Ok(UploadProgress::Complete) => Ok(UploadProgress::Complete),
-                    Err(_) => Err(error),
-                }
-            }
-            result => result,
-        }
+            })
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
         let session = ResumableUpload::from_token(token, &self.endpoint)?;
-        self.query_upload_offset(id, &session).await
+
+        self.with_retry("query_resumable_upload", || async {
+            let response = self
+                .request(Method::PUT, session.session_uri.as_str())
+                .await?
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", session.total_length),
+                )
+                .send_traced()
+                .await
+                .reqwest_context("GCS: query resumable upload")?;
+
+            range_response_to_upload_progress(&session, response)
+                .await
+                .map(|(progress, completed)| {
+                    if let Some(object) = completed {
+                        let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                        self.report_object_write(
+                            id,
+                            stored_size,
+                            object.metadata_size(),
+                            object.custom_time,
+                        );
+                    }
+                    progress
+                })
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
