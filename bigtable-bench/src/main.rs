@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
             instance_name: args.instance.clone(),
             table_name: args.table.clone(),
             connections: Some(args.pool),
+            rpc_timeout: Duration::from_secs(2),
             cogs: None,
         },
         &ChangeStreamFactory::default(),
