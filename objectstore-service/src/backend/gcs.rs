@@ -775,9 +775,6 @@ impl GcsBackend {
     }
 
     /// Reports a completed Resumable Upload to the [`ChangeStream`].
-    ///
-    /// Call this after [`range_response_to_upload_progress`] hands back a completed object, from
-    /// whichever request happened to observe the completion.
     fn report_upload_completion(&self, id: &ObjectId, object: &GcsObject) {
         match object
             .size
@@ -789,14 +786,14 @@ impl GcsBackend {
                 stored_size + object.metadata_size(),
                 object.custom_time,
             ),
-            // GCS omits `size` for a zero-byte object.
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
             }
         }
     }
 
-    /// Queries GCS for the progress of an existing session.
+    /// Queries GCS for the progress of an existing session, reporting completion to the
+    /// [`ChangeStream`] if completion is detected.
     async fn query_upload_offset(
         &self,
         id: &ObjectId,
@@ -833,72 +830,8 @@ impl fmt::Debug for GcsBackend {
     }
 }
 
-/// Interprets a Resumable Upload response, shared by chunk writes and status queries.
-///
-/// Returns the progress GCS reported, plus the completed object when this is the response that
-/// finished the upload. Reporting that object to the change stream is the caller's job, through
-/// [`GcsBackend::report_upload_completion`]; parsing a response has no side effects of its own.
-async fn range_response_to_upload_progress(
-    session: &ResumableUpload,
-    response: reqwest::Response,
-) -> Result<(UploadProgress, Option<GcsObject>)> {
-    let status = response.status();
-
-    // GCS reports a session it does not know as 404, and one that expired or was canceled as
-    // 410. Neither is a backend fault, so they bypass the error handling below.
-    match status {
-        StatusCode::NOT_FOUND => {
-            response.drain_body().await;
-            return Err(ErrorKind::UnknownUploadSession.into());
-        }
-        StatusCode::GONE => {
-            response.drain_body().await;
-            return Err(ErrorKind::UploadSessionGone.into());
-        }
-        _ => {}
-    }
-
-    // Always errors for 4xx and 5xx, which is every status not handled below.
-    let response = response.check_error("GCS: resumable upload status").await?;
-
-    match status {
-        StatusCode::OK | StatusCode::CREATED => {
-            let body = response
-                .bytes()
-                .await
-                .reqwest_context("GCS: read completed resumable upload response")?;
-            let object = serde_json::from_slice::<GcsObject>(&body).context(
-                ErrorKind::CorruptData,
-                "GCS: parse completed resumable upload response",
-            )?;
-            Ok((UploadProgress::Complete, Some(object)))
-        }
-        StatusCode::PERMANENT_REDIRECT => {
-            let offset = match response.headers().get(header::RANGE) {
-                Some(range) => {
-                    let range = range.to_str().map_err(|_| {
-                        Error::new(ErrorKind::BackendFailure, "GCS: invalid Range header")
-                    })?;
-                    range_response_to_offset(range, session.total_length)?
-                }
-                // GCS omits the header entirely while it holds nothing.
-                None => 0,
-            };
-            response.drain_body().await;
-            Ok((UploadProgress::Incomplete { offset }, None))
-        }
-        _ => {
-            response.drain_body().await;
-            Err(Error::new(
-                ErrorKind::BackendFailure,
-                format!("GCS: unexpected resumable upload status {status}"),
-            ))
-        }
-    }
-}
-
 /// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
-fn range_response_to_offset(value: &str, total_length: u64) -> Result<u64> {
+fn range_header_to_offset(value: &str, total_length: u64) -> Result<u64> {
     let end = value
         .strip_prefix("bytes=0-")
         .filter(|end| !end.is_empty() && end.bytes().all(|byte| byte.is_ascii_digit()))
@@ -922,6 +855,68 @@ fn range_response_to_offset(value: &str, total_length: u64) -> Result<u64> {
         ));
     }
     Ok(offset)
+}
+
+/// Interprets a Resumable Upload response, shared by chunk writes and status queries.
+///
+/// Returns the progress GCS reported, plus the completed object when this is the response that
+/// finished the upload.
+async fn range_response_to_upload_progress(
+    session: &ResumableUpload,
+    response: reqwest::Response,
+) -> Result<(UploadProgress, Option<GcsObject>)> {
+    let status = response.status();
+
+    match status {
+        StatusCode::NOT_FOUND => {
+            response.drain_body().await;
+            return Err(ErrorKind::UnknownUploadSession.into());
+        }
+        status if status == StatusCode::GONE || status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
+            response.drain_body().await;
+            return Err(ErrorKind::UploadSessionGone.into());
+        }
+        _ => {}
+    }
+
+    let response = response
+        .check_error("GCS: unexpected resumable upload status")
+        .await?;
+
+    match status {
+        StatusCode::OK | StatusCode::CREATED => {
+            let body = response
+                .bytes()
+                .await
+                .reqwest_context("GCS: read completed resumable upload response")?;
+            let object = serde_json::from_slice::<GcsObject>(&body).context(
+                ErrorKind::CorruptData,
+                "GCS: parse completed resumable upload response",
+            )?;
+            Ok((UploadProgress::Complete, Some(object)))
+        }
+        StatusCode::PERMANENT_REDIRECT => {
+            let offset = match response.headers().get(header::RANGE) {
+                Some(range) => {
+                    let range = range.to_str().map_err(|_| {
+                        Error::new(ErrorKind::BackendFailure, "GCS: invalid Range header")
+                    })?;
+                    range_header_to_offset(range, session.total_length)?
+                }
+                // GCS omits the header entirely while it holds nothing.
+                None => 0,
+            };
+            response.drain_body().await;
+            Ok((UploadProgress::Incomplete { offset }, None))
+        }
+        _ => {
+            response.drain_body().await;
+            Err(Error::new(
+                ErrorKind::BackendFailure,
+                format!("GCS: unexpected resumable upload status {status}"),
+            ))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1168,16 +1163,14 @@ impl Backend for GcsBackend {
                 "GCS: resumable session Location is not a valid URL",
             )
         })?;
-        // The session URI must stay on the configured endpoint's origin: every later request to
-        // it carries our bearer token, so a Location pointing elsewhere would send it off-origin.
         if session_uri.origin() != self.endpoint.origin() {
             return Err(Error::new(
                 ErrorKind::BackendFailure,
                 "GCS: resumable session Location has an unexpected origin",
             ));
         }
-        let session = ResumableUpload::new(session_uri, total_length);
 
+        let session = ResumableUpload::new(session_uri, total_length);
         Ok(Some(session.into_token()))
     }
 
@@ -1202,16 +1195,13 @@ impl Backend for GcsBackend {
                 upload_length: session.total_length,
             })?;
 
-        // GCS has no `Content-Range` that names zero bytes, so an empty chunk takes the wildcard
-        // form instead. That finalizes a zero-length object, and for a longer one reports where
-        // GCS stands, which is everything an empty chunk can achieve either way.
         let content_range = match content_length {
+            // Edge case: a user could create an upload with length 0 and send an empty request to
+            // complete it. The correct format to finish it in that case is `*/0`.
             0 => format!("bytes */{}", session.total_length),
             _ => format!("bytes {offset}-{}/{}", end - 1, session.total_length),
         };
 
-        // NB: Not wrapped in `with_retry`: the body is a client stream that cannot be replayed.
-        // Callers recover from an ambiguous failure through `upload_offset` instead.
         let response = self
             .request(Method::PUT, session.session_uri.as_str())
             .await?
@@ -1799,11 +1789,8 @@ mod tests {
 
     #[test]
     fn resumable_range_reports_next_offset_and_rejects_malformed_values() -> Result<()> {
-        assert_eq!(range_response_to_offset("bytes=0-0", 10)?, 1);
-        assert_eq!(
-            range_response_to_offset("bytes=0-262143", 300_000)?,
-            262_144
-        );
+        assert_eq!(range_header_to_offset("bytes=0-0", 10)?, 1);
+        assert_eq!(range_header_to_offset("bytes=0-262143", 300_000)?, 262_144);
 
         for malformed in [
             "",
@@ -1814,12 +1801,12 @@ mod tests {
             "bytes=0-9,bytes=20-30",
         ] {
             assert!(
-                range_response_to_offset(malformed, 100).is_err(),
+                range_header_to_offset(malformed, 100).is_err(),
                 "accepted {malformed:?}"
             );
         }
-        assert_eq!(range_response_to_offset("bytes=0-9", 10)?, 10);
-        assert!(range_response_to_offset("bytes=0-18446744073709551615", u64::MAX).is_err());
+        assert_eq!(range_header_to_offset("bytes=0-9", 10)?, 10);
+        assert!(range_header_to_offset("bytes=0-18446744073709551615", u64::MAX).is_err());
         Ok(())
     }
 
