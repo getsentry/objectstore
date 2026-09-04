@@ -774,18 +774,19 @@ impl GcsBackend {
         .await
     }
 
-    /// Reports a completed Resumable Upload to the [`ChangeStream`].
-    fn report_upload_completion(&self, id: &ObjectId, object: &GcsObject) {
-        match object
-            .size
-            .as_deref()
-            .and_then(|size| size.parse::<u64>().ok())
-        {
-            Some(stored_size) => self.change_stream.write(
-                id,
-                stored_size + object.metadata_size(),
-                object.custom_time,
-            ),
+    /// Reports an object write to the [`ChangeStream`].
+    fn report_object_write(
+        &self,
+        id: &ObjectId,
+        stored_size: Option<u64>,
+        metadata_size: u64,
+        expires_at: Option<SystemTime>,
+    ) {
+        match stored_size {
+            Some(stored_size) => {
+                self.change_stream
+                    .write(id, stored_size + metadata_size, expires_at)
+            }
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
             }
@@ -813,7 +814,13 @@ impl GcsBackend {
             let (progress, completed) =
                 range_response_to_upload_progress(session, response).await?;
             if let Some(object) = completed {
-                self.report_upload_completion(id, &object);
+                let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                self.report_object_write(
+                    id,
+                    stored_size,
+                    object.metadata_size(),
+                    object.custom_time,
+                );
             }
             Ok(progress)
         })
@@ -974,16 +981,12 @@ impl Backend for GcsBackend {
             .await?;
 
         let stored_size = read_stored_content_length(response).await;
-
-        if let Some(payload_size) = stored_size {
-            self.change_stream.write(
-                id,
-                payload_size + gcs_metadata.metadata_size(),
-                metadata.time_expires,
-            );
-        } else {
-            objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size");
-        }
+        self.report_object_write(
+            id,
+            stored_size,
+            gcs_metadata.metadata_size(),
+            metadata.time_expires,
+        );
 
         Ok(())
     }
@@ -1217,7 +1220,13 @@ impl Backend for GcsBackend {
             .await
             .map(|(progress, completed)| {
                 if let Some(object) = completed {
-                    self.report_upload_completion(id, &object);
+                    let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                    self.report_object_write(
+                        id,
+                        stored_size,
+                        object.metadata_size(),
+                        object.custom_time,
+                    );
                 }
                 progress
             });
