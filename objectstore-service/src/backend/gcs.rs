@@ -1185,10 +1185,18 @@ impl Backend for GcsBackend {
 
         range_response_to_upload_progress(&session, response)
             .await
-            // If we get a completed object back it means that a previous `put_chunk` request
-            // already observed it and wrote to the `change_stream`. If we were to write to it
-            // again we would double count.
-            .map(|(progress, _)| progress)
+            .map(|(progress, completed)| {
+                if let Some(object) = completed {
+                    let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                    self.report_object_write(
+                        id,
+                        stored_size,
+                        object.metadata_size(),
+                        object.custom_time,
+                    );
+                }
+                progress
+            })
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1210,18 +1218,10 @@ impl Backend for GcsBackend {
 
             range_response_to_upload_progress(&session, response)
                 .await
-                .map(|(progress, completed)| {
-                    if let Some(object) = completed {
-                        let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-                        self.report_object_write(
-                            id,
-                            stored_size,
-                            object.metadata_size(),
-                            object.custom_time,
-                        );
-                    }
-                    progress
-                })
+                // If we get a completed object back it means that a previous `put_chunk` request
+                // already observed it and wrote to the `change_stream`. If we were to write to it
+                // again we would double count.
+                .map(|(progress, _)| progress)
         })
         .await
     }
