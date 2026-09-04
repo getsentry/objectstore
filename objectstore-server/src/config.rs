@@ -923,6 +923,7 @@ mod tests {
             };
             let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
+            assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
             let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
                 panic!("expected gcs long_term");
             };
@@ -940,6 +941,7 @@ mod tests {
             jail.set_env("OS__STORAGE__HIGH_VOLUME__PROJECT_ID", "my-project");
             jail.set_env("OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME", "my-instance");
             jail.set_env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "my-table");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__RPC_TIMEOUT", "750ms");
             jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
             jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
 
@@ -952,6 +954,7 @@ mod tests {
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
+            assert_eq!(hv.rpc_timeout, Duration::from_millis(750));
             let MultipartUploadStorageConfig::FileSystem(lt) = &c.long_term else {
                 panic!("expected filesystem long_term");
             };

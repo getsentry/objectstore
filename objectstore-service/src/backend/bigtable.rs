@@ -128,6 +128,19 @@ pub struct BigTableConfig {
     /// - `OS__STORAGE__CONNECTIONS=16` (optional)
     pub connections: Option<usize>,
 
+    /// Timeout for an individual Bigtable RPC attempt.
+    ///
+    /// # Default
+    ///
+    /// `2s`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__RPC_TIMEOUT=2s`
+    /// - `OS__STORAGE__HIGH_VOLUME__RPC_TIMEOUT=2s` (tiered storage)
+    #[serde(default = "default_rpc_timeout", with = "humantime_serde")]
+    pub rpc_timeout: Duration,
+
     /// Reports what this backend stores, for per-usecase cost attribution.
     ///
     /// # Default
@@ -142,8 +155,10 @@ pub struct BigTableConfig {
     pub cogs: Option<CostTrackerStreamConfig>,
 }
 
-/// Connection timeout used for the initial connection to Bigtable.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+fn default_rpc_timeout() -> Duration {
+    Duration::from_secs(2)
+}
+
 /// Maximum age for connections (GRPC channels) to Bigtable, after which they will be swapped with
 /// new ones in the background.
 /// This is intended to avoid latency spikes that could occur every hour or so, when the server
@@ -784,6 +799,7 @@ impl BigTableBackend {
             instance_name,
             table_name,
             connections,
+            rpc_timeout,
             cogs,
         } = config;
         let change_stream = streams.build(cogs.as_ref());
@@ -794,7 +810,7 @@ impl BigTableBackend {
                 &project_id,
                 &instance_name,
                 false, // is_read_only
-                Some(CONNECT_TIMEOUT),
+                Some(rpc_timeout),
             )?
         } else {
             let token_provider = PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?;
@@ -802,7 +818,7 @@ impl BigTableBackend {
                 &project_id,
                 &instance_name,
                 false, // is_read_only
-                Some(CONNECT_TIMEOUT),
+                Some(rpc_timeout),
                 Arc::new(token_provider),
                 connections.unwrap_or(1),
                 true, // prime_channels
@@ -1471,6 +1487,7 @@ mod tests {
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
+            rpc_timeout: default_rpc_timeout(),
             cogs: None,
         }
     }

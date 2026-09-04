@@ -540,6 +540,7 @@ mod tests {
             instance_name: "objectstore".into(),
             table_name: "objectstore".into(),
             connections: None,
+            rpc_timeout: Duration::from_secs(2),
             cogs: None,
         };
         let gcs_config = GcsConfig {
