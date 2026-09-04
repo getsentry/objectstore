@@ -111,6 +111,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// through this backend's normal read methods. A backend that composes another backend must
     /// finish its own publication work before returning that outcome.
     ///
+    /// A `content_length` of zero is valid: it is how a zero-length object is uploaded, and it
+    /// completes such a session. Against a session that still expects bytes it writes nothing and
+    /// reports the offset the backend holds.
+    ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
