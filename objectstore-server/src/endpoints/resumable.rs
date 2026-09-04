@@ -23,7 +23,8 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
-    CommitResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET, UploadOffset, UploadProgress,
+    CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET, UploadOffset,
+    UploadProgress,
 };
 
 use crate::auth::AuthAwareService;
@@ -113,12 +114,17 @@ async fn create_session_for_id(
 ///
 /// [`HEADER_UPLOAD_OFFSET`] selects between the two. A concrete offset submits the request
 /// body as the chunk starting there; the `*` wildcard submits nothing and asks where the
-/// server stands, which also commits an object that was assembled but not yet committed.
+/// server stands. A status query can observe completion when the final chunk succeeded but its
+/// response was lost. A composed backend can also finish pending idempotent publication work
+/// before reporting completion.
 /// Chunks require `Content-Length`, including over HTTP/2. Offset queries may omit it, but the
 /// body stream is checked and any bytes are rejected as a malformed request.
 ///
 /// Both answer `204 No Content` with the authoritative offset while bytes remain, and
-/// `201 Created` with the key once the object is committed.
+/// `201 Created` with the key once the upload is complete, the session is terminal, and the object
+/// is available through the normal object endpoints.
+/// The acknowledged offset may be lower than the submitted chunk's end, so clients should continue
+/// from this response (or from a later explicit offset query), never from local byte accounting alone.
 pub(super) async fn continue_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
@@ -189,8 +195,8 @@ fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiRes
             [(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset))],
         )
             .into_response(),
-        UploadProgress::Committed => {
-            (StatusCode::CREATED, Json(CommitResponse { key })).into_response()
+        UploadProgress::Complete => {
+            (StatusCode::CREATED, Json(CompleteUploadResponse { key })).into_response()
         }
     };
 
@@ -229,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_answers_created_with_the_key() {
-        let response = progress_response(Ok(UploadProgress::Committed), "my-key".into()).unwrap();
+        let response = progress_response(Ok(UploadProgress::Complete), "my-key".into()).unwrap();
 
         let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::CREATED);

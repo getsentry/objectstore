@@ -226,7 +226,7 @@ impl AuthAwareService {
         id: ObjectId,
         session: SessionToken,
     ) -> ApiResult<UploadProgress> {
-        // An offset query can commit an assembled object.
+        // A status query can detect an upload to be complete and cause logical object creation.
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.upload_offset(id, session).await?)
     }

@@ -68,12 +68,16 @@ impl Services {
             .as_ref()
             .map(ChangeStreamFactory::new)
             .unwrap_or_default();
+        let resumable_token_encryption = config.service.resumable_token_encryption()?;
         let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
-        let service = StorageService::new(backend).with_concurrency(concurrency);
+        let mut service = StorageService::new(backend)?.with_concurrency(concurrency);
+        if let Some(resumable_token_encryption) = resumable_token_encryption {
+            service = service.with_resumable_token_encryption(resumable_token_encryption);
+        }
         service.start();
 
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);

@@ -356,6 +356,7 @@ mod tests {
 
     fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
+            .unwrap()
             .with_concurrency(ConcurrencyLimiter::new(limit))
     }
 
@@ -519,8 +520,9 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
         });
-        let service =
-            StorageService::new(Box::new(gated)).with_concurrency(ConcurrencyLimiter::new(100));
+        let service = StorageService::new(Box::new(gated))
+            .unwrap()
+            .with_concurrency(ConcurrencyLimiter::new(100));
 
         let ops: Vec<Operation> = (0..10)
             .map(|i| {
@@ -564,6 +566,7 @@ mod tests {
         // Bulk budget = 1 (100% of max=1). Hold the permit via a normal
         // acquire; the bulk op should wait and eventually time out.
         let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
+            .unwrap()
             .with_concurrency(
                 ConcurrencyLimiter::new(1)
                     .with_queue(0)

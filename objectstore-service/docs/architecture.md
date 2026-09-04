@@ -260,13 +260,25 @@ trips for objects large enough that re-sending the whole payload is expensive.
    reports the offset now persisted.
 3. After a failure, [`upload_offset`](backend::common::Backend::upload_offset)
    reports where the backend stands, so the caller resumes from there.
-4. The chunk carrying the last byte commits the object. There is no finalize call —
-   the backend recognizes that chunk from the declared total size.
+4. The chunk carrying the last byte completes the upload. There is no separate completion call —
+   the backend recognizes that chunk from the declared total size and makes the object available
+   through its normal read path before reporting completion.
 5. At any time, an upload can be canceled, which discards what its session holds.
+
+Backend session tokens remain private to the service. Before returning a token to a client,
+[`StorageService`] places the canonical object path and backend-defined token string in an
+AES-256-GCM envelope. Continuation, offset-query, and cancellation operations authenticate and
+open that envelope, reject an object-path mismatch, and pass the original string back to the
+backend.
 
 Not all backends support resumable uploads. A backend returns no session when it declines a
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
+
+The offset returned by every chunk response is authoritative. A backend may accept the full
+request body but persist only a prefix (for example, up to an internal alignment boundary), so a
+client must not advance by the submitted `Content-Length` on its own. It continues from the
+preceding response's offset, or performs an explicit offset query after an ambiguous failure.
 
 ## Multipart Uploads
 

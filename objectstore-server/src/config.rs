@@ -65,6 +65,7 @@ use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
+use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -575,6 +576,8 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
+/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
+/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEY_FILES`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -629,6 +632,61 @@ pub struct Service {
     ///
     /// `60`
     pub bulk_concurrency_pct: u32,
+
+    /// Persistent encryption keys for resumable-upload session tokens returned to clients.
+    ///
+    /// Tokens are always encrypted. When this is absent, Objectstore generates a fresh in-memory
+    /// AES-256 key at startup, so resumable sessions become invalid after a restart. Configure a
+    /// persistent keyring for sessions that must survive restarts. Keep old keys configured while
+    /// their sessions may still be active; removing a key intentionally invalidates those sessions.
+    ///
+    /// ```yaml
+    /// service:
+    ///   resumable_token_encryption:
+    ///     active_key_id: v1
+    ///     key_files:
+    ///       v1: /var/run/secrets/objectstore/resumable-upload-v1
+    /// ```
+    pub resumable_token_encryption: Option<ResumableTokenEncryptionConfig>,
+}
+
+impl Service {
+    /// Loads and validates the configured resumable token encryption keys.
+    pub(crate) fn resumable_token_encryption(&self) -> Result<Option<Encryptor>> {
+        let Some(config) = &self.resumable_token_encryption else {
+            return Ok(None);
+        };
+
+        let mut keys = BTreeMap::new();
+        for (key_id, filename) in &config.key_files {
+            let bytes = std::fs::read(filename).map_err(|error| {
+                anyhow::anyhow!("reading resumable token key {filename:?}: {error}")
+            })?;
+            keys.insert(key_id.clone(), bytes);
+        }
+
+        Encryptor::new(config.active_key_id.clone(), keys).map(Some)
+    }
+}
+
+/// AES-256-GCM keys used to protect externally visible resumable session tokens.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ResumableTokenEncryptionConfig {
+    /// Key used to encrypt newly created sessions.
+    pub active_key_id: String,
+    /// Files containing raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    #[serde(default)]
+    pub key_files: BTreeMap<String, PathBuf>,
+}
+
+impl fmt::Debug for ResumableTokenEncryptionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResumableTokenEncryptionConfig")
+            .field("active_key_id", &self.active_key_id)
+            .field("key_ids", &self.key_files.keys().collect::<Vec<_>>())
+            .field("key_files", &self.key_files)
+            .finish()
+    }
 }
 
 impl Default for Service {
@@ -638,6 +696,7 @@ impl Default for Service {
             concurrency_queue: 0,
             concurrency_timeout: Duration::from_secs(1),
             bulk_concurrency_pct: 60,
+            resumable_token_encryption: None,
         }
     }
 }
@@ -864,6 +923,78 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn resumable_token_encryption_loads_keys_from_files() {
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file.write_all(&[7; 32]).unwrap();
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                format!(
+                    "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                    key_file.path().display(),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert!(
+                config
+                    .service
+                    .resumable_token_encryption()
+                    .unwrap()
+                    .is_some()
+            );
+
+            let debug = format!("{:?}", config.service);
+            assert!(debug.contains("v1"));
+            assert!(debug.contains(&key_file.path().display().to_string()));
+            assert!(!debug.contains("07070707"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn resumable_token_encryption_rejects_invalid_configuration() {
+        let mut valid = tempfile::NamedTempFile::new().unwrap();
+        valid.write_all(&[7; 32]).unwrap();
+        let mut short = tempfile::NamedTempFile::new().unwrap();
+        short.write_all(&[7; 31]).unwrap();
+        let missing = valid.path().with_extension("missing");
+        for yaml in [
+            "service:\n  resumable_token_encryption:\n    active_key_id: v1\n".to_owned(),
+            format!(
+                "service:\n  resumable_token_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
+                valid.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_token_encryption:\n    active_key_id: bad_key\n    key_files:\n      'bad key': \"{}\"\n",
+                valid.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                short.path().display(),
+            ),
+            format!(
+                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                missing.display(),
+            ),
+        ] {
+            let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+            tempfile.write_all(yaml.as_bytes()).unwrap();
+            figment::Jail::expect_with(|_jail| {
+                let config = Config::load(Some(tempfile.path())).unwrap();
+                assert!(
+                    config.service.resumable_token_encryption().is_err(),
+                    "accepted {yaml}"
+                );
+                Ok(())
+            });
+        }
     }
 
     #[test]
