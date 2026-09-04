@@ -22,7 +22,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::ResumableUploadEncryption;
+use crate::resumable::ResumableTokenEncryption;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -76,7 +76,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 pub struct StorageService {
     inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
-    resumable_upload_encryption: Arc<ResumableUploadEncryption>,
+    resumable_token_encryption: Arc<ResumableTokenEncryption>,
 }
 
 impl StorageService {
@@ -87,14 +87,14 @@ impl StorageService {
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
     ///
-    /// Returns an error if the process-local resumable-upload encryption key cannot be generated.
+    /// Returns an error if the process-local resumable token encryption key cannot be generated.
     pub fn new(backend: Box<dyn Backend>) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
-            resumable_upload_encryption: Arc::new(
-                ResumableUploadEncryption::ephemeral()
-                    .context("failed to initialize resumable upload encryption")?,
+            resumable_token_encryption: Arc::new(
+                ResumableTokenEncryption::ephemeral()
+                    .context("failed to initialize resumable token encryption")?,
             ),
         })
     }
@@ -109,12 +109,9 @@ impl StorageService {
         self
     }
 
-    /// Replaces the process-local resumable-upload encryption key with a persistent keyring.
-    pub fn with_resumable_upload_encryption(
-        mut self,
-        encryption: ResumableUploadEncryption,
-    ) -> Self {
-        self.resumable_upload_encryption = Arc::new(encryption);
+    /// Replaces the process-local resumable token encryption key with a persistent keyring.
+    pub fn with_resumable_token_encryption(mut self, encryption: ResumableTokenEncryption) -> Self {
+        self.resumable_token_encryption = Arc::new(encryption);
         self
     }
 
@@ -393,7 +390,7 @@ impl StorageService {
     ) -> Result<Option<SessionToken>> {
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let inner = Arc::clone(&self.inner);
-        let encryption = self.resumable_upload_encryption.clone();
+        let encryption = self.resumable_token_encryption.clone();
         self.spawn("create_upload_session", async move {
             let session = inner
                 .create_upload_session(&id, &metadata, total_length)
@@ -422,7 +419,7 @@ impl StorageService {
         body: ClientStream,
     ) -> Result<UploadProgress> {
         let inner = Arc::clone(&self.inner);
-        let encryption = self.resumable_upload_encryption.clone();
+        let encryption = self.resumable_token_encryption.clone();
         self.spawn("put_chunk", async move {
             let session = encryption.decrypt(&id, session)?;
             inner
@@ -443,7 +440,7 @@ impl StorageService {
         session: SessionToken,
     ) -> Result<UploadProgress> {
         let inner = Arc::clone(&self.inner);
-        let encryption = self.resumable_upload_encryption.clone();
+        let encryption = self.resumable_token_encryption.clone();
         self.spawn("upload_offset", async move {
             let session = encryption.decrypt(&id, session)?;
             inner.upload_offset(&id, &session).await
@@ -454,7 +451,7 @@ impl StorageService {
     /// Cancels an upload session, discarding whatever was uploaded.
     pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> Result<()> {
         let inner = Arc::clone(&self.inner);
-        let encryption = self.resumable_upload_encryption.clone();
+        let encryption = self.resumable_token_encryption.clone();
         self.spawn("cancel_upload", async move {
             let session = encryption.decrypt(&id, session)?;
             inner.cancel_upload(&id, &session).await
@@ -997,14 +994,14 @@ mod tests {
     #[tokio::test]
     async fn configured_encryption_only_crosses_the_service_boundary() -> Result<()> {
         let hooks = ResumableTokenHooks::default();
-        let encryption = ResumableUploadEncryption::new(
+        let encryption = ResumableTokenEncryption::new(
             "v1",
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
         .unwrap();
         let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
             .unwrap()
-            .with_resumable_upload_encryption(encryption);
+            .with_resumable_token_encryption(encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let encrypted = service
@@ -1023,14 +1020,14 @@ mod tests {
     #[tokio::test]
     async fn configured_encryption_rejects_plaintext_tokens() {
         let hooks = ResumableTokenHooks::default();
-        let encryption = ResumableUploadEncryption::new(
+        let encryption = ResumableTokenEncryption::new(
             "v1",
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
         .unwrap();
         let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
             .unwrap()
-            .with_resumable_upload_encryption(encryption);
+            .with_resumable_token_encryption(encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let result = service

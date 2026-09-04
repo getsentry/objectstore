@@ -68,15 +68,15 @@ impl Services {
             .as_ref()
             .map(ChangeStreamFactory::new)
             .unwrap_or_default();
-        let resumable_upload_encryption = config.service.resumable_upload_encryption()?;
+        let resumable_token_encryption = config.service.resumable_token_encryption()?;
         let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
         let mut service = StorageService::new(backend)?.with_concurrency(concurrency);
-        if let Some(resumable_upload_encryption) = resumable_upload_encryption {
-            service = service.with_resumable_upload_encryption(resumable_upload_encryption);
+        if let Some(resumable_token_encryption) = resumable_token_encryption {
+            service = service.with_resumable_token_encryption(resumable_token_encryption);
         }
         service.start();
 

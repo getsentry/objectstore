@@ -110,8 +110,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// through this backend's normal read methods. A backend that composes another backend must
     /// finish its own publication work before returning that outcome.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session,
-    /// and [`Error::ChunkExceedsUploadLength`] when the chunk would exceed the total length
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
+    /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
     async fn put_chunk(
         &self,
@@ -131,7 +131,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify a known session.
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
     async fn upload_offset(&self, id: &ObjectId, session: &str) -> Result<UploadProgress> {
         let _ = (id, session);
         Err(ErrorKind::Unsupported.into())
@@ -139,7 +139,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`Error::UnknownUploadSession`] when `session` does not identify an open session.
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
     async fn cancel_upload(&self, id: &ObjectId, session: &str) -> Result<()> {
         let _ = (id, session);
         Err(ErrorKind::Unsupported.into())

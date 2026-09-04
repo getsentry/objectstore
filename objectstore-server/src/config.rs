@@ -65,7 +65,7 @@ use anyhow::Result;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
-use objectstore_service::resumable::ResumableUploadEncryption;
+use objectstore_service::resumable::ResumableTokenEncryption;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -576,8 +576,8 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
-/// - `OS__SERVICE__RESUMABLE_UPLOAD_ENCRYPTION__ACTIVE_KEY_ID`
-/// - `OS__SERVICE__RESUMABLE_UPLOAD_ENCRYPTION__KEY_FILES`
+/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
+/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEY_FILES`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -642,36 +642,36 @@ pub struct Service {
     ///
     /// ```yaml
     /// service:
-    ///   resumable_upload_encryption:
+    ///   resumable_token_encryption:
     ///     active_key_id: v1
     ///     key_files:
     ///       v1: /var/run/secrets/objectstore/resumable-upload-v1
     /// ```
-    pub resumable_upload_encryption: Option<ResumableUploadEncryptionConfig>,
+    pub resumable_token_encryption: Option<ResumableTokenEncryptionConfig>,
 }
 
 impl Service {
-    /// Loads and validates the configured resumable-upload encryption keys.
-    pub(crate) fn resumable_upload_encryption(&self) -> Result<Option<ResumableUploadEncryption>> {
-        let Some(config) = &self.resumable_upload_encryption else {
+    /// Loads and validates the configured resumable token encryption keys.
+    pub(crate) fn resumable_token_encryption(&self) -> Result<Option<ResumableTokenEncryption>> {
+        let Some(config) = &self.resumable_token_encryption else {
             return Ok(None);
         };
 
         let mut keys = BTreeMap::new();
         for (key_id, filename) in &config.key_files {
             let bytes = std::fs::read(filename).map_err(|error| {
-                anyhow::anyhow!("reading resumable upload key {filename:?}: {error}")
+                anyhow::anyhow!("reading resumable token key {filename:?}: {error}")
             })?;
             keys.insert(key_id.clone(), bytes);
         }
 
-        ResumableUploadEncryption::new(config.active_key_id.clone(), keys).map(Some)
+        ResumableTokenEncryption::new(config.active_key_id.clone(), keys).map(Some)
     }
 }
 
 /// AES-256-GCM keys used to protect externally visible resumable session tokens.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct ResumableUploadEncryptionConfig {
+pub struct ResumableTokenEncryptionConfig {
     /// Key used to encrypt newly created sessions.
     pub active_key_id: String,
     /// Files containing raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
@@ -679,9 +679,9 @@ pub struct ResumableUploadEncryptionConfig {
     pub key_files: BTreeMap<String, PathBuf>,
 }
 
-impl fmt::Debug for ResumableUploadEncryptionConfig {
+impl fmt::Debug for ResumableTokenEncryptionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResumableUploadEncryptionConfig")
+        f.debug_struct("ResumableTokenEncryptionConfig")
             .field("active_key_id", &self.active_key_id)
             .field("key_ids", &self.key_files.keys().collect::<Vec<_>>())
             .field("key_files", &self.key_files)
@@ -696,7 +696,7 @@ impl Default for Service {
             concurrency_queue: 0,
             concurrency_timeout: Duration::from_secs(1),
             bulk_concurrency_pct: 60,
-            resumable_upload_encryption: None,
+            resumable_token_encryption: None,
         }
     }
 }
@@ -926,14 +926,14 @@ mod tests {
     }
 
     #[test]
-    fn resumable_upload_encryption_loads_keys_from_files() {
+    fn resumable_token_encryption_loads_keys_from_files() {
         let mut key_file = tempfile::NamedTempFile::new().unwrap();
         key_file.write_all(&[7; 32]).unwrap();
         let mut tempfile = tempfile::NamedTempFile::new().unwrap();
         tempfile
             .write_all(
                 format!(
-                    "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                    "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
                     key_file.path().display(),
                 )
                 .as_bytes(),
@@ -945,7 +945,7 @@ mod tests {
             assert!(
                 config
                     .service
-                    .resumable_upload_encryption()
+                    .resumable_token_encryption()
                     .unwrap()
                     .is_some()
             );
@@ -959,28 +959,28 @@ mod tests {
     }
 
     #[test]
-    fn resumable_upload_encryption_rejects_invalid_configuration() {
+    fn resumable_token_encryption_rejects_invalid_configuration() {
         let mut valid = tempfile::NamedTempFile::new().unwrap();
         valid.write_all(&[7; 32]).unwrap();
         let mut short = tempfile::NamedTempFile::new().unwrap();
         short.write_all(&[7; 31]).unwrap();
         let missing = valid.path().with_extension("missing");
         for yaml in [
-            "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n".to_owned(),
+            "service:\n  resumable_token_encryption:\n    active_key_id: v1\n".to_owned(),
             format!(
-                "service:\n  resumable_upload_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
                 valid.path().display(),
             ),
             format!(
-                "service:\n  resumable_upload_encryption:\n    active_key_id: bad_key\n    key_files:\n      'bad key': \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: bad_key\n    key_files:\n      'bad key': \"{}\"\n",
                 valid.path().display(),
             ),
             format!(
-                "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
                 short.path().display(),
             ),
             format!(
-                "service:\n  resumable_upload_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
                 missing.display(),
             ),
         ] {
@@ -989,7 +989,7 @@ mod tests {
             figment::Jail::expect_with(|_jail| {
                 let config = Config::load(Some(tempfile.path())).unwrap();
                 assert!(
-                    config.service.resumable_upload_encryption().is_err(),
+                    config.service.resumable_token_encryption().is_err(),
                     "accepted {yaml}"
                 );
                 Ok(())
