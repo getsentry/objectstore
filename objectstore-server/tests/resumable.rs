@@ -11,13 +11,10 @@ use std::net::TcpStream;
 
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
-use objectstore_server::config::{
-    AuthZ, Config, ConfigSecret, ResumableTokenEncryptionConfig, Service,
-};
+use objectstore_server::config::{AuthZ, Config, ResumableTokenEncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
 use reqwest::StatusCode;
-use secrecy::SecretBox;
 
 /// Unpadded base64url for the opaque backend token `some-token`.
 const SESSION: &str = "c29tZS10b2tlbg";
@@ -47,10 +44,7 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
         service: Service {
             resumable_token_encryption: Some(ResumableTokenEncryptionConfig {
                 active_key_id: "test".into(),
-                keys: BTreeMap::from([(
-                    "test".into(),
-                    SecretBox::new(Box::new(ConfigSecret::from(key.as_str()))),
-                )]),
+                keys: BTreeMap::from([("test".into(), key)]),
             }),
             ..Default::default()
         },

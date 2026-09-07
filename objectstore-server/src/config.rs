@@ -68,7 +68,7 @@ use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
-use secrecy::{CloneableSecret, ExposeSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
+use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
@@ -664,7 +664,7 @@ impl Service {
             .iter()
             .map(|(key_id, key)| {
                 general_purpose::STANDARD
-                    .decode(key.expose_secret().as_str())
+                    .decode(key)
                     .map(|key| (key_id.clone(), key))
                     .map_err(|error| {
                         anyhow::anyhow!("invalid base64 resumable token key {key_id:?}: {error}")
@@ -686,7 +686,7 @@ pub struct ResumableTokenEncryptionConfig {
     /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
     /// deserialization.
     #[serde(default)]
-    pub keys: BTreeMap<String, SecretBox<ConfigSecret>>,
+    pub keys: BTreeMap<String, String>,
 }
 
 impl fmt::Debug for ResumableTokenEncryptionConfig {
