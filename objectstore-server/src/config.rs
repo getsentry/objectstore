@@ -62,7 +62,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use base64::{Engine as _, engine::general_purpose};
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
@@ -640,7 +639,7 @@ pub struct Service {
     /// AES-256 key at startup, so resumable sessions become invalid after a restart. Configure a
     /// persistent keyring for sessions that must survive restarts. Keep old keys configured while
     /// their sessions may still be active; removing a key intentionally invalidates those sessions.
-    /// Values must be standard-base64-encoded AES-256 keys.
+    /// Values must be raw AES-256 key bytes.
     ///
     /// ```yaml
     /// service:
@@ -659,20 +658,7 @@ impl Service {
             return Ok(None);
         };
 
-        let keys = config
-            .keys
-            .iter()
-            .map(|(key_id, key)| {
-                general_purpose::STANDARD
-                    .decode(key)
-                    .map(|key| (key_id.clone(), key))
-                    .map_err(|error| {
-                        anyhow::anyhow!("invalid base64 resumable token key {key_id:?}: {error}")
-                    })
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-
-        Encryptor::new(config.active_key_id.clone(), keys).map(Some)
+        Encryptor::new(config.active_key_id.clone(), config.keys.clone()).map(Some)
     }
 }
 
@@ -681,12 +667,42 @@ impl Service {
 pub struct ResumableTokenEncryptionConfig {
     /// Key used to encrypt newly created sessions.
     pub active_key_id: String,
-    /// Standard-base64-encoded, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    /// Raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
     ///
     /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
     /// deserialization.
     #[serde(default)]
-    pub keys: BTreeMap<String, String>,
+    #[serde(with = "raw_bytes_map")]
+    pub keys: BTreeMap<String, Vec<u8>>,
+}
+
+/// Serde adapter that makes map values byte buffers rather than byte sequences.
+mod raw_bytes_map {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
+    use serde_bytes::{ByteBuf, Bytes};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<String, Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BTreeMap::<String, ByteBuf>::deserialize(deserializer).map(|keys| {
+            keys.into_iter()
+                .map(|(key_id, key)| (key_id, key.into_vec()))
+                .collect()
+        })
+    }
+
+    pub fn serialize<S>(keys: &BTreeMap<String, Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        keys.iter()
+            .map(|(key_id, key)| (key_id, Bytes::new(key)))
+            .collect::<BTreeMap<_, _>>()
+            .serialize(serializer)
+    }
 }
 
 impl fmt::Debug for ResumableTokenEncryptionConfig {
@@ -937,16 +953,11 @@ mod tests {
     #[test]
     fn resumable_token_encryption_rejects_invalid_configuration() {
         let mut valid = tempfile::NamedTempFile::new().unwrap();
-        valid
-            .write_all(general_purpose::STANDARD.encode([7; 32]).as_bytes())
-            .unwrap();
+        valid.write_all(&[7; 32]).unwrap();
         let mut short = tempfile::NamedTempFile::new().unwrap();
-        short
-            .write_all(general_purpose::STANDARD.encode([7; 31]).as_bytes())
-            .unwrap();
+        short.write_all(&[7; 31]).unwrap();
         for yaml in [
             "service:\n  resumable_token_encryption:\n    active_key_id: v1\n".to_owned(),
-            "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    keys:\n      v1: not-base64\n".to_owned(),
             format!(
                 "service:\n  resumable_token_encryption:\n    active_key_id: missing\n    keys:\n      v1: ${{file:{}}}\n",
                 valid.path().display(),
@@ -1133,11 +1144,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("relative-password"), "hunter3").unwrap();
-        std::fs::write(
-            dir.path().join("resumable-token-key"),
-            general_purpose::STANDARD.encode([7; 32]),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("resumable-token-key"), [255; 32]).unwrap();
 
         let config_path = dir.path().join("config.yml");
         std::fs::write(

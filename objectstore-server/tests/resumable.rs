@@ -10,7 +10,6 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::Result;
-use base64::{Engine as _, engine::general_purpose};
 use objectstore_server::config::{AuthZ, Config, ResumableTokenEncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
@@ -34,8 +33,6 @@ async fn test_server() -> TestServer {
 }
 
 async fn test_server_with_protected_session() -> Result<TestServer> {
-    let key = general_purpose::STANDARD.encode([7; 32]);
-
     Ok(TestServer::with_config(Config {
         auth: AuthZ {
             enforce: false,
@@ -44,7 +41,7 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
         service: Service {
             resumable_token_encryption: Some(ResumableTokenEncryptionConfig {
                 active_key_id: "test".into(),
-                keys: BTreeMap::from([("test".into(), key)]),
+                keys: BTreeMap::from([("test".into(), vec![7; 32])]),
             }),
             ..Default::default()
         },
