@@ -344,6 +344,7 @@ mod tests {
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::concurrency::ConcurrencyLimiter;
     use crate::error::{Error, ErrorKind};
+    use crate::resumable::Encryptor;
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
 
@@ -355,9 +356,11 @@ mod tests {
     }
 
     fn make_service_with_limit(limit: u32) -> StorageService {
-        StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
-            .unwrap()
-            .with_concurrency(ConcurrencyLimiter::new(limit))
+        StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory")),
+            Encryptor::ephemeral().unwrap(),
+        )
+        .with_concurrency(ConcurrencyLimiter::new(limit))
     }
 
     fn make_service() -> StorageService {
@@ -520,8 +523,7 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
         });
-        let service = StorageService::new(Box::new(gated))
-            .unwrap()
+        let service = StorageService::new(Box::new(gated), Encryptor::ephemeral().unwrap())
             .with_concurrency(ConcurrencyLimiter::new(100));
 
         let ops: Vec<Operation> = (0..10)
@@ -565,14 +567,16 @@ mod tests {
     async fn bulk_respects_budget() {
         // Bulk budget = 1 (100% of max=1). Hold the permit via a normal
         // acquire; the bulk op should wait and eventually time out.
-        let service = StorageService::new(Box::new(InMemoryBackend::new("in-memory")))
-            .unwrap()
-            .with_concurrency(
-                ConcurrencyLimiter::new(1)
-                    .with_queue(0)
-                    .with_timeout(Duration::from_millis(1))
-                    .with_bulk(100),
-            );
+        let service = StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory")),
+            Encryptor::ephemeral().unwrap(),
+        )
+        .with_concurrency(
+            ConcurrencyLimiter::new(1)
+                .with_queue(0)
+                .with_timeout(Duration::from_millis(1))
+                .with_bulk(100),
+        );
 
         let _held = service.concurrency_limiter().acquire().await.unwrap();
 

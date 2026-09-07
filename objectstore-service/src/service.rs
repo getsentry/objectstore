@@ -8,7 +8,6 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::Context;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
@@ -87,16 +86,13 @@ impl StorageService {
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
     ///
-    /// Returns an error if the process-local resumable token encryption key cannot be generated.
-    pub fn new(backend: Box<dyn Backend>) -> anyhow::Result<Self> {
-        Ok(Self {
+    /// `resumable_token_encryption` protects tokens exposed by the resumable upload methods.
+    pub fn new(backend: Box<dyn Backend>, resumable_token_encryption: Encryptor) -> Self {
+        Self {
             inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
-            resumable_token_encryption: Arc::new(
-                Encryptor::ephemeral()
-                    .context("failed to initialize resumable token encryption")?,
-            ),
-        })
+            resumable_token_encryption: Arc::new(resumable_token_encryption),
+        }
     }
 
     /// Replaces the default concurrency limiter.
@@ -106,12 +102,6 @@ impl StorageService {
     /// and no queue.
     pub fn with_concurrency(mut self, limiter: ConcurrencyLimiter) -> Self {
         self.concurrency = limiter;
-        self
-    }
-
-    /// Replaces the process-local resumable token encryption key with a persistent keyring.
-    pub fn with_resumable_token_encryption(mut self, encryption: Encryptor) -> Self {
-        self.resumable_token_encryption = Arc::new(encryption);
         self
     }
 
@@ -532,7 +522,10 @@ mod tests {
     }
 
     fn make_service() -> StorageService {
-        StorageService::new(Box::new(InMemoryBackend::new("in-memory"))).unwrap()
+        StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory")),
+            Encryptor::ephemeral().unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -583,7 +576,7 @@ mod tests {
         let backend = GcsBackend::new(config, &ChangeStreamFactory::default())
             .await
             .unwrap();
-        let service = StorageService::new(Box::new(backend)).unwrap();
+        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
 
         let key = service
             .insert_object(
@@ -628,7 +621,7 @@ mod tests {
                 .unwrap(),
         );
         let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend)).unwrap();
+        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
@@ -727,7 +720,10 @@ mod tests {
 
     #[tokio::test]
     async fn panic_in_backend_returns_task_failed() {
-        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet))).unwrap();
+        let service = StorageService::new(
+            Box::new(TestBackend::new(PanicOnGet)),
+            Encryptor::ephemeral().unwrap(),
+        );
 
         let id = ObjectId::new(make_context(), "panic-test".into());
         let result = service.get_object(id, None).await;
@@ -802,7 +798,7 @@ mod tests {
         let hv = Box::new(TestBackend::new(GateOnPut::default()));
         let lt = Box::new(TestBackend::new(GateOnPut::with_pause()));
         let backend = TieredStorage::new(hv.clone(), lt.clone(), Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend)).unwrap();
+        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
@@ -844,9 +840,9 @@ mod tests {
 
     fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
-        let service = StorageService::new(Box::new(backend.clone()))
-            .unwrap()
-            .with_concurrency(ConcurrencyLimiter::new(limit));
+        let service =
+            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap())
+                .with_concurrency(ConcurrencyLimiter::new(limit));
         (service, backend)
     }
 
@@ -900,8 +896,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
         let backend = Box::new(InMemoryBackend::new("cap"));
-        let service = StorageService::new(backend)
-            .unwrap()
+        let service = StorageService::new(backend, Encryptor::ephemeral().unwrap())
             .with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
     }
@@ -932,9 +927,11 @@ mod tests {
 
     #[tokio::test]
     async fn permits_released_after_panic() {
-        let service = StorageService::new(Box::new(TestBackend::new(PanicOnGet)))
-            .unwrap()
-            .with_concurrency(ConcurrencyLimiter::new(1));
+        let service = StorageService::new(
+            Box::new(TestBackend::new(PanicOnGet)),
+            Encryptor::ephemeral().unwrap(),
+        )
+        .with_concurrency(ConcurrencyLimiter::new(1));
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
@@ -982,7 +979,10 @@ mod tests {
     #[tokio::test]
     async fn resumable_tokens_are_encrypted_by_default() -> Result<()> {
         let hooks = ResumableTokenHooks::default();
-        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone()))).unwrap();
+        let service = StorageService::new(
+            Box::new(TestBackend::new(hooks.clone())),
+            Encryptor::ephemeral().unwrap(),
+        );
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let token = service
@@ -1018,9 +1018,7 @@ mod tests {
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
         .unwrap();
-        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
-            .unwrap()
-            .with_resumable_token_encryption(encryption);
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())), encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let encrypted = service
@@ -1044,9 +1042,7 @@ mod tests {
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
         .unwrap();
-        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())))
-            .unwrap()
-            .with_resumable_token_encryption(encryption);
+        let service = StorageService::new(Box::new(TestBackend::new(hooks.clone())), encryption);
         let id = ObjectId::new(make_context(), "resumable".into());
 
         let result = service
