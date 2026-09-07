@@ -13,8 +13,8 @@
 //! service, and clients must treat their contents as opaque. The token bytes are encoded as
 //! unpadded base64url when the token is placed in a request's `session` query parameter.
 
-use std::fmt;
 use std::str::FromStr;
+use std::{borrow::Cow, fmt};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -78,7 +78,7 @@ impl SessionToken {
 
 impl fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SessionToken([redacted])")
+        f.write_str("SessionToken")
     }
 }
 
@@ -96,7 +96,7 @@ impl<'de> Deserialize<'de> for SessionToken {
     where
         D: Deserializer<'de>,
     {
-        let encoded = String::deserialize(deserializer)?;
+        let encoded = Cow::<'static, String>::deserialize(deserializer)?;
         Self::from_base64url(&encoded).map_err(de::Error::custom)
     }
 }
