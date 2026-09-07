@@ -11,10 +11,11 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::Mutex;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
+    self, Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
@@ -61,7 +62,7 @@ pub struct LocalFsBackend {
     // This lock coordinates mutations only within this backend instance. It
     // does not serialize another backend instance or another process using the
     // same directory.
-    mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl LocalFsBackend {
@@ -69,7 +70,7 @@ impl LocalFsBackend {
     pub fn new(config: FileSystemConfig) -> Self {
         Self {
             path: config.path,
-            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mutation_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -217,7 +218,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(&path).await {
@@ -748,7 +749,7 @@ mod tests {
         assert_eq!(updated.custom, metadata.custom);
         assert_eq!(
             updated.time_expires,
-            Some(super::super::common::normalize_expiry(requested).unwrap())
+            Some(common::normalize_expiry(requested).unwrap())
         );
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
 

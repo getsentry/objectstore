@@ -16,8 +16,8 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
-    TieredMetadata, TieredUpdate, TieredWrite, Tombstone, normalize_expiry,
+    self, DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse,
+    TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
@@ -157,7 +157,7 @@ impl super::common::Backend for InMemoryBackend {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
         let Some(StoreEntry::Object(metadata, _)) = store.get_mut(id) else {
@@ -254,7 +254,7 @@ impl HighVolumeBackend for InMemoryBackend {
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let expected_target = current;
-        let expire_at = normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
         let Some(entry) = store.get_mut(id) else {
@@ -659,7 +659,7 @@ mod tests {
             assert_eq!(payload, Bytes::from_static(b"payload"));
             assert_eq!(
                 updated.time_expires,
-                Some(normalize_expiry(requested).unwrap())
+                Some(common::normalize_expiry(requested).unwrap())
             );
 
             assert!(backend.set_expiry(&id, original_expiry).await.unwrap());
@@ -751,7 +751,7 @@ mod tests {
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
-            Some(normalize_expiry(new_expiry).unwrap())
+            Some(common::normalize_expiry(new_expiry).unwrap())
         );
     }
 

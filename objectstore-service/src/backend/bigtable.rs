@@ -44,7 +44,7 @@ use tonic::Code;
 use tracing::Instrument;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
+    self, Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
     TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::change_stream::{
@@ -1220,7 +1220,7 @@ impl HighVolumeBackend for BigTableBackend {
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let expected_target = current;
-        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         let path = id.as_storage_path().to_string().into_bytes();
 
         // Inline extension needs metadata and payload from the same read so a
@@ -1832,7 +1832,7 @@ mod tests {
         assert!(backend.set_expiry(&id, requested).await?);
         assert_eq!(
             backend.get_metadata(&id).await?.unwrap().time_expires,
-            Some(crate::backend::common::normalize_expiry(requested)?)
+            Some(common::normalize_expiry(requested)?)
         );
         let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
@@ -1853,7 +1853,7 @@ mod tests {
 
         let id = make_id();
         let observed_expiry =
-            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+            common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
         let original = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(observed_expiry),
@@ -1892,7 +1892,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id();
         let observed_expiry =
-            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+            common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
         let original = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(observed_expiry),
@@ -1930,8 +1930,7 @@ mod tests {
         let id = make_id();
         let target = ObjectId::random(id.context().clone());
         let wrong_target = ObjectId::random(id.context().clone());
-        let old_expiry =
-            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+        let old_expiry = common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
         create_tombstone(
             &backend,
             &id,
@@ -2486,8 +2485,7 @@ mod tests {
         let tti = Duration::from_hours(2 * 24);
 
         // Place time_expires near expiry but still in the future.
-        let old_deadline =
-            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_mins(1))?;
+        let old_deadline = common::normalize_expiry(SystemTime::now() + Duration::from_mins(1))?;
         write_legacy_tombstone(
             &backend,
             &id,

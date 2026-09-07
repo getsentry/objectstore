@@ -9,7 +9,7 @@ use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use bytes::Bytes;
 
-use crate::error::{ErrorKind, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -302,7 +302,7 @@ pub(crate) fn normalize_expiry(expire_at: SystemTime) -> Result<SystemTime> {
     let millis = expire_at
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|error| {
-            crate::error::Error::with_context(
+            Error::with_context(
                 ErrorKind::Internal,
                 "normalizing expiration timestamp",
                 error,
@@ -310,7 +310,7 @@ pub(crate) fn normalize_expiry(expire_at: SystemTime) -> Result<SystemTime> {
         })?
         .as_millis();
     let millis = u64::try_from(millis).map_err(|error| {
-        crate::error::Error::with_context(
+        Error::with_context(
             ErrorKind::Internal,
             "normalizing expiration timestamp",
             error,

@@ -13,6 +13,8 @@ use std::time::SystemTime;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken, UploadProgress};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::TaskTracker;
 
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
@@ -25,8 +27,6 @@ use crate::multipart::{
 };
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::task::TaskTracker;
 
 /// Service response for [`StorageService::get_object`].
 pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
@@ -593,7 +593,7 @@ mod tests {
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::changelog::NoopChangeLog;
-    use crate::backend::common::{HighVolumeBackend, PutResponse, TieredWrite};
+    use crate::backend::common::{self, HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
@@ -816,7 +816,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .time_expires,
-            Some(crate::backend::common::normalize_expiry(requested).unwrap())
+            Some(common::normalize_expiry(requested).unwrap())
         );
     }
 

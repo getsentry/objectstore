@@ -125,7 +125,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    self, Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -535,7 +535,7 @@ impl Backend for TieredStorage {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         match self.inner.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::NotFound => Ok(false),
             TieredMetadata::Object(_) => {
@@ -1109,7 +1109,7 @@ mod tests {
         let requested = SystemTime::now() + Duration::from_hours(1);
         assert!(storage.set_expiry(&id, requested).await.unwrap());
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
-        let normalized = crate::backend::common::normalize_expiry(requested).unwrap();
+        let normalized = common::normalize_expiry(requested).unwrap();
         assert_eq!(
             lt.inner.get(&target).expect_object().0.time_expires,
             Some(normalized)
@@ -1126,8 +1126,7 @@ mod tests {
         let id = make_id("tiered-hv-failure");
         let target = new_long_term_revision(&id);
         let old_expiry =
-            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_mins(10))
-                .unwrap();
+            common::normalize_expiry(SystemTime::now() + Duration::from_mins(10)).unwrap();
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
         let requested = SystemTime::now() + Duration::from_hours(1);

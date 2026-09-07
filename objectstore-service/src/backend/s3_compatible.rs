@@ -387,7 +387,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let expire_at = common::normalize_expiry(expire_at)?;
         let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
         else {
             return Ok(false);
@@ -462,7 +462,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -495,7 +495,7 @@ mod tests {
         })
     }
 
-    fn read_http_request(connection: &mut std::net::TcpStream) -> String {
+    fn read_http_request(connection: &mut TcpStream) -> String {
         let mut bytes = Vec::new();
         let mut byte = [0];
         while !bytes.ends_with(b"\r\n\r\n") {
