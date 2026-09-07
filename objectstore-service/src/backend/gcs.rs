@@ -489,7 +489,7 @@ impl ResumableUpload {
         format!("{}.{}", self.total_length, self.session_uri)
     }
 
-    fn from_token(token: &BackendToken, endpoint: &Url) -> Result<Self> {
+    fn from_token(token: &BackendToken) -> Result<Self> {
         let (total_length, session_uri) = token
             .split_once('.')
             .ok_or(ErrorKind::UnknownUploadSession)?;
@@ -1144,7 +1144,7 @@ impl Backend for GcsBackend {
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         objectstore_log::debug!("Uploading resumable chunk to GCS backend");
-        let session = ResumableUpload::from_token(token, &self.endpoint)?;
+        let session = ResumableUpload::from_token(token)?;
 
         let end = offset
             .checked_add(content_length)
@@ -1192,7 +1192,7 @@ impl Backend for GcsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
-        let session = ResumableUpload::from_token(token, &self.endpoint)?;
+        let session = ResumableUpload::from_token(token)?;
 
         self.with_retry("query_resumable_upload", || async {
             let response = self
@@ -1219,7 +1219,7 @@ impl Backend for GcsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
         objectstore_log::debug!("Cancelling resumable upload on GCS backend");
-        let session = ResumableUpload::from_token(token, &self.endpoint)?;
+        let session = ResumableUpload::from_token(token)?;
         let session_uri = session.session_uri;
         self.with_retry("cancel_resumable_upload", || {
             let session_uri = session_uri.clone();
@@ -1728,10 +1728,10 @@ mod tests {
 
     #[test]
     fn resumable_backend_token_round_trips_and_validates_uri() -> Result<()> {
-        let endpoint = Url::parse("https://example.invalid")?;
+        let _endpoint = Url::parse("https://example.invalid")?;
         let session_uri = "https://example.invalid/opaque/session?arbitrary=value";
         let token = ResumableUpload::new(Url::parse(session_uri)?, 123).into_token();
-        let decoded = ResumableUpload::from_token(&token, &endpoint)?;
+        let decoded = ResumableUpload::from_token(&token)?;
         assert_eq!(decoded.session_uri.as_str(), session_uri);
         assert_eq!(decoded.total_length, 123);
 
@@ -1744,7 +1744,7 @@ mod tests {
             wrong_origin,
         ] {
             assert!(matches!(
-                ResumableUpload::from_token(&malformed, &endpoint),
+                ResumableUpload::from_token(&malformed),
                 Err(error) if error.kind() == ErrorKind::UnknownUploadSession
             ));
         }
