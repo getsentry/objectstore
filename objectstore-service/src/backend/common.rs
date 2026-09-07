@@ -233,18 +233,6 @@ pub trait HighVolumeBackend: Backend {
     /// fetching up to 1 MiB of data just to discover a tombstone.
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata>;
 
-    /// Conditionally extends the deadline of an inline object or redirect.
-    ///
-    /// `expected_target = None` requires a live inline object. `Some(target)`
-    /// requires a live redirect to exactly that target. A mismatched, absent,
-    /// expired, or manual-policy entry returns `false`.
-    async fn set_expiry_if_matches(
-        &self,
-        id: &ObjectId,
-        expire_at: SystemTime,
-        expected_target: Option<&ObjectId>,
-    ) -> Result<bool>;
-
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
     /// Returns `None` after deleting the row (or if the row was already absent),
@@ -273,6 +261,22 @@ pub trait HighVolumeBackend: Backend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+    ) -> Result<bool>;
+
+    /// Atomically updates an existing row if its kind and redirect target match.
+    ///
+    /// `current = None` requires a live inline object. `Some(target)` requires
+    /// a live redirect to exactly that target. Updates never authorize creation
+    /// of an absent row.
+    ///
+    /// Returns `true` when the update was applied or its requested state was
+    /// already satisfied. Returns `false` for an absent, expired, manual-policy,
+    /// or conflicting entry.
+    async fn compare_and_update(
+        &self,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
     ) -> Result<bool>;
 }
 
@@ -369,6 +373,13 @@ impl TieredWrite {
             _ => None,
         }
     }
+}
+
+/// The in-place operation performed by [`HighVolumeBackend::compare_and_update`].
+#[derive(Clone, Debug)]
+pub enum TieredUpdate {
+    /// Extend the deadline while preserving the policy, payload, and other metadata.
+    SetExpiry(SystemTime),
 }
 
 /// Creates a reqwest client with required defaults.

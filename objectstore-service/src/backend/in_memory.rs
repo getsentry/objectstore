@@ -17,7 +17,7 @@ use objectstore_types::metadata::Metadata;
 
 use super::common::{
     DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
-    TieredMetadata, TieredWrite, Tombstone, normalize_expiry,
+    TieredMetadata, TieredUpdate, TieredWrite, Tombstone, normalize_expiry,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
@@ -246,12 +246,14 @@ impl HighVolumeBackend for InMemoryBackend {
         Ok(None)
     }
 
-    async fn set_expiry_if_matches(
+    async fn compare_and_update(
         &self,
         id: &ObjectId,
-        expire_at: SystemTime,
-        expected_target: Option<&ObjectId>,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
     ) -> Result<bool> {
+        let TieredUpdate::SetExpiry(expire_at) = update;
+        let expected_target = current;
         let expire_at = normalize_expiry(expire_at)?;
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
@@ -733,7 +735,7 @@ mod tests {
         let new_expiry = old_expiry + Duration::from_hours(1);
         assert!(
             !backend
-                .set_expiry_if_matches(&id, new_expiry, Some(&other))
+                .compare_and_update(&id, Some(&other), TieredUpdate::SetExpiry(new_expiry),)
                 .await
                 .unwrap()
         );
@@ -743,7 +745,7 @@ mod tests {
         );
         assert!(
             backend
-                .set_expiry_if_matches(&id, new_expiry, Some(&target))
+                .compare_and_update(&id, Some(&target), TieredUpdate::SetExpiry(new_expiry))
                 .await
                 .unwrap()
         );

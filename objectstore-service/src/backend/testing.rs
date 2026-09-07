@@ -45,7 +45,8 @@ use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
@@ -159,19 +160,6 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.get_tiered_metadata(id).await
     }
 
-    /// Intercepts [`HighVolumeBackend::set_expiry_if_matches`].
-    async fn set_expiry_if_matches(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        expire_at: SystemTime,
-        expected_target: Option<&ObjectId>,
-    ) -> Result<bool> {
-        inner
-            .set_expiry_if_matches(id, expire_at, expected_target)
-            .await
-    }
-
     /// Intercepts [`HighVolumeBackend::delete_non_tombstone`]. Default delegates to `inner`.
     async fn delete_non_tombstone(
         &self,
@@ -190,6 +178,17 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         write: TieredWrite,
     ) -> Result<bool> {
         inner.compare_and_write(id, current, write).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::compare_and_update`]. Default delegates to `inner`.
+    async fn compare_and_update(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
+    ) -> Result<bool> {
+        inner.compare_and_update(id, current, update).await
     }
 
     // --- MultipartUploadBackend methods ---
@@ -449,17 +448,6 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         self.hooks.get_tiered_metadata(&self.inner, id).await
     }
 
-    async fn set_expiry_if_matches(
-        &self,
-        id: &ObjectId,
-        expire_at: SystemTime,
-        expected_target: Option<&ObjectId>,
-    ) -> Result<bool> {
-        self.hooks
-            .set_expiry_if_matches(&self.inner, id, expire_at, expected_target)
-            .await
-    }
-
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         self.hooks.delete_non_tombstone(&self.inner, id).await
     }
@@ -472,6 +460,17 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
     ) -> Result<bool> {
         self.hooks
             .compare_and_write(&self.inner, id, current, write)
+            .await
+    }
+
+    async fn compare_and_update(
+        &self,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
+    ) -> Result<bool> {
+        self.hooks
+            .compare_and_update(&self.inner, id, current, update)
             .await
     }
 }

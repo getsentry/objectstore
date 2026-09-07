@@ -45,7 +45,7 @@ use tracing::Instrument;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse, PutResponse,
-    TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
@@ -1061,7 +1061,13 @@ impl Backend for BigTableBackend {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        <Self as HighVolumeBackend>::set_expiry_if_matches(self, id, expire_at, None).await
+        <Self as HighVolumeBackend>::compare_and_update(
+            self,
+            id,
+            None,
+            TieredUpdate::SetExpiry(expire_at),
+        )
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1206,12 +1212,14 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry_if_matches(
+    async fn compare_and_update(
         &self,
         id: &ObjectId,
-        expire_at: SystemTime,
-        expected_target: Option<&ObjectId>,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
     ) -> Result<bool> {
+        let TieredUpdate::SetExpiry(expire_at) = update;
+        let expected_target = current;
         let expire_at = super::common::normalize_expiry(expire_at)?;
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -1939,17 +1947,21 @@ mod tests {
         let later = old_expiry + Duration::from_hours(2);
         assert!(
             !backend
-                .set_expiry_if_matches(&id, later, Some(&wrong_target))
+                .compare_and_update(&id, Some(&wrong_target), TieredUpdate::SetExpiry(later),)
                 .await?
         );
         assert!(
             backend
-                .set_expiry_if_matches(&id, later, Some(&target))
+                .compare_and_update(&id, Some(&target), TieredUpdate::SetExpiry(later))
                 .await?
         );
         assert!(
             backend
-                .set_expiry_if_matches(&id, old_expiry + Duration::from_mins(30), Some(&target),)
+                .compare_and_update(
+                    &id,
+                    Some(&target),
+                    TieredUpdate::SetExpiry(old_expiry + Duration::from_mins(30)),
+                )
                 .await?
         );
         let TieredMetadata::Tombstone(tombstone) = backend.get_tiered_metadata(&id).await? else {
@@ -2499,7 +2511,7 @@ mod tests {
         let requested = SystemTime::now() + tti;
         assert!(
             backend
-                .set_expiry_if_matches(&id, requested, Some(&id))
+                .compare_and_update(&id, Some(&id), TieredUpdate::SetExpiry(requested))
                 .await?
         );
 

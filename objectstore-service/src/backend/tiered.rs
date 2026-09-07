@@ -126,7 +126,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
@@ -540,7 +541,7 @@ impl Backend for TieredStorage {
             TieredMetadata::Object(_) => {
                 self.inner
                     .high_volume
-                    .set_expiry_if_matches(id, expire_at, None)
+                    .compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at))
                     .await
             }
             TieredMetadata::Tombstone(tombstone) => {
@@ -558,7 +559,11 @@ impl Backend for TieredStorage {
                 let extended = self
                     .inner
                     .high_volume
-                    .set_expiry_if_matches(id, expire_at, Some(&tombstone.target))
+                    .compare_and_update(
+                        id,
+                        Some(&tombstone.target),
+                        TieredUpdate::SetExpiry(expire_at),
+                    )
                     .await?;
                 // If this fails, LT may remain extended while the redirect
                 // becomes unreachable earlier. Rolling LT back could interfere
@@ -1029,20 +1034,18 @@ mod tests {
             }
         }
 
-        async fn set_expiry_if_matches(
+        async fn compare_and_update(
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: SystemTime,
-            expected_target: Option<&ObjectId>,
+            current: Option<&ObjectId>,
+            update: TieredUpdate,
         ) -> Result<bool> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
                 Ok(false)
             } else {
-                inner
-                    .set_expiry_if_matches(id, expire_at, expected_target)
-                    .await
+                inner.compare_and_update(id, current, update).await
             }
         }
     }
