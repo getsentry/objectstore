@@ -1208,10 +1208,20 @@ impl Backend for GcsBackend {
 
             range_response_to_upload_progress(&session, response)
                 .await
-                // If we get a completed object back it means that a previous `put_chunk` request
-                // already observed it and wrote to the `change_stream`. If we were to write to it
-                // again we would double count.
-                .map(|(progress, _)| progress)
+                .map(|(progress, completed)| {
+                    // The final `put_chunk` may have persisted the object but failed while
+                    // reading its response, so completion observed here must be reported too.
+                    if let Some(object) = completed {
+                        let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                        self.report_object_write(
+                            id,
+                            stored_size,
+                            object.metadata_size(),
+                            object.custom_time,
+                        );
+                    }
+                    progress
+                })
         })
         .await
     }
@@ -2991,6 +3001,50 @@ mod tests {
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
         assert!(records[0].expiration_time.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn resumable_completion_after_corrupt_response_reports_to_change_stream() -> Result<()> {
+        let (mut backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id_with_key("resumable-change-stream-after-corrupt-response");
+        let payload = b"final".to_vec();
+        let metadata = Metadata::default();
+        let token = backend
+            .create_upload_session(&id, &metadata, payload.len() as u64)
+            .await?;
+        inject_retry_test(
+            &mut backend,
+            "storage.objects.insert",
+            "return-broken-stream-final-chunk-after-0B",
+        )
+        .await?;
+
+        assert!(matches!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single::<ClientError>(payload.clone()),
+                )
+                .await,
+            Err(error) if error.kind() == ErrorKind::CorruptData
+        ));
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Complete
+        );
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
         Ok(())
     }
 
