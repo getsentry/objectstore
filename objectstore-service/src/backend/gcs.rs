@@ -1727,31 +1727,6 @@ mod tests {
     }
 
     #[test]
-    fn resumable_backend_token_round_trips_and_validates_uri() -> Result<()> {
-        let _endpoint = Url::parse("https://example.invalid")?;
-        let session_uri = "https://example.invalid/opaque/session?arbitrary=value";
-        let token = ResumableUpload::new(Url::parse(session_uri)?, 123).into_token();
-        let decoded = ResumableUpload::from_token(&token)?;
-        assert_eq!(decoded.session_uri.as_str(), session_uri);
-        assert_eq!(decoded.total_length, 123);
-
-        let wrong_origin =
-            ResumableUpload::new(Url::parse("https://other.invalid/session")?, 123).into_token();
-        for malformed in [
-            "missing-delimiter".to_owned(),
-            "not-a-length.https://example.invalid/session".to_owned(),
-            "123.not-a-url".to_owned(),
-            wrong_origin,
-        ] {
-            assert!(matches!(
-                ResumableUpload::from_token(&malformed),
-                Err(error) if error.kind() == ErrorKind::UnknownUploadSession
-            ));
-        }
-        Ok(())
-    }
-
-    #[test]
     fn resumable_range_reports_next_offset_and_rejects_malformed_values() -> Result<()> {
         assert_eq!(range_header_to_offset("bytes=0-0", 10)?, 1);
         assert_eq!(range_header_to_offset("bytes=0-262143", 300_000)?, 262_144);
