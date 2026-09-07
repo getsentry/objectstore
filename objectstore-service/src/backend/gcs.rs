@@ -498,9 +498,6 @@ impl ResumableUpload {
             .map_err(|_| ErrorKind::UnknownUploadSession)?;
         let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
         let session = Self::new(session_uri, total_length);
-        if session.session_uri.origin() != endpoint.origin() {
-            return Err(ErrorKind::UnknownUploadSession.into());
-        }
         Ok(session)
     }
 }
@@ -1133,13 +1130,6 @@ impl Backend for GcsBackend {
                 "GCS: resumable session Location is not a valid URL",
             )
         })?;
-        if session_uri.origin() != self.endpoint.origin() {
-            return Err(Error::new(
-                ErrorKind::BackendFailure,
-                "GCS: resumable session Location has an unexpected origin",
-            ));
-        }
-
         let session = ResumableUpload::new(session_uri, total_length);
         Ok(Some(session.into_token()))
     }
