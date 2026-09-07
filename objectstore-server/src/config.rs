@@ -62,12 +62,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose};
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
-use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
+use secrecy::{CloneableSecret, ExposeSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
@@ -577,7 +578,7 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 /// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
-/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEY_FILES`
+/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEYS`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -639,13 +640,14 @@ pub struct Service {
     /// AES-256 key at startup, so resumable sessions become invalid after a restart. Configure a
     /// persistent keyring for sessions that must survive restarts. Keep old keys configured while
     /// their sessions may still be active; removing a key intentionally invalidates those sessions.
+    /// Values must be standard-base64-encoded AES-256 keys.
     ///
     /// ```yaml
     /// service:
     ///   resumable_token_encryption:
     ///     active_key_id: v1
-    ///     key_files:
-    ///       v1: /var/run/secrets/objectstore/resumable-upload-v1
+    ///     keys:
+    ///       v1: ${file:/var/run/secrets/objectstore/resumable-upload-v1}
     /// ```
     pub resumable_token_encryption: Option<ResumableTokenEncryptionConfig>,
 }
@@ -657,13 +659,18 @@ impl Service {
             return Ok(None);
         };
 
-        let mut keys = BTreeMap::new();
-        for (key_id, filename) in &config.key_files {
-            let bytes = std::fs::read(filename).map_err(|error| {
-                anyhow::anyhow!("reading resumable token key {filename:?}: {error}")
-            })?;
-            keys.insert(key_id.clone(), bytes);
-        }
+        let keys = config
+            .keys
+            .iter()
+            .map(|(key_id, key)| {
+                general_purpose::STANDARD
+                    .decode(key.expose_secret().as_str())
+                    .map(|key| (key_id.clone(), key))
+                    .map_err(|error| {
+                        anyhow::anyhow!("invalid base64 resumable token key {key_id:?}: {error}")
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         Encryptor::new(config.active_key_id.clone(), keys).map(Some)
     }
@@ -674,17 +681,19 @@ impl Service {
 pub struct ResumableTokenEncryptionConfig {
     /// Key used to encrypt newly created sessions.
     pub active_key_id: String,
-    /// Files containing raw, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    /// Standard-base64-encoded, exactly 32-byte AES-256 keys, indexed by rotation ID.
+    ///
+    /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
+    /// deserialization.
     #[serde(default)]
-    pub key_files: BTreeMap<String, PathBuf>,
+    pub keys: BTreeMap<String, SecretBox<ConfigSecret>>,
 }
 
 impl fmt::Debug for ResumableTokenEncryptionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ResumableTokenEncryptionConfig")
             .field("active_key_id", &self.active_key_id)
-            .field("key_ids", &self.key_files.keys().collect::<Vec<_>>())
-            .field("key_files", &self.key_files)
+            .field("key_ids", &self.keys.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -926,62 +935,29 @@ mod tests {
     }
 
     #[test]
-    fn resumable_token_encryption_loads_keys_from_files() {
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file.write_all(&[7; 32]).unwrap();
-        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
-        tempfile
-            .write_all(
-                format!(
-                    "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
-                    key_file.path().display(),
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-
-        figment::Jail::expect_with(|_jail| {
-            let config = Config::load(Some(tempfile.path())).unwrap();
-            assert!(
-                config
-                    .service
-                    .resumable_token_encryption()
-                    .unwrap()
-                    .is_some()
-            );
-
-            let debug = format!("{:?}", config.service);
-            assert!(debug.contains("v1"));
-            assert!(debug.contains(&key_file.path().display().to_string()));
-            assert!(!debug.contains("07070707"));
-            Ok(())
-        });
-    }
-
-    #[test]
     fn resumable_token_encryption_rejects_invalid_configuration() {
         let mut valid = tempfile::NamedTempFile::new().unwrap();
-        valid.write_all(&[7; 32]).unwrap();
+        valid
+            .write_all(general_purpose::STANDARD.encode([7; 32]).as_bytes())
+            .unwrap();
         let mut short = tempfile::NamedTempFile::new().unwrap();
-        short.write_all(&[7; 31]).unwrap();
-        let missing = valid.path().with_extension("missing");
+        short
+            .write_all(general_purpose::STANDARD.encode([7; 31]).as_bytes())
+            .unwrap();
         for yaml in [
             "service:\n  resumable_token_encryption:\n    active_key_id: v1\n".to_owned(),
+            "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    keys:\n      v1: not-base64\n".to_owned(),
             format!(
-                "service:\n  resumable_token_encryption:\n    active_key_id: missing\n    key_files:\n      v1: \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: missing\n    keys:\n      v1: ${{file:{}}}\n",
                 valid.path().display(),
             ),
             format!(
-                "service:\n  resumable_token_encryption:\n    active_key_id: bad_key\n    key_files:\n      'bad key': \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: bad_key\n    keys:\n      'bad key': ${{file:{}}}\n",
                 valid.path().display(),
             ),
             format!(
-                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
+                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    keys:\n      v1: ${{file:{}}}\n",
                 short.path().display(),
-            ),
-            format!(
-                "service:\n  resumable_token_encryption:\n    active_key_id: v1\n    key_files:\n      v1: \"{}\"\n",
-                missing.display(),
             ),
         ] {
             let mut tempfile = tempfile::NamedTempFile::new().unwrap();
@@ -1157,6 +1133,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("relative-password"), "hunter3").unwrap();
+        std::fs::write(
+            dir.path().join("resumable-token-key"),
+            general_purpose::STANDARD.encode([7; 32]),
+        )
+        .unwrap();
 
         let config_path = dir.path().join("config.yml");
         std::fs::write(
@@ -1171,6 +1152,11 @@ mod tests {
                     from.env: ${{KAFKA_SASL_PASSWORD}}
                     from.relative.file: ${{file:relative-password}}
                     from.absolute.file: ${{file:{}}}
+            service:
+                resumable_token_encryption:
+                    active_key_id: v1
+                    keys:
+                        v1: ${{file:resumable-token-key}}
             "#,
                 absolute_secret.display()
             ),
@@ -1194,6 +1180,13 @@ mod tests {
             assert_eq!(
                 sink.override_params["not.a.reference"], "prod-${NOT_A_VAR",
                 "a value that is not a reference is left alone"
+            );
+            assert!(
+                config
+                    .service
+                    .resumable_token_encryption()
+                    .unwrap()
+                    .is_some()
             );
 
             Ok(())

@@ -10,11 +10,14 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config, ResumableTokenEncryptionConfig, Service};
+use base64::{Engine as _, engine::general_purpose};
+use objectstore_server::config::{
+    AuthZ, Config, ConfigSecret, ResumableTokenEncryptionConfig, Service,
+};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
 use reqwest::StatusCode;
-use tempfile::NamedTempFile;
+use secrecy::SecretBox;
 
 /// Unpadded base64url for the opaque backend token `some-token`.
 const SESSION: &str = "c29tZS10b2tlbg";
@@ -34,8 +37,7 @@ async fn test_server() -> TestServer {
 }
 
 async fn test_server_with_protected_session() -> Result<TestServer> {
-    let mut key_file = NamedTempFile::new()?;
-    key_file.write_all(&[7; 32])?;
+    let key = general_purpose::STANDARD.encode([7; 32]);
 
     Ok(TestServer::with_config(Config {
         auth: AuthZ {
@@ -45,7 +47,10 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
         service: Service {
             resumable_token_encryption: Some(ResumableTokenEncryptionConfig {
                 active_key_id: "test".into(),
-                key_files: BTreeMap::from([("test".into(), key_file.path().into())]),
+                keys: BTreeMap::from([(
+                    "test".into(),
+                    SecretBox::new(Box::new(ConfigSecret::from(key.as_str()))),
+                )]),
             }),
             ..Default::default()
         },
