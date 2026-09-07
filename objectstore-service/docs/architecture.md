@@ -146,9 +146,8 @@ rate-limiting failures at a higher layer) are not counted.
 
 This is gated behind the `storage_cogs` Cargo feature.
 
-Each backend reports every write/overwrite, TTI bump, and delete it performs on
-stored objects to a [`ChangeStream`](change_stream::ChangeStream). To
-turn this change stream into COGS data, a stream consumer has to merge each
+Each backend reports every write/overwrite, applied expiry extension, and delete it performs on stored objects to a [`ChangeStream`](change_stream::ChangeStream).
+To turn this change stream into COGS data, a stream consumer has to merge each
 change event into an external table to update an inventory of objects. The
 inventory table can be queried to break down each backend's storage utilization
 by `app_feature`. Note that [`NoopStream`](change_stream::NoopStream) is used
@@ -216,11 +215,17 @@ is streamed end-to-end.
 ## Expiration
 
 Expiration policies are part of the built-in object metadata and can carry
-special semantics. The service delegates expiry **entirely** to the backend
-implementation, allowing each backend to leverage its underlying system's native
-capabilities. For example, BigTable has built-in TTL via garbage collection
-policies, and GCS supports object lifecycle management. The service does not
-perform active garbage collection.
+special semantics. Backends use their underlying system's native expiry
+capabilities. For example, BigTable uses garbage collection policies, and GCS
+uses object lifecycle management. The service does not perform active garbage
+collection.
+
+Backend reads are side-effect-free. After a successful GET or HEAD of a TTI
+object, the service may schedule a best-effort background deadline extension.
+The extension is debounced by `min(tti / 4, 24h)`, deduplicated per object, and
+limited to 32 concurrent tasks without a waiting queue. The read returns the
+metadata it observed and does not wait for the extension. Graceful shutdown
+drains scheduled extensions.
 
 Apart from the expiration policy, metadata during object creation must carry a
 `time_expires` field with the correct expiration timestamp. This is ensured

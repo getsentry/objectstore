@@ -15,6 +15,7 @@
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
@@ -85,6 +86,12 @@ impl Backend for CountingBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         count(&id.context.usecase);
         self.inner.get_metadata(id).await
+    }
+
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        // Renewal is an implementation detail of the original client read and
+        // must not add another client-operation COGS unit.
+        self.inner.set_expiry(id, expire_at).await
     }
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {

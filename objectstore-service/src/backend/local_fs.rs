@@ -3,6 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -57,12 +58,19 @@ pub struct FileSystemConfig {
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
+    // This lock coordinates mutations only within this backend instance. It
+    // does not serialize another backend instance or another process using the
+    // same directory.
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
     pub fn new(config: FileSystemConfig) -> Self {
-        Self { path: config.path }
+        Self {
+            path: config.path,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 }
 
@@ -83,6 +91,7 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         let path = self.path.join(id.as_storage_path().to_string());
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
         tokio::fs::create_dir_all(path.parent().unwrap())
@@ -140,7 +149,6 @@ impl Backend for LocalFsBackend {
         Ok(())
     }
 
-    // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from local_fs backend");
@@ -171,6 +179,14 @@ impl Backend for LocalFsBackend {
             .len();
         let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())
             .context(ErrorKind::CorruptData, "decoding local-fs object metadata")?;
+        if metadata.expiration_policy.is_timeout()
+            && metadata
+                .time_expires
+                .is_some_and(|deadline| deadline < SystemTime::now())
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
         let payload_size = file_len
             .checked_sub(metadata_line.len() as u64)
             .ok_or_else(|| {
@@ -200,7 +216,93 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let path = self.path.join(id.as_storage_path().to_string());
+        let file = match OpenOptions::new().read(true).open(&path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            result => result.context(
+                ErrorKind::BackendFailure,
+                "opening local-fs object for expiry extension",
+            )?,
+        };
+        let mut reader = BufReader::new(file);
+        let mut metadata_line = String::new();
+        reader.read_line(&mut metadata_line).await.context(
+            ErrorKind::BackendFailure,
+            "reading local-fs object metadata for expiry extension",
+        )?;
+        let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end()).context(
+            ErrorKind::CorruptData,
+            "decoding local-fs object metadata for expiry extension",
+        )?;
+        let Some(current_expiry) = metadata.time_expires else {
+            return Ok(false);
+        };
+        if metadata.expiration_policy.is_manual() || current_expiry < SystemTime::now() {
+            return Ok(false);
+        }
+        if current_expiry >= expire_at {
+            return Ok(true);
+        }
+        metadata.time_expires = Some(expire_at);
+
+        let temp_path = path.with_extension(format!("expiry-{}.tmp", uuid::Uuid::now_v7()));
+        let rewrite: Result<()> = async {
+            let temp = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp_path)
+                .await
+                .context(
+                    ErrorKind::BackendFailure,
+                    "creating local-fs expiry temporary file",
+                )?;
+            let mut writer = BufWriter::new(temp);
+            let metadata_json = serde_json::to_string(&metadata)
+                .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+            writer.write_all(metadata_json.as_bytes()).await.context(
+                ErrorKind::BackendFailure,
+                "writing local-fs expiry metadata",
+            )?;
+            writer.write_all(b"\n").await.context(
+                ErrorKind::BackendFailure,
+                "writing local-fs expiry metadata",
+            )?;
+            tokio::io::copy(&mut reader, &mut writer).await.context(
+                ErrorKind::BackendFailure,
+                "copying local-fs object payload for expiry extension",
+            )?;
+            writer.flush().await.context(
+                ErrorKind::BackendFailure,
+                "flushing local-fs expiry temporary file",
+            )?;
+            let temp = writer.into_inner();
+            temp.sync_data().await.context(
+                ErrorKind::BackendFailure,
+                "syncing local-fs expiry temporary file",
+            )?;
+            drop(temp);
+            tokio::fs::rename(&temp_path, &path).await.context(
+                ErrorKind::BackendFailure,
+                "publishing local-fs expiry extension",
+            )?;
+            Ok(())
+        }
+        .await;
+
+        if rewrite.is_err() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+        rewrite?;
+        Ok(true)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path.join(id.as_storage_path().to_string());
         let result = tokio::fs::remove_file(path).await;
@@ -497,6 +599,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         }
 
         // Stream parts directly to the final object file
+        let _mutation_guard = self.mutation_lock.lock().await;
         let path = self.path.join(id.as_storage_path().to_string());
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -617,6 +720,74 @@ mod tests {
             }
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn set_expiry_rewrites_metadata_and_preserves_payload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(FileSystemConfig {
+            path: tempdir.path().to_path_buf(),
+        });
+        let id = make_id();
+        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(old_expiry),
+            custom: [("preserved".into(), "yes".into())].into(),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+
+        let requested = old_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
+        assert!(backend.set_expiry(&id, requested).await.unwrap());
+        let (updated, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        assert_eq!(updated.expiration_policy, metadata.expiration_policy);
+        assert_eq!(updated.custom, metadata.custom);
+        assert_eq!(
+            updated.time_expires,
+            Some(super::super::common::normalize_expiry(requested).unwrap())
+        );
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
+
+        let object_path = backend.path.join(id.as_storage_path().to_string());
+        let entries = std::fs::read_dir(object_path.parent().unwrap())
+            .unwrap()
+            .flat_map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|path| !path.to_string_lossy().contains("expiry-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_objects_are_filtered_and_cannot_be_extended() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let backend = LocalFsBackend::new(FileSystemConfig {
+            path: tempdir.path().to_path_buf(),
+        });
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("expired"))
+            .await
+            .unwrap();
+
+        assert!(backend.get_object(&id, None).await.unwrap().is_none());
+        assert!(
+            !backend
+                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

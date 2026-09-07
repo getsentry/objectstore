@@ -25,8 +25,8 @@
 //! Tombstones written before the `r`/`t` column layout used the object-row format with an
 //! empty `p` column and `"is_redirect_tombstone": true` in the `m` JSON. Both formats are
 //! supported for reading. A `bigtable.legacy_tombstone_read` metric is emitted on each legacy
-//! read. Legacy tombstones expire naturally by TTL/GC; TTI bumps transparently upgrade them
-//! to the new format.
+//! read. Legacy tombstones expire naturally by TTL/GC; a successful conditional
+//! expiry extension upgrades them to the new format.
 
 use std::fmt;
 use std::future::Future;
@@ -461,6 +461,78 @@ fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePred
     })
 }
 
+fn exact_expiry_filter(expire_at: SystemTime) -> Result<v2::RowFilter> {
+    let start = system_time_to_micros(expire_at)?;
+    let end = start.checked_add(1).ok_or_else(|| {
+        Error::new(
+            ErrorKind::Internal,
+            "building Bigtable expiration predicate",
+        )
+    })?;
+    Ok(v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::FamilyNameRegexFilter(format!(
+                        "^{FAMILY_GC}$"
+                    ))),
+                },
+                v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::TimestampRangeFilter(
+                        v2::TimestampRange {
+                            start_timestamp_micros: start,
+                            end_timestamp_micros: end,
+                        },
+                    )),
+                },
+            ],
+        })),
+    })
+}
+
+/// Matches an inline row whose metadata cell has the observed expiry timestamp.
+///
+/// Millisecond expiry timestamps are not unique revisions. A replacement inline
+/// object with the same row kind and expiry can therefore still be overwritten
+/// by this rewrite. A dedicated persisted revision token is deferred.
+fn inline_expiry_predicate(observed_expiry: SystemTime) -> Result<MutatePredicate> {
+    let inline_at_expiry = v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                column_filter(COLUMN_METADATA),
+                exact_expiry_filter(observed_expiry)?,
+            ],
+        })),
+    };
+
+    Ok(MutatePredicate::Include(v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Condition(Box::new(
+            v2::row_filter::Condition {
+                predicate_filter: Some(Box::new(tombstone_filter())),
+                true_filter: Some(Box::new(v2::RowFilter {
+                    filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
+                })),
+                false_filter: Some(Box::new(inline_at_expiry)),
+            },
+        ))),
+    }))
+}
+
+fn redirect_expiry_predicate(
+    target: &ObjectId,
+    own_id: &ObjectId,
+    observed_expiry: SystemTime,
+) -> Result<MutatePredicate> {
+    Ok(MutatePredicate::Include(v2::RowFilter {
+        filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+            filters: vec![
+                redirect_target_filter(target, own_id),
+                exact_expiry_filter(observed_expiry)?,
+            ],
+        })),
+    }))
+}
+
 /// The condition under which a [`BigTableBackend::check_and_mutate`] write proceeds.
 ///
 /// Each variant pairs a row filter with the state that makes the write safe:
@@ -500,19 +572,6 @@ fn delete_row_mutation() -> v2::Mutation {
     mutation(mutation::Mutation::DeleteFromRow(
         mutation::DeleteFromRow {},
     ))
-}
-
-/// Returns a clone of `metadata` with `time_expires` refreshed for a TTI bump.
-///
-/// [`object_mutations`] persists `time_expires` verbatim, so the bumped deadline must be applied
-/// to the metadata before rewriting the row.
-fn bumped_tti_metadata(metadata: &Metadata) -> Metadata {
-    let mut metadata = metadata.clone();
-    metadata.time_expires = metadata
-        .expiration_policy
-        .expires_in()
-        .map(|tti| SystemTime::now() + tti);
-    metadata
 }
 
 /// Builds the three mutations that write an object row: clear existing data,
@@ -576,6 +635,7 @@ fn row_size(path: &[u8], mutations: &[v2::Mutation]) -> u64 {
 /// The moment a row written now under `policy` is expected to be reclaimed.
 ///
 /// Returns `None` for [`ExpirationPolicy::Manual`], which never expires on its own.
+#[cfg(test)]
 fn expiry_from_policy(policy: ExpirationPolicy, now: SystemTime) -> Option<SystemTime> {
     policy.expires_in().map(|ttl| now + ttl)
 }
@@ -596,13 +656,19 @@ struct TombstoneMeta {
 /// Builds the three mutations that write a tombstone row: clear existing data,
 /// then set the redirect sentinel and tombstone-meta cells.
 ///
-/// Used by both [`BigTableBackend::put_tombstone_row`] (unconditional write) and the
-/// TTI bump path in tiered reads.
-fn tombstone_mutations(tombstone: &Tombstone, now: SystemTime) -> Result<[v2::Mutation; 3]> {
-    let (family, timestamp_micros) = match tombstone.expiration_policy {
-        ExpirationPolicy::Manual => (FAMILY_MANUAL, -1),
-        ExpirationPolicy::TimeToLive(ttl) => (FAMILY_GC, ttl_to_micros(ttl, now)?),
-        ExpirationPolicy::TimeToIdle(tti) => (FAMILY_GC, ttl_to_micros(tti, now)?),
+/// Used by both unconditional tombstone writes and the conditional expiry-extension paths.
+fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 3]> {
+    let (family, timestamp_micros) = match (tombstone.expiration_policy, tombstone.time_expires) {
+        (ExpirationPolicy::Manual, _) => (FAMILY_MANUAL, -1),
+        (policy, Some(deadline)) if policy.is_timeout() => {
+            (FAMILY_GC, system_time_to_micros(deadline)?)
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorKind::Internal,
+                "expiring tombstone missing resolved deadline",
+            ));
+        }
     };
 
     let tombstone_meta = TombstoneMeta {
@@ -727,7 +793,7 @@ impl RowData {
                 time_expires: expire_at,
             }
         } else {
-            // Metadata may have been skipped during read - payload-only read for TTI bump.
+            // Metadata may have been skipped by a payload-only internal read.
             let mut metadata = metadata_opt.unwrap_or_default();
             metadata.time_expires = expire_at;
             RowData::Object { metadata, payload }
@@ -755,15 +821,6 @@ impl RowData {
     /// Only applies to rows with an expiration policy set.
     fn expires_before(&self, time: SystemTime) -> bool {
         self.expiration_policy().is_timeout() && self.time_expires().is_some_and(|ts| ts < time)
-    }
-
-    /// Checks whether this row's TTI deadline needs bumping.
-    ///
-    /// Returns `Some(new_expire_at)` when the deadline is stale enough to
-    /// justify a write, `None` otherwise.
-    fn check_tti_bump(&self, access_time: SystemTime) -> Option<SystemTime> {
-        self.expiration_policy()
-            .check_tti_bump(self.time_expires(), access_time)
     }
 }
 
@@ -914,80 +971,6 @@ impl BigTableBackend {
         Ok((response, size))
     }
 
-    async fn put_tombstone_row(
-        &self,
-        path: Vec<u8>,
-        tombstone: &Tombstone,
-        action: &'static str,
-    ) -> Result<v2::MutateRowResponse> {
-        let mutations = tombstone_mutations(tombstone, SystemTime::now())?;
-        self.mutate(path, mutations, action).await
-    }
-
-    /// Best-effort TTI bump for a row.
-    ///
-    /// If the payload isn't loaded, it will be fetched. Failures are ignored silently.
-    ///
-    /// A successful bump is reported to the [`ChangeStream`].
-    #[tracing::instrument(level = "debug", fields(?hv_id, loaded), skip_all)]
-    async fn bump_tti(&self, path: Vec<u8>, row: &RowData, loaded: bool, hv_id: &ObjectId) {
-        let expiration_policy = row.expiration_policy();
-
-        match row {
-            RowData::Tombstone { target, .. } => {
-                let target = match parse_redirect_target(target, hv_id) {
-                    Ok(target) => target,
-                    Err(e) => {
-                        objectstore_log::error!(!!&e, "invalid redirect target in tombstone row");
-                        return;
-                    }
-                };
-
-                let now = SystemTime::now();
-                let tombstone = Tombstone {
-                    target,
-                    expiration_policy,
-                };
-                if self
-                    .put_tombstone_row(path, &tombstone, "tti-bump")
-                    .await
-                    .is_ok()
-                {
-                    self.change_stream
-                        .update(hv_id, expiry_from_policy(expiration_policy, now));
-                }
-            }
-            RowData::Object { metadata, payload } if loaded => {
-                let bumped = bumped_tti_metadata(metadata);
-                let expires_at = bumped.time_expires;
-                if self
-                    .put_row(path, bumped, payload.clone(), "tti-bump")
-                    .await
-                    .is_ok()
-                {
-                    self.change_stream.update(hv_id, expires_at);
-                }
-            }
-            RowData::Object { metadata, .. } => {
-                let payload_read = self
-                    .read_row(&path, Some(column_filter(COLUMN_PAYLOAD)), "tti-bump")
-                    .await;
-
-                if let Ok(Some(RowData::Object { payload, .. })) = payload_read {
-                    let bumped = bumped_tti_metadata(metadata);
-                    let expires_at = bumped.time_expires;
-                    if self
-                        .put_row(path, bumped, payload, "tti-bump")
-                        .await
-                        .is_ok()
-                    {
-                        self.change_stream.update(hv_id, expires_at);
-                    }
-                }
-            }
-        }
-    }
-
     /// Executes a `CheckAndMutateRow` request.
     #[tracing::instrument(level = "debug", fields(action = context), skip_all)]
     async fn check_and_mutate(
@@ -1077,6 +1060,10 @@ impl Backend for BigTableBackend {
         }
     }
 
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        <Self as HighVolumeBackend>::set_expiry_if_matches(self, id, expire_at, None).await
+    }
+
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from Bigtable backend");
@@ -1128,10 +1115,15 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             match row {
-                Some(RowData::Tombstone { target, meta, .. }) => {
+                Some(RowData::Tombstone {
+                    target,
+                    meta,
+                    time_expires,
+                }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
                         expiration_policy: meta.expiration_policy,
+                        time_expires,
                     }));
                 }
                 // Race: Tombstone was replaced by an object, retry to overwrite
@@ -1160,15 +1152,15 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredGet::NotFound);
         };
 
-        // TODO: extract into dedicated call from service
-        if row.check_tti_bump(SystemTime::now()).is_some() {
-            self.bump_tti(path.clone(), &row, true, id).await;
-        }
-
         Ok(match row {
-            RowData::Tombstone { meta, target, .. } => TieredGet::Tombstone(Tombstone {
+            RowData::Tombstone {
+                meta,
+                target,
+                time_expires,
+            } => TieredGet::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
                 expiration_policy: meta.expiration_policy,
+                time_expires,
             }),
             RowData::Object { metadata, payload } => {
                 let mut metadata = metadata;
@@ -1199,18 +1191,104 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(TieredMetadata::NotFound);
         };
 
-        // TODO: extract into dedicated call from service
-        if row.check_tti_bump(SystemTime::now()).is_some() {
-            self.bump_tti(path.clone(), &row, false, id).await;
-        }
-
         Ok(match row {
-            RowData::Tombstone { meta, target, .. } => TieredMetadata::Tombstone(Tombstone {
+            RowData::Tombstone {
+                meta,
+                target,
+                time_expires,
+            } => TieredMetadata::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
                 expiration_policy: meta.expiration_policy,
+                time_expires,
             }),
             RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
         })
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry_if_matches(
+        &self,
+        id: &ObjectId,
+        expire_at: SystemTime,
+        expected_target: Option<&ObjectId>,
+    ) -> Result<bool> {
+        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let path = id.as_storage_path().to_string().into_bytes();
+
+        // Inline extension needs metadata and payload from the same read so a
+        // successful conditional rewrite can preserve the payload verbatim.
+        let Some(row) = self.read_row(&path, None, "set_expiry").await? else {
+            return Ok(false);
+        };
+        let now = SystemTime::now();
+
+        let (predicate, mutations): (MutatePredicate, Vec<v2::Mutation>) =
+            match (row, expected_target) {
+                (
+                    RowData::Object {
+                        mut metadata,
+                        payload,
+                    },
+                    None,
+                ) => {
+                    let Some(observed_expiry) = metadata.time_expires else {
+                        return Ok(false);
+                    };
+                    if metadata.expiration_policy.is_manual() || observed_expiry < now {
+                        return Ok(false);
+                    }
+                    if observed_expiry >= expire_at {
+                        return Ok(true);
+                    }
+
+                    // Observing a live cell here is not atomic with wall-clock
+                    // expiry or Bigtable GC. The conditional write may still lose
+                    // to either and then returns false.
+                    let predicate = inline_expiry_predicate(observed_expiry)?;
+                    metadata.time_expires = Some(expire_at);
+                    let (mutations, _) = object_mutations(&path, metadata, payload)?;
+                    (predicate, mutations.into())
+                }
+                (
+                    RowData::Tombstone {
+                        target,
+                        meta,
+                        time_expires,
+                    },
+                    Some(expected),
+                ) => {
+                    let target = parse_redirect_target(&target, id)?;
+                    let Some(observed_expiry) = time_expires else {
+                        return Ok(false);
+                    };
+                    if target != *expected
+                        || meta.expiration_policy.is_manual()
+                        || observed_expiry < now
+                    {
+                        return Ok(false);
+                    }
+                    if observed_expiry >= expire_at {
+                        return Ok(true);
+                    }
+
+                    let predicate = redirect_expiry_predicate(expected, id, observed_expiry)?;
+                    let tombstone = Tombstone {
+                        target,
+                        expiration_policy: meta.expiration_policy,
+                        time_expires: Some(expire_at),
+                    };
+                    (predicate, tombstone_mutations(&tombstone)?.into())
+                }
+                _ => return Ok(false),
+            };
+
+        let applied = self
+            .check_and_mutate(path, predicate, mutations, "set_expiry")
+            .await?;
+        if applied {
+            self.change_stream.update(id, Some(expire_at));
+        }
+        Ok(applied)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1241,10 +1319,15 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             match row {
-                Some(RowData::Tombstone { target, meta, .. }) => {
+                Some(RowData::Tombstone {
+                    target,
+                    meta,
+                    time_expires,
+                }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
                         expiration_policy: meta.expiration_policy,
+                        time_expires,
                     }));
                 }
                 // Race: An object appeared since the predicate ran, delete the new object now.
@@ -1270,8 +1353,6 @@ impl HighVolumeBackend for BigTableBackend {
         objectstore_log::debug!("CAS put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
-        let now = SystemTime::now();
-
         let predicate = match (current, write.target()) {
             (Some(old), Some(new)) => update_predicate(old, new, id),
             (Some(target), None) => optional_target_predicate(target, id),
@@ -1284,8 +1365,8 @@ impl HighVolumeBackend for BigTableBackend {
         // without an expiration date, `expires_at` is `Some(None)`.
         let (mutations, expires_at): (Vec<v2::Mutation>, Option<Option<SystemTime>>) = match write {
             TieredWrite::Tombstone(tombstone) => (
-                tombstone_mutations(&tombstone, now)?.into(),
-                Some(expiry_from_policy(tombstone.expiration_policy, now)),
+                tombstone_mutations(&tombstone)?.into(),
+                Some(tombstone.time_expires),
             ),
             TieredWrite::Object(m, p) => {
                 let expires_at = m.time_expires;
@@ -1318,19 +1399,6 @@ impl HighVolumeBackend for BigTableBackend {
 
         Ok(written)
     }
-}
-
-/// Converts the given TTL duration to a microsecond-precision unix timestamp.
-///
-/// The TTL is anchored at the provided `from` timestamp, which defaults to `SystemTime::now()`. As
-/// required by BigTable, the resulting timestamp has millisecond precision, with the last digits at
-/// 0.
-fn ttl_to_micros(ttl: Duration, from: SystemTime) -> Result<i64> {
-    let deadline = from
-        .checked_add(ttl)
-        .ok_or_else(|| Error::new(ErrorKind::Internal, "calculating Bigtable expiration"))?;
-
-    system_time_to_micros(deadline)
 }
 
 /// Converts a [`SystemTime`] to a microsecond-precision unix timestamp.
@@ -1543,7 +1611,11 @@ mod tests {
         now: SystemTime,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = tombstone_mutations(tombstone, now)?;
+        let mut tombstone = tombstone.clone();
+        if tombstone.time_expires.is_none() {
+            tombstone.time_expires = expiry_from_policy(tombstone.expiration_policy, now);
+        }
+        let mutations = tombstone_mutations(&tombstone)?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -1724,12 +1796,9 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies TTI bump via both `get_object` (loaded=true path) and `get_metadata` (loaded=false path).
-    ///
-    /// We write a stale timestamp inside the bump window (still in the future,
-    /// so the row is not GC'd) and confirm that a subsequent read extends the expiry.
+    /// Backend reads are side-effect-free; explicit extension preserves payload.
     #[tokio::test]
-    async fn test_tti_bump() -> Result<()> {
+    async fn test_reads_do_not_bump_tti_and_set_expiry_preserves_payload() -> Result<()> {
         let backend = create_test_backend().await?;
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
@@ -1740,40 +1809,153 @@ mod tests {
         // Backdate `now` so the written expiry (past_now + tti) is stale but not expired.
         let past_now = SystemTime::now() - tti + Duration::from_mins(1);
 
-        // Sub-sequence 1: get_object triggers bump (loaded=true path).
-        let id1 = make_id();
-        create_object(&backend, &id1, &metadata, b"hello, world", past_now).await?;
+        let id = make_id();
+        create_object(&backend, &id, &metadata, b"hello, world", past_now).await?;
 
-        // get_object reads the stale row, triggers bump, and returns the pre-bump metadata.
-        let (pre_obj_meta, _, _) = backend.get_object(&id1, None).await?.unwrap();
-        let pre_obj_expiry = pre_obj_meta.time_expires.unwrap();
-
-        // A second get_metadata reads the freshly bumped row.
-        let post_obj_meta = backend.get_metadata(&id1).await?.unwrap();
-        let post_obj_expiry = post_obj_meta.time_expires.unwrap();
-        assert!(
-            post_obj_expiry > pre_obj_expiry,
-            "bump should extend expiry"
+        let (observed, _, _) = backend.get_object(&id, None).await?.unwrap();
+        let observed_expiry = observed.time_expires.unwrap();
+        assert_eq!(
+            backend.get_metadata(&id).await?.unwrap().time_expires,
+            Some(observed_expiry),
+            "backend reads must not renew TTI"
         );
 
-        // Sub-sequence 2: get_metadata triggers bump (loaded=false path).
-        let id2 = make_id();
-        create_object(&backend, &id2, &metadata, b"hello, world", past_now).await?;
-
-        // First get_metadata sees the stale row and triggers a bump.
-        let pre_meta = backend.get_metadata(&id2).await?.unwrap();
-        let pre_expiry = pre_meta.time_expires.unwrap();
-
-        // Second get_metadata reads the freshly bumped row.
-        let post_meta = backend.get_metadata(&id2).await?.unwrap();
-        let post_expiry = post_meta.time_expires.unwrap();
-        assert!(post_expiry > pre_expiry, "bump should extend expiry");
-
-        // Payload must be intact after the loaded=false bump (which re-fetches the payload).
-        let (_, _, stream) = backend.get_object(&id2, None).await?.unwrap();
+        let requested = SystemTime::now() + tti;
+        assert!(backend.set_expiry(&id, requested).await?);
+        assert_eq!(
+            backend.get_metadata(&id).await?.unwrap().time_expires,
+            Some(crate::backend::common::normalize_expiry(requested)?)
+        );
+        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"hello, world");
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_expiry_returns_false_for_missing_and_conflicting_inline_rows() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let missing = make_id();
+        assert!(
+            !backend
+                .set_expiry(&missing, SystemTime::now() + Duration::from_hours(2))
+                .await?
+        );
+
+        let id = make_id();
+        let observed_expiry =
+            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+        let original = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(observed_expiry),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &original, b"original", SystemTime::now()).await?;
+
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mut extended = original.clone();
+        extended.time_expires = Some(observed_expiry + Duration::from_hours(1));
+        let (extension, _) = object_mutations(&path, extended, b"original".to_vec())?;
+        let predicate = inline_expiry_predicate(observed_expiry)?;
+
+        let mut replacement = original.clone();
+        replacement.time_expires = Some(observed_expiry + Duration::from_mins(1));
+        create_object(
+            &backend,
+            &id,
+            &replacement,
+            b"replacement",
+            SystemTime::now(),
+        )
+        .await?;
+        assert!(
+            !backend
+                .check_and_mutate(path, predicate, extension, "test-expiry-conflict")
+                .await?
+        );
+        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
+        assert_eq!(stream::read_to_vec(payload).await?, b"replacement");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_expiry_timestamp_replacement_documents_revision_boundary() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let observed_expiry =
+            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+        let original = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(observed_expiry),
+            ..Default::default()
+        };
+        create_object(&backend, &id, &original, b"original", SystemTime::now()).await?;
+
+        let path = id.as_storage_path().to_string().into_bytes();
+        let predicate = inline_expiry_predicate(observed_expiry)?;
+        let mut extended = original.clone();
+        extended.time_expires = Some(observed_expiry + Duration::from_hours(1));
+        let (extension, _) = object_mutations(&path, extended, b"original".to_vec())?;
+
+        create_object(
+            &backend,
+            &id,
+            &original,
+            b"same-timestamp-replacement",
+            SystemTime::now(),
+        )
+        .await?;
+        assert!(
+            backend
+                .check_and_mutate(path, predicate, extension, "test-expiry-collision")
+                .await?
+        );
+        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
+        assert_eq!(stream::read_to_vec(payload).await?, b"original");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conditional_redirect_extension_requires_target_and_never_shortens() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let target = ObjectId::random(id.context().clone());
+        let wrong_target = ObjectId::random(id.context().clone());
+        let old_expiry =
+            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_hours(1))?;
+        create_tombstone(
+            &backend,
+            &id,
+            &Tombstone {
+                target: target.clone(),
+                expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+                time_expires: Some(old_expiry),
+            },
+            SystemTime::now(),
+        )
+        .await?;
+
+        let later = old_expiry + Duration::from_hours(2);
+        assert!(
+            !backend
+                .set_expiry_if_matches(&id, later, Some(&wrong_target))
+                .await?
+        );
+        assert!(
+            backend
+                .set_expiry_if_matches(&id, later, Some(&target))
+                .await?
+        );
+        assert!(
+            backend
+                .set_expiry_if_matches(&id, old_expiry + Duration::from_mins(30), Some(&target),)
+                .await?
+        );
+        let TieredMetadata::Tombstone(tombstone) = backend.get_tiered_metadata(&id).await? else {
+            panic!("expected tombstone");
+        };
+        assert_eq!(tombstone.time_expires, Some(later));
         Ok(())
     }
 
@@ -1897,6 +2079,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
@@ -1947,6 +2130,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
         let result = backend
@@ -1993,6 +2177,7 @@ mod tests {
         let tombstone = Tombstone {
             target: id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
         let tombstone = backend
@@ -2026,6 +2211,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy,
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
         };
 
         // First create succeeds.
@@ -2081,6 +2267,7 @@ mod tests {
         let tombstone = Tombstone {
             target: old_lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
 
@@ -2088,6 +2275,7 @@ mod tests {
         let write = TieredWrite::Tombstone(Tombstone {
             target: new_lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         });
         let swapped = backend
             .compare_and_write(&hv_id, Some(&wrong_lt_id), write.clone())
@@ -2129,6 +2317,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
 
@@ -2193,6 +2382,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
 
@@ -2274,10 +2464,7 @@ mod tests {
         Ok(())
     }
 
-    /// A legacy tombstone with TTI policy is upgraded to the new `r`/`t` column format on read.
-    ///
-    /// The bump path calls `put_tombstone_row`, which rewrites the row with `r` + `t` columns.
-    /// The upgraded row has a fresh cell timestamp (≈ now + TTI), so `time_expires` increases.
+    /// A conditional extension upgrades a legacy TTI tombstone to `r`/`t`.
     #[tokio::test]
     async fn test_legacy_tombstone_tti_upgrade() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2286,8 +2473,9 @@ mod tests {
 
         let tti = Duration::from_hours(2 * 24);
 
-        // Place time_expires inside the bump window but still in the future.
-        let old_deadline = SystemTime::now() + Duration::from_mins(1);
+        // Place time_expires near expiry but still in the future.
+        let old_deadline =
+            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_mins(1))?;
         write_legacy_tombstone(
             &backend,
             &id,
@@ -2296,20 +2484,34 @@ mod tests {
         )
         .await?;
 
-        // First read detects the stale TTI and triggers `put_tombstone_row`.
+        // A read observes the legacy row but leaves it unchanged.
         let TieredMetadata::Tombstone(_) = backend.get_tiered_metadata(&id).await? else {
             panic!("expected tombstone");
         };
+        assert_eq!(
+            backend
+                .read_row(&path, None, "test-verify")
+                .await?
+                .and_then(|row| row.time_expires()),
+            Some(old_deadline)
+        );
 
-        // After the bump, the row is rewritten with a fresh timestamp (≈ now + TTI).
+        let requested = SystemTime::now() + tti;
+        assert!(
+            backend
+                .set_expiry_if_matches(&id, requested, Some(&id))
+                .await?
+        );
+
+        // After extension, the row uses the requested timestamp.
         let new_deadline = match backend.read_row(&path, None, "test-verify").await? {
             Some(RowData::Tombstone { time_expires, .. }) => time_expires.unwrap(),
-            _ => panic!("expected tombstone row after bump"),
+            _ => panic!("expected tombstone row after extension"),
         };
 
         assert!(
             new_deadline > old_deadline,
-            "TTI bump should extend tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
+            "explicit extension should extend tombstone expiry: {old_deadline:?} -> {new_deadline:?}"
         );
 
         Ok(())
@@ -2398,6 +2600,7 @@ mod tests {
         let old_tombstone = Tombstone {
             target: old_lt_id,
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &old_tombstone, SystemTime::now()).await?;
 
@@ -2405,6 +2608,7 @@ mod tests {
         let new_tombstone = Tombstone {
             target: new_lt_id.clone(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
         };
         let committed = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
@@ -2433,6 +2637,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id,
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
 
@@ -2578,8 +2783,9 @@ mod tests {
         let tombstone = Tombstone {
             target: ObjectId::from_storage_path("attachments/org.1/objects/abc/0199").unwrap(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(60)),
         };
-        let mutations = tombstone_mutations(&tombstone, SystemTime::now()).unwrap();
+        let mutations = tombstone_mutations(&tombstone).unwrap();
 
         assert!(row_size(path, &mutations) > path.len() as u64);
     }
@@ -2647,6 +2853,7 @@ mod tests {
         let tombstone = Tombstone {
             target: ObjectId::random(id.context().clone()),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: None,
         };
         create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
         assert_eq!(
@@ -2684,6 +2891,7 @@ mod tests {
         let tombstone = Tombstone {
             target: target.clone(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
         };
         let written = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
@@ -2704,7 +2912,7 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
-    async fn change_stream_reports_tti_bump_as_an_update() -> Result<()> {
+    async fn change_stream_reports_expiry_extension_as_an_update() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
         let id = make_id();
         let metadata = Metadata {
@@ -2722,13 +2930,17 @@ mod tests {
             .await?;
         producer.clear();
 
-        // The stored deadline is far enough below `now + tti` to clear the debounce.
-        backend.get_tiered_object(&id, None).await?;
+        backend
+            .set_expiry(&id, SystemTime::now() + Duration::from_secs(3600))
+            .await?;
 
         let records = producer.records();
-        assert_eq!(records.len(), 1, "expected exactly one bump report");
+        assert_eq!(records.len(), 1, "expected exactly one extension report");
         assert_eq!(records[0].op_type, OpType::Update);
-        assert_eq!(records[0].size, None, "a bump does not change the size");
+        assert_eq!(
+            records[0].size, None,
+            "an extension does not change the size"
+        );
         assert!(records[0].expiration_time.is_some());
 
         Ok(())

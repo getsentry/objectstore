@@ -35,6 +35,7 @@
 //! ```
 
 use std::fmt;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
@@ -102,6 +103,16 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.get_metadata(id).await
     }
 
+    /// Intercepts [`Backend::set_expiry`]. Default delegates to `inner`.
+    async fn set_expiry(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        expire_at: SystemTime,
+    ) -> Result<bool> {
+        inner.set_expiry(id, expire_at).await
+    }
+
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
     async fn delete_object(
         &self,
@@ -146,6 +157,19 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
     ) -> Result<TieredMetadata> {
         inner.get_tiered_metadata(id).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::set_expiry_if_matches`].
+    async fn set_expiry_if_matches(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        expire_at: SystemTime,
+        expected_target: Option<&ObjectId>,
+    ) -> Result<bool> {
+        inner
+            .set_expiry_if_matches(id, expire_at, expected_target)
+            .await
     }
 
     /// Intercepts [`HighVolumeBackend::delete_non_tombstone`]. Default delegates to `inner`.
@@ -355,6 +379,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.get_metadata(&self.inner, id).await
     }
 
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        self.hooks.set_expiry(&self.inner, id, expire_at).await
+    }
+
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         self.hooks.delete_object(&self.inner, id).await
     }
@@ -419,6 +447,17 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
 
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
         self.hooks.get_tiered_metadata(&self.inner, id).await
+    }
+
+    async fn set_expiry_if_matches(
+        &self,
+        id: &ObjectId,
+        expire_at: SystemTime,
+        expected_target: Option<&ObjectId>,
+    ) -> Result<bool> {
+        self.hooks
+            .set_expiry_if_matches(&self.inner, id, expire_at, expected_target)
+            .await
     }
 
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {

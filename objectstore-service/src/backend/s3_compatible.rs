@@ -144,7 +144,7 @@ fn metadata_to_gcs_headers(
 
     // GCS custom-time for lifecycle expiration
     if let Some(expires_at) = metadata.time_expires {
-        let expires_at = humantime::format_rfc3339_seconds(expires_at);
+        let expires_at = humantime::format_rfc3339_millis(expires_at);
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -169,9 +169,8 @@ where
         Ok(builder)
     }
 
-    /// Fetches object metadata using the given HTTP method (GET or HEAD),
-    /// bumps TTI if needed, and returns the parsed metadata along with the
-    /// response (so `get_object` can read the body from a GET).
+    /// Fetches object metadata using the given HTTP method (GET or HEAD) and
+    /// returns it with the response without modifying the object.
     async fn request_object(
         &self,
         method: Method,
@@ -243,7 +242,6 @@ where
             None
         };
 
-        // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
@@ -255,22 +253,20 @@ where
             return Ok(None);
         }
 
-        // TODO: extract into dedicated call from service
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            let mut bumped = metadata.clone();
-            bumped.time_expires = Some(new_expire_at);
-            self.update_metadata(id, &bumped).await?;
-        }
-
         Ok(Some((metadata, content_range, response)))
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> Result<()> {
+    async fn update_metadata(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        generation: Option<(&str, &str)>,
+    ) -> Result<bool> {
         // NB: Meta updates require copy + REPLACE along with *all* metadata. See
         // https://cloud.google.com/storage/docs/xml-api/put-object-copy
-        self.request(Method::PUT, self.object_url(id))
+        let mut request = self
+            .request(Method::PUT, self.object_url(id))
             .await?
             .header(
                 "x-goog-copy-source",
@@ -280,15 +276,38 @@ where
             .headers(
                 metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
                     .context(ErrorKind::InvalidMetadata, "encoding S3 object metadata")?,
-            )
-            .send_traced()
-            .await
+            );
+
+        if let Some((generation, metageneration)) = generation {
+            request = request
+                .header("x-goog-copy-source-if-generation-match", generation)
+                .header("x-goog-copy-source-if-metageneration-match", metageneration)
+                .header("x-goog-if-generation-match", generation)
+                .header("x-goog-if-metageneration-match", metageneration);
+        } else {
+            // Generic S3-compatible servers do not expose GCS revision
+            // headers. This fallback can copy over a concurrent replacement or
+            // delete, and REPLACE can restore metadata from this stale HEAD.
+            // Broader provider-specific conditional-copy support is deferred.
+            objectstore_metrics::count!("s3.expiry_extension_unguarded");
+        }
+
+        let response = request.send_traced().await;
+        let response = response.reqwest_context("updating S3 expiration")?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::PRECONDITION_FAILED
+        ) {
+            response.drain_body().await;
+            return Ok(false);
+        }
+        response
             .check_error("updating S3 expiration")
             .await?
             .drain_body()
             .await;
 
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -367,6 +386,53 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
+        else {
+            return Ok(false);
+        };
+        let Some(current_expiry) = metadata.time_expires else {
+            response.drain_body().await;
+            return Ok(false);
+        };
+        if metadata.expiration_policy.is_manual() || current_expiry < SystemTime::now() {
+            response.drain_body().await;
+            return Ok(false);
+        }
+        if current_expiry >= expire_at {
+            response.drain_body().await;
+            return Ok(true);
+        }
+
+        let revision = response
+            .headers()
+            .get("x-goog-generation")
+            .and_then(|value| value.to_str().ok())
+            .zip(
+                response
+                    .headers()
+                    .get("x-goog-metageneration")
+                    .and_then(|value| value.to_str().ok()),
+            )
+            .map(|(generation, metageneration)| (generation.to_owned(), metageneration.to_owned()));
+        response.drain_body().await;
+
+        metadata.time_expires = Some(expire_at);
+        // Observing a live object is not atomic with wall-clock expiry or the
+        // provider's native collection. Revision-aware implementations reject
+        // a copy after the observed object changes; the fallback below cannot.
+        self.update_metadata(
+            id,
+            &metadata,
+            revision
+                .as_ref()
+                .map(|(generation, metageneration)| (generation.as_str(), metageneration.as_str())),
+        )
+        .await
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
         let response = self
@@ -395,6 +461,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     use anyhow::Result;
@@ -425,6 +495,125 @@ mod tests {
         })
     }
 
+    fn read_http_request(connection: &mut std::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut byte = [0];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            connection.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn start_expiry_server(
+        metadata: &Metadata,
+        include_revision: bool,
+        copy_status: &'static str,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let headers = metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX).unwrap();
+        let mut response_headers = String::new();
+        for (name, value) in &headers {
+            response_headers.push_str(name.as_str());
+            response_headers.push_str(": ");
+            response_headers.push_str(value.to_str().unwrap());
+            response_headers.push_str("\r\n");
+        }
+        if include_revision {
+            response_headers.push_str("x-goog-generation: 42\r\n");
+            response_headers.push_str("x-goog-metageneration: 7\r\n");
+        }
+
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut head, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut head);
+            assert!(request.starts_with("HEAD "));
+            write!(
+                head,
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n{response_headers}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+
+            let (mut copy, _) = listener.accept().unwrap();
+            request_tx.send(read_http_request(&mut copy)).unwrap();
+            write!(
+                copy,
+                "HTTP/1.1 {copy_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        (endpoint, request_rx, server)
+    }
+
+    #[tokio::test]
+    async fn set_expiry_guards_gcs_xml_copy_when_revision_headers_are_available() {
+        let old_expiry = SystemTime::now() + Duration::from_mins(10);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(old_expiry),
+            ..Default::default()
+        };
+        let (endpoint, request_rx, server) = start_expiry_server(&metadata, true, "200 OK");
+        let backend = S3CompatibleBackend::without_token(S3CompatibleConfig {
+            endpoint,
+            bucket: "bucket".into(),
+        });
+
+        assert!(
+            backend
+                .set_expiry(&make_id(), old_expiry + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+        let request = request_rx.recv().unwrap().to_ascii_lowercase();
+        for header in [
+            "x-goog-copy-source-if-generation-match: 42",
+            "x-goog-copy-source-if-metageneration-match: 7",
+            "x-goog-if-generation-match: 42",
+            "x-goog-if-metageneration-match: 7",
+        ] {
+            assert!(request.contains(header), "missing {header} in {request}");
+        }
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_expiry_uses_unguarded_fallback_and_treats_precondition_as_conflict() {
+        for (include_revision, status, expected) in [
+            (false, "200 OK", true),
+            (true, "412 Precondition Failed", false),
+        ] {
+            let old_expiry = SystemTime::now() + Duration::from_mins(10);
+            let metadata = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+                time_expires: Some(old_expiry),
+                ..Default::default()
+            };
+            let (endpoint, request_rx, server) =
+                start_expiry_server(&metadata, include_revision, status);
+            let backend = S3CompatibleBackend::without_token(S3CompatibleConfig {
+                endpoint,
+                bucket: "bucket".into(),
+            });
+
+            assert_eq!(
+                backend
+                    .set_expiry(&make_id(), old_expiry + Duration::from_hours(1))
+                    .await
+                    .unwrap(),
+                expected
+            );
+            let request = request_rx.recv().unwrap().to_ascii_lowercase();
+            assert_eq!(
+                request.contains("x-goog-if-generation-match"),
+                include_revision
+            );
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn metadata_to_gcs_headers_omits_size() {
         let metadata = Metadata {
@@ -449,9 +638,10 @@ mod tests {
 
         let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
 
-        // The lifecycle custom-time is the server-resolved expiry (second precision).
+        // The lifecycle custom-time is the server-resolved expiry at the
+        // cross-backend millisecond precision.
         let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
-        let expected = humantime::format_rfc3339_seconds(expires).to_string();
+        let expected = humantime::format_rfc3339_millis(expires).to_string();
         assert_eq!(custom_time, expected);
     }
 

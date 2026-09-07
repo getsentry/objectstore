@@ -387,7 +387,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
     if let Some(custom_time) = metadata.time_expires {
-        let formatted = humantime::format_rfc3339_seconds(custom_time);
+        let formatted = humantime::format_rfc3339_millis(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
             formatted
@@ -603,17 +603,9 @@ impl GcsBackend {
         }
     }
 
-    /// Fetches the GCS object metadata (without the payload), bumps TTI if
-    /// needed, and returns the parsed [`Metadata`].
-    ///
-    /// `id` is only used to attribute a TTI bump to the right record in the change stream; the
-    /// request itself is addressed by `object_url`.
+    /// Fetches GCS object metadata without modifying the object.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
-    async fn fetch_gcs_metadata(
-        &self,
-        id: &ObjectId,
-        object_url: &Url,
-    ) -> Result<Option<Metadata>> {
+    async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
@@ -644,11 +636,7 @@ impl GcsBackend {
             return Ok(None);
         };
 
-        let generation = gcs_metadata.generation.clone();
-        let metageneration = gcs_metadata.metageneration.clone();
         let metadata = gcs_metadata.into_metadata()?;
-
-        // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
@@ -657,23 +645,6 @@ impl GcsBackend {
         {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
-        }
-
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            let bumped = self
-                .update_custom_time(
-                    object_url.clone(),
-                    new_expire_at,
-                    &generation,
-                    &metageneration,
-                )
-                .await?;
-
-            // Only report a deadline that actually moved.
-            if bumped {
-                self.change_stream.update(id, Some(new_expire_at));
-            }
         }
 
         Ok(Some(metadata))
@@ -712,9 +683,12 @@ impl GcsBackend {
                 .await
                 .reqwest_context("updating GCS custom time")?;
 
-            // Bumping TTI is opportunistic. A concurrent metadata writer won the CAS race, so
-            // leave its update intact and let a future read evaluate the TTI again.
-            if response.status() == StatusCode::PRECONDITION_FAILED {
+            // A concurrent metadata writer won the CAS race. Leave its update
+            // intact; automatic renewal can be retried by a later read.
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::PRECONDITION_FAILED
+            ) {
                 response.drain_body().await;
                 return Ok(false);
             }
@@ -814,7 +788,7 @@ impl Backend for GcsBackend {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
-        let Some(metadata) = self.fetch_gcs_metadata(id, &object_url).await? else {
+        let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
             return Ok(None);
         };
 
@@ -880,7 +854,62 @@ impl Backend for GcsBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
-        self.fetch_gcs_metadata(id, &object_url).await
+        self.fetch_gcs_metadata(&object_url).await
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let expire_at = super::common::normalize_expiry(expire_at)?;
+        let object_url = self.object_url(id)?;
+        let object = self
+            .with_retry("get_metadata", || async {
+                let response = self
+                    .request(Method::GET, object_url.clone())
+                    .await?
+                    .send_traced()
+                    .await
+                    .reqwest_context("getting GCS object metadata for expiry extension")?;
+                if response.status() == StatusCode::NOT_FOUND {
+                    response.drain_body().await;
+                    return Ok(None);
+                }
+                let object = response
+                    .check_error("getting GCS object metadata for expiry extension")
+                    .await?
+                    .json::<GcsObject>()
+                    .await
+                    .reqwest_context("getting GCS object metadata for expiry extension")?;
+                Ok(Some(object))
+            })
+            .await?;
+
+        let Some(object) = object else {
+            return Ok(false);
+        };
+        let generation = object.generation.clone();
+        let metageneration = object.metageneration.clone();
+        let metadata = object.into_metadata()?;
+        let Some(current_expiry) = metadata.time_expires else {
+            return Ok(false);
+        };
+        let now = SystemTime::now();
+        if metadata.expiration_policy.is_manual() || current_expiry < now {
+            return Ok(false);
+        }
+        if current_expiry >= expire_at {
+            return Ok(true);
+        }
+
+        // The metadata observation is not atomic with wall-clock expiry or
+        // native GCS lifecycle collection. Fixed generation preconditions keep
+        // transport retries from applying to a replacement object.
+        let applied = self
+            .update_custom_time(object_url, expire_at, &generation, &metageneration)
+            .await?;
+        if applied {
+            self.change_stream.update(id, Some(expire_at));
+        }
+        Ok(applied)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1599,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_metadata_bumps_tti() -> Result<()> {
+    async fn test_reads_do_not_bump_tti_and_set_expiry_preserves_payload() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -1615,7 +1644,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        // Backdate custom_time so it falls inside the bump window.
+        // Backdate custom_time while keeping the object live.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
         let (generation, metageneration) =
@@ -1624,19 +1653,22 @@ mod tests {
             .update_custom_time(object_url, old_deadline, &generation, &metageneration)
             .await?;
 
-        // First get_metadata sees the old timestamp and triggers a TTI bump.
+        // Backend reads return the stored deadline without modifying it.
         let pre_meta = backend.get_metadata(&id).await?.unwrap();
         let pre_expiry = pre_meta.time_expires.unwrap();
-
-        // Second get_metadata sees the bumped timestamp.
-        let post_meta = backend.get_metadata(&id).await?.unwrap();
-        let post_expiry = post_meta.time_expires.unwrap();
-        assert!(
-            post_expiry > pre_expiry,
-            "TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
+        assert_eq!(
+            backend.get_metadata(&id).await?.unwrap().time_expires,
+            Some(pre_expiry)
         );
 
-        // Verify the payload is still intact after the bump.
+        let requested = SystemTime::now() + tti;
+        assert!(backend.set_expiry(&id, requested).await?);
+        assert_eq!(
+            backend.get_metadata(&id).await?.unwrap().time_expires,
+            Some(crate::backend::common::normalize_expiry(requested)?)
+        );
+
+        // Verify the payload is still intact after extension.
         let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
@@ -1678,7 +1710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_short_tti_bumps() -> Result<()> {
+    async fn test_short_tti_can_be_extended_explicitly() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -1694,7 +1726,7 @@ mod tests {
             .put_object(&id, &metadata, stream::single("hello, world"))
             .await?;
 
-        // Backdate custom_time so it falls inside the bump window.
+        // Backdate custom_time while keeping the object live.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
         let (generation, metageneration) =
@@ -1703,18 +1735,71 @@ mod tests {
             .update_custom_time(object_url, old_deadline, &generation, &metageneration)
             .await?;
 
-        // First get_metadata triggers the bump.
-        let pre_meta = backend.get_metadata(&id).await?.unwrap();
-        let pre_expiry = pre_meta.time_expires.unwrap();
-
-        // Second get_metadata sees the bumped timestamp.
-        let post_meta = backend.get_metadata(&id).await?.unwrap();
-        let post_expiry = post_meta.time_expires.unwrap();
-        assert!(
-            post_expiry > pre_expiry,
-            "Short TTI bump should have extended the expiry: {pre_expiry:?} -> {post_expiry:?}"
+        let requested = SystemTime::now() + tti;
+        assert!(backend.set_expiry(&id, requested).await?);
+        let post_expiry = backend
+            .get_metadata(&id)
+            .await?
+            .unwrap()
+            .time_expires
+            .unwrap();
+        assert_eq!(
+            post_expiry,
+            crate::backend::common::normalize_expiry(requested)?
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_custom_time_treats_stale_preconditions_and_missing_objects_as_conflicts()
+    -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_mins(10)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await?;
+        let object_url = backend.object_url(&id)?;
+        let (generation, metageneration) =
+            get_generation_matches(&backend, object_url.clone()).await?;
+
+        assert!(
+            backend
+                .update_custom_time(
+                    object_url.clone(),
+                    SystemTime::now() + Duration::from_hours(1),
+                    &generation,
+                    &metageneration,
+                )
+                .await?
+        );
+        assert!(
+            !backend
+                .update_custom_time(
+                    object_url.clone(),
+                    SystemTime::now() + Duration::from_hours(2),
+                    &generation,
+                    &metageneration,
+                )
+                .await?
+        );
+
+        backend.delete_object(&id).await?;
+        assert!(
+            !backend
+                .update_custom_time(
+                    object_url,
+                    SystemTime::now() + Duration::from_hours(2),
+                    &generation,
+                    &metageneration,
+                )
+                .await?
+        );
         Ok(())
     }
 
@@ -2273,7 +2358,7 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
-    async fn change_stream_reports_tti_bump_as_an_update() -> Result<()> {
+    async fn change_stream_reports_expiry_extension_as_an_update() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
         let id = make_id();
         let metadata = Metadata {
@@ -2291,7 +2376,9 @@ mod tests {
             .await?;
         producer.clear();
 
-        backend.get_metadata(&id).await?;
+        backend
+            .set_expiry(&id, SystemTime::now() + Duration::from_secs(3600))
+            .await?;
 
         let records = producer.records();
         assert_eq!(records.len(), 1);
@@ -2304,7 +2391,7 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
-    async fn change_stream_reports_nothing_when_tti_is_not_bumped() -> Result<()> {
+    async fn change_stream_reports_nothing_for_side_effect_free_read() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
         let id = make_id();
         let metadata = Metadata {

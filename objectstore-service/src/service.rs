@@ -5,8 +5,10 @@
 //!
 //! See the [crate-level documentation](crate) for full architecture details.
 
+use std::collections::HashSet;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
@@ -23,6 +25,8 @@ use crate::multipart::{
 };
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::TaskTracker;
 
 /// Service response for [`StorageService::get_object`].
 pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
@@ -38,6 +42,114 @@ pub type DeleteResponse = ();
 /// This value is used when no explicit limiter is set via
 /// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
+
+const EXPIRY_RENEWAL_CONCURRENCY_LIMIT: usize = 32;
+
+#[derive(Debug)]
+struct RenewalGuard {
+    id: ObjectId,
+    in_flight: Arc<Mutex<HashSet<ObjectId>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for RenewalGuard {
+    fn drop(&mut self) {
+        self.in_flight.lock().unwrap().remove(&self.id);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RenewalScheduler {
+    backend: Arc<dyn Backend>,
+    capacity: Arc<Semaphore>,
+    in_flight: Arc<Mutex<HashSet<ObjectId>>>,
+    tracker: TaskTracker,
+}
+
+impl RenewalScheduler {
+    fn new(backend: Arc<dyn Backend>) -> Self {
+        Self::with_limit(backend, EXPIRY_RENEWAL_CONCURRENCY_LIMIT)
+    }
+
+    fn with_limit(backend: Arc<dyn Backend>, limit: usize) -> Self {
+        Self {
+            backend,
+            capacity: Arc::new(Semaphore::new(limit)),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+            tracker: TaskTracker::new(),
+        }
+    }
+
+    pub(crate) fn schedule(&self, id: ObjectId, metadata: &Metadata, access_time: SystemTime) {
+        let Some(expire_at) = metadata.check_tti_bump(access_time) else {
+            return;
+        };
+
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if !in_flight.insert(id.clone()) {
+                objectstore_metrics::count!(
+                    "service.expiry_renewal",
+                    outcome = "skipped",
+                    reason = "duplicate"
+                );
+                return;
+            }
+        }
+
+        let permit = match Arc::clone(&self.capacity).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.in_flight.lock().unwrap().remove(&id);
+                objectstore_metrics::count!("service.expiry_renewal", outcome = "capacity_dropped");
+                return;
+            }
+        };
+
+        let guard = RenewalGuard {
+            id: id.clone(),
+            in_flight: Arc::clone(&self.in_flight),
+            _permit: permit,
+        };
+        let backend = Arc::clone(&self.backend);
+        self.tracker.spawn(async move {
+            // This ID-only operation can run after a replacement write. Its
+            // original read timestamp and requested deadline may therefore
+            // extend a replacement TTL/TTI object. Overload or process exit can
+            // also lose this opportunistic renewal; a later read may retry it.
+            let result = crate::concurrency::spawn_metered("set_expiry", guard, async move {
+                match backend.set_expiry(&id, expire_at).await {
+                    Ok(true) => {
+                        objectstore_metrics::count!(
+                            "service.expiry_renewal",
+                            outcome = "applied_or_already_sufficient"
+                        );
+                        Ok(())
+                    }
+                    Ok(false) => {
+                        objectstore_metrics::count!(
+                            "service.expiry_renewal",
+                            outcome = "skipped",
+                            reason = "backend_conflict"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        objectstore_metrics::count!("service.expiry_renewal", outcome = "failed");
+                        Err(error)
+                    }
+                }
+            })
+            .await;
+            let _ = result;
+        });
+    }
+
+    async fn join(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+}
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -74,6 +186,7 @@ pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 pub struct StorageService {
     inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
+    renewals: RenewalScheduler,
 }
 
 impl StorageService {
@@ -84,8 +197,10 @@ impl StorageService {
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
     pub fn new(backend: Box<dyn Backend>) -> Self {
+        let inner: Arc<dyn Backend> = Arc::new(CountingBackend::new(backend));
         Self {
-            inner: Arc::new(CountingBackend::new(backend)),
+            renewals: RenewalScheduler::new(Arc::clone(&inner)),
+            inner,
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
         }
     }
@@ -122,7 +237,11 @@ impl StorageService {
     /// configurable percentage of execution slots while allowing operations
     /// to queue for permits instead of requiring upfront reservation.
     pub fn stream(&self) -> StreamExecutor {
-        StreamExecutor::new(Arc::clone(&self.inner), self.concurrency.clone())
+        StreamExecutor::new(
+            Arc::clone(&self.inner),
+            self.concurrency.clone(),
+            self.renewals.clone(),
+        )
     }
 
     /// Starts background processes for the storage service.
@@ -218,16 +337,41 @@ impl StorageService {
 
     /// Retrieves only the metadata for an object, without the payload.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
+        let access_time = SystemTime::now();
         let inner = Arc::clone(&self.inner);
-        self.spawn("get_metadata", async move { inner.get_metadata(&id).await })
-            .await
+        let renewals = self.renewals.clone();
+        self.spawn("get_metadata", async move {
+            let response = inner.get_metadata(&id).await?;
+            if let Some(metadata) = &response {
+                renewals.schedule(id, metadata, access_time);
+            }
+            Ok(response)
+        })
+        .await
     }
 
     /// Streams (part of) the contents of an object.
     pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+        let access_time = SystemTime::now();
         let inner = Arc::clone(&self.inner);
-        self.spawn("get", async move { inner.get_object(&id, range).await })
-            .await
+        let renewals = self.renewals.clone();
+        self.spawn("get", async move {
+            let response = inner.get_object(&id, range).await?;
+            if let Some((metadata, _, _)) = &response {
+                renewals.schedule(id, metadata, access_time);
+            }
+            Ok(response)
+        })
+        .await
+    }
+
+    /// Extends an existing TTL or TTI object's deadline.
+    pub async fn set_expiry(&self, id: ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let inner = Arc::clone(&self.inner);
+        self.spawn("set_expiry", async move {
+            inner.set_expiry(&id, expire_at).await
+        })
+        .await
     }
 
     /// Deletes an object, if it exists.
@@ -249,6 +393,7 @@ impl StorageService {
     /// backend's configured timeout. Should be called during graceful shutdown
     /// after the HTTP server has stopped accepting new requests.
     pub async fn join(&self) {
+        self.renewals.join().await;
         self.inner.join().await;
     }
 
@@ -436,6 +581,7 @@ impl StorageService {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use bytes::BytesMut;
@@ -642,6 +788,38 @@ mod tests {
         assert!(after.is_none());
     }
 
+    #[tokio::test]
+    async fn explicit_set_expiry_runs_through_service() {
+        let service = make_service();
+        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(old_expiry),
+            ..Default::default()
+        };
+        let id = service
+            .insert_object(
+                make_context(),
+                Some("explicit-expiry".into()),
+                metadata,
+                stream::single("payload"),
+            )
+            .await
+            .unwrap();
+        let requested = old_expiry + Duration::from_hours(1);
+
+        assert!(service.set_expiry(id.clone(), requested).await.unwrap());
+        assert_eq!(
+            service
+                .get_metadata(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .time_expires,
+            Some(crate::backend::common::normalize_expiry(requested).unwrap())
+        );
+    }
+
     #[derive(Debug)]
     struct PanicOnGet;
 
@@ -673,6 +851,254 @@ mod tests {
             std::error::Error::source(&error).unwrap().to_string(),
             "intentional panic in get_object"
         );
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct GateOnExpiry {
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        requested: Arc<Mutex<Vec<SystemTime>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for GateOnExpiry {
+        async fn set_expiry(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+        ) -> Result<bool> {
+            self.requested.lock().unwrap().push(expire_at);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.resume.notified().await;
+            inner.set_expiry(id, expire_at).await
+        }
+    }
+
+    fn stale_tti_metadata() -> Metadata {
+        Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_return_without_waiting_for_renewal_and_join_drains_it() {
+        let backend = TestBackend::new(GateOnExpiry::default());
+        let id = ObjectId::new(make_context(), "background-renewal".into());
+        let metadata = stale_tti_metadata();
+        backend
+            .inner
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+        let service = StorageService::new(Box::new(backend.clone()));
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            service.get_object(id.clone(), Some(ByteRange::Bounded(0, 2))),
+        )
+        .await
+        .expect("GET waited for its background renewal")
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.0.time_expires, metadata.time_expires);
+        backend.hooks.started.notified().await;
+
+        let join = tokio::spawn({
+            let service = service.clone();
+            async move { service.join().await }
+        });
+        tokio::pin!(join);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut join)
+                .await
+                .is_err()
+        );
+
+        backend.hooks.resume.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), &mut join)
+            .await
+            .expect("shutdown did not drain renewal")
+            .unwrap();
+        assert!(backend.inner.get(&id).expect_object().0.time_expires > response.0.time_expires);
+    }
+
+    #[tokio::test]
+    async fn duplicate_reads_share_one_in_flight_renewal() {
+        let backend = TestBackend::new(GateOnExpiry::default());
+        let id = ObjectId::new(make_context(), "deduplicated-renewal".into());
+        backend
+            .inner
+            .put_object(&id, &stale_tti_metadata(), stream::single("payload"))
+            .await
+            .unwrap();
+        let service = StorageService::new(Box::new(backend.clone()));
+
+        service.get_metadata(id.clone()).await.unwrap();
+        backend.hooks.started.notified().await;
+        service.get_metadata(id).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 1);
+
+        backend.hooks.resume.notify_waiters();
+        service.join().await;
+    }
+
+    #[tokio::test]
+    async fn ttl_reads_do_not_schedule_renewal() {
+        let backend = TestBackend::new(GateOnExpiry::default());
+        let id = ObjectId::new(make_context(), "ttl-no-renewal".into());
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            ..Default::default()
+        };
+        backend
+            .inner
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+        let service = StorageService::new(Box::new(backend.clone()));
+
+        service.get_metadata(id).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 0);
+        service.join().await;
+    }
+
+    #[tokio::test]
+    async fn renewal_scheduler_uses_captured_access_time_and_drops_at_capacity() {
+        let backend = TestBackend::new(GateOnExpiry::default());
+        let first = ObjectId::new(make_context(), "first-renewal".into());
+        let second = ObjectId::new(make_context(), "capacity-dropped-renewal".into());
+        let access_time = SystemTime::now() - Duration::from_mins(10);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            ..Default::default()
+        };
+        for id in [&first, &second] {
+            backend
+                .inner
+                .put_object(id, &metadata, stream::single("payload"))
+                .await
+                .unwrap();
+        }
+
+        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
+        scheduler.schedule(first, &metadata, access_time);
+        backend.hooks.started.notified().await;
+        assert_eq!(
+            backend.hooks.requested.lock().unwrap().as_slice(),
+            &[access_time + Duration::from_hours(1)]
+        );
+
+        scheduler.schedule(second.clone(), &metadata, access_time);
+        tokio::task::yield_now().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backend.inner.get(&second).expect_object().0.time_expires,
+            metadata.time_expires
+        );
+
+        backend.hooks.resume.notify_waiters();
+        scheduler.join().await;
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct PanicFirstExpiry {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for PanicFirstExpiry {
+        async fn set_expiry(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+        ) -> Result<bool> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("intentional renewal panic");
+            }
+            inner.set_expiry(id, expire_at).await
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_panic_releases_duplicate_and_capacity_guards() {
+        let backend = TestBackend::new(PanicFirstExpiry::default());
+        let id = ObjectId::new(make_context(), "panic-renewal".into());
+        let metadata = stale_tti_metadata();
+        backend
+            .inner
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
+
+        scheduler.schedule(id.clone(), &metadata, SystemTime::now());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !scheduler.in_flight.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic did not release renewal guards");
+
+        scheduler.schedule(id, &metadata, SystemTime::now());
+        scheduler.join().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailFirstExpiry {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for FailFirstExpiry {
+        async fn set_expiry(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+        ) -> Result<bool> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(ErrorKind::BackendFailure.into());
+            }
+            inner.set_expiry(id, expire_at).await
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_error_releases_duplicate_and_capacity_guards() {
+        let backend = TestBackend::new(FailFirstExpiry::default());
+        let id = ObjectId::new(make_context(), "failed-renewal".into());
+        let metadata = stale_tti_metadata();
+        backend
+            .inner
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
+
+        scheduler.schedule(id.clone(), &metadata, SystemTime::now());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !scheduler.in_flight.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("error did not release renewal guards");
+
+        scheduler.schedule(id, &metadata, SystemTime::now());
+        scheduler.join().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
     }
 
     /// In-memory backend with optional synchronization for `put_object`.

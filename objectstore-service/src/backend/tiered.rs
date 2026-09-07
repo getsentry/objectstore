@@ -158,6 +158,17 @@ fn new_long_term_revision(id: &ObjectId) -> ObjectId {
     }
 }
 
+fn effective_expiry(
+    redirect_expiry: Option<SystemTime>,
+    blob_expiry: Option<SystemTime>,
+) -> Option<SystemTime> {
+    match (redirect_expiry, blob_expiry) {
+        (Some(redirect), Some(blob)) => Some(redirect.min(blob)),
+        (Some(expiry), None) | (None, Some(expiry)) => Some(expiry),
+        (None, None) => None,
+    }
+}
+
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
@@ -364,6 +375,10 @@ impl TieredStorage {
         let tombstone = Tombstone {
             target: new.clone(),
             expiration_policy: metadata.expiration_policy,
+            // Copy the already-resolved deadline so the HV redirect and LT
+            // blob do not drift merely because their writes happen at
+            // different times. Existing mismatches are left as-is.
+            time_expires: metadata.time_expires,
         };
         let written = self
             .inner
@@ -452,7 +467,15 @@ impl Backend for TieredStorage {
                 self.inner
                     .long_term
                     .get_object(&tombstone.target, range)
-                    .await?,
+                    .await?
+                    .map(|(mut metadata, range, stream)| {
+                        // The redirect can expire before a successfully renewed
+                        // blob. Reporting only LT's later deadline would suppress
+                        // a retry after LT success followed by HV failure.
+                        metadata.time_expires =
+                            effective_expiry(tombstone.time_expires, metadata.time_expires);
+                        (metadata, range, stream)
+                    }),
                 BackendChoice::LongTerm,
             ),
         };
@@ -487,7 +510,17 @@ impl Backend for TieredStorage {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
-                self.inner.long_term.get_metadata(&tombstone.target).await?,
+                self.inner
+                    .long_term
+                    .get_metadata(&tombstone.target)
+                    .await?
+                    .map(|mut metadata| {
+                        // See the matching GET path: the earlier deadline is
+                        // the lifetime clients can actually rely on.
+                        metadata.time_expires =
+                            effective_expiry(tombstone.time_expires, metadata.time_expires);
+                        metadata
+                    }),
                 BackendChoice::LongTerm,
             ),
         };
@@ -498,6 +531,41 @@ impl Backend for TieredStorage {
             .record();
 
         Ok(result)
+    }
+
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let expire_at = super::common::normalize_expiry(expire_at)?;
+        match self.inner.high_volume.get_tiered_metadata(id).await? {
+            TieredMetadata::NotFound => Ok(false),
+            TieredMetadata::Object(_) => {
+                self.inner
+                    .high_volume
+                    .set_expiry_if_matches(id, expire_at, None)
+                    .await
+            }
+            TieredMetadata::Tombstone(tombstone) => {
+                // Extend LT first. Extending the redirect first could leave it
+                // alive after the blob failed to extend and was reclaimed.
+                if !self
+                    .inner
+                    .long_term
+                    .set_expiry(&tombstone.target, expire_at)
+                    .await?
+                {
+                    return Ok(false);
+                }
+
+                let extended = self
+                    .inner
+                    .high_volume
+                    .set_expiry_if_matches(id, expire_at, Some(&tombstone.target))
+                    .await?;
+                // If this fails, LT may remain extended while the redirect
+                // becomes unreachable earlier. Rolling LT back could interfere
+                // with another renewal that succeeded concurrently.
+                Ok(extended)
+            }
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -853,6 +921,9 @@ impl MultipartUploadBackend for TieredStorage {
         let tombstone = Tombstone {
             target: physical.clone(),
             expiration_policy: metadata.expiration_policy,
+            // Multipart completion reads LT's resolved deadline and copies it
+            // verbatim into HV, avoiding write-time drift between tiers.
+            time_expires: metadata.time_expires,
         };
         let written = self
             .inner
@@ -885,6 +956,7 @@ impl MultipartUploadBackend for TieredStorage {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::Mutex as StdMutex;
 
     use futures::lock::Mutex;
     use objectstore_types::metadata::{ExpirationPolicy, Metadata};
@@ -925,6 +997,176 @@ mod tests {
             Box::new(changelog.clone()),
         );
         (storage, hv, lt, changelog)
+    }
+
+    #[derive(Clone, Debug)]
+    struct ExpiryHook {
+        label: &'static str,
+        events: Arc<StdMutex<Vec<&'static str>>>,
+        reject: bool,
+    }
+
+    type ExpiryTestStorage = (
+        TieredStorage,
+        TestBackend<ExpiryHook>,
+        TestBackend<ExpiryHook>,
+        Arc<StdMutex<Vec<&'static str>>>,
+    );
+
+    #[async_trait::async_trait]
+    impl Hooks for ExpiryHook {
+        async fn set_expiry(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+        ) -> Result<bool> {
+            self.events.lock().unwrap().push(self.label);
+            if self.reject {
+                Ok(false)
+            } else {
+                inner.set_expiry(id, expire_at).await
+            }
+        }
+
+        async fn set_expiry_if_matches(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+            expected_target: Option<&ObjectId>,
+        ) -> Result<bool> {
+            self.events.lock().unwrap().push(self.label);
+            if self.reject {
+                Ok(false)
+            } else {
+                inner
+                    .set_expiry_if_matches(id, expire_at, expected_target)
+                    .await
+            }
+        }
+    }
+
+    fn tiered_with_expiry_hooks(hv_reject: bool, lt_reject: bool) -> ExpiryTestStorage {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let hv = TestBackend::new(ExpiryHook {
+            label: "hv",
+            events: Arc::clone(&events),
+            reject: hv_reject,
+        });
+        let lt = TestBackend::new(ExpiryHook {
+            label: "lt",
+            events: Arc::clone(&events),
+            reject: lt_reject,
+        });
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(lt.clone()),
+            Box::new(NoopChangeLog),
+        );
+        (storage, hv, lt, events)
+    }
+
+    async fn seed_redirect(
+        hv: &InMemoryBackend,
+        lt: &InMemoryBackend,
+        id: &ObjectId,
+        target: &ObjectId,
+        expiry: SystemTime,
+    ) {
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(expiry),
+            ..Default::default()
+        };
+        lt.put_object(target, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+        hv.compare_and_write(
+            id,
+            None,
+            TieredWrite::Tombstone(Tombstone {
+                target: target.clone(),
+                expiration_policy: metadata.expiration_policy,
+                time_expires: metadata.time_expires,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn expiry_extension_updates_lt_before_conditional_hv() {
+        let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, false);
+        let id = make_id("tiered-expiry-order");
+        let target = new_long_term_revision(&id);
+        let old_expiry = SystemTime::now() + Duration::from_mins(10);
+        seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
+
+        let requested = SystemTime::now() + Duration::from_hours(1);
+        assert!(storage.set_expiry(&id, requested).await.unwrap());
+        assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
+        let normalized = crate::backend::common::normalize_expiry(requested).unwrap();
+        assert_eq!(
+            lt.inner.get(&target).expect_object().0.time_expires,
+            Some(normalized)
+        );
+        assert_eq!(
+            hv.inner.get(&id).expect_tombstone().time_expires,
+            Some(normalized)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_hv_extension_leaves_lt_extended_and_reports_earlier_expiry() {
+        let (storage, hv, lt, events) = tiered_with_expiry_hooks(true, false);
+        let id = make_id("tiered-hv-failure");
+        let target = new_long_term_revision(&id);
+        let old_expiry =
+            crate::backend::common::normalize_expiry(SystemTime::now() + Duration::from_mins(10))
+                .unwrap();
+        seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
+
+        let requested = SystemTime::now() + Duration::from_hours(1);
+        assert!(!storage.set_expiry(&id, requested).await.unwrap());
+        assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
+        assert_eq!(
+            hv.inner.get(&id).expect_tombstone().time_expires,
+            Some(old_expiry)
+        );
+        assert!(lt.inner.get(&target).expect_object().0.time_expires > Some(old_expiry));
+        assert_eq!(
+            storage
+                .get_metadata(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .time_expires,
+            Some(old_expiry)
+        );
+    }
+
+    #[tokio::test]
+    async fn lt_conflict_stops_before_hv_extension() {
+        let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, true);
+        let id = make_id("tiered-lt-conflict");
+        let target = new_long_term_revision(&id);
+        seed_redirect(
+            &hv.inner,
+            &lt.inner,
+            &id,
+            &target,
+            SystemTime::now() + Duration::from_mins(10),
+        )
+        .await;
+
+        assert!(
+            !storage
+                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(events.lock().unwrap().as_slice(), &["lt"]);
     }
 
     // --- new_long_term_revision tests ---
@@ -1012,6 +1254,7 @@ mod tests {
         let metadata_in = Metadata {
             content_type: "image/png".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
             origin: Some("10.0.0.1".into()),
             ..Metadata::default()
         };
@@ -1024,6 +1267,7 @@ mod tests {
         // Tombstone in HV: correct expiration_policy, target is a revision key.
         let tombstone = hv.get(&id).expect_tombstone();
         assert_eq!(tombstone.expiration_policy, metadata_in.expiration_policy);
+        assert_eq!(tombstone.time_expires, metadata_in.time_expires);
         let lt_id = tombstone.target;
         assert!(
             lt_id.key().starts_with(id.key()),
@@ -1035,6 +1279,7 @@ mod tests {
         let (lt_meta, _) = lt.get(&lt_id).expect_object();
         assert_eq!(lt_meta.content_type, "image/png");
         assert_eq!(lt_meta.expiration_policy, metadata_in.expiration_policy);
+        assert_eq!(lt_meta.time_expires, tombstone.time_expires);
 
         // get_object follows the tombstone and returns the correct payload.
         let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
@@ -1268,6 +1513,7 @@ mod tests {
         let tombstone = Tombstone {
             target: make_id("lt-object"),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         inner
             .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
@@ -1396,6 +1642,7 @@ mod tests {
         let tombstone = Tombstone {
             target: lt_id.clone(),
             expiration_policy: ExpirationPolicy::Manual,
+            time_expires: None,
         };
         hv.compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
             .await
@@ -1674,6 +1921,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "application/octet-stream".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
             ..Metadata::default()
         };
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB
@@ -1720,7 +1968,11 @@ mod tests {
             tombstone.target.key().starts_with(id.key()),
             "tombstone target should be a revision key"
         );
-        lt.get(&tombstone.target).expect_object();
+        assert_eq!(tombstone.time_expires, metadata.time_expires);
+        assert_eq!(
+            lt.get(&tombstone.target).expect_object().0.time_expires,
+            tombstone.time_expires
+        );
     }
 
     #[tokio::test]

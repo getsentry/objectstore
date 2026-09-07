@@ -17,7 +17,7 @@ use objectstore_types::metadata::Metadata;
 
 use super::common::{
     DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
-    TieredMetadata, TieredWrite, Tombstone,
+    TieredMetadata, TieredWrite, Tombstone, normalize_expiry,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
@@ -128,6 +128,7 @@ impl super::common::Backend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
+            Some(entry) if entry.is_expired(SystemTime::now()) => Ok(None),
             Some(StoreEntry::Tombstone(_)) => Err(Error::new(
                 ErrorKind::Internal,
                 "unexpected in-memory tombstone",
@@ -155,6 +156,16 @@ impl super::common::Backend for InMemoryBackend {
         }
     }
 
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let expire_at = normalize_expiry(expire_at)?;
+        let now = SystemTime::now();
+        let mut store = self.store.lock().unwrap();
+        let Some(StoreEntry::Object(metadata, _)) = store.get_mut(id) else {
+            return Ok(false);
+        };
+        extend_metadata_expiry(metadata, expire_at, now)
+    }
+
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         self.store.lock().unwrap().remove(id);
         Ok(())
@@ -170,6 +181,12 @@ impl HighVolumeBackend for InMemoryBackend {
         payload: Bytes,
     ) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
+        if store
+            .get(id)
+            .is_some_and(|entry| entry.is_expired(SystemTime::now()))
+        {
+            store.remove(id);
+        }
         if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
             return Ok(Some(tombstone));
         }
@@ -188,6 +205,7 @@ impl HighVolumeBackend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredGet::NotFound,
+            Some(entry) if entry.is_expired(SystemTime::now()) => TieredGet::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredGet::Tombstone(tombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
@@ -212,6 +230,7 @@ impl HighVolumeBackend for InMemoryBackend {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredMetadata::NotFound,
+            Some(entry) if entry.is_expired(SystemTime::now()) => TieredMetadata::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredMetadata::Tombstone(tombstone),
             Some(StoreEntry::Object(metadata, _bytes)) => TieredMetadata::Object(metadata),
         })
@@ -227,6 +246,42 @@ impl HighVolumeBackend for InMemoryBackend {
         Ok(None)
     }
 
+    async fn set_expiry_if_matches(
+        &self,
+        id: &ObjectId,
+        expire_at: SystemTime,
+        expected_target: Option<&ObjectId>,
+    ) -> Result<bool> {
+        let expire_at = normalize_expiry(expire_at)?;
+        let now = SystemTime::now();
+        let mut store = self.store.lock().unwrap();
+        let Some(entry) = store.get_mut(id) else {
+            return Ok(false);
+        };
+
+        match (entry, expected_target) {
+            (StoreEntry::Object(metadata, _), None) => {
+                extend_metadata_expiry(metadata, expire_at, now)
+            }
+            (StoreEntry::Tombstone(tombstone), Some(target)) if tombstone.target == *target => {
+                if tombstone.expiration_policy.is_manual()
+                    || tombstone.time_expires.is_none_or(|deadline| deadline < now)
+                {
+                    return Ok(false);
+                }
+                if tombstone
+                    .time_expires
+                    .is_some_and(|deadline| deadline >= expire_at)
+                {
+                    return Ok(true);
+                }
+                tombstone.time_expires = Some(expire_at);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     async fn compare_and_write(
         &self,
         id: &ObjectId,
@@ -236,8 +291,9 @@ impl HighVolumeBackend for InMemoryBackend {
         let mut store = self.store.lock().unwrap();
 
         let actual = store.get(id);
-        let matches_current = matches_redirect(actual, current);
-        let matches_next = matches_redirect(actual, write.target());
+        let now = SystemTime::now();
+        let matches_current = matches_redirect(actual, current, now);
+        let matches_next = matches_redirect(actual, write.target(), now);
 
         if matches_current {
             match write {
@@ -445,11 +501,60 @@ impl MultipartUploadBackend for InMemoryBackend {
 ///
 /// - `expected = None`: matches any non-tombstone (absent or inline object).
 /// - `expected = Some(target)`: matches a tombstone whose redirect target equals `target`.
-fn matches_redirect(entry: Option<&StoreEntry>, expected: Option<&ObjectId>) -> bool {
+fn matches_redirect(
+    entry: Option<&StoreEntry>,
+    expected: Option<&ObjectId>,
+    now: SystemTime,
+) -> bool {
     match expected {
-        None => matches!(entry, Some(StoreEntry::Object { .. }) | None),
-        Some(target) => matches!(entry, Some(StoreEntry::Tombstone(t)) if t.target == *target),
+        None => entry
+            .is_none_or(|entry| matches!(entry, StoreEntry::Object(..)) || entry.is_expired(now)),
+        Some(target) => match entry {
+            Some(StoreEntry::Tombstone(tombstone)) => {
+                tombstone.target == *target && !tombstone.is_expired(now)
+            }
+            _ => false,
+        },
     }
+}
+
+impl StoreEntry {
+    fn is_expired(&self, now: SystemTime) -> bool {
+        match self {
+            StoreEntry::Object(metadata, _) => {
+                metadata.expiration_policy.is_timeout()
+                    && metadata.time_expires.is_some_and(|deadline| deadline < now)
+            }
+            StoreEntry::Tombstone(tombstone) => tombstone.is_expired(now),
+        }
+    }
+}
+
+impl Tombstone {
+    fn is_expired(&self, now: SystemTime) -> bool {
+        self.expiration_policy.is_timeout()
+            && self.time_expires.is_some_and(|deadline| deadline < now)
+    }
+}
+
+fn extend_metadata_expiry(
+    metadata: &mut Metadata,
+    expire_at: SystemTime,
+    now: SystemTime,
+) -> Result<bool> {
+    if metadata.expiration_policy.is_manual()
+        || metadata.time_expires.is_none_or(|deadline| deadline < now)
+    {
+        return Ok(false);
+    }
+    if metadata
+        .time_expires
+        .is_some_and(|deadline| deadline >= expire_at)
+    {
+        return Ok(true);
+    }
+    metadata.time_expires = Some(expire_at);
+    Ok(true)
 }
 
 /// Type returned by [`InMemoryBackend::get`] for direct inspection of stored entries.
@@ -522,6 +627,130 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    #[tokio::test]
+    async fn set_expiry_extends_ttl_and_tti_without_changing_object() {
+        for policy in [
+            ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+        ] {
+            let backend = InMemoryBackend::new("test");
+            let id = make_id();
+            let original_expiry = SystemTime::now() + Duration::from_hours(1);
+            let metadata = Metadata {
+                expiration_policy: policy,
+                time_expires: Some(original_expiry),
+                custom: [("preserved".into(), "yes".into())].into(),
+                ..Default::default()
+            };
+            backend
+                .put_object(&id, &metadata, stream::single("payload"))
+                .await
+                .unwrap();
+
+            let requested = original_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
+            assert!(backend.set_expiry(&id, requested).await.unwrap());
+            let (updated, payload) = backend.get(&id).expect_object();
+            assert_eq!(updated.expiration_policy, policy);
+            assert_eq!(updated.custom, metadata.custom);
+            assert_eq!(payload, Bytes::from_static(b"payload"));
+            assert_eq!(
+                updated.time_expires,
+                Some(normalize_expiry(requested).unwrap())
+            );
+
+            assert!(backend.set_expiry(&id, original_expiry).await.unwrap());
+            assert_eq!(
+                backend.get(&id).expect_object().0.time_expires,
+                updated.time_expires
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn set_expiry_rejects_absent_manual_and_expired_objects() {
+        let backend = InMemoryBackend::new("test");
+        let absent = make_id();
+        assert!(
+            !backend
+                .set_expiry(&absent, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+
+        let manual = make_id();
+        backend
+            .put_object(&manual, &Metadata::default(), stream::single("manual"))
+            .await
+            .unwrap();
+        assert!(
+            !backend
+                .set_expiry(&manual, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+
+        let expired = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&expired, &metadata, stream::single("expired"))
+            .await
+            .unwrap();
+        assert!(backend.get_object(&expired, None).await.unwrap().is_none());
+        assert!(
+            !backend
+                .set_expiry(&expired, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_tombstone_extension_requires_exact_target() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let target = make_id();
+        let other = make_id();
+        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: target.clone(),
+                    expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+                    time_expires: Some(old_expiry),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let new_expiry = old_expiry + Duration::from_hours(1);
+        assert!(
+            !backend
+                .set_expiry_if_matches(&id, new_expiry, Some(&other))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            backend.get(&id).expect_tombstone().time_expires,
+            Some(old_expiry)
+        );
+        assert!(
+            backend
+                .set_expiry_if_matches(&id, new_expiry, Some(&target))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            backend.get(&id).expect_tombstone().time_expires,
+            Some(normalize_expiry(new_expiry).unwrap())
+        );
     }
 
     #[tokio::test]

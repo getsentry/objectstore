@@ -1,6 +1,7 @@
 //! Shared trait definition and types for all backends.
 
 use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
@@ -55,6 +56,17 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
             .await?
             .map(|(metadata, _range, _stream)| metadata))
     }
+
+    /// Extends the deadline of an existing object with expiration policy.
+    ///
+    /// The supplied deadline is normalized to millisecond precision. This only
+    /// changes the stored deadline: the expiration policy, duration, payload,
+    /// and all other metadata remain unchanged.
+    ///
+    /// Returns `true` when the deadline was extended or was already at least as
+    /// late as `expire_at`. Returns `false` when the object is absent, expired,
+    /// manually expired, or changed concurrently.
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
@@ -221,6 +233,18 @@ pub trait HighVolumeBackend: Backend {
     /// fetching up to 1 MiB of data just to discover a tombstone.
     async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata>;
 
+    /// Conditionally extends the deadline of an inline object or redirect.
+    ///
+    /// `expected_target = None` requires a live inline object. `Some(target)`
+    /// requires a live redirect to exactly that target. A mismatched, absent,
+    /// expired, or manual-policy entry returns `false`.
+    async fn set_expiry_if_matches(
+        &self,
+        id: &ObjectId,
+        expire_at: SystemTime,
+        expected_target: Option<&ObjectId>,
+    ) -> Result<bool>;
+
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
     /// Returns `None` after deleting the row (or if the row was already absent),
@@ -263,6 +287,32 @@ pub struct Tombstone {
 
     /// The expiration policy copied from the original object.
     pub expiration_policy: ExpirationPolicy,
+
+    /// The concrete deadline stored on the redirect.
+    pub time_expires: Option<SystemTime>,
+}
+
+/// Normalizes an expiry deadline to the millisecond precision shared by all
+/// backends.
+pub(crate) fn normalize_expiry(expire_at: SystemTime) -> Result<SystemTime> {
+    let millis = expire_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| {
+            crate::error::Error::with_context(
+                ErrorKind::Internal,
+                "normalizing expiration timestamp",
+                error,
+            )
+        })?
+        .as_millis();
+    let millis = u64::try_from(millis).map_err(|error| {
+        crate::error::Error::with_context(
+            ErrorKind::Internal,
+            "normalizing expiration timestamp",
+            error,
+        )
+    })?;
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(millis))
 }
 
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
