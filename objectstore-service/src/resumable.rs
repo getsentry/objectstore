@@ -118,9 +118,13 @@ impl Encryptor {
     /// Encrypts a structured Resumable Upload session token.
     pub(crate) fn encrypt(&self, session: SessionToken) -> Result<EncryptedSessionToken> {
         let key_id = self.active_key_id.as_bytes();
+        let key_id_length = u8::try_from(key_id.len()).context(
+            ErrorKind::Internal,
+            "resumable token encryption key ID exceeds maximum length",
+        )?;
 
         let mut header = Vec::with_capacity(1 + key_id.len());
-        header.push(key_id.len() as u8);
+        header.push(key_id_length);
         header.extend_from_slice(key_id);
 
         let mut ciphertext = serde_json::to_vec(&session).context(
@@ -205,6 +209,13 @@ impl fmt::Debug for Encryptor {
 }
 
 fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
+    let key_id_length = key_id.len();
+    u8::try_from(key_id_length).map_err(|_| {
+        anyhow::anyhow!(
+            "resumable token encryption key ID must be at most {} bytes, got {key_id_length}",
+            u8::MAX
+        )
+    })?;
     anyhow::ensure!(
         !key_id.is_empty()
             && key_id
