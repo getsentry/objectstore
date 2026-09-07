@@ -2965,8 +2965,8 @@ dependencies = [
  "sentry",
  "serde",
  "serde-vars",
- "serde_bytes",
  "serde_json",
+ "serde_with",
  "stresstest",
  "tempfile",
  "thiserror",
@@ -4459,16 +4459,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c31ed6ad0418012bd1f7493bb01d9b107e81aec23042be9292d7d154909a5c45"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "serde_bytes"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
-dependencies = [
- "serde",
- "serde_core",
 ]
 
 [[package]]

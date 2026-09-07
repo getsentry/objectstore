@@ -69,6 +69,7 @@ use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
+use serde_with::{Bytes, serde_as};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
 pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
@@ -663,6 +664,7 @@ impl Service {
 }
 
 /// AES-256-GCM keys used to protect externally visible resumable session tokens.
+#[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ResumableTokenEncryptionConfig {
     /// Key used to encrypt newly created sessions.
@@ -672,37 +674,8 @@ pub struct ResumableTokenEncryptionConfig {
     /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
     /// deserialization.
     #[serde(default)]
-    #[serde(with = "raw_bytes_map")]
+    #[serde_as(as = "BTreeMap<_, Bytes>")]
     pub keys: BTreeMap<String, Vec<u8>>,
-}
-
-/// Serde adapter that makes map values byte buffers rather than byte sequences.
-mod raw_bytes_map {
-    use std::collections::BTreeMap;
-
-    use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
-    use serde_bytes::{ByteBuf, Bytes};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<String, Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        BTreeMap::<String, ByteBuf>::deserialize(deserializer).map(|keys| {
-            keys.into_iter()
-                .map(|(key_id, key)| (key_id, key.into_vec()))
-                .collect()
-        })
-    }
-
-    pub fn serialize<S>(keys: &BTreeMap<String, Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        keys.iter()
-            .map(|(key_id, key)| (key_id, Bytes::new(key)))
-            .collect::<BTreeMap<_, _>>()
-            .serialize(serializer)
-    }
 }
 
 impl fmt::Debug for ResumableTokenEncryptionConfig {
