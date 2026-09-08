@@ -1212,22 +1212,19 @@ impl Backend for GcsBackend {
                 .await
                 .reqwest_context("GCS: query resumable upload")?;
 
-            range_response_to_upload_progress(&session, response)
-                .await
-                .map(|progress| {
-                    // The final `put_chunk` may have persisted the object but failed while
-                    // reading its response, so completion observed here must be reported too.
-                    if let GcsUploadProgress::Complete(ref object) = progress {
-                        let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-                        self.report_object_write(
-                            id,
-                            stored_size,
-                            object.metadata_size(),
-                            object.custom_time,
-                        );
-                    }
-                    progress.into()
-                })
+            let progress = range_response_to_upload_progress(&session, response).await?;
+            // The final `put_chunk` may have persisted the object but failed while
+            // reading its response, so completion observed here must be reported too.
+            if let GcsUploadProgress::Complete(ref object) = progress {
+                let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                self.report_object_write(
+                    id,
+                    stored_size,
+                    object.metadata_size(),
+                    object.custom_time,
+                );
+            }
+            Ok(progress.into())
         })
         .await
     }
