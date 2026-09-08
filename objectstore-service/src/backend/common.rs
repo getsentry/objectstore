@@ -1,11 +1,12 @@
 //! Shared trait definition and types for all backends.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::time::SystemTime;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
-use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::resumable::UploadProgress;
 
 use bytes::Bytes;
 
@@ -15,6 +16,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::BackendToken;
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -90,6 +92,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Object metadata and its total length are declared upfront and cannot be mutated
     /// during the upload.
     ///
+    /// The returned string is opaque backend-defined state. [`StorageService`](crate::StorageService)
+    /// protects it before exposing the session token outside the service layer.
+    ///
     /// Returns `Ok(None)` when this backend cannot store the described object resumably. Declining
     /// is a routine outcome rather than an error, and the default implementation declines.
     ///
@@ -101,43 +106,58 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
         let _ = (id, metadata, total_length);
         Ok(None)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// `offset` must equal the offset the backend currently holds.
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
+    /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
+    /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
+    /// [`UploadProgress`], or query [`Self::upload_offset`] after an ambiguous failure. A backend
+    /// may or may not accept a replay starting before its persisted offset.
+    ///
+    /// [`UploadProgress::Complete`] means the upload is terminal and the object is available
+    /// through this backend's normal read methods. A backend that composes another backend must
+    /// finish its own publication work before returning that outcome.
+    ///
+    /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
+    /// holds.
+    ///
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, session, offset, content_length, stream);
+        let _ = (id, token, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Reports how far the session has progressed.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
-        let _ = (id, session);
+    /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
+    /// when its original response was lost. A composed backend may finish pending idempotent
+    /// publication work before returning that terminal outcome.
+    ///
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        let _ = (id, token);
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
-        let _ = (id, session);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session.
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        let _ = (id, token);
         Err(ErrorKind::Unsupported.into())
     }
 }

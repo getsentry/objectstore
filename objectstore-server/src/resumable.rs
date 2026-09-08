@@ -3,8 +3,6 @@
 use axum::extract::{FromRequestParts, OptionalFromRequestParts, Query};
 use axum::http::{HeaderName, HeaderValue, request::Parts};
 use axum_extra::headers::{ContentLength, Error as HeaderError, Header};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::TryStreamExt;
 use objectstore_service::error::Error as ServiceError;
 use objectstore_service::stream::ClientStream;
@@ -95,7 +93,9 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
         let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
             .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
-        Ok(Session(decode_session_token(&session)?))
+        Ok(Session(SessionToken::from_base64url(&session).map_err(
+            |error| ApiError::map_client("invalid session token", error),
+        )?))
     }
 }
 
@@ -176,22 +176,6 @@ where
     Ok(value)
 }
 
-fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|error| ApiError::map_client("invalid session token", error))?;
-
-    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
-        return Err(ApiError::client(
-            "session token must use unpadded base64 URL encoding",
-        ));
-    }
-
-    String::from_utf8(bytes)
-        .map(SessionToken::from)
-        .map_err(|error| ApiError::map_client("session token is not valid UTF-8", error))
-}
-
 /// Confirms that a request neither declares nor streams a non-empty body.
 pub(crate) async fn require_empty_body(
     content_length: Option<ContentLength>,
@@ -255,16 +239,18 @@ mod tests {
     #[test]
     fn session_token_decodes_from_unpadded_base64url() {
         assert_eq!(
-            decode_session_token("Li4vZXNjYXBl").unwrap().as_ref(),
-            "../escape"
+            SessionToken::from_base64url("Li4vZXNjYXBl")
+                .unwrap()
+                .as_bytes(),
+            b"../escape"
         );
     }
 
     #[test]
     fn session_token_rejects_invalid_query_encodings() {
-        for invalid in ["%%%", "dG9rM24=", "_w"] {
+        for invalid in ["%%%", "dG9rM24="] {
             assert!(
-                decode_session_token(invalid).is_err(),
+                SessionToken::from_base64url(invalid).is_err(),
                 "accepted {invalid:?}"
             );
         }
