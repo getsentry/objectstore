@@ -208,7 +208,7 @@ impl AuthAwareService {
     pub async fn put_chunk(
         &self,
         id: ObjectId,
-        session: SessionToken,
+        token: SessionToken,
         offset: u64,
         content_length: u64,
         body: ClientStream,
@@ -216,7 +216,7 @@ impl AuthAwareService {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service
-            .put_chunk(id, session, offset, content_length, body)
+            .put_chunk(id, token, offset, content_length, body)
             .await?)
     }
 
@@ -224,17 +224,17 @@ impl AuthAwareService {
     pub async fn upload_offset(
         &self,
         id: ObjectId,
-        session: SessionToken,
+        token: SessionToken,
     ) -> ApiResult<UploadProgress> {
         // A status query can detect an upload to be complete and cause logical object creation.
         self.check_permission(Permission::ObjectWrite, id.context())?;
-        Ok(self.service.upload_offset(id, session).await?)
+        Ok(self.service.upload_offset(id, token).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::cancel_upload`].
-    pub async fn cancel_upload(&self, id: ObjectId, session: SessionToken) -> ApiResult<()> {
+    pub async fn cancel_upload(&self, id: ObjectId, token: SessionToken) -> ApiResult<()> {
         // Canceling a session discards an in-progress upload rather than deleting an object.
         self.check_permission(Permission::ObjectWrite, id.context())?;
-        Ok(self.service.cancel_upload(id, session).await?)
+        Ok(self.service.cancel_upload(id, token).await?)
     }
 }

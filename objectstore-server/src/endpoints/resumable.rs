@@ -128,7 +128,7 @@ async fn create_session_for_id(
 pub(super) async fn continue_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
-    Session(session): Session,
+    Session(token): Session,
     TypedHeader(UploadOffsetHeader(offset)): TypedHeader<UploadOffsetHeader>,
     content_length: Option<TypedHeader<ContentLength>>,
     MeteredBody(body): MeteredBody,
@@ -141,7 +141,7 @@ pub(super) async fn continue_session(
                 .map(|TypedHeader(ContentLength(length))| length)
                 .ok_or_else(|| ApiError::client("content-length header is required"))?;
             service
-                .put_chunk(id, session, offset, content_length, body)
+                .put_chunk(id, token, offset, content_length, body)
                 .await
         }
         UploadOffset::Unknown => {
@@ -154,7 +154,7 @@ pub(super) async fn continue_session(
             )
             .await?;
 
-            service.upload_offset(id, session).await
+            service.upload_offset(id, token).await
         }
     };
 
@@ -165,9 +165,9 @@ pub(super) async fn continue_session(
 pub(super) async fn cancel_session(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
-    Session(session): Session,
+    Session(token): Session,
 ) -> ApiResult<Response> {
-    service.cancel_upload(id, session).await?;
+    service.cancel_upload(id, token).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

@@ -116,7 +116,7 @@ impl Encryptor {
     }
 
     /// Encrypts a structured Resumable Upload session token.
-    pub(crate) fn encrypt(&self, session: SessionToken) -> Result<EncryptedSessionToken> {
+    pub(crate) fn encrypt(&self, token: SessionToken) -> Result<EncryptedSessionToken> {
         let key_id = self.active_key_id.as_bytes();
         let key_id_length = u8::try_from(key_id.len()).context(
             ErrorKind::Internal,
@@ -127,7 +127,7 @@ impl Encryptor {
         header.push(key_id_length);
         header.extend_from_slice(key_id);
 
-        let mut ciphertext = serde_json::to_vec(&session).context(
+        let mut ciphertext = serde_json::to_vec(&token).context(
             ErrorKind::Internal,
             "failed to serialize resumable session token",
         )?;

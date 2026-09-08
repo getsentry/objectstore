@@ -420,12 +420,12 @@ impl StorageService {
     pub async fn put_chunk(
         &self,
         id: ObjectId,
-        session: EncryptedSessionToken,
+        token: EncryptedSessionToken,
         offset: u64,
         content_length: u64,
         body: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, session)?;
+        let session = self.backend_token_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("put_chunk", async move {
             inner
@@ -443,9 +443,9 @@ impl StorageService {
     pub async fn upload_offset(
         &self,
         id: ObjectId,
-        session: EncryptedSessionToken,
+        token: EncryptedSessionToken,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, session)?;
+        let session = self.backend_token_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
             inner.upload_offset(&id, &session).await
@@ -454,8 +454,8 @@ impl StorageService {
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
-    pub async fn cancel_upload(&self, id: ObjectId, session: EncryptedSessionToken) -> Result<()> {
-        let session = self.backend_token_for(&id, session)?;
+    pub async fn cancel_upload(&self, id: ObjectId, token: EncryptedSessionToken) -> Result<()> {
+        let session = self.backend_token_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
             inner.cancel_upload(&id, &session).await
@@ -507,9 +507,9 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
-            session: &BackendToken,
+            token: &BackendToken,
         ) -> Result<UploadProgress> {
-            self.seen_tokens.lock().unwrap().push(session.to_owned());
+            self.seen_tokens.lock().unwrap().push(token.to_owned());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }

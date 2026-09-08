@@ -115,18 +115,18 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// completes such a session. Against a session that still expects bytes it writes nothing and
     /// reports the offset the backend holds.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created.
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &BackendToken,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, session, offset, content_length, stream);
+        let _ = (id, token, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
@@ -136,17 +136,17 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
-    async fn upload_offset(&self, id: &ObjectId, session: &BackendToken) -> Result<UploadProgress> {
-        let _ = (id, session);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        let _ = (id, token);
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, session: &BackendToken) -> Result<()> {
-        let _ = (id, session);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session.
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        let _ = (id, token);
         Err(ErrorKind::Unsupported.into())
     }
 }
