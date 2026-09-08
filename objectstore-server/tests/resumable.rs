@@ -19,7 +19,7 @@ use reqwest::StatusCode;
 const SESSION: &str = "c29tZS10b2tlbg";
 
 /// Protected `some-token`, bound to `test/org.1/objects/my-key` with the test key below.
-const PROTECTED_SESSION: &str = "BHRlc3QAAAAAAAAAAAAAAAAa-svQkfdonL5u60b-WT_LzpuGlgG7hWo5euKiKopuFcKkMHnolxLc6JiaHvvMLcQi39wg4playvMM9HNrTtQOvOVVDI9IXylpxwkWmu5yFrCGsPj7BA";
+const PROTECTED_SESSION: &str = "AAR0ZXN0XSsQ-Z1kEHOi7Np_EvIdRGcZVhFjaV20NWpuzZNyrxcbQD6sDvNFCqXBJF_z8DcrYZoGhzYxYnmX2KOEB4AjPDlkorw3DrUD4AwxlhqSmHMERGPtexVbxt_DS9b-jpDPwJA";
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {

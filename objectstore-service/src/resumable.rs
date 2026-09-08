@@ -28,6 +28,8 @@ pub use objectstore_types::resumable::{
 const NONCE_LENGTH: usize = 12;
 /// AES-GCM authentication tag length in bytes.
 const TAG_LENGTH: usize = 16;
+/// Resumable session token envelope format version.
+const FORMAT_VERSION: u8 = 0;
 
 /// Opaque session state encoded and decoded by a storage backend.
 pub type BackendToken = String;
@@ -129,13 +131,13 @@ impl Encryptor {
     ///
     /// Envelope format:
     /// ```text
-    /// +------------++------------------------+------------------------+---------------------------+--------------------+
-    /// |            || Header                 | Nonce                  | Ciphertext                | Authentication tag |
-    /// +------------++------------------------+------------------------+---------------------------+--------------------+
-    /// | Contains   || ID length + key ID     | random                 | serde_json(token)         | AES-GCM verifier   |
-    /// | Protection || public (authenticated) | public (authenticated) | encrypted + authenticated | public; checked    |
-    /// | Encoding   || 1 B length + UTF-8     | 12 B                   | variable                  | 16 B               |
-    /// +------------++------------------------+------------------------+---------------------------+--------------------+
+    /// +------------++------------------------------+------------------------+---------------------------+--------------------+
+    /// |            || Header                       | Nonce                  | Ciphertext                | Authentication tag |
+    /// +------------++------------------------------+------------------------+---------------------------+--------------------+
+    /// | Contains   || version + ID length + key ID | random                 | serde_json(token)         | AES-GCM verifier   |
+    /// | Protection || public (authenticated)       | public (authenticated) | encrypted + authenticated | public; checked    |
+    /// | Encoding   || 1 B + 1 B + UTF-8            | 12 B                   | variable                  | 16 B               |
+    /// +------------++------------------------------+------------------------+---------------------------+--------------------+
     /// ```
     pub(crate) fn encrypt(&self, token: SessionToken) -> Result<EncryptedSessionToken> {
         let key_id = self.active_key_id.as_bytes();
@@ -145,7 +147,8 @@ impl Encryptor {
         )?;
 
         // Plaintext header.
-        let mut header = Vec::with_capacity(1 + key_id.len());
+        let mut header = Vec::with_capacity(2 + key_id.len());
+        header.push(FORMAT_VERSION);
         header.push(key_id_length);
         header.extend_from_slice(key_id);
 
@@ -188,9 +191,14 @@ impl Encryptor {
     fn decrypt_inner(&self, token: EncryptedSessionToken) -> Option<SessionToken> {
         let envelope = token.into_bytes();
 
+        let (&version, rest) = envelope.split_first()?;
+        if version != FORMAT_VERSION {
+            return None;
+        }
+
         // Parse the plaintext header and nonce.
         // They remain untrusted until AES-GCM verifies the authentication tag below.
-        let (&key_id_length, rest) = envelope.split_first()?;
+        let (&key_id_length, rest) = rest.split_first()?;
         let key_id_length = usize::from(key_id_length);
         if key_id_length == 0 {
             return None;
@@ -205,7 +213,7 @@ impl Encryptor {
         } else {
             self.decryption_keys.get(key_id)?
         };
-        let header_length = 1 + key_id_length;
+        let header_length = 2 + key_id_length;
         let header = &envelope[..header_length];
         let nonce: [u8; NONCE_LENGTH] = nonce.try_into().ok()?;
         if ciphertext.len() < TAG_LENGTH {
@@ -303,6 +311,7 @@ mod tests {
             })
             .unwrap();
         assert_ne!(first, second);
+        assert_eq!(first.as_bytes()[0], FORMAT_VERSION);
         let first = encryption.decrypt(first).unwrap();
         let second = encryption.decrypt(second).unwrap();
         assert_eq!(first.object_id, id);
@@ -326,6 +335,12 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(matches!(
             encryption.decrypt(EncryptedSessionToken::new(tampered)),
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
+        ));
+        let mut unsupported_version = token.into_bytes();
+        unsupported_version[0] = FORMAT_VERSION + 1;
+        assert!(matches!(
+            encryption.decrypt(EncryptedSessionToken::new(unsupported_version)),
             Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
         assert!(matches!(
@@ -356,7 +371,7 @@ mod tests {
                 backend_token: "new token".to_owned(),
             })
             .unwrap();
-        assert_eq!(new_token.as_bytes()[1..3], *b"v2");
+        assert_eq!(new_token.as_bytes()[2..4], *b"v2");
 
         let removed = encryption("v2", &[("v2", 2)]);
         assert!(matches!(
