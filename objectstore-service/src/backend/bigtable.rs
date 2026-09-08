@@ -1207,7 +1207,7 @@ impl HighVolumeBackend for BigTableBackend {
             return Ok(false);
         };
 
-        let (predicate, mutations) = match row {
+        let (predicate, mutations): (_, Vec<_>) = match row {
             RowData::Object { metadata, payload } => {
                 if current.is_some() {
                     return Ok(false); // wrong row kind
@@ -1229,7 +1229,7 @@ impl HighVolumeBackend for BigTableBackend {
                 let mut metadata = metadata;
                 metadata.time_expires = Some(expire_at);
                 let (mutations, _) = object_mutations(&path, metadata, payload)?;
-                (predicate, mutations.to_vec())
+                (predicate, mutations.into())
             }
             RowData::Tombstone {
                 target,
@@ -1256,7 +1256,7 @@ impl HighVolumeBackend for BigTableBackend {
                     expiration_policy: meta.expiration_policy,
                     time_expires: Some(expire_at),
                 };
-                (predicate, tombstone_mutations(&tombstone)?.to_vec())
+                (predicate, tombstone_mutations(&tombstone)?.into())
             }
         };
 
