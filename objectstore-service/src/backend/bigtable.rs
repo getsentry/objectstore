@@ -658,17 +658,9 @@ struct TombstoneMeta {
 ///
 /// Used by both unconditional tombstone writes and the conditional expiry-extension paths.
 fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 3]> {
-    let (family, timestamp_micros) = match (tombstone.expiration_policy, tombstone.time_expires) {
-        (ExpirationPolicy::Manual, _) => (FAMILY_MANUAL, -1),
-        (policy, Some(deadline)) if policy.is_timeout() => {
-            (FAMILY_GC, system_time_to_micros(deadline)?)
-        }
-        _ => {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "expiring tombstone missing resolved deadline",
-            ));
-        }
+    let (family, timestamp_micros) = match tombstone.time_expires {
+        None => (FAMILY_MANUAL, -1),
+        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
     };
 
     let tombstone_meta = TombstoneMeta {
@@ -1053,13 +1045,8 @@ impl Backend for BigTableBackend {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        <Self as HighVolumeBackend>::compare_and_update(
-            self,
-            id,
-            None,
-            TieredUpdate::SetExpiry(expire_at),
-        )
-        .await
+        self.compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at))
+            .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1211,79 +1198,76 @@ impl HighVolumeBackend for BigTableBackend {
         update: TieredUpdate,
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
-        let expected_target = current;
         let path = id.as_storage_path().to_string().into_bytes();
+        let access_time = SystemTime::now();
 
         // Inline extension needs metadata and payload from the same read so a
         // successful conditional rewrite can preserve the payload verbatim.
         let Some(row) = self.read_row(&path, None, "set_expiry").await? else {
             return Ok(false);
         };
-        let now = SystemTime::now();
 
-        let (predicate, mutations): (MutatePredicate, Vec<v2::Mutation>) =
-            match (row, expected_target) {
-                (
-                    RowData::Object {
-                        mut metadata,
-                        payload,
-                    },
-                    None,
-                ) => {
-                    let Some(old_expiry) = metadata.time_expires else {
-                        return Ok(false);
-                    };
-
-                    if old_expiry < now {
-                        return Ok(false); // already expired
-                    } else if old_expiry >= expire_at {
-                        return Ok(true); // already satisfied
-                    }
-
-                    // Observing a live cell here is not atomic with wall-clock
-                    // expiry or Bigtable GC. The conditional write may still lose
-                    // to either and then returns false.
-                    let predicate = inline_expiry_predicate(old_expiry)?;
-                    metadata.time_expires = Some(expire_at);
-                    let (mutations, _) = object_mutations(&path, metadata, payload)?;
-                    (predicate, mutations.into())
+        let (predicate, mutations) = match row {
+            RowData::Object { metadata, payload } => {
+                if current.is_some() {
+                    return Ok(false); // wrong row kind
                 }
-                (
-                    RowData::Tombstone {
-                        target,
-                        meta,
-                        time_expires,
-                    },
-                    Some(expected),
-                ) => {
-                    let target = parse_redirect_target(&target, id)?;
-                    let Some(old_expiry) = time_expires else {
-                        return Ok(false);
-                    };
+                let Some(old_expiry) = metadata.time_expires else {
+                    return Ok(false);
+                };
 
-                    if target != *expected || old_expiry < now {
-                        return Ok(false); // wrong target or already expired
-                    } else if old_expiry >= expire_at {
-                        return Ok(true); // already satisfied
-                    }
-
-                    let predicate = redirect_expiry_predicate(expected, id, old_expiry)?;
-                    let tombstone = Tombstone {
-                        target,
-                        expiration_policy: meta.expiration_policy,
-                        time_expires: Some(expire_at),
-                    };
-                    (predicate, tombstone_mutations(&tombstone)?.into())
+                if old_expiry < access_time {
+                    return Ok(false); // already expired
+                } else if old_expiry >= expire_at {
+                    return Ok(true); // already satisfied
                 }
-                _ => return Ok(false),
-            };
+
+                // Observing a live cell here is not atomic with wall-clock
+                // expiry or Bigtable GC. The conditional write may still lose
+                // to either and then returns false.
+                let predicate = inline_expiry_predicate(old_expiry)?;
+                let mut metadata = metadata;
+                metadata.time_expires = Some(expire_at);
+                let (mutations, _) = object_mutations(&path, metadata, payload)?;
+                (predicate, mutations.to_vec())
+            }
+            RowData::Tombstone {
+                target,
+                meta,
+                time_expires,
+            } => {
+                let Some(expected) = current else {
+                    return Ok(false); // wrong row kind
+                };
+                let Some(old_expiry) = time_expires else {
+                    return Ok(false);
+                };
+
+                let target = parse_redirect_target(&target, id)?;
+                if target != *expected || old_expiry < access_time {
+                    return Ok(false); // wrong target or already expired
+                } else if old_expiry >= expire_at {
+                    return Ok(true); // already satisfied
+                }
+
+                let predicate = redirect_expiry_predicate(expected, id, old_expiry)?;
+                let tombstone = Tombstone {
+                    target,
+                    expiration_policy: meta.expiration_policy,
+                    time_expires: Some(expire_at),
+                };
+                (predicate, tombstone_mutations(&tombstone)?.to_vec())
+            }
+        };
 
         let applied = self
             .check_and_mutate(path, predicate, mutations, "set_expiry")
             .await?;
+
         if applied {
             self.change_stream.update(id, Some(expire_at));
         }
+
         Ok(applied)
     }
 
