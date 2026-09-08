@@ -235,8 +235,7 @@ impl fmt::Debug for Encryptor {
         f.debug_struct("Encryptor")
             .field("active_key_id", &self.active_key_id)
             .field("key_ids", &key_ids)
-            .field("keys", &"[redacted]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
