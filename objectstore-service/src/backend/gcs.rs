@@ -863,7 +863,7 @@ async fn range_response_to_upload_progress(
     }
 
     let response = response
-        .check_error("GCS: unexpected resumable upload status")
+        .check_error("processing a GCS resumable upload response")
         .await?;
 
     match status {
@@ -871,10 +871,10 @@ async fn range_response_to_upload_progress(
             let body = response
                 .bytes()
                 .await
-                .reqwest_context("GCS: read completed resumable upload response")?;
+                .reqwest_context("reading a completed GCS resumable upload response")?;
             let object = serde_json::from_slice::<GcsObject>(&body).context(
                 ErrorKind::CorruptData,
-                "GCS: parse completed resumable upload response",
+                "parsing a completed GCS resumable upload response",
             )?;
             Ok(GcsUploadProgress::Complete(object))
         }
@@ -883,7 +883,10 @@ async fn range_response_to_upload_progress(
             let offset = match response.headers().get(header::RANGE) {
                 Some(range) => {
                     let range = range.to_str().map_err(|_| {
-                        Error::new(ErrorKind::BackendFailure, "GCS: invalid Range header")
+                        Error::new(
+                            ErrorKind::BackendFailure,
+                            "invalid GCS resumable upload Range header",
+                        )
                     })?;
                     range_header_to_offset(range, session.total_length)?
                 }
@@ -897,7 +900,7 @@ async fn range_response_to_upload_progress(
             response.drain_body().await;
             Err(Error::new(
                 ErrorKind::BackendFailure,
-                format!("GCS: unexpected resumable upload status {status}"),
+                format!("unexpected GCS resumable upload status {status}"),
             ))
         }
     }
@@ -1089,7 +1092,7 @@ impl Backend for GcsBackend {
         let url = self.upload_url(id, "resumable")?;
         let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
             ErrorKind::Internal,
-            "GCS: failed to serialize resumable upload metadata",
+            "serializing GCS resumable upload metadata",
         )?;
         let content_type = metadata.content_type.clone();
 
@@ -1108,7 +1111,7 @@ impl Backend for GcsBackend {
                         .body(metadata_json)
                         .send_traced()
                         .await
-                        .check_error("GCS: create resumable upload")
+                        .check_error("creating a GCS resumable upload")
                         .await?;
 
                     if response.status() != StatusCode::OK {
@@ -1116,7 +1119,7 @@ impl Backend for GcsBackend {
                         response.drain_body().await;
                         return Err(Error::new(
                             ErrorKind::BackendFailure,
-                            format!("GCS: unexpected resumable session creation status {status}"),
+                            format!("unexpected GCS resumable upload creation status {status}"),
                         ));
                     }
 
@@ -1128,7 +1131,7 @@ impl Backend for GcsBackend {
                         .ok_or_else(|| {
                             Error::new(
                                 ErrorKind::BackendFailure,
-                                "GCS: resumable session response missing valid Location header",
+                                "missing valid Location header in GCS resumable upload creation response",
                             )
                         })?;
                     response.drain_body().await;
@@ -1140,7 +1143,7 @@ impl Backend for GcsBackend {
         let session_uri = Url::parse(&location).map_err(|_| {
             Error::new(
                 ErrorKind::BackendFailure,
-                "GCS: resumable session Location is not a valid URL",
+                "invalid Location URL in GCS resumable upload creation response",
             )
         })?;
         let session = ResumableUpload::new(session_uri, total_length);
@@ -1182,7 +1185,7 @@ impl Backend for GcsBackend {
             .body(Body::wrap_stream(stream))
             .send_traced()
             .await
-            .reqwest_context("GCS: upload resumable chunk")?;
+            .reqwest_context("uploading a GCS resumable chunk")?;
 
         let progress = range_response_to_upload_progress(&session, response).await?;
         if let GcsUploadProgress::Complete(ref object) = progress {
@@ -1207,7 +1210,7 @@ impl Backend for GcsBackend {
                 )
                 .send_traced()
                 .await
-                .reqwest_context("GCS: query resumable upload")?;
+                .reqwest_context("querying a GCS resumable upload")?;
 
             let progress = range_response_to_upload_progress(&session, response).await?;
             // The final `put_chunk` may have persisted the object but failed while
@@ -1239,7 +1242,7 @@ impl Backend for GcsBackend {
                     .await?
                     .send_traced()
                     .await
-                    .reqwest_context("GCS: cancel resumable upload")?;
+                    .reqwest_context("canceling a GCS resumable upload")?;
                 match response.status() {
                     // Expected status code when canceling a recently created upload.
                     status if status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
@@ -1253,13 +1256,13 @@ impl Backend for GcsBackend {
                     }
                     _ => {
                         response
-                            .check_error("GCS: cancel resumable upload")
+                            .check_error("canceling a GCS resumable upload")
                             .await?
                             .drain_body()
                             .await;
                         Err(Error::new(
                             ErrorKind::BackendFailure,
-                            "GCS: unexpected resumable cancellation status",
+                            "unexpected GCS resumable upload cancellation status",
                         ))
                     }
                 }
