@@ -62,6 +62,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
+use bytes::Bytes;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
 use objectstore_service::change_stream::CostTrackerConfig;
@@ -69,7 +70,6 @@ use objectstore_service::resumable::Encryptor;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
-use serde_with::{Bytes, serde_as};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
 pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
@@ -659,12 +659,17 @@ impl Service {
             return Ok(None);
         };
 
-        Encryptor::new(config.active_key_id.clone(), config.keys.clone()).map(Some)
+        let keys = config
+            .keys
+            .iter()
+            .map(|(key_id, key)| (key_id.clone(), key.to_vec()))
+            .collect();
+
+        Encryptor::new(config.active_key_id.clone(), keys).map(Some)
     }
 }
 
 /// AES-256-GCM keys used to protect externally visible resumable session tokens.
-#[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ResumableTokenEncryptionConfig {
     /// Key used to encrypt newly created sessions.
@@ -674,8 +679,7 @@ pub struct ResumableTokenEncryptionConfig {
     /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
     /// deserialization.
     #[serde(default)]
-    #[serde_as(as = "BTreeMap<_, Bytes>")]
-    pub keys: BTreeMap<String, Vec<u8>>,
+    pub keys: BTreeMap<String, Bytes>,
 }
 
 impl fmt::Debug for ResumableTokenEncryptionConfig {

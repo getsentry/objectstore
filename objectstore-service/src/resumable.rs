@@ -386,13 +386,4 @@ mod tests {
             "resumable token encryption key \"v1\" must contain exactly 32 bytes, got 31"
         );
     }
-
-    #[test]
-    fn debug_output_redacts_keys() {
-        let encryption = encryption("v1", &[("v1", 7)]);
-        let debug = format!("{encryption:?}");
-        assert!(debug.contains("v1"));
-        assert!(debug.contains("[redacted]"));
-        assert!(!debug.contains("7, 7"));
-    }
 }

@@ -41,7 +41,7 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
         service: Service {
             resumable_token_encryption: Some(ResumableTokenEncryptionConfig {
                 active_key_id: "test".into(),
-                keys: BTreeMap::from([("test".into(), vec![7; 32])]),
+                keys: BTreeMap::from([("test".into(), vec![7; 32].into())]),
             }),
             ..Default::default()
         },

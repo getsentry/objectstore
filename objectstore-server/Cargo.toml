@@ -16,7 +16,7 @@ argh = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 axum-extra = { workspace = true, features = ["typed-header"] }
-bytes = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
 ed25519-dalek = { workspace = true, features = ["pem"] }
 elegant-departure = { workspace = true, features = ["tokio"] }
 figment = { workspace = true, features = ["env", "test", "yaml"] }
@@ -45,7 +45,6 @@ sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "
 serde = { workspace = true }
 serde-vars = { workspace = true }
 serde_json = { workspace = true }
-serde_with = { workspace = true }
 thiserror = { workspace = true }
 thread_local = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
