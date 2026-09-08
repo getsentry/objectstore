@@ -35,12 +35,13 @@
 //! ```
 
 use std::fmt;
+use std::num::NonZeroU64;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 
 use objectstore_types::range::ByteRange;
-use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
@@ -53,6 +54,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::BackendToken;
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -247,8 +249,8 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
         inner
             .create_upload_session(id, metadata, total_length)
             .await
@@ -259,13 +261,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         inner
-            .put_chunk(id, session, offset, content_length, stream)
+            .put_chunk(id, token, offset, content_length, stream)
             .await
     }
 
@@ -274,9 +276,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
     ) -> Result<UploadProgress> {
-        inner.upload_offset(id, session).await
+        inner.upload_offset(id, token).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
@@ -284,9 +286,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
     ) -> Result<()> {
-        inner.cancel_upload(id, session).await
+        inner.cancel_upload(id, token).await
     }
 }
 
@@ -367,8 +369,8 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
         self.hooks
             .create_upload_session(&self.inner, id, metadata, total_length)
             .await
@@ -377,22 +379,22 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         self.hooks
-            .put_chunk(&self.inner, id, session, offset, content_length, stream)
+            .put_chunk(&self.inner, id, token, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
-        self.hooks.upload_offset(&self.inner, id, session).await
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        self.hooks.upload_offset(&self.inner, id, token).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
-        self.hooks.cancel_upload(&self.inner, id, session).await
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        self.hooks.cancel_upload(&self.inner, id, token).await
     }
 }
 

@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fmt, io};
@@ -31,6 +32,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::{BackendToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
@@ -189,6 +191,7 @@ impl GcsObject {
     fn metadata_size(&self) -> u64 {
         self.metadata
             .iter()
+            .filter(|(key, _)| !matches!(key, GcsMetaKey::EmulatorIgnored))
             .map(|(key, value)| key.to_string().len() as u64 + value.len() as u64)
             .sum()
     }
@@ -334,7 +337,7 @@ impl std::str::FromStr for GcsMetaKey {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if matches!(s, "x_emulator_upload" | "x_testbench_upload") {
+        if s.starts_with("x_emulator_") || s.starts_with("x_testbench_") {
             return Ok(GcsMetaKey::EmulatorIgnored);
         }
 
@@ -459,6 +462,59 @@ fn insert_gcs_meta_header(
         headers::encode_header_value(value),
     );
     Ok(())
+}
+
+/// Special status code returned by GCS when a Resumable Upload is canceled successfully or when
+/// making other requests to a session that was recently canceled.
+const CLIENT_CLOSED_REQUEST_STATUS: u16 = 499;
+
+/// Represents a resumable upload session in GCS.
+#[derive(Debug)]
+struct ResumableUpload {
+    // URI to use for requests that act on this session, returned by GCS in the `Location` header
+    // on session creation.
+    session_uri: Url,
+    // Total length of the object, declared at session creation time.
+    total_length: NonZeroU64,
+}
+
+impl ResumableUpload {
+    fn new(session_uri: Url, total_length: NonZeroU64) -> Self {
+        Self {
+            session_uri,
+            total_length,
+        }
+    }
+
+    fn into_token(self) -> BackendToken {
+        format!("{}.{}", self.total_length, self.session_uri)
+    }
+
+    fn from_token(token: &BackendToken) -> Result<Self> {
+        let (total_length, session_uri) = token
+            .split_once('.')
+            .ok_or(ErrorKind::UnknownUploadSession)?;
+        let total_length = total_length
+            .parse::<NonZeroU64>()
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let session = Self::new(session_uri, total_length);
+        Ok(session)
+    }
+}
+
+enum GcsUploadProgress {
+    Incomplete(u64),
+    Complete(GcsObject),
+}
+
+impl From<GcsUploadProgress> for UploadProgress {
+    fn from(value: GcsUploadProgress) -> Self {
+        match value {
+            GcsUploadProgress::Incomplete(offset) => UploadProgress::Incomplete { offset },
+            GcsUploadProgress::Complete(_) => UploadProgress::Complete,
+        }
+    }
 }
 
 /// Returns `true` if the error is a transient backend failure worth retrying.
@@ -729,6 +785,25 @@ impl GcsBackend {
         })
         .await
     }
+
+    /// Reports an object write to the [`ChangeStream`].
+    fn report_object_write(
+        &self,
+        id: &ObjectId,
+        stored_size: Option<u64>,
+        metadata_size: u64,
+        expires_at: Option<SystemTime>,
+    ) {
+        match stored_size {
+            Some(stored_size) => {
+                self.change_stream
+                    .write(id, stored_size + metadata_size, expires_at)
+            }
+            None => {
+                objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
+            }
+        }
+    }
 }
 
 impl fmt::Debug for GcsBackend {
@@ -737,6 +812,97 @@ impl fmt::Debug for GcsBackend {
             .field("endpoint", &self.endpoint)
             .field("bucket", &self.bucket)
             .finish_non_exhaustive()
+    }
+}
+
+/// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
+fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> {
+    let end = value.strip_prefix("bytes=0-").ok_or_else(|| {
+        Error::new(
+            ErrorKind::Internal,
+            "malformed GCS Range header for resumable progress",
+        )
+    })?;
+    let end = end.parse::<u64>().context(
+        ErrorKind::Internal,
+        "invalid GCS Range header for resumable progress",
+    )?;
+
+    let offset = end
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::Internal, "GCS offset overflows u64"))?;
+    if offset > total_length.get() {
+        return Err(Error::new(
+            ErrorKind::Internal,
+            "GCS offset exceeds upload length",
+        ));
+    }
+    Ok(offset)
+}
+
+/// Interprets a Resumable Upload response, shared by chunk writes and status queries.
+///
+/// Returns the progress GCS reported, plus the completed object when this is the response that
+/// finished the upload.
+async fn range_response_to_upload_progress(
+    session: &ResumableUpload,
+    response: reqwest::Response,
+) -> Result<GcsUploadProgress> {
+    let status = response.status();
+
+    match status {
+        StatusCode::NOT_FOUND => {
+            response.drain_body().await;
+            return Err(ErrorKind::UnknownUploadSession.into());
+        }
+        status if status == StatusCode::GONE || status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
+            response.drain_body().await;
+            return Err(ErrorKind::UploadSessionGone.into());
+        }
+        _ => {}
+    }
+
+    let response = response
+        .check_error("processing a GCS resumable upload response")
+        .await?;
+
+    match status {
+        StatusCode::OK | StatusCode::CREATED => {
+            let body = response
+                .bytes()
+                .await
+                .reqwest_context("reading a completed GCS resumable upload response")?;
+            let object = serde_json::from_slice::<GcsObject>(&body).context(
+                ErrorKind::CorruptData,
+                "parsing a completed GCS resumable upload response",
+            )?;
+            Ok(GcsUploadProgress::Complete(object))
+        }
+        // GCS calls it "308 Resume Incomplete"
+        StatusCode::PERMANENT_REDIRECT => {
+            let offset = match response.headers().get(header::RANGE) {
+                Some(range) => {
+                    let range = range.to_str().map_err(|_| {
+                        Error::new(
+                            ErrorKind::BackendFailure,
+                            "invalid GCS resumable upload Range header",
+                        )
+                    })?;
+                    range_header_to_offset(range, session.total_length)?
+                }
+                // GCS omits this header while it holds nothing
+                None => 0,
+            };
+            response.drain_body().await;
+            Ok(GcsUploadProgress::Incomplete(offset))
+        }
+        _ => {
+            response.drain_body().await;
+            Err(Error::new(
+                ErrorKind::BackendFailure,
+                format!("unexpected GCS resumable upload status {status}"),
+            ))
+        }
     }
 }
 
@@ -795,16 +961,12 @@ impl Backend for GcsBackend {
             .await?;
 
         let stored_size = read_stored_content_length(response).await;
-
-        if let Some(payload_size) = stored_size {
-            self.change_stream.write(
-                id,
-                payload_size + gcs_metadata.metadata_size(),
-                metadata.time_expires,
-            );
-        } else {
-            objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size");
-        }
+        self.report_object_write(
+            id,
+            stored_size,
+            gcs_metadata.metadata_size(),
+            metadata.time_expires,
+        );
 
         Ok(())
     }
@@ -917,6 +1079,196 @@ impl Backend for GcsBackend {
         }
 
         Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
+        objectstore_log::debug!("Creating resumable upload session on GCS backend");
+        let url = self.upload_url(id, "resumable")?;
+        let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
+            ErrorKind::Internal,
+            "serializing GCS resumable upload metadata",
+        )?;
+        let content_type = metadata.content_type.clone();
+
+        let location = self
+            .with_retry("create_resumable_upload", || {
+                let url = url.clone();
+                let metadata_json = metadata_json.clone();
+                let content_type = content_type.clone();
+                async move {
+                    let response = self
+                        .request(Method::POST, url)
+                        .await?
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("x-upload-content-type", content_type.as_ref())
+                        .header("x-upload-content-length", total_length.get())
+                        .body(metadata_json)
+                        .send_traced()
+                        .await
+                        .check_error("creating a GCS resumable upload")
+                        .await?;
+
+                    if response.status() != StatusCode::OK {
+                        let status = response.status();
+                        response.drain_body().await;
+                        return Err(Error::new(
+                            ErrorKind::BackendFailure,
+                            format!("unexpected GCS resumable upload creation status {status}"),
+                        ));
+                    }
+
+                    let location = response
+                        .headers()
+                        .get(header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::BackendFailure,
+                                "missing valid Location header in GCS resumable upload creation response",
+                            )
+                        })?;
+                    response.drain_body().await;
+                    Ok(location)
+                }
+            })
+            .await?;
+
+        let session_uri = Url::parse(&location).map_err(|_| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "invalid Location URL in GCS resumable upload creation response",
+            )
+        })?;
+        let session = ResumableUpload::new(session_uri, total_length);
+        Ok(Some(session.into_token()))
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        objectstore_log::debug!("Uploading resumable chunk to GCS backend");
+        let session = ResumableUpload::from_token(token)?;
+
+        let end = offset
+            .checked_add(content_length)
+            .filter(|end| *end <= session.total_length.get())
+            .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                offset,
+                content_length,
+                upload_length: session.total_length.get(),
+            })?;
+
+        let content_range = match content_length {
+            // An empty chunk is equivalent to an offset query.
+            0 => format!("bytes */{}", session.total_length),
+            _ => format!("bytes {offset}-{}/{}", end - 1, session.total_length),
+        };
+
+        let response = self
+            .request(Method::PUT, session.session_uri.as_str())
+            .await?
+            .header(header::CONTENT_LENGTH, content_length)
+            .header(header::CONTENT_RANGE, content_range)
+            .body(Body::wrap_stream(stream))
+            .send_traced()
+            .await
+            .reqwest_context("uploading a GCS resumable chunk")?;
+
+        let progress = range_response_to_upload_progress(&session, response).await?;
+        if let GcsUploadProgress::Complete(ref object) = progress {
+            let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+            self.report_object_write(id, stored_size, object.metadata_size(), object.custom_time);
+        }
+        Ok(progress.into())
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        objectstore_log::debug!("Querying resumable upload offset on GCS backend");
+        let session = ResumableUpload::from_token(token)?;
+
+        self.with_retry("query_resumable_upload", || async {
+            let response = self
+                .request(Method::PUT, session.session_uri.as_str())
+                .await?
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", session.total_length),
+                )
+                .send_traced()
+                .await
+                .reqwest_context("querying a GCS resumable upload")?;
+
+            let progress = range_response_to_upload_progress(&session, response).await?;
+            // The final `put_chunk` may have persisted the object but failed while
+            // reading its response, so completion observed here must be reported too.
+            if let GcsUploadProgress::Complete(ref object) = progress {
+                let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+                self.report_object_write(
+                    id,
+                    stored_size,
+                    object.metadata_size(),
+                    object.custom_time,
+                );
+            }
+            Ok(progress.into())
+        })
+        .await
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        objectstore_log::debug!("Cancelling resumable upload on GCS backend");
+        let session = ResumableUpload::from_token(token)?;
+        let session_uri = session.session_uri;
+        self.with_retry("cancel_resumable_upload", || {
+            let session_uri = session_uri.clone();
+            async move {
+                let response = self
+                    .request(Method::DELETE, session_uri)
+                    .await?
+                    .send_traced()
+                    .await
+                    .reqwest_context("canceling a GCS resumable upload")?;
+                match response.status() {
+                    // Expected status code when canceling a recently created upload.
+                    status if status.as_u16() == CLIENT_CLOSED_REQUEST_STATUS => {
+                        response.drain_body().await;
+                        Ok(())
+                    }
+                    // The upload was already canceled or never existed.
+                    StatusCode::GONE | StatusCode::NOT_FOUND => {
+                        response.drain_body().await;
+                        Ok(())
+                    }
+                    _ => {
+                        response
+                            .check_error("canceling a GCS resumable upload")
+                            .await?
+                            .drain_body()
+                            .await;
+                        Err(Error::new(
+                            ErrorKind::BackendFailure,
+                            "unexpected GCS resumable upload cancellation status",
+                        ))
+                    }
+                }
+            }
+        })
+        .await
     }
 
     async fn join(&self) {
@@ -1270,11 +1622,12 @@ impl MultipartUploadBackend for GcsBackend {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::num::NonZeroU32;
+    use std::num::{NonZeroU32, NonZeroU64};
     use std::time::Duration;
 
     use anyhow::Result;
     use objectstore_types::scope::{Scope, Scopes};
+    use reqwest::header::{HeaderMap, HeaderValue};
 
     #[cfg(feature = "storage-cogs")]
     use objectstore_inventory_tracker::OpType;
@@ -1288,6 +1641,21 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::multipart::CompletedPart;
     use crate::stream;
+
+    impl GcsBackend {
+        async fn create_upload_session(
+            &self,
+            id: &ObjectId,
+            metadata: &Metadata,
+            total_length: NonZeroU64,
+        ) -> Result<BackendToken> {
+            <Self as Backend>::create_upload_session(self, id, metadata, total_length)
+                .await?
+                .ok_or_else(|| Error::from(ErrorKind::Unsupported).into())
+        }
+    }
+
+    const RESUMABLE_CHUNK_SIZE: usize = 256 * 1024;
 
     // NB: Not run any of these tests, you need to have a GCS emulator running. This is done
     // automatically in CI.
@@ -1320,11 +1688,409 @@ mod tests {
         Ok((GcsBackend::new(config, &streams).await?, producer))
     }
 
+    #[derive(Deserialize)]
+    struct RetryTestResource {
+        id: String,
+    }
+
+    /// Configures one storage-testbench failure and sends its ID on subsequent backend requests.
+    async fn inject_retry_test(
+        backend: &mut GcsBackend,
+        method: &str,
+        instruction: &str,
+    ) -> Result<()> {
+        let retry_test: RetryTestResource = reqwest::Client::new()
+            .post(backend.endpoint.join("retry_test")?)
+            .json(&serde_json::json!({
+                "instructions": { method: [instruction] },
+                "transport": "HTTP",
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-retry-test-id", HeaderValue::from_str(&retry_test.id)?);
+        backend.client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        Ok(())
+    }
+
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    fn make_id_with_key(key: &str) -> ObjectId {
+        ObjectId::new(
+            ObjectContext {
+                usecase: "testing".into(),
+                scopes: Scopes::from_iter([
+                    Scope::create("organization", "42").unwrap(),
+                    Scope::create("project", "7").unwrap(),
+                ]),
+            },
+            key.into(),
+        )
+    }
+
+    fn nonzero(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
+    }
+
+    #[test]
+    fn resumable_range_reports_next_offset_and_rejects_malformed_values() -> Result<()> {
+        assert_eq!(range_header_to_offset("bytes=0-0", nonzero(10))?, 1);
+        assert_eq!(
+            range_header_to_offset("bytes=0-262143", nonzero(300_000))?,
+            262_144
+        );
+
+        for malformed in [
+            "",
+            "bytes=1-2",
+            "bytes=0-",
+            "bytes=0-*",
+            "bytes=0-9 ",
+            "bytes=0-9,bytes=20-30",
+        ] {
+            assert!(
+                range_header_to_offset(malformed, nonzero(100)).is_err(),
+                "accepted {malformed:?}"
+            );
+        }
+        assert_eq!(range_header_to_offset("bytes=0-9", nonzero(10))?, 10);
+        assert!(range_header_to_offset("bytes=0-18446744073709551615", nonzero(u64::MAX)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resumable_token_rejects_zero_length() {
+        let token = "0.http://localhost/upload".to_owned();
+        assert!(matches!(
+            ResumableUpload::from_token(&token),
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_resumable_empty_chunk_reports_offset_without_writing() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-empty-chunk");
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(4))
+            .await?;
+
+        // An empty chunk cannot advance a session that still expects bytes. It reports the
+        // authoritative offset instead of failing, and leaves what GCS holds untouched.
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 0, 0, stream::single(Vec::new()))
+                .await?,
+            UploadProgress::Incomplete { offset: 0 }
+        );
+        let after_write = backend
+            .put_chunk(&id, &token, 0, 2, stream::single(b"ab".to_vec()))
+            .await?;
+        assert!(matches!(after_write, UploadProgress::Incomplete { .. }));
+
+        // Whichever prefix GCS acknowledged, an empty chunk reports that same position rather
+        // than moving it. GCS documents that a chunk "should be a multiple of 256 KiB ... unless
+        // it's the last chunk", and that a client "should not assume that the server received all
+        // bytes sent in any given request". The emulator acknowledges any length, so the position
+        // itself is not asserted here.
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 2, 0, stream::single(Vec::new()))
+                .await?,
+            after_write
+        );
+        assert_eq!(backend.upload_offset(&id, &token).await?, after_write);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_single_and_multi_chunk_uploads() -> Result<()> {
+        let backend = create_test_backend().await?;
+
+        let single_id = make_id_with_key("resumable-single");
+        let single = b"single chunk".to_vec();
+        let token = backend
+            .create_upload_session(
+                &single_id,
+                &Metadata::default(),
+                nonzero(single.len() as u64),
+            )
+            .await?;
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &single_id,
+                    &token,
+                    0,
+                    single.len() as u64,
+                    stream::single(single.clone()),
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+        let (_, _, payload) = backend.get_object(&single_id, None).await?.unwrap();
+        assert_eq!(stream::read_to_vec(payload).await?, single);
+
+        let multi_id = make_id_with_key("resumable-multi");
+        let mut expected = vec![b'a'; RESUMABLE_CHUNK_SIZE];
+        expected.extend_from_slice(b"final");
+        let token = backend
+            .create_upload_session(
+                &multi_id,
+                &Metadata::default(),
+                nonzero(expected.len() as u64),
+            )
+            .await?;
+        assert_eq!(
+            backend.upload_offset(&multi_id, &token).await?,
+            UploadProgress::Incomplete { offset: 0 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &multi_id,
+                    &token,
+                    0,
+                    RESUMABLE_CHUNK_SIZE as u64,
+                    stream::single(expected[..RESUMABLE_CHUNK_SIZE].to_vec()),
+                )
+                .await?,
+            UploadProgress::Incomplete {
+                offset: RESUMABLE_CHUNK_SIZE as u64
+            }
+        );
+        assert_eq!(
+            backend.upload_offset(&multi_id, &token).await?,
+            UploadProgress::Incomplete {
+                offset: RESUMABLE_CHUNK_SIZE as u64
+            }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &multi_id,
+                    &token,
+                    RESUMABLE_CHUNK_SIZE as u64,
+                    5,
+                    stream::single(b"final".to_vec()),
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+        let (_, _, payload) = backend.get_object(&multi_id, None).await?.unwrap();
+        assert_eq!(stream::read_to_vec(payload).await?, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_unaligned_chunk_and_rewind_preserve_persisted_bytes() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-rewind");
+        let total_length = RESUMABLE_CHUNK_SIZE + 3;
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(total_length as u64))
+            .await?;
+
+        let prefix = vec![b'a'; RESUMABLE_CHUNK_SIZE];
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 0, prefix.len() as u64, stream::single(prefix),)
+                .await?,
+            UploadProgress::Incomplete {
+                offset: RESUMABLE_CHUNK_SIZE as u64
+            }
+        );
+
+        // Resend three already-persisted positions with different bytes. GCS ignores that overlap
+        // without comparing it, then appends the suffix from its authoritative offset.
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    (RESUMABLE_CHUNK_SIZE - 3) as u64,
+                    6,
+                    stream::single(b"BADxyz".to_vec()),
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+
+        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
+        let payload = stream::read_to_vec(payload).await?;
+        assert_eq!(&payload[RESUMABLE_CHUNK_SIZE - 3..], b"aaaxyz");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_rejects_oversized_chunks() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-validation");
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
+            .await?;
+
+        let error = backend
+            .put_chunk(&id, &token, 8, 3, stream::single(b"abc".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::ChunkExceedsUploadLength {
+                offset: 8,
+                content_length: 3,
+                upload_length: 10
+            }
+        );
+
+        let error = backend
+            .put_chunk(&id, &token, u64::MAX, 2, stream::single(b"ab".to_vec()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::ChunkExceedsUploadLength { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_cancel_is_idempotent_and_session_is_not_found() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-cancel");
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
+            .await?;
+
+        backend.cancel_upload(&id, &token).await?;
+        backend.cancel_upload(&id, &token).await?;
+        assert!(matches!(
+            backend.upload_offset(&id, &token).await,
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_retries_only_replayable_operations() -> Result<()> {
+        let mut backend = create_test_backend().await?;
+        inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
+        let id = make_id_with_key("resumable-retries");
+
+        // Creation consumes the injected 503 and succeeds on the backend's retry.
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
+            .await?;
+
+        inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Incomplete { offset: 0 }
+        );
+
+        inject_retry_test(&mut backend, "storage.objects.delete", "return-503").await?;
+        backend.cancel_upload(&id, &token).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resumable_stream_failures_require_explicit_offset_recovery() -> Result<()> {
+        // A failure before persistence is returned directly: put_chunk must not retry the body.
+        let mut backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-failure-before");
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(4))
+            .await?;
+        inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
+        assert!(matches!(
+            backend
+                .put_chunk(&id, &token, 0, 4, stream::single(b"data".to_vec()))
+                .await,
+            Err(error) if error.kind() == ErrorKind::BackendUnavailable
+        ));
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Incomplete { offset: 0 }
+        );
+
+        // The emulator persists the first KiB, then fails. Recovery observes that prefix and the
+        // caller resumes exactly from the returned offset.
+        let mut backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-failure-partial");
+        let data = vec![b'p'; 2048];
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(data.len() as u64))
+            .await?;
+        inject_retry_test(
+            &mut backend,
+            "storage.objects.insert",
+            "return-503-after-1K",
+        )
+        .await?;
+        assert!(matches!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    data.len() as u64,
+                    stream::single(data.clone()),
+                )
+                .await,
+            Err(error) if error.kind() == ErrorKind::BackendUnavailable
+        ));
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Incomplete { offset: 1024 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    1024,
+                    1024,
+                    stream::single(data[1024..].to_vec()),
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+
+        // GCS persists the final bytes, but storage-testbench truncates the successful JSON
+        // response. The chunk is not retried; an explicit status query observes completion.
+        let mut backend = create_test_backend().await?;
+        let id = make_id_with_key("resumable-failure-final");
+        let token = backend
+            .create_upload_session(&id, &Metadata::default(), nonzero(5))
+            .await?;
+        inject_retry_test(
+            &mut backend,
+            "storage.objects.insert",
+            "return-broken-stream-final-chunk-after-0B",
+        )
+        .await?;
+        assert!(matches!(
+            backend
+                .put_chunk(&id, &token, 0, 5, stream::single(b"final".to_vec()))
+                .await,
+            Err(error) if error.kind() == ErrorKind::CorruptData
+        ));
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Complete
+        );
+        Ok(())
     }
 
     async fn get_generation_matches(
@@ -2186,6 +2952,88 @@ mod tests {
         );
         assert!(records[0].expiration_time.is_some());
 
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn resumable_completion_reports_to_change_stream() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let payload = b"resumable payload".to_vec();
+        let metadata = Metadata {
+            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let token = backend
+            .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
+            .await?;
+
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single::<ClientError>(payload.clone()),
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
+        assert!(records[0].expiration_time.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn resumable_completion_after_corrupt_response_reports_to_change_stream() -> Result<()> {
+        let (mut backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id_with_key("resumable-change-stream-after-corrupt-response");
+        let payload = b"final".to_vec();
+        let metadata = Metadata::default();
+        let token = backend
+            .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
+            .await?;
+        inject_retry_test(
+            &mut backend,
+            "storage.objects.insert",
+            "return-broken-stream-final-chunk-after-0B",
+        )
+        .await?;
+
+        assert!(matches!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single::<ClientError>(payload.clone()),
+                )
+                .await,
+            Err(error) if error.kind() == ErrorKind::CorruptData
+        ));
+        assert_eq!(
+            backend.upload_offset(&id, &token).await?,
+            UploadProgress::Complete
+        );
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
         Ok(())
     }
 

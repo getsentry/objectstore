@@ -14,11 +14,12 @@
 //! [`StorageService`]: crate::service::StorageService
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
-use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
@@ -29,6 +30,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::BackendToken;
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -105,8 +107,8 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
-    ) -> Result<Option<SessionToken>> {
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
         count(&id.context.usecase);
         self.inner
             .create_upload_session(id, metadata, total_length)
@@ -116,25 +118,25 @@ impl Backend for CountingBackend {
     async fn put_chunk(
         &self,
         id: &ObjectId,
-        session: &SessionToken,
+        token: &BackendToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         count(&id.context.usecase);
         self.inner
-            .put_chunk(id, session, offset, content_length, stream)
+            .put_chunk(id, token, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         count(&id.context.usecase);
-        self.inner.upload_offset(id, session).await
+        self.inner.upload_offset(id, token).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
         count(&id.context.usecase);
-        self.inner.cancel_upload(id, session).await
+        self.inner.cancel_upload(id, token).await
     }
 }
 

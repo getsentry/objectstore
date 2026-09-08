@@ -80,6 +80,7 @@ rand = "0.10.1"
 rand_distr = "0.6.0"
 regex = "1.12.4"
 reqwest = { version = "0.13.4", default-features = false }
+ring = "0.17.14"
 rustls = { version = "0.23.40", default-features = false }
 secrecy = "0.10.3"
 sentry = "0.48.3"
