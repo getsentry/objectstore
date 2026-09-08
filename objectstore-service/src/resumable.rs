@@ -1,4 +1,14 @@
-//! Utilities for Resumable Uploads.
+//! Types and utilities for authenticated encryption of Resumable Upload Session tokens.
+//!
+//! Storage backends represent their opaque upload state as a [`BackendToken`].
+//! At the service boundary, `SessionToken` combines that state with service-specific fields,
+//! and [`Encryptor`] protects the serialized token before it is returned to the server.
+//!
+//! ```text
+//! Storage backend       | objectstore-service                         | objectstore-server             |
+//! BackendToken <------->| SessionToken <-------- Encryptor ---------->| EncryptedSessionToken          |
+//! opaque backend state  | { ObjectId, BackendToken }                  | b64url encoded opaque envelope |
+//! ```
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -116,6 +126,17 @@ impl Encryptor {
     }
 
     /// Encrypts a structured Resumable Upload session token.
+    ///
+    /// Envelope format:
+    /// ```text
+    /// +------------++------------------------+------------------------+---------------------------+--------------------+
+    /// |            || Header                 | Nonce                  | Ciphertext                | Authentication tag |
+    /// +------------++------------------------+------------------------+---------------------------+--------------------+
+    /// | Contains   || ID length + key ID     | random                 | serde_json(token)         | AES-GCM verifier   |
+    /// | Protection || public (authenticated) | public (authenticated) | encrypted + authenticated | public; checked    |
+    /// | Encoding   || 1 B length + UTF-8     | 12 B                   | variable                  | 16 B               |
+    /// +------------++------------------------+------------------------+---------------------------+--------------------+
+    /// ```
     pub(crate) fn encrypt(&self, token: SessionToken) -> Result<EncryptedSessionToken> {
         let key_id = self.active_key_id.as_bytes();
         let key_id_length = u8::try_from(key_id.len()).context(
@@ -123,6 +144,7 @@ impl Encryptor {
             "resumable token encryption key ID exceeds maximum length",
         )?;
 
+        // Plaintext header.
         let mut header = Vec::with_capacity(1 + key_id.len());
         header.push(key_id_length);
         header.extend_from_slice(key_id);
@@ -139,6 +161,9 @@ impl Encryptor {
                 "failed to generate resumable token nonce",
             )
         })?;
+
+        // Encrypt the serialized token in place and append the authentication tag.
+        // The tag also authenticates the plaintext header.
         self.active_key
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce),
@@ -162,6 +187,9 @@ impl Encryptor {
 
     fn decrypt_inner(&self, token: EncryptedSessionToken) -> Option<SessionToken> {
         let envelope = token.into_bytes();
+
+        // Parse the plaintext header and nonce.
+        // They remain untrusted until AES-GCM verifies the authentication tag below.
         let (&key_id_length, rest) = envelope.split_first()?;
         let key_id_length = usize::from(key_id_length);
         if key_id_length == 0 {
@@ -170,6 +198,7 @@ impl Encryptor {
         let (key_id, rest) = rest.split_at_checked(key_id_length)?;
         let (nonce, ciphertext) = rest.split_at_checked(NONCE_LENGTH)?;
 
+        // Use the plaintext key ID to select a key, without trusting the ID until authentication.
         let key_id = std::str::from_utf8(key_id).ok()?;
         let key = if key_id == self.active_key_id {
             &self.active_key
@@ -182,6 +211,8 @@ impl Encryptor {
         if ciphertext.len() < TAG_LENGTH {
             return None;
         }
+
+        // Verify the tag over the ciphertext and original header.
         let mut ciphertext = ciphertext.to_vec();
         let plaintext = key
             .open_in_place(
@@ -190,6 +221,7 @@ impl Encryptor {
                 &mut ciphertext,
             )
             .ok()?;
+
         serde_json::from_slice(plaintext).ok()
     }
 }
