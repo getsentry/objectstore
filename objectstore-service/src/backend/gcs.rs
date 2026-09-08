@@ -328,6 +328,7 @@ impl GcsObject {
     }
 }
 
+/// The object and metadata versions of a GCS object, used for conditional updates.
 type GcsGenerations<'a> = (&'a str, &'a str);
 
 /// Key for [`GcsObject::metadata`].
@@ -402,7 +403,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
     if let Some(custom_time) = metadata.time_expires {
-        let formatted = humantime::format_rfc3339_millis(custom_time);
+        let formatted = humantime::format_rfc3339_seconds(custom_time);
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
             formatted
