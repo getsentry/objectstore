@@ -193,6 +193,19 @@ impl GcsObject {
             .sum()
     }
 
+    /// Returns `true` if the object is expired at the given access time.
+    pub fn is_expired(&self, access_time: SystemTime) -> bool {
+        match self.custom_time {
+            Some(expires_at) => access_time > expires_at,
+            None => false,
+        }
+    }
+
+    /// Returns the generation and metageneration of this object.
+    pub fn generations(&self) -> GcsGenerations<'_> {
+        (&self.generation, &self.metageneration)
+    }
+
     /// Converts our Metadata type to GCS JSON object metadata.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         let mut gcs_object = GcsObject {
@@ -314,6 +327,8 @@ impl GcsObject {
         })
     }
 }
+
+type GcsGenerations<'a> = (&'a str, &'a str);
 
 /// Key for [`GcsObject::metadata`].
 #[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
@@ -605,7 +620,7 @@ impl GcsBackend {
 
     /// Fetches GCS object metadata without modifying the object.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
-    async fn fetch_gcs_metadata(&self, object_url: &Url) -> Result<Option<Metadata>> {
+    async fn get_gcs_metadata(&self, object_url: &Url) -> Result<Option<GcsObject>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
@@ -636,16 +651,14 @@ impl GcsBackend {
             return Ok(None);
         };
 
-        let metadata = gcs_metadata.into_metadata()?;
-        let access_time = SystemTime::now();
-
         // Filter already expired objects but leave them to garbage collection
-        if metadata.is_expired(access_time) {
+        let access_time = SystemTime::now();
+        if gcs_metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
 
-        Ok(Some(metadata))
+        Ok(Some(gcs_metadata))
     }
 
     /// Moves an object's `customTime`, which is what its lifecycle expiry is anchored to.
@@ -656,8 +669,7 @@ impl GcsBackend {
         &self,
         object_url: Url,
         custom_time: SystemTime,
-        generation: &str,
-        metageneration: &str,
+        generations: GcsGenerations<'_>,
     ) -> Result<bool> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -669,8 +681,8 @@ impl GcsBackend {
         let mut object_url = object_url;
         object_url
             .query_pairs_mut()
-            .append_pair("ifGenerationMatch", generation)
-            .append_pair("ifMetagenerationMatch", metageneration);
+            .append_pair("ifGenerationMatch", generations.0)
+            .append_pair("ifMetagenerationMatch", generations.1);
 
         self.with_retry("update_custom_time", || async {
             let response = self
@@ -786,12 +798,15 @@ impl Backend for GcsBackend {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
 
-        let Some(metadata) = self.fetch_gcs_metadata(&object_url).await? else {
+        let Some(gcs_metadata) = self.get_gcs_metadata(&object_url).await? else {
             return Ok(None);
         };
 
         let mut download_url = object_url;
-        download_url.query_pairs_mut().append_pair("alt", "media");
+        download_url
+            .query_pairs_mut()
+            .append_pair("alt", "media")
+            .append_pair("ifGenerationMatch", &gcs_metadata.generation);
 
         let payload_response = self
             .with_retry("get_payload", || async {
@@ -845,6 +860,7 @@ impl Backend for GcsBackend {
             .map_err(io::Error::other)
             .boxed();
 
+        let metadata = gcs_metadata.into_metadata()?;
         Ok(Some((metadata, content_range, stream)))
     }
 
@@ -852,60 +868,32 @@ impl Backend for GcsBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
-        self.fetch_gcs_metadata(&object_url).await
+        match self.get_gcs_metadata(&object_url).await? {
+            Some(gcs_metadata) => Ok(Some(gcs_metadata.into_metadata()?)),
+            None => Ok(None),
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
         let object_url = self.object_url(id)?;
-        let object = self
-            .with_retry("get_metadata", || async {
-                let response = self
-                    .request(Method::GET, object_url.clone())
-                    .await?
-                    .send_traced()
-                    .await
-                    .reqwest_context("getting GCS object metadata for expiry extension")?;
-                if response.status() == StatusCode::NOT_FOUND {
-                    response.drain_body().await;
-                    return Ok(None);
-                }
-                let object = response
-                    .check_error("getting GCS object metadata for expiry extension")
-                    .await?
-                    .json::<GcsObject>()
-                    .await
-                    .reqwest_context("getting GCS object metadata for expiry extension")?;
-                Ok(Some(object))
-            })
-            .await?;
-
-        let Some(object) = object else {
+        let Some(object) = self.get_gcs_metadata(&object_url).await? else {
             return Ok(false);
         };
-        let generation = object.generation.clone();
-        let metageneration = object.metageneration.clone();
-        let metadata = object.into_metadata()?;
-        let Some(current_expiry) = metadata.time_expires else {
+        let Some(current_expiry) = object.custom_time else {
             return Ok(false);
         };
-
-        let now = SystemTime::now();
-        if current_expiry < now {
-            return Ok(false); // already expired
-        } else if current_expiry >= expire_at {
+        if current_expiry >= expire_at {
             return Ok(true); // already satisfied
         }
 
-        // The metadata observation is not atomic with wall-clock expiry or
-        // native GCS lifecycle collection. Fixed generation preconditions keep
-        // transport retries from applying to a replacement object.
         let applied = self
-            .update_custom_time(object_url, expire_at, &generation, &metageneration)
+            .update_custom_time(object_url, expire_at, object.generations())
             .await?;
         if applied {
             self.change_stream.update(id, Some(expire_at));
         }
+
         Ok(applied)
     }
 
@@ -1353,7 +1341,7 @@ mod tests {
         })
     }
 
-    async fn get_generation_matches(
+    async fn get_gcs_generations(
         backend: &GcsBackend,
         object_url: Url,
     ) -> Result<(String, String)> {
@@ -1644,10 +1632,9 @@ mod tests {
         // Backdate custom_time while keeping the object live.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        let (generation, metageneration) =
-            get_generation_matches(&backend, object_url.clone()).await?;
+        let generations = get_gcs_generations(&backend, object_url.clone()).await?;
         backend
-            .update_custom_time(object_url, old_deadline, &generation, &metageneration)
+            .update_custom_time(object_url, old_deadline, (&generations.0, &generations.1))
             .await?;
 
         // Backend reads return the stored deadline without modifying it.
@@ -1726,10 +1713,9 @@ mod tests {
         // Backdate custom_time while keeping the object live.
         let object_url = backend.object_url(&id)?;
         let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        let (generation, metageneration) =
-            get_generation_matches(&backend, object_url.clone()).await?;
+        let generations = get_gcs_generations(&backend, object_url.clone()).await?;
         backend
-            .update_custom_time(object_url, old_deadline, &generation, &metageneration)
+            .update_custom_time(object_url, old_deadline, (&generations.0, &generations.1))
             .await?;
 
         let requested = SystemTime::now() + tti;
@@ -1759,16 +1745,14 @@ mod tests {
             .put_object(&id, &metadata, stream::single("payload"))
             .await?;
         let object_url = backend.object_url(&id)?;
-        let (generation, metageneration) =
-            get_generation_matches(&backend, object_url.clone()).await?;
+        let generations = get_gcs_generations(&backend, object_url.clone()).await?;
 
         assert!(
             backend
                 .update_custom_time(
                     object_url.clone(),
                     SystemTime::now() + Duration::from_hours(1),
-                    &generation,
-                    &metageneration,
+                    (&generations.0, &generations.1),
                 )
                 .await?
         );
@@ -1777,8 +1761,7 @@ mod tests {
                 .update_custom_time(
                     object_url.clone(),
                     SystemTime::now() + Duration::from_hours(2),
-                    &generation,
-                    &metageneration,
+                    (&generations.0, &generations.1),
                 )
                 .await?
         );
@@ -1789,8 +1772,7 @@ mod tests {
                 .update_custom_time(
                     object_url,
                     SystemTime::now() + Duration::from_hours(2),
-                    &generation,
-                    &metageneration,
+                    (&generations.0, &generations.1),
                 )
                 .await?
         );
