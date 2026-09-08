@@ -1,7 +1,7 @@
 //! Shared trait definition and types for all backends.
 
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
@@ -9,7 +9,7 @@ use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use bytes::Bytes;
 
-use crate::error::{Error, ErrorKind, Result};
+use crate::error::{ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -59,9 +59,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Extends the deadline of an existing object with expiration policy.
     ///
-    /// The supplied deadline is normalized to millisecond precision. This only
-    /// changes the stored deadline: the expiration policy, duration, payload,
-    /// and all other metadata remain unchanged.
+    /// This only changes the stored deadline: the expiration policy, duration,
+    /// payload, and all other metadata remain unchanged.
     ///
     /// Returns `true` when the deadline was extended or was already at least as
     /// late as `expire_at`. Returns `false` when the object is absent, expired,
@@ -294,29 +293,6 @@ pub struct Tombstone {
 
     /// The concrete deadline stored on the redirect.
     pub time_expires: Option<SystemTime>,
-}
-
-/// Normalizes an expiry deadline to the millisecond precision shared by all
-/// backends.
-pub(crate) fn normalize_expiry(expire_at: SystemTime) -> Result<SystemTime> {
-    let millis = expire_at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|error| {
-            Error::with_context(
-                ErrorKind::Internal,
-                "normalizing expiration timestamp",
-                error,
-            )
-        })?
-        .as_millis();
-    let millis = u64::try_from(millis).map_err(|error| {
-        Error::with_context(
-            ErrorKind::Internal,
-            "normalizing expiration timestamp",
-            error,
-        )
-    })?;
-    Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(millis))
 }
 
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].

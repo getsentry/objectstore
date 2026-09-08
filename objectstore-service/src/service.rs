@@ -593,7 +593,7 @@ mod tests {
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::changelog::NoopChangeLog;
-    use crate::backend::common::{self, HighVolumeBackend, PutResponse, TieredWrite};
+    use crate::backend::common::{HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
@@ -816,7 +816,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .time_expires,
-            Some(common::normalize_expiry(requested).unwrap())
+            Some(requested)
         );
     }
 

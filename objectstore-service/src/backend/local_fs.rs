@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
+    Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
@@ -218,7 +218,6 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = common::normalize_expiry(expire_at)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let path = self.path.join(id.as_storage_path().to_string());
         let file = match OpenOptions::new().read(true).open(&path).await {
@@ -747,10 +746,7 @@ mod tests {
         let (updated, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
         assert_eq!(updated.expiration_policy, metadata.expiration_policy);
         assert_eq!(updated.custom, metadata.custom);
-        assert_eq!(
-            updated.time_expires,
-            Some(common::normalize_expiry(requested).unwrap())
-        );
+        assert_eq!(updated.time_expires, Some(requested));
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
 
         let object_path = backend.path.join(id.as_storage_path().to_string());

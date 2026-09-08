@@ -859,7 +859,6 @@ impl Backend for GcsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = common::normalize_expiry(expire_at)?;
         let object_url = self.object_url(id)?;
         let object = self
             .with_retry("get_metadata", || async {
@@ -1665,7 +1664,7 @@ mod tests {
         assert!(backend.set_expiry(&id, requested).await?);
         assert_eq!(
             backend.get_metadata(&id).await?.unwrap().time_expires,
-            Some(common::normalize_expiry(requested)?)
+            Some(requested)
         );
 
         // Verify the payload is still intact after extension.
@@ -1743,7 +1742,7 @@ mod tests {
             .unwrap()
             .time_expires
             .unwrap();
-        assert_eq!(post_expiry, common::normalize_expiry(requested)?);
+        assert_eq!(post_expiry, requested);
 
         Ok(())
     }

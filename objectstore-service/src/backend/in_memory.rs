@@ -16,8 +16,8 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    self, DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse,
-    TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
+    DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
+    TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
@@ -157,7 +157,6 @@ impl super::common::Backend for InMemoryBackend {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = common::normalize_expiry(expire_at)?;
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
         let Some(StoreEntry::Object(metadata, _)) = store.get_mut(id) else {
@@ -254,7 +253,6 @@ impl HighVolumeBackend for InMemoryBackend {
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let expected_target = current;
-        let expire_at = common::normalize_expiry(expire_at)?;
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
         let Some(entry) = store.get_mut(id) else {
@@ -657,10 +655,7 @@ mod tests {
             assert_eq!(updated.expiration_policy, policy);
             assert_eq!(updated.custom, metadata.custom);
             assert_eq!(payload, Bytes::from_static(b"payload"));
-            assert_eq!(
-                updated.time_expires,
-                Some(common::normalize_expiry(requested).unwrap())
-            );
+            assert_eq!(updated.time_expires, Some(requested));
 
             assert!(backend.set_expiry(&id, original_expiry).await.unwrap());
             assert_eq!(
@@ -751,7 +746,7 @@ mod tests {
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
-            Some(common::normalize_expiry(new_expiry).unwrap())
+            Some(new_expiry)
         );
     }
 

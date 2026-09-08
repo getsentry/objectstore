@@ -387,7 +387,6 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let expire_at = common::normalize_expiry(expire_at)?;
         let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
         else {
             return Ok(false);
