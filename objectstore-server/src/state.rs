@@ -11,8 +11,8 @@ use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::change_stream::ChangeStreamFactory;
 use objectstore_service::concurrency::ConcurrencyLimiter;
+use objectstore_service::encryption::Cipher;
 use objectstore_service::id::ObjectContext;
-use objectstore_service::resumable::Encryptor;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
 
@@ -69,19 +69,16 @@ impl Services {
             .as_ref()
             .map(ChangeStreamFactory::new)
             .unwrap_or_default();
-        let resumable_token_encryption = match config.service.resumable_token_encryption()? {
+        let encryption = match config.service.encryption()? {
             Some(encryption) => encryption,
-            None => {
-                Encryptor::ephemeral().context("failed to initialize resumable token encryption")?
-            }
+            None => Cipher::ephemeral().context("failed to initialize encryption")?,
         };
         let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
-        let service =
-            StorageService::new(backend, resumable_token_encryption).with_concurrency(concurrency);
+        let service = StorageService::new(backend, encryption).with_concurrency(concurrency);
         service.start();
 
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);

@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::Result;
-use objectstore_server::config::{AuthZ, Config, ResumableTokenEncryptionConfig, Service};
+use objectstore_server::config::{AuthZ, Config, EncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
 use reqwest::StatusCode;
@@ -39,7 +39,7 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
             ..Default::default()
         },
         service: Service {
-            resumable_token_encryption: Some(ResumableTokenEncryptionConfig {
+            encryption: Some(EncryptionConfig {
                 active_key_id: "test".into(),
                 keys: BTreeMap::from([("test".into(), vec![7; 32].into())]),
             }),

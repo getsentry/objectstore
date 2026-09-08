@@ -267,9 +267,10 @@ trips for objects large enough that re-sending the whole payload is expensive.
 
 Backend session tokens remain private to the service. Before returning a token to a client,
 [`StorageService`] places the canonical object path and backend-defined token string in an
-AES-256-GCM envelope. Continuation, offset-query, and cancellation operations authenticate and
+authenticated envelope. Continuation, offset-query, and cancellation operations authenticate and
 open that envelope, reject an object-path mismatch, and pass the remaining string back to the
-backend, which can decode it using a backend-specific convention.
+backend, which can decode it using a backend-specific convention. See
+[`Cipher`](encryption::Cipher) for the encryption format and key-rotation behavior.
 
 Not all backends support resumable uploads. A backend returns no session when it declines a
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the

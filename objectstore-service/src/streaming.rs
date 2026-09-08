@@ -343,8 +343,8 @@ mod tests {
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::concurrency::ConcurrencyLimiter;
+    use crate::encryption::Cipher;
     use crate::error::{Error, ErrorKind};
-    use crate::resumable::Encryptor;
     use crate::service::StorageService;
     use crate::stream::{self, ClientStream};
 
@@ -358,7 +358,7 @@ mod tests {
     fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(
             Box::new(InMemoryBackend::new("in-memory")),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         )
         .with_concurrency(ConcurrencyLimiter::new(limit))
     }
@@ -523,7 +523,7 @@ mod tests {
             resume: Arc::clone(&resume),
             in_flight: Arc::clone(&in_flight),
         });
-        let service = StorageService::new(Box::new(gated), Encryptor::ephemeral().unwrap())
+        let service = StorageService::new(Box::new(gated), Cipher::ephemeral().unwrap())
             .with_concurrency(ConcurrencyLimiter::new(100));
 
         let ops: Vec<Operation> = (0..10)
@@ -569,7 +569,7 @@ mod tests {
         // acquire; the bulk op should wait and eventually time out.
         let service = StorageService::new(
             Box::new(InMemoryBackend::new("in-memory")),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         )
         .with_concurrency(
             ConcurrencyLimiter::new(1)
