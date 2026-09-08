@@ -817,26 +817,24 @@ impl fmt::Debug for GcsBackend {
 
 /// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
 fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> {
-    let end = value
-        .strip_prefix("bytes=0-")
-        .filter(|end| !end.is_empty() && end.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|end| end.parse::<u64>().ok())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::BackendFailure,
-                "GCS: malformed resumable Range header",
-            )
-        })?;
-    let offset = end.checked_add(1).ok_or_else(|| {
+    let end = value.strip_prefix("bytes=0-").ok_or_else(|| {
         Error::new(
-            ErrorKind::BackendFailure,
-            "GCS: resumable Range header overflows",
+            ErrorKind::Internal,
+            "malformed GCS Range header for resumable progress",
         )
     })?;
+    let end = end.parse::<u64>().context(
+        ErrorKind::Internal,
+        "invalid GCS Range header for resumable progress",
+    )?;
+
+    let offset = end
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::Internal, "GCS offset overflows u64"))?;
     if offset > total_length.get() {
         return Err(Error::new(
-            ErrorKind::BackendFailure,
-            "GCS: incomplete resumable Range reaches declared upload length",
+            ErrorKind::Internal,
+            "GCS offset exceeds upload length",
         ));
     }
     Ok(offset)
