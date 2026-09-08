@@ -14,6 +14,7 @@
 //! [`StorageService`]: crate::service::StorageService
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
@@ -106,7 +107,7 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
+        total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         count(&id.context.usecase);
         self.inner

@@ -35,6 +35,7 @@
 //! ```
 
 use std::fmt;
+use std::num::NonZeroU64;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
@@ -248,7 +249,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
+        total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         inner
             .create_upload_session(id, metadata, total_length)
@@ -368,7 +369,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
+        total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         self.hooks
             .create_upload_session(&self.inner, id, metadata, total_length)

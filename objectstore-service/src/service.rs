@@ -6,6 +6,7 @@
 //! See the [crate-level documentation](crate) for full architecture details.
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
@@ -370,14 +371,17 @@ impl StorageService {
 
     /// Opens a resumable upload session for an object of `total_length` bytes.
     ///
-    /// Returns `Ok(None)` when the backend declines resumable uploads for this object, in which case
-    /// the caller should fall back to [`Self::insert_object`].
+    /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
+    /// for this object, in which case the caller should fall back to [`Self::insert_object`].
     pub async fn create_upload_session(
         &self,
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
     ) -> Result<Option<EncryptedSessionToken>> {
+        let Some(total_length) = NonZeroU64::new(total_length) else {
+            return Ok(None);
+        };
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let inner = Arc::clone(&self.inner);
         let encryption = self.resumable_token_encryption.clone();
@@ -498,7 +502,7 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _total_length: u64,
+            _total_length: NonZeroU64,
         ) -> Result<Option<BackendToken>> {
             Ok(Some("backend token".to_owned()))
         }
@@ -955,6 +959,21 @@ mod tests {
 
         let result = service
             .create_upload_session(id, Metadata::default(), 1024)
+            .await;
+
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn resumable_create_declines_zero_length() {
+        let service = StorageService::new(
+            Box::new(TestBackend::new(ResumableTokenHooks::default())),
+            Encryptor::ephemeral().unwrap(),
+        );
+        let id = ObjectId::new(make_context(), "resumable".into());
+
+        let result = service
+            .create_upload_session(id, Metadata::default(), 0)
             .await;
 
         assert!(matches!(result, Ok(None)), "{result:?}");

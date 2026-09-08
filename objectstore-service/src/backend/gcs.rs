@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{fmt, io};
@@ -474,11 +475,11 @@ struct ResumableUpload {
     // on session creation.
     session_uri: Url,
     // Total length of the object, declared at session creation time.
-    total_length: u64,
+    total_length: NonZeroU64,
 }
 
 impl ResumableUpload {
-    fn new(session_uri: Url, total_length: u64) -> Self {
+    fn new(session_uri: Url, total_length: NonZeroU64) -> Self {
         Self {
             session_uri,
             total_length,
@@ -494,7 +495,7 @@ impl ResumableUpload {
             .split_once('.')
             .ok_or(ErrorKind::UnknownUploadSession)?;
         let total_length = total_length
-            .parse()
+            .parse::<NonZeroU64>()
             .map_err(|_| ErrorKind::UnknownUploadSession)?;
         let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
         let session = Self::new(session_uri, total_length);
@@ -815,7 +816,7 @@ impl fmt::Debug for GcsBackend {
 }
 
 /// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
-fn range_header_to_offset(value: &str, total_length: u64) -> Result<u64> {
+fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> {
     let end = value
         .strip_prefix("bytes=0-")
         .filter(|end| !end.is_empty() && end.bytes().all(|byte| byte.is_ascii_digit()))
@@ -832,7 +833,7 @@ fn range_header_to_offset(value: &str, total_length: u64) -> Result<u64> {
             "GCS: resumable Range header overflows",
         )
     })?;
-    if offset > total_length {
+    if offset > total_length.get() {
         return Err(Error::new(
             ErrorKind::BackendFailure,
             "GCS: incomplete resumable Range reaches declared upload length",
@@ -1084,7 +1085,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: u64,
+        total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
         let url = self.upload_url(id, "resumable")?;
@@ -1105,7 +1106,7 @@ impl Backend for GcsBackend {
                         .await?
                         .header(header::CONTENT_TYPE, "application/json")
                         .header("x-upload-content-type", content_type.as_ref())
-                        .header("x-upload-content-length", total_length)
+                        .header("x-upload-content-length", total_length.get())
                         .body(metadata_json)
                         .send_traced()
                         .await
@@ -1162,17 +1163,15 @@ impl Backend for GcsBackend {
 
         let end = offset
             .checked_add(content_length)
-            .filter(|end| *end <= session.total_length)
+            .filter(|end| *end <= session.total_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: session.total_length,
+                upload_length: session.total_length.get(),
             })?;
 
         let content_range = match content_length {
-            // If `total_length` of this upload is 0, the only way to complete it is to
-            // put a an empty chunk, which is accomplished by putting `*/0` in this header.
-            // Otherwise, this request is equivalent to an offset query.
+            // An empty chunk is equivalent to an offset query.
             0 => format!("bytes */{}", session.total_length),
             _ => format!("bytes {offset}-{}/{}", end - 1, session.total_length),
         };
@@ -1622,7 +1621,7 @@ impl MultipartUploadBackend for GcsBackend {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::num::NonZeroU32;
+    use std::num::{NonZeroU32, NonZeroU64};
     use std::time::Duration;
 
     use anyhow::Result;
@@ -1647,7 +1646,7 @@ mod tests {
             &self,
             id: &ObjectId,
             metadata: &Metadata,
-            total_length: u64,
+            total_length: NonZeroU64,
         ) -> Result<BackendToken> {
             <Self as Backend>::create_upload_session(self, id, metadata, total_length)
                 .await?
@@ -1739,10 +1738,17 @@ mod tests {
         )
     }
 
+    fn nonzero(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
+    }
+
     #[test]
     fn resumable_range_reports_next_offset_and_rejects_malformed_values() -> Result<()> {
-        assert_eq!(range_header_to_offset("bytes=0-0", 10)?, 1);
-        assert_eq!(range_header_to_offset("bytes=0-262143", 300_000)?, 262_144);
+        assert_eq!(range_header_to_offset("bytes=0-0", nonzero(10))?, 1);
+        assert_eq!(
+            range_header_to_offset("bytes=0-262143", nonzero(300_000))?,
+            262_144
+        );
 
         for malformed in [
             "",
@@ -1753,51 +1759,22 @@ mod tests {
             "bytes=0-9,bytes=20-30",
         ] {
             assert!(
-                range_header_to_offset(malformed, 100).is_err(),
+                range_header_to_offset(malformed, nonzero(100)).is_err(),
                 "accepted {malformed:?}"
             );
         }
-        assert_eq!(range_header_to_offset("bytes=0-9", 10)?, 10);
-        assert!(range_header_to_offset("bytes=0-18446744073709551615", u64::MAX).is_err());
+        assert_eq!(range_header_to_offset("bytes=0-9", nonzero(10))?, 10);
+        assert!(range_header_to_offset("bytes=0-18446744073709551615", nonzero(u64::MAX)).is_err());
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_resumable_zero_length_upload_and_metadata() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id_with_key("resumable-zero");
-        let metadata = Metadata {
-            content_type: "application/x-empty".into(),
-            custom: BTreeMap::from([("upload".into(), "zero".into())]),
-            ..Default::default()
-        };
-
-        let token = backend.create_upload_session(&id, &metadata, 0).await?;
-        assert_eq!(
-            backend.upload_offset(&id, &token).await?,
-            UploadProgress::Complete
-        );
-
-        let (stored_metadata, _, payload) = backend.get_object(&id, None).await?.unwrap();
-        assert_eq!(stream::read_to_vec(payload).await?, b"");
-        assert_eq!(stored_metadata.content_type, metadata.content_type);
-        assert_eq!(stored_metadata.custom, metadata.custom);
-
-        // An empty chunk is how a client uploads a zero-length object, so it has to finalize the
-        // session rather than be rejected or send a `Content-Range` naming a byte that is absent.
-        let chunked_id = make_id_with_key("resumable-zero-chunk");
-        let token = backend
-            .create_upload_session(&chunked_id, &metadata, 0)
-            .await?;
-        assert_eq!(
-            backend
-                .put_chunk(&chunked_id, &token, 0, 0, stream::single(Vec::new()))
-                .await?,
-            UploadProgress::Complete
-        );
-        let (_, _, payload) = backend.get_object(&chunked_id, None).await?.unwrap();
-        assert_eq!(stream::read_to_vec(payload).await?, b"");
-        Ok(())
+    #[test]
+    fn resumable_token_rejects_zero_length() {
+        let token = "0.http://localhost/upload".to_owned();
+        assert!(matches!(
+            ResumableUpload::from_token(&token),
+            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
+        ));
     }
 
     #[tokio::test]
@@ -1805,7 +1782,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-empty-chunk");
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 4)
+            .create_upload_session(&id, &Metadata::default(), nonzero(4))
             .await?;
 
         // An empty chunk cannot advance a session that still expects bytes. It reports the
@@ -1843,7 +1820,11 @@ mod tests {
         let single_id = make_id_with_key("resumable-single");
         let single = b"single chunk".to_vec();
         let token = backend
-            .create_upload_session(&single_id, &Metadata::default(), single.len() as u64)
+            .create_upload_session(
+                &single_id,
+                &Metadata::default(),
+                nonzero(single.len() as u64),
+            )
             .await?;
         assert_eq!(
             backend
@@ -1864,7 +1845,11 @@ mod tests {
         let mut expected = vec![b'a'; RESUMABLE_CHUNK_SIZE];
         expected.extend_from_slice(b"final");
         let token = backend
-            .create_upload_session(&multi_id, &Metadata::default(), expected.len() as u64)
+            .create_upload_session(
+                &multi_id,
+                &Metadata::default(),
+                nonzero(expected.len() as u64),
+            )
             .await?;
         assert_eq!(
             backend.upload_offset(&multi_id, &token).await?,
@@ -1913,7 +1898,7 @@ mod tests {
         let id = make_id_with_key("resumable-rewind");
         let total_length = RESUMABLE_CHUNK_SIZE + 3;
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), total_length as u64)
+            .create_upload_session(&id, &Metadata::default(), nonzero(total_length as u64))
             .await?;
 
         let prefix = vec![b'a'; RESUMABLE_CHUNK_SIZE];
@@ -1952,7 +1937,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-validation");
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 10)
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
             .await?;
 
         let error = backend
@@ -1984,7 +1969,7 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-cancel");
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 10)
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
             .await?;
 
         backend.cancel_upload(&id, &token).await?;
@@ -2004,7 +1989,7 @@ mod tests {
 
         // Creation consumes the injected 503 and succeeds on the backend's retry.
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 10)
+            .create_upload_session(&id, &Metadata::default(), nonzero(10))
             .await?;
 
         inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
@@ -2024,7 +2009,7 @@ mod tests {
         let mut backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-failure-before");
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 4)
+            .create_upload_session(&id, &Metadata::default(), nonzero(4))
             .await?;
         inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
         assert!(matches!(
@@ -2044,7 +2029,7 @@ mod tests {
         let id = make_id_with_key("resumable-failure-partial");
         let data = vec![b'p'; 2048];
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), data.len() as u64)
+            .create_upload_session(&id, &Metadata::default(), nonzero(data.len() as u64))
             .await?;
         inject_retry_test(
             &mut backend,
@@ -2086,7 +2071,7 @@ mod tests {
         let mut backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-failure-final");
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), 5)
+            .create_upload_session(&id, &Metadata::default(), nonzero(5))
             .await?;
         inject_retry_test(
             &mut backend,
@@ -2980,7 +2965,7 @@ mod tests {
             ..Default::default()
         };
         let token = backend
-            .create_upload_session(&id, &metadata, payload.len() as u64)
+            .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
 
         assert_eq!(
@@ -3015,7 +3000,7 @@ mod tests {
         let payload = b"final".to_vec();
         let metadata = Metadata::default();
         let token = backend
-            .create_upload_session(&id, &metadata, payload.len() as u64)
+            .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
         inject_retry_test(
             &mut backend,
