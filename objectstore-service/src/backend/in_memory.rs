@@ -168,10 +168,12 @@ impl super::common::Backend for InMemoryBackend {
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
         let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
-        let Some(StoreEntry::Object(metadata, _)) = store.get_mut(id) else {
-            return Ok(false);
-        };
-        Ok(extend_metadata_expiry(metadata, expire_at, now))
+        Ok(match store.get_mut(id) {
+            Some(StoreEntry::Object(metadata, _)) => {
+                extend_expiry(&mut metadata.time_expires, expire_at, now)
+            }
+            _ => false,
+        })
     }
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
@@ -189,14 +191,10 @@ impl HighVolumeBackend for InMemoryBackend {
         payload: Bytes,
     ) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
-        if store
-            .get(id)
-            .is_some_and(|entry| entry.is_expired(SystemTime::now()))
+        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
+            && !tombstone.is_expired(SystemTime::now())
         {
-            store.remove(id);
-        }
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
-            return Ok(Some(tombstone));
+            return Ok(Some(tombstone.clone()));
         }
 
         let mut metadata = metadata.clone();
@@ -261,30 +259,14 @@ impl HighVolumeBackend for InMemoryBackend {
         update: TieredUpdate,
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
-        let expected_target = current;
-        let now = SystemTime::now();
         let mut store = self.store.lock().unwrap();
-        let Some(entry) = store.get_mut(id) else {
-            return Ok(false);
-        };
 
-        // TODO: Unify this with extend expiry.
-        Ok(match (entry, expected_target) {
-            (StoreEntry::Object(metadata, _), None) => {
-                extend_metadata_expiry(metadata, expire_at, now)
+        Ok(match (store.get_mut(id), current) {
+            (Some(StoreEntry::Object(metadata, _)), None) => {
+                extend_expiry(&mut metadata.time_expires, expire_at, SystemTime::now())
             }
-            (StoreEntry::Tombstone(tombstone), Some(target)) if tombstone.target == *target => {
-                if tombstone.time_expires.is_none() || tombstone.is_expired(now) {
-                    return Ok(false);
-                }
-                if tombstone
-                    .time_expires
-                    .is_some_and(|deadline| deadline >= expire_at)
-                {
-                    return Ok(true);
-                }
-                tombstone.time_expires = Some(expire_at);
-                true
+            (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
+                extend_expiry(&mut t.time_expires, expire_at, SystemTime::now())
             }
             _ => false,
         })
@@ -299,9 +281,9 @@ impl HighVolumeBackend for InMemoryBackend {
         let mut store = self.store.lock().unwrap();
 
         let actual = store.get(id);
-        let now = SystemTime::now();
-        let matches_current = matches_redirect(actual, current, now);
-        let matches_next = matches_redirect(actual, write.target(), now);
+        let access_time = SystemTime::now();
+        let matches_current = matches_redirect(actual, current, access_time);
+        let matches_next = matches_redirect(actual, write.target(), access_time);
 
         if matches_current {
             match write {
@@ -523,8 +505,12 @@ fn matches_redirect(
     }
 }
 
-fn extend_metadata_expiry(metadata: &mut Metadata, expire_at: SystemTime, now: SystemTime) -> bool {
-    let Some(time_expires) = metadata.time_expires else {
+/// Extends an active expiry time to `expire_at` where valid.
+///
+/// Returns `true` if expiry was extended or already satisfied, and `false` if the expiry could not
+/// be extended (e.g. manual expiration policy or already expired).
+fn extend_expiry(field: &mut Option<SystemTime>, expire_at: SystemTime, now: SystemTime) -> bool {
+    let Some(time_expires) = *field else {
         return false; // manual expiration policy cannot be extended
     };
 
@@ -533,7 +519,7 @@ fn extend_metadata_expiry(metadata: &mut Metadata, expire_at: SystemTime, now: S
     } else if time_expires >= expire_at {
         true // already satisfied
     } else {
-        metadata.time_expires = Some(expire_at);
+        *field = Some(expire_at);
         true
     }
 }
