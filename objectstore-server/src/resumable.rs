@@ -93,7 +93,9 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> ApiResult<Session> {
         let Query(SessionQuery { session }) = Query::<SessionQuery>::try_from_uri(&parts.uri)
             .map_err(|error| ApiError::map_client("invalid query parameters", error))?;
-        Ok(Session(decode_session_token(&session)?))
+        Ok(Session(SessionToken::from_base64url(&session).map_err(
+            |error| ApiError::map_client("invalid session token", error),
+        )?))
     }
 }
 
@@ -174,11 +176,6 @@ where
     Ok(value)
 }
 
-fn decode_session_token(encoded: &str) -> ApiResult<SessionToken> {
-    SessionToken::from_base64url(encoded)
-        .map_err(|error| ApiError::map_client("invalid session token", error))
-}
-
 /// Confirms that a request neither declares nor streams a non-empty body.
 pub(crate) async fn require_empty_body(
     content_length: Option<ContentLength>,
@@ -242,7 +239,9 @@ mod tests {
     #[test]
     fn session_token_decodes_from_unpadded_base64url() {
         assert_eq!(
-            decode_session_token("Li4vZXNjYXBl").unwrap().as_bytes(),
+            SessionToken::from_base64url("Li4vZXNjYXBl")
+                .unwrap()
+                .as_bytes(),
             b"../escape"
         );
     }
@@ -251,7 +250,7 @@ mod tests {
     fn session_token_rejects_invalid_query_encodings() {
         for invalid in ["%%%", "dG9rM24="] {
             assert!(
-                decode_session_token(invalid).is_err(),
+                SessionToken::from_base64url(invalid).is_err(),
                 "accepted {invalid:?}"
             );
         }

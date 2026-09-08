@@ -1187,20 +1187,12 @@ impl Backend for GcsBackend {
             .await
             .reqwest_context("GCS: upload resumable chunk")?;
 
-        range_response_to_upload_progress(&session, response)
-            .await
-            .map(|progress| {
-                if let GcsUploadProgress::Complete(ref object) = progress {
-                    let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-                    self.report_object_write(
-                        id,
-                        stored_size,
-                        object.metadata_size(),
-                        object.custom_time,
-                    );
-                }
-                progress.into()
-            })
+        let progress = range_response_to_upload_progress(&session, response).await?;
+        if let GcsUploadProgress::Complete(ref object) = progress {
+            let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
+            self.report_object_write(id, stored_size, object.metadata_size(), object.custom_time);
+        }
+        Ok(progress.into())
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
