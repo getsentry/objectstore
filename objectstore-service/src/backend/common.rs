@@ -36,6 +36,29 @@ pub type DeleteResponse = ();
 /// Trait implemented by all storage backends.
 #[async_trait::async_trait]
 pub trait Backend: fmt::Debug + Send + Sync + 'static {
+    /// Backend-specific resumable upload session state.
+    type SessionToken
+    where
+        Self: Sized;
+
+    /// Encodes backend-specific session state into an opaque token.
+    fn encode_session_token(token: Self::SessionToken) -> Result<BackendToken>
+    where
+        Self: Sized,
+    {
+        let _ = token;
+        Err(ErrorKind::Unsupported.into())
+    }
+
+    /// Decodes an opaque token into backend-specific session state.
+    fn decode_session_token(token: &BackendToken) -> Result<Self::SessionToken>
+    where
+        Self: Sized,
+    {
+        let _ = token;
+        Err(ErrorKind::Unsupported.into())
+    }
+
     /// The backend name, used for diagnostics.
     fn name(&self) -> &'static str;
 
@@ -92,7 +115,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Object metadata and its total length are declared upfront and cannot be mutated
     /// during the upload.
     ///
-    /// The returned string is opaque backend-defined state. [`StorageService`](crate::StorageService)
+    /// The returned token contains opaque backend-defined state. [`StorageService`](crate::StorageService)
     /// protects it before exposing the session token outside the service layer.
     ///
     /// Returns `Ok(None)` when this backend cannot store the described object resumably. Declining

@@ -19,7 +19,21 @@ pub use objectstore_types::resumable::{
 };
 
 /// Opaque session state encoded and decoded by a storage backend.
-pub type BackendToken = String;
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct BackendToken(String);
+
+impl BackendToken {
+    /// Creates an opaque backend token from its encoded representation.
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    /// Returns the encoded token representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Structured token encrypted at the service boundary.
 #[derive(Deserialize, Serialize)]

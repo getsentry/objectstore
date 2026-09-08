@@ -111,6 +111,8 @@ impl InMemoryBackend {
 
 #[async_trait::async_trait]
 impl super::common::Backend for InMemoryBackend {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         self.name
     }

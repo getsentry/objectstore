@@ -486,7 +486,7 @@ const CLIENT_CLOSED_REQUEST_STATUS: u16 = 499;
 
 /// Represents a resumable upload session in GCS.
 #[derive(Debug)]
-struct ResumableUpload {
+pub struct GcsSessionToken {
     // URI to use for requests that act on this session, returned by GCS in the `Location` header
     // on session creation.
     session_uri: Url,
@@ -494,28 +494,12 @@ struct ResumableUpload {
     total_length: NonZeroU64,
 }
 
-impl ResumableUpload {
+impl GcsSessionToken {
     fn new(session_uri: Url, total_length: NonZeroU64) -> Self {
         Self {
             session_uri,
             total_length,
         }
-    }
-
-    fn into_token(self) -> BackendToken {
-        format!("{}.{}", self.total_length, self.session_uri)
-    }
-
-    fn from_token(token: &BackendToken) -> Result<Self> {
-        let (total_length, session_uri) = token
-            .split_once('.')
-            .ok_or(ErrorKind::UnknownUploadSession)?;
-        let total_length = total_length
-            .parse::<NonZeroU64>()
-            .map_err(|_| ErrorKind::UnknownUploadSession)?;
-        let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        let session = Self::new(session_uri, total_length);
-        Ok(session)
     }
 }
 
@@ -830,7 +814,7 @@ fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> 
 /// Returns the progress GCS reported, plus the completed object when this is the response that
 /// finished the upload.
 async fn range_response_to_upload_progress(
-    session: &ResumableUpload,
+    session: &GcsSessionToken,
     response: reqwest::Response,
 ) -> Result<GcsUploadProgress> {
     let status = response.status();
@@ -893,6 +877,27 @@ async fn range_response_to_upload_progress(
 
 #[async_trait::async_trait]
 impl Backend for GcsBackend {
+    type SessionToken = GcsSessionToken;
+
+    fn encode_session_token(token: Self::SessionToken) -> Result<BackendToken> {
+        Ok(BackendToken::new(format!(
+            "{}.{}",
+            token.total_length, token.session_uri
+        )))
+    }
+
+    fn decode_session_token(token: &BackendToken) -> Result<Self::SessionToken> {
+        let (total_length, session_uri) = token
+            .as_str()
+            .split_once('.')
+            .ok_or(ErrorKind::UnknownUploadSession)?;
+        let total_length = total_length
+            .parse::<NonZeroU64>()
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let session_uri = Url::parse(session_uri).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        Ok(GcsSessionToken::new(session_uri, total_length))
+    }
+
     fn name(&self) -> &'static str {
         "gcs"
     }
@@ -1186,8 +1191,8 @@ impl Backend for GcsBackend {
                 "invalid Location URL in GCS resumable upload creation response",
             )
         })?;
-        let session = ResumableUpload::new(session_uri, total_length);
-        Ok(Some(session.into_token()))
+        let session = GcsSessionToken::new(session_uri, total_length);
+        Ok(Some(Self::encode_session_token(session)?))
     }
 
     #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
@@ -1199,8 +1204,8 @@ impl Backend for GcsBackend {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
+        let session = Self::decode_session_token(token)?;
         objectstore_log::debug!("Uploading resumable chunk to GCS backend");
-        let session = ResumableUpload::from_token(token)?;
 
         let end = offset
             .checked_add(content_length)
@@ -1237,8 +1242,8 @@ impl Backend for GcsBackend {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        let session = Self::decode_session_token(token)?;
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
-        let session = ResumableUpload::from_token(token)?;
 
         self.with_retry("query_resumable_upload", || async {
             let response = self
@@ -1271,8 +1276,8 @@ impl Backend for GcsBackend {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        let session = Self::decode_session_token(token)?;
         objectstore_log::debug!("Cancelling resumable upload on GCS backend");
-        let session = ResumableUpload::from_token(token)?;
         let session_uri = session.session_uri;
         self.with_retry("cancel_resumable_upload", || {
             let session_uri = session_uri.clone();
@@ -1900,9 +1905,9 @@ mod tests {
 
     #[test]
     fn resumable_token_rejects_zero_length() {
-        let token = "0.http://localhost/upload".to_owned();
+        let token = BackendToken::new("0.http://localhost/upload".to_owned());
         assert!(matches!(
-            ResumableUpload::from_token(&token),
+            GcsBackend::decode_session_token(&token),
             Err(error) if error.kind() == ErrorKind::UnknownUploadSession
         ));
     }

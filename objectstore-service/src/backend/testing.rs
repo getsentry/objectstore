@@ -353,6 +353,8 @@ impl<H: Hooks> TestBackend<H> {
 
 #[async_trait::async_trait]
 impl<H: Hooks> Backend for TestBackend<H> {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         self.hooks.name()
     }
