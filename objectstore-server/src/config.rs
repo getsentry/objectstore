@@ -657,8 +657,8 @@ pub struct Service {
 }
 
 impl Service {
-    /// Loads and validates the configured encryption keys.
-    pub(crate) fn encryption(&self) -> Result<Option<Cipher>> {
+    /// Loads and validates the configured encryption keys, constructing a [`Cipher`].
+    pub(crate) fn cipher(&self) -> Result<Option<Cipher>> {
         let Some(config) = &self.encryption else {
             return Ok(None);
         };
@@ -956,7 +956,7 @@ mod tests {
             tempfile.write_all(yaml.as_bytes()).unwrap();
             figment::Jail::expect_with(|_jail| {
                 let config = Config::load(Some(tempfile.path())).unwrap();
-                assert!(config.service.encryption().is_err(), "accepted {yaml}");
+                assert!(config.service.cipher().is_err(), "accepted {yaml}");
                 Ok(())
             });
         }
@@ -1169,7 +1169,7 @@ mod tests {
                 sink.override_params["not.a.reference"], "prod-${NOT_A_VAR",
                 "a value that is not a reference is left alone"
             );
-            assert!(config.service.encryption().unwrap().is_some());
+            assert!(config.service.cipher().unwrap().is_some());
 
             Ok(())
         });

@@ -87,13 +87,11 @@ impl StorageService {
     /// each operation run. Single-object operations served directly by `StorageService` are covered
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
-    ///
-    /// `encryption` protects opaque values exposed by the service.
-    pub fn new(backend: Box<dyn Backend>, encryption: Cipher) -> Self {
+    pub fn new(backend: Box<dyn Backend>, cipher: Cipher) -> Self {
         Self {
             inner: Arc::new(CountingBackend::new(backend)),
             concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
-            cipher: Arc::new(encryption),
+            cipher: Arc::new(cipher),
         }
     }
 
