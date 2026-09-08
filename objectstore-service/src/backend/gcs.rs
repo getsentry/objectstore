@@ -502,6 +502,20 @@ impl ResumableUpload {
     }
 }
 
+enum GcsUploadProgress {
+    Incomplete(u64),
+    Complete(GcsObject),
+}
+
+impl From<GcsUploadProgress> for UploadProgress {
+    fn from(value: GcsUploadProgress) -> Self {
+        match value {
+            GcsUploadProgress::Incomplete(offset) => UploadProgress::Incomplete { offset },
+            GcsUploadProgress::Complete(_) => UploadProgress::Complete,
+        }
+    }
+}
+
 /// Returns `true` if the error is a transient backend failure worth retrying.
 fn error_is_retryable(error: &Error) -> bool {
     matches!(
@@ -834,7 +848,7 @@ fn range_header_to_offset(value: &str, total_length: u64) -> Result<u64> {
 async fn range_response_to_upload_progress(
     session: &ResumableUpload,
     response: reqwest::Response,
-) -> Result<(UploadProgress, Option<GcsObject>)> {
+) -> Result<GcsUploadProgress> {
     let status = response.status();
 
     match status {
@@ -863,7 +877,7 @@ async fn range_response_to_upload_progress(
                 ErrorKind::CorruptData,
                 "GCS: parse completed resumable upload response",
             )?;
-            Ok((UploadProgress::Complete, Some(object)))
+            Ok(GcsUploadProgress::Complete(object))
         }
         // GCS calls it "308 Resume Incomplete"
         StatusCode::PERMANENT_REDIRECT => {
@@ -878,7 +892,7 @@ async fn range_response_to_upload_progress(
                 None => 0,
             };
             response.drain_body().await;
-            Ok((UploadProgress::Incomplete { offset }, None))
+            Ok(GcsUploadProgress::Incomplete(offset))
         }
         _ => {
             response.drain_body().await;
@@ -1175,8 +1189,8 @@ impl Backend for GcsBackend {
 
         range_response_to_upload_progress(&session, response)
             .await
-            .map(|(progress, completed)| {
-                if let Some(object) = completed {
+            .map(|progress| {
+                if let GcsUploadProgress::Complete(ref object) = progress {
                     let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
                     self.report_object_write(
                         id,
@@ -1185,7 +1199,7 @@ impl Backend for GcsBackend {
                         object.custom_time,
                     );
                 }
-                progress
+                progress.into()
             })
     }
 
@@ -1208,10 +1222,10 @@ impl Backend for GcsBackend {
 
             range_response_to_upload_progress(&session, response)
                 .await
-                .map(|(progress, completed)| {
+                .map(|progress| {
                     // The final `put_chunk` may have persisted the object but failed while
                     // reading its response, so completion observed here must be reported too.
-                    if let Some(object) = completed {
+                    if let GcsUploadProgress::Complete(ref object) = progress {
                         let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
                         self.report_object_write(
                             id,
@@ -1220,7 +1234,7 @@ impl Backend for GcsBackend {
                             object.custom_time,
                         );
                     }
-                    progress
+                    progress.into()
                 })
         })
         .await
