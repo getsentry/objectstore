@@ -34,6 +34,15 @@ enum StoreEntry {
     Tombstone(Tombstone),
 }
 
+impl StoreEntry {
+    fn is_expired(&self, now: SystemTime) -> bool {
+        match self {
+            StoreEntry::Object(metadata, _) => metadata.is_expired(now),
+            StoreEntry::Tombstone(tombstone) => tombstone.is_expired(now),
+        }
+    }
+}
+
 type Store = HashMap<ObjectId, StoreEntry>;
 
 #[derive(Clone, Debug)]
@@ -162,7 +171,7 @@ impl super::common::Backend for InMemoryBackend {
         let Some(StoreEntry::Object(metadata, _)) = store.get_mut(id) else {
             return Ok(false);
         };
-        extend_metadata_expiry(metadata, expire_at, now)
+        Ok(extend_metadata_expiry(metadata, expire_at, now))
     }
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
@@ -259,14 +268,13 @@ impl HighVolumeBackend for InMemoryBackend {
             return Ok(false);
         };
 
-        match (entry, expected_target) {
+        // TODO: Unify this with extend expiry.
+        Ok(match (entry, expected_target) {
             (StoreEntry::Object(metadata, _), None) => {
                 extend_metadata_expiry(metadata, expire_at, now)
             }
             (StoreEntry::Tombstone(tombstone), Some(target)) if tombstone.target == *target => {
-                if tombstone.expiration_policy.is_manual()
-                    || tombstone.time_expires.is_none_or(|deadline| deadline < now)
-                {
+                if tombstone.time_expires.is_none() || tombstone.is_expired(now) {
                     return Ok(false);
                 }
                 if tombstone
@@ -276,10 +284,10 @@ impl HighVolumeBackend for InMemoryBackend {
                     return Ok(true);
                 }
                 tombstone.time_expires = Some(expire_at);
-                Ok(true)
+                true
             }
-            _ => Ok(false),
-        }
+            _ => false,
+        })
     }
 
     async fn compare_and_write(
@@ -506,55 +514,28 @@ fn matches_redirect(
     expected: Option<&ObjectId>,
     now: SystemTime,
 ) -> bool {
-    match expected {
-        None => entry
-            .is_none_or(|entry| matches!(entry, StoreEntry::Object(..)) || entry.is_expired(now)),
-        Some(target) => match entry {
-            Some(StoreEntry::Tombstone(tombstone)) => {
-                tombstone.target == *target && !tombstone.is_expired(now)
-            }
-            _ => false,
+    match entry {
+        None | Some(StoreEntry::Object(..)) => expected.is_none(),
+        Some(StoreEntry::Tombstone(tombstone)) => match expected {
+            None => tombstone.is_expired(now),
+            Some(target) => tombstone.target == *target && !tombstone.is_expired(now),
         },
     }
 }
 
-impl StoreEntry {
-    fn is_expired(&self, now: SystemTime) -> bool {
-        match self {
-            StoreEntry::Object(metadata, _) => {
-                metadata.expiration_policy.is_timeout()
-                    && metadata.time_expires.is_some_and(|deadline| deadline < now)
-            }
-            StoreEntry::Tombstone(tombstone) => tombstone.is_expired(now),
-        }
-    }
-}
+fn extend_metadata_expiry(metadata: &mut Metadata, expire_at: SystemTime, now: SystemTime) -> bool {
+    let Some(time_expires) = metadata.time_expires else {
+        return false; // manual expiration policy cannot be extended
+    };
 
-impl Tombstone {
-    fn is_expired(&self, now: SystemTime) -> bool {
-        self.expiration_policy.is_timeout()
-            && self.time_expires.is_some_and(|deadline| deadline < now)
+    if time_expires < now {
+        false // already expired
+    } else if time_expires >= expire_at {
+        true // already satisfied
+    } else {
+        metadata.time_expires = Some(expire_at);
+        true
     }
-}
-
-fn extend_metadata_expiry(
-    metadata: &mut Metadata,
-    expire_at: SystemTime,
-    now: SystemTime,
-) -> Result<bool> {
-    if metadata.expiration_policy.is_manual()
-        || metadata.time_expires.is_none_or(|deadline| deadline < now)
-    {
-        return Ok(false);
-    }
-    if metadata
-        .time_expires
-        .is_some_and(|deadline| deadline >= expire_at)
-    {
-        return Ok(true);
-    }
-    metadata.time_expires = Some(expire_at);
-    Ok(true)
 }
 
 /// Type returned by [`InMemoryBackend::get`] for direct inspection of stored entries.

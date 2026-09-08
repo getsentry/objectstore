@@ -640,9 +640,7 @@ impl GcsBackend {
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout()
-            && metadata.time_expires.is_some_and(|ts| ts < access_time)
-        {
+        if metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -891,12 +889,12 @@ impl Backend for GcsBackend {
         let Some(current_expiry) = metadata.time_expires else {
             return Ok(false);
         };
+
         let now = SystemTime::now();
-        if metadata.expiration_policy.is_manual() || current_expiry < now {
-            return Ok(false);
-        }
-        if current_expiry >= expire_at {
-            return Ok(true);
+        if current_expiry < now {
+            return Ok(false); // already expired
+        } else if current_expiry >= expire_at {
+            return Ok(true); // already satisfied
         }
 
         // The metadata observation is not atomic with wall-clock expiry or

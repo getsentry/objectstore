@@ -180,11 +180,7 @@ impl Backend for LocalFsBackend {
             .len();
         let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())
             .context(ErrorKind::CorruptData, "decoding local-fs object metadata")?;
-        if metadata.expiration_policy.is_timeout()
-            && metadata
-                .time_expires
-                .is_some_and(|deadline| deadline < SystemTime::now())
-        {
+        if metadata.is_expired(SystemTime::now()) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -241,11 +237,10 @@ impl Backend for LocalFsBackend {
         let Some(current_expiry) = metadata.time_expires else {
             return Ok(false);
         };
-        if metadata.expiration_policy.is_manual() || current_expiry < SystemTime::now() {
-            return Ok(false);
-        }
-        if current_expiry >= expire_at {
-            return Ok(true);
+        if current_expiry < SystemTime::now() {
+            return Ok(false); // already expired
+        } else if current_expiry >= expire_at {
+            return Ok(true); // already satisfied
         }
         metadata.time_expires = Some(expire_at);
 

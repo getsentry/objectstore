@@ -295,6 +295,13 @@ pub struct Tombstone {
     pub time_expires: Option<SystemTime>,
 }
 
+impl Tombstone {
+    /// Returns whether the tombstone has expired at the given time.
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        self.time_expires.is_some_and(|deadline| deadline < now)
+    }
+}
+
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
 pub enum TieredGet {
     /// A real object was found.

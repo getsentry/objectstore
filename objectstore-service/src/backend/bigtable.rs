@@ -800,14 +800,6 @@ impl RowData {
         })
     }
 
-    /// Returns the expiration policy for this row, regardless of variant.
-    fn expiration_policy(&self) -> ExpirationPolicy {
-        match self {
-            RowData::Object { metadata, .. } => metadata.expiration_policy,
-            RowData::Tombstone { meta, .. } => meta.expiration_policy,
-        }
-    }
-
     /// Returns the resolved expiration timestamp for this row, regardless of variant.
     fn time_expires(&self) -> Option<SystemTime> {
         match self {
@@ -820,7 +812,7 @@ impl RowData {
     ///
     /// Only applies to rows with an expiration policy set.
     fn expires_before(&self, time: SystemTime) -> bool {
-        self.expiration_policy().is_timeout() && self.time_expires().is_some_and(|ts| ts < time)
+        self.time_expires().is_some_and(|ts| ts < time)
     }
 }
 
@@ -1238,20 +1230,20 @@ impl HighVolumeBackend for BigTableBackend {
                     },
                     None,
                 ) => {
-                    let Some(observed_expiry) = metadata.time_expires else {
+                    let Some(old_expiry) = metadata.time_expires else {
                         return Ok(false);
                     };
-                    if metadata.expiration_policy.is_manual() || observed_expiry < now {
-                        return Ok(false);
-                    }
-                    if observed_expiry >= expire_at {
-                        return Ok(true);
+
+                    if old_expiry < now {
+                        return Ok(false); // already expired
+                    } else if old_expiry >= expire_at {
+                        return Ok(true); // already satisfied
                     }
 
                     // Observing a live cell here is not atomic with wall-clock
                     // expiry or Bigtable GC. The conditional write may still lose
                     // to either and then returns false.
-                    let predicate = inline_expiry_predicate(observed_expiry)?;
+                    let predicate = inline_expiry_predicate(old_expiry)?;
                     metadata.time_expires = Some(expire_at);
                     let (mutations, _) = object_mutations(&path, metadata, payload)?;
                     (predicate, mutations.into())
@@ -1265,20 +1257,17 @@ impl HighVolumeBackend for BigTableBackend {
                     Some(expected),
                 ) => {
                     let target = parse_redirect_target(&target, id)?;
-                    let Some(observed_expiry) = time_expires else {
+                    let Some(old_expiry) = time_expires else {
                         return Ok(false);
                     };
-                    if target != *expected
-                        || meta.expiration_policy.is_manual()
-                        || observed_expiry < now
-                    {
-                        return Ok(false);
-                    }
-                    if observed_expiry >= expire_at {
-                        return Ok(true);
+
+                    if target != *expected || old_expiry < now {
+                        return Ok(false); // wrong target or already expired
+                    } else if old_expiry >= expire_at {
+                        return Ok(true); // already satisfied
                     }
 
-                    let predicate = redirect_expiry_predicate(expected, id, observed_expiry)?;
+                    let predicate = redirect_expiry_predicate(expected, id, old_expiry)?;
                     let tombstone = Tombstone {
                         target,
                         expiration_policy: meta.expiration_policy,

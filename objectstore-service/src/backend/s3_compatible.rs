@@ -245,9 +245,7 @@ where
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout()
-            && metadata.time_expires.is_some_and(|ts| ts < access_time)
-        {
+        if metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             response.drain_body().await;
             return Ok(None);
@@ -395,13 +393,13 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             response.drain_body().await;
             return Ok(false);
         };
+
         if metadata.expiration_policy.is_manual() || current_expiry < SystemTime::now() {
             response.drain_body().await;
-            return Ok(false);
-        }
-        if current_expiry >= expire_at {
+            return Ok(false); // already expired
+        } else if current_expiry >= expire_at {
             response.drain_body().await;
-            return Ok(true);
+            return Ok(true); // already satisfied
         }
 
         let revision = response
