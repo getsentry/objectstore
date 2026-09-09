@@ -159,17 +159,6 @@ fn new_long_term_revision(id: &ObjectId) -> ObjectId {
     }
 }
 
-fn effective_expiry(
-    redirect_expiry: Option<SystemTime>,
-    blob_expiry: Option<SystemTime>,
-) -> Option<SystemTime> {
-    match (redirect_expiry, blob_expiry) {
-        (Some(redirect), Some(blob)) => Some(redirect.min(blob)),
-        (Some(expiry), None) | (None, Some(expiry)) => Some(expiry),
-        (None, None) => None,
-    }
-}
-
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
@@ -376,9 +365,6 @@ impl TieredStorage {
         let tombstone = Tombstone {
             target: new.clone(),
             expiration_policy: metadata.expiration_policy,
-            // Copy the already-resolved deadline so the HV redirect and LT
-            // blob do not drift merely because their writes happen at
-            // different times. Existing mismatches are left as-is.
             time_expires: metadata.time_expires,
         };
         let written = self
@@ -469,14 +455,7 @@ impl Backend for TieredStorage {
                     .long_term
                     .get_object(&tombstone.target, range)
                     .await?
-                    .map(|(mut metadata, range, stream)| {
-                        // The redirect can expire before a successfully renewed
-                        // blob. Reporting only LT's later deadline would suppress
-                        // a retry after LT success followed by HV failure.
-                        metadata.time_expires =
-                            effective_expiry(tombstone.time_expires, metadata.time_expires);
-                        (metadata, range, stream)
-                    }),
+                    .map(|(meta, range, stream)| (align_expiry(meta, &tombstone), range, stream)),
                 BackendChoice::LongTerm,
             ),
         };
@@ -515,13 +494,7 @@ impl Backend for TieredStorage {
                     .long_term
                     .get_metadata(&tombstone.target)
                     .await?
-                    .map(|mut metadata| {
-                        // See the matching GET path: the earlier deadline is
-                        // the lifetime clients can actually rely on.
-                        metadata.time_expires =
-                            effective_expiry(tombstone.time_expires, metadata.time_expires);
-                        metadata
-                    }),
+                    .map(|metadata| align_expiry(metadata, &tombstone)),
                 BackendChoice::LongTerm,
             ),
         };
@@ -555,6 +528,9 @@ impl Backend for TieredStorage {
                     return Ok(false);
                 }
 
+                // NOTE: If this fails, LT may remain extended while the redirect
+                // becomes unreachable earlier. Rolling LT back could interfere
+                // with another renewal that succeeded concurrently.
                 let extended = self
                     .inner
                     .high_volume
@@ -564,9 +540,7 @@ impl Backend for TieredStorage {
                         TieredUpdate::SetExpiry(expire_at),
                     )
                     .await?;
-                // If this fails, LT may remain extended while the redirect
-                // becomes unreachable earlier. Rolling LT back could interfere
-                // with another renewal that succeeded concurrently.
+
                 Ok(extended)
             }
         }
@@ -640,6 +614,29 @@ impl std::fmt::Display for BackendChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Returns the lower expiry between the redirect and blob, if any.
+///
+/// This is used to ensure correct expiry if they ever drift.
+fn effective_expiry(
+    redirect_expiry: Option<SystemTime>,
+    blob_expiry: Option<SystemTime>,
+) -> Option<SystemTime> {
+    match (redirect_expiry, blob_expiry) {
+        (Some(redirect), Some(blob)) => Some(redirect.min(blob)),
+        (Some(expiry), None) | (None, Some(expiry)) => Some(expiry),
+        (None, None) => None,
+    }
+}
+
+/// Aligns the expiry of the metadata with the expiry of the tombstone.
+///
+/// Keeps the lower expiry between the metadata and the tombstone so that the client sees the most
+/// conservative expiry and automatic expiry bumps still occur.
+fn align_expiry(mut metadata: Metadata, tombstone: &Tombstone) -> Metadata {
+    metadata.time_expires = effective_expiry(tombstone.time_expires, metadata.time_expires);
+    metadata
 }
 
 /// Wraps a stream to count the total bytes yielded by successful chunks.
@@ -925,8 +922,6 @@ impl MultipartUploadBackend for TieredStorage {
         let tombstone = Tombstone {
             target: physical.clone(),
             expiration_policy: metadata.expiration_policy,
-            // Multipart completion reads LT's resolved deadline and copies it
-            // verbatim into HV, avoiding write-time drift between tiers.
             time_expires: metadata.time_expires,
         };
         let written = self
