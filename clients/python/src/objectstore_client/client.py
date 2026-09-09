@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from io import BytesIO
-from typing import IO, Any, Literal, NamedTuple, cast
+from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
 import sentry_sdk
@@ -42,6 +42,10 @@ PARAM_AUTH = "os_auth"
 
 # Identifies this library to the server, mirroring the Rust client's user agent.
 USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
+
+
+if TYPE_CHECKING:
+    from objectstore_client.many import Operation, OperationResults
 
 
 class GetResponse(NamedTuple):
@@ -328,6 +332,68 @@ class Session:
         if full:
             return f"{self._base_url()}{path}"
         return path
+
+    def _make_batch_url(self) -> str:
+        relative_path = f"/v1/objects:batch/{self._usecase.name}/{self._scope}/"
+        return utils.encode_path(self._base_path.rstrip("/") + relative_path)
+
+    def many(
+        self,
+        operations: Iterable[Operation],
+        *,
+        concurrency: int | None = None,
+    ) -> OperationResults:
+        """
+        Executes multiple operations, batching them where possible.
+
+        Operations that satisfy the batch protocol's per-part size limit of 1MB
+        are grouped into batch requests to reduce network overhead. Inserts with
+        larger sizes (or unknown sizes) are sent as individual requests instead.
+
+        Operations run concurrently and in no particular order, so two
+        operations on the same key race. Sequence them with separate calls.
+
+        Args:
+            operations: The operations to execute, as
+                :class:`~objectstore_client.many.Get`,
+                :class:`~objectstore_client.many.Put`,
+                :class:`~objectstore_client.many.Delete`, and
+                :class:`~objectstore_client.many.Head` instances. Any iterable
+                works.
+            concurrency: The maximum number of requests in flight. Defaults to
+                ``3``. Pass ``1`` to run everything sequentially on the calling
+                thread without a thread pool. A client created with
+                ``connection_kwargs`` that include ``"block": True`` caps the
+                size of its connection pool explicitly so, in that case,
+                ``concurrency`` will be clamped to its ``maxsize``.
+
+        Returns:
+            An :class:`~objectstore_client.many.OperationResults` iterator over
+            the results. Results are yielded as responses come in, in no
+            particular order; each carries the ``index`` of the operation it
+            belongs to, which is the only handle on a keyless
+            :class:`~objectstore_client.many.Put`. This iterator is lazy, and if
+            it's abandoned without being fully consumed then operations that
+            haven't been dispatched are cancelled.
+
+        Raises:
+            ValueError: If ``concurrency`` is less than ``1``.
+
+        Example::
+
+            from objectstore_client import many
+
+            results = session.many([many.Put(b"hello", key="k1"), many.Get("k2")])
+            for result in results:
+                if result.error is not None:
+                    ...  # this operation failed
+                elif isinstance(result, many.GetResult):
+                    ...  # `result.response` is None if the object does not exist
+        """
+        # Imported lazily to avoid a circular import at module load time.
+        from objectstore_client.many import execute_many
+
+        return execute_many(self, operations, concurrency=concurrency)
 
     def _make_multipart_url(
         self,
