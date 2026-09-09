@@ -960,71 +960,96 @@ impl Backend for GcsBackend {
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
+        let mut generation_retry_count = 0usize;
 
-        let Some(gcs_metadata) = self.get_gcs_metadata(&object_url).await? else {
-            return Ok(None);
-        };
+        loop {
+            let Some(gcs_metadata) = self.get_gcs_metadata(&object_url).await? else {
+                return Ok(None);
+            };
 
-        let mut download_url = object_url;
-        download_url
-            .query_pairs_mut()
-            .append_pair("alt", "media")
-            .append_pair("ifGenerationMatch", &gcs_metadata.generation);
+            let mut download_url = object_url.clone();
+            download_url
+                .query_pairs_mut()
+                .append_pair("alt", "media")
+                .append_pair("ifGenerationMatch", &gcs_metadata.generation);
 
-        let payload_response = self
-            .with_retry("get_payload", || async {
-                let mut req = self.request(Method::GET, download_url.clone()).await?;
-                if let Some(r) = range {
-                    req = req.header(header::RANGE, r.to_header_value());
+            let payload_response = self
+                .with_retry("get_payload", || async {
+                    let mut req = self.request(Method::GET, download_url.clone()).await?;
+                    if let Some(r) = range {
+                        req = req.header(header::RANGE, r.to_header_value());
+                    }
+
+                    let resp = req
+                        .send_traced()
+                        .await
+                        .reqwest_context("getting a GCS object payload")?;
+
+                    if resp.status() == StatusCode::PRECONDITION_FAILED {
+                        resp.drain_body().await;
+                        return Ok(None);
+                    }
+
+                    if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                        let raw = resp
+                            .headers()
+                            .get(header::CONTENT_RANGE)
+                            .and_then(|v| v.to_str().ok());
+                        let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
+                        let err = match total {
+                            Some(total) => ErrorKind::RangeNotSatisfiable { total }.into(),
+                            None => Error::new(
+                                ErrorKind::BackendFailure,
+                                "invalid GCS 416 Content-Range",
+                            ),
+                        };
+                        resp.drain_body().await;
+                        return Err(err);
+                    }
+
+                    resp.check_error("getting a GCS object payload")
+                        .await
+                        .map(Some)
+                })
+                .await?;
+
+            let Some(payload_response) = payload_response else {
+                if generation_retry_count >= REQUEST_RETRY_COUNT {
+                    objectstore_metrics::count!("gcs.failures", action = "get_object");
+                    return Err(Error::new(
+                        ErrorKind::BackendFailure,
+                        "GCS object kept changing while being read",
+                    ));
                 }
 
-                let resp = req
-                    .send_traced()
-                    .await
-                    .reqwest_context("getting a GCS object payload")?;
+                generation_retry_count += 1;
+                objectstore_metrics::count!("gcs.retries", action = "get_object");
+                continue;
+            };
 
-                if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                    let raw = resp
+            let content_range = if payload_response.status() == StatusCode::PARTIAL_CONTENT {
+                Some(
+                    payload_response
                         .headers()
                         .get(header::CONTENT_RANGE)
-                        .and_then(|v| v.to_str().ok());
-                    let total = raw.and_then(ContentRange::parse_unsatisfiable_total);
-                    let err = match total {
-                        Some(total) => ErrorKind::RangeNotSatisfiable { total }.into(),
-                        None => {
-                            Error::new(ErrorKind::BackendFailure, "invalid GCS 416 Content-Range")
-                        }
-                    };
-                    resp.drain_body().await;
-                    return Err(err);
-                }
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<ContentRange>().ok())
+                        .ok_or_else(|| {
+                            Error::new(ErrorKind::BackendFailure, "missing GCS 206 Content-Range")
+                        })?,
+                )
+            } else {
+                None
+            };
 
-                resp.check_error("getting a GCS object payload").await
-            })
-            .await?;
+            let stream = payload_response
+                .bytes_stream()
+                .map_err(io::Error::other)
+                .boxed();
 
-        let content_range = if payload_response.status() == StatusCode::PARTIAL_CONTENT {
-            Some(
-                payload_response
-                    .headers()
-                    .get(header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<ContentRange>().ok())
-                    .ok_or_else(|| {
-                        Error::new(ErrorKind::BackendFailure, "missing GCS 206 Content-Range")
-                    })?,
-            )
-        } else {
-            None
-        };
-
-        let stream = payload_response
-            .bytes_stream()
-            .map_err(io::Error::other)
-            .boxed();
-
-        let metadata = gcs_metadata.into_metadata()?;
-        Ok(Some((metadata, content_range, stream)))
+            let metadata = gcs_metadata.into_metadata()?;
+            return Ok(Some((metadata, content_range, stream)));
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1637,7 +1662,11 @@ impl MultipartUploadBackend for GcsBackend {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::num::{NonZeroU32, NonZeroU64};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     use anyhow::Result;
@@ -1668,6 +1697,63 @@ mod tests {
                 .await?
                 .ok_or_else(|| Error::from(ErrorKind::Unsupported).into())
         }
+    }
+
+    fn read_http_request(connection: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut byte = [0];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            connection.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn write_http_response(
+        connection: &mut TcpStream,
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) {
+        write!(
+            connection,
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    }
+
+    fn start_generation_race_server()
+    -> (String, mpsc::Receiver<Vec<String>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let responses = [
+                (
+                    "200 OK",
+                    "application/json",
+                    r#"{"contentType":"text/old","generation":"1","metageneration":"1"}"#,
+                ),
+                ("412 Precondition Failed", "text/plain", "stale generation"),
+                (
+                    "200 OK",
+                    "application/json",
+                    r#"{"contentType":"text/new","generation":"2","metageneration":"1"}"#,
+                ),
+                ("200 OK", "text/plain", "new"),
+            ];
+            let mut requests = Vec::new();
+
+            for (status, content_type, body) in responses {
+                let (mut connection, _) = listener.accept().unwrap();
+                requests.push(read_http_request(&mut connection));
+                write_http_response(&mut connection, status, content_type, body);
+            }
+
+            request_tx.send(requests).unwrap();
+        });
+        (endpoint, request_rx, server)
     }
 
     const RESUMABLE_CHUNK_SIZE: usize = 256 * 1024;
@@ -1756,6 +1842,34 @@ mod tests {
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_object_retries_from_metadata_after_generation_conflict() -> Result<()> {
+        let (endpoint, request_rx, server) = start_generation_race_server();
+        let backend = GcsBackend::new(
+            GcsConfig {
+                endpoint: Some(endpoint),
+                bucket: "bucket".into(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        )
+        .await?;
+
+        let (metadata, _, stream) = backend.get_object(&make_id(), None).await?.unwrap();
+        assert_eq!(metadata.content_type, "text/new");
+        assert_eq!(stream::read_to_vec(stream).await?, b"new");
+
+        let requests = request_rx.recv().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(!requests[0].contains("alt=media"));
+        assert!(requests[1].contains("alt=media&ifGenerationMatch=1"));
+        assert!(!requests[2].contains("alt=media"));
+        assert!(requests[3].contains("alt=media&ifGenerationMatch=2"));
+        server.join().unwrap();
+
+        Ok(())
     }
 
     #[test]
