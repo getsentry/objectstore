@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_get_and_head_return_while_renewals_are_blocked() {
+    async fn batch_renewal() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let context = make_context();
         let metadata = Metadata {

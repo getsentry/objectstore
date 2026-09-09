@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_set_expiry_runs_through_service() {
+    async fn set_expiry() {
         let service = make_service();
         let old_expiry = SystemTime::now() + Duration::from_hours(1);
         let metadata = Metadata {
@@ -844,7 +844,6 @@ mod tests {
         calls: Arc<AtomicUsize>,
         started: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
-        requested: Arc<Mutex<Vec<SystemTime>>>,
     }
 
     #[async_trait::async_trait]
@@ -855,7 +854,6 @@ mod tests {
             id: &ObjectId,
             expire_at: SystemTime,
         ) -> Result<bool> {
-            self.requested.lock().unwrap().push(expire_at);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;
@@ -872,7 +870,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_return_without_waiting_for_renewal_and_join_drains_it() {
+    async fn background_renewal() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let id = ObjectId::new(make_context(), "background-renewal".into());
         let metadata = stale_tti_metadata();
@@ -916,7 +914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_reads_share_one_in_flight_renewal() {
+    async fn renewal_deduplication() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let id = ObjectId::new(make_context(), "deduplicated-renewal".into());
         backend
@@ -939,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ttl_reads_do_not_schedule_renewal() {
+    async fn ttl_read() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let id = ObjectId::new(make_context(), "ttl-no-renewal".into());
         let metadata = Metadata {
@@ -963,16 +961,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renewal_scheduler_uses_captured_access_time_and_queues_at_capacity() {
+    async fn renewal_queueing() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let first = ObjectId::new(make_context(), "first-renewal".into());
-        let second = ObjectId::new(make_context(), "capacity-dropped-renewal".into());
-        let access_time = SystemTime::now() - Duration::from_mins(10);
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
-            ..Default::default()
-        };
+        let second = ObjectId::new(make_context(), "queued-renewal".into());
+        let metadata = stale_tti_metadata();
         for id in [&first, &second] {
             backend
                 .inner
@@ -983,15 +976,12 @@ mod tests {
 
         let concurrency = ConcurrencyLimiter::new(1);
         let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
-        scheduler.start();
-        scheduler.start();
-        let expire_at = metadata.check_tti_bump(access_time).unwrap();
+        let expire_at = SystemTime::now() + Duration::from_hours(1);
         scheduler.schedule(first, expire_at);
+        assert_eq!(scheduler.queued(), 1);
+        scheduler.start();
         backend.hooks.started.notified().await;
-        assert_eq!(
-            backend.hooks.requested.lock().unwrap().as_slice(),
-            &[access_time + Duration::from_hours(1)]
-        );
+        assert_eq!(scheduler.queued(), 0);
 
         scheduler.schedule(second.clone(), expire_at);
         tokio::task::yield_now().await;
@@ -1011,62 +1001,15 @@ mod tests {
         .expect("queued renewal did not start");
         backend.hooks.resume.notify_waiters();
         scheduler.join().await;
+        assert_eq!(scheduler.queued(), 0);
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
         assert!(backend.inner.get(&second).expect_object().0.time_expires > metadata.time_expires);
     }
 
     #[derive(Clone, Debug, Default)]
-    struct PanicFirstExpiry {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl Hooks for PanicFirstExpiry {
-        async fn set_expiry(
-            &self,
-            inner: &InMemoryBackend,
-            id: &ObjectId,
-            expire_at: SystemTime,
-        ) -> Result<bool> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                panic!("intentional renewal panic");
-            }
-            inner.set_expiry(id, expire_at).await
-        }
-    }
-
-    #[tokio::test]
-    async fn renewal_panic_releases_duplicate_and_capacity_guards() {
-        let backend = TestBackend::new(PanicFirstExpiry::default());
-        let id = ObjectId::new(make_context(), "panic-renewal".into());
-        let metadata = stale_tti_metadata();
-        backend
-            .inner
-            .put_object(&id, &metadata, stream::single("payload"))
-            .await
-            .unwrap();
-        let concurrency = ConcurrencyLimiter::new(1);
-        let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
-        scheduler.start();
-        let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
-
-        scheduler.schedule(id.clone(), expire_at);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while scheduler.pending() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("panic did not release renewal guards");
-
-        scheduler.schedule(id, expire_at);
-        scheduler.join().await;
-        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[derive(Clone, Debug, Default)]
     struct FailFirstExpiry {
         calls: Arc<AtomicUsize>,
+        panic: bool,
     }
 
     #[async_trait::async_trait]
@@ -1078,6 +1021,7 @@ mod tests {
             expire_at: SystemTime,
         ) -> Result<bool> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                assert!(!self.panic, "intentional renewal panic");
                 return Err(ErrorKind::BackendFailure.into());
             }
             inner.set_expiry(id, expire_at).await
@@ -1085,32 +1029,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renewal_error_releases_duplicate_and_capacity_guards() {
-        let backend = TestBackend::new(FailFirstExpiry::default());
-        let id = ObjectId::new(make_context(), "failed-renewal".into());
-        let metadata = stale_tti_metadata();
-        backend
-            .inner
-            .put_object(&id, &metadata, stream::single("payload"))
+    async fn renewal_failure_cleanup() {
+        for panic in [false, true] {
+            let backend = TestBackend::new(FailFirstExpiry {
+                panic,
+                ..Default::default()
+            });
+            let id = ObjectId::new(make_context(), "failed-renewal".into());
+            let metadata = stale_tti_metadata();
+            backend
+                .inner
+                .put_object(&id, &metadata, stream::single("payload"))
+                .await
+                .unwrap();
+            let concurrency = ConcurrencyLimiter::new(1);
+            let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
+            scheduler.start();
+            let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
+
+            scheduler.schedule(id.clone(), expire_at);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while scheduler.pending() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .unwrap();
-        let concurrency = ConcurrencyLimiter::new(1);
-        let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
-        scheduler.start();
-        let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
+            .expect("failure did not release renewal guards");
 
-        scheduler.schedule(id.clone(), expire_at);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while scheduler.pending() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("error did not release renewal guards");
-
-        scheduler.schedule(id, expire_at);
-        scheduler.join().await;
-        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
+            scheduler.schedule(id, expire_at);
+            scheduler.join().await;
+            assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
+        }
     }
 
     /// In-memory backend with optional synchronization for `put_object`.

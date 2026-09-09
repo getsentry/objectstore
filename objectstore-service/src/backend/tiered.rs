@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expiry_extension_updates_lt_before_conditional_hv() {
+    async fn set_expiry() {
         let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, false);
         let id = make_id("tiered-expiry-order");
         let target = new_long_term_revision(&id);
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_hv_extension_leaves_lt_extended_and_reports_earlier_expiry() {
+    async fn expiry_hv_conflict() {
         let (storage, hv, lt, events) = tiered_with_expiry_hooks(true, false);
         let id = make_id("tiered-hv-failure");
         let target = new_long_term_revision(&id);
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lt_conflict_stops_before_hv_extension() {
+    async fn expiry_lt_conflict() {
         let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, true);
         let id = make_id("tiered-lt-conflict");
         let target = new_long_term_revision(&id);

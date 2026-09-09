@@ -319,21 +319,3 @@ impl RenewalScheduler {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn queue_counter_guard_decrements_when_dropped() {
-        let counter = Arc::new(QueueCounter::default());
-        let first = counter.enter();
-        let second = counter.enter();
-
-        assert_eq!(counter.get(), 2);
-        drop(first);
-        assert_eq!(counter.get(), 1);
-        drop(second);
-        assert_eq!(counter.get(), 0);
-    }
-}

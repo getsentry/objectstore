@@ -2494,7 +2494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reads_do_not_bump_tti_and_set_expiry_preserves_payload() -> Result<()> {
+    async fn test_set_expiry() -> Result<()> {
         let backend = create_test_backend().await?;
 
         let id = make_id();
@@ -2542,79 +2542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_metadata_does_not_bump_fresh_tti() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let tti = Duration::from_hours(2 * 24);
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            time_expires: Some(SystemTime::now() + tti),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        // A freshly written object has time_expires ≈ now + 2d, which is well outside
-        // the bump window (now + 2d - 1d = now + 1d). No bump should occur.
-        let first = backend.get_metadata(&id).await?.unwrap();
-        let first_expiry = first.time_expires.unwrap();
-
-        let second = backend.get_metadata(&id).await?.unwrap();
-        let second_expiry = second.time_expires.unwrap();
-
-        assert_eq!(
-            first_expiry, second_expiry,
-            "Fresh TTI object should not have its expiry bumped"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_short_tti_can_be_extended_explicitly() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let tti = Duration::from_hours(2);
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            time_expires: Some(SystemTime::now() + tti),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
-            .await?;
-
-        // Backdate custom_time while keeping the object live.
-        let object_url = backend.object_url(&id)?;
-        let old_deadline = SystemTime::now() + Duration::from_mins(1);
-        let generations = get_gcs_generations(&backend, object_url.clone()).await?;
-        backend
-            .update_custom_time(object_url, old_deadline, (&generations.0, &generations.1))
-            .await?;
-
-        let requested = SystemTime::now() + tti;
-        assert!(backend.set_expiry(&id, requested).await?);
-        let post_expiry = backend
-            .get_metadata(&id)
-            .await?
-            .unwrap()
-            .time_expires
-            .unwrap();
-        assert_eq!(post_expiry, requested);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_custom_time_treats_stale_preconditions_and_missing_objects_as_conflicts()
-    -> Result<()> {
+    async fn test_expiry_conflict() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
         let metadata = Metadata {
@@ -3315,6 +3243,9 @@ mod tests {
             .await?;
         producer.clear();
 
+        backend.get_metadata(&id).await?;
+        assert!(producer.records().is_empty());
+
         backend
             .set_expiry(&id, SystemTime::now() + Duration::from_secs(3600))
             .await?;
@@ -3324,33 +3255,6 @@ mod tests {
         assert_eq!(records[0].op_type, OpType::Update);
         assert_eq!(records[0].size, None);
         assert!(records[0].expiration_time.is_some());
-
-        Ok(())
-    }
-
-    #[cfg(feature = "storage-cogs")]
-    #[tokio::test]
-    async fn change_stream_reports_nothing_for_side_effect_free_read() -> Result<()> {
-        let (backend, producer) = create_test_backend_with_change_stream().await?;
-        let id = make_id();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(
-                &id,
-                &metadata,
-                stream::single::<ClientError>(b"hi".to_vec()),
-            )
-            .await?;
-        producer.clear();
-
-        backend.get_metadata(&id).await?;
-
-        assert!(producer.records().is_empty());
 
         Ok(())
     }

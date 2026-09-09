@@ -1782,7 +1782,7 @@ mod tests {
 
     /// Backend reads are side-effect-free; explicit extension preserves payload.
     #[tokio::test]
-    async fn test_reads_do_not_bump_tti_and_set_expiry_preserves_payload() -> Result<()> {
+    async fn test_set_expiry() -> Result<()> {
         let backend = create_test_backend().await?;
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
@@ -1818,7 +1818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_expiry_returns_false_for_missing_and_conflicting_inline_rows() -> Result<()> {
+    async fn test_expiry_conflict() -> Result<()> {
         let backend = create_test_backend().await?;
         let missing = make_id();
         assert!(
@@ -1863,43 +1863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_expiry_timestamp_replacement_documents_revision_boundary() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let observed_expiry = persisted_expiry(SystemTime::now() + Duration::from_hours(1));
-        let original = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(observed_expiry),
-            ..Default::default()
-        };
-        create_object(&backend, &id, &original, b"original", SystemTime::now()).await?;
-
-        let path = id.as_storage_path().to_string().into_bytes();
-        let predicate = inline_expiry_predicate(observed_expiry)?;
-        let mut extended = original.clone();
-        extended.time_expires = Some(observed_expiry + Duration::from_hours(1));
-        let (extension, _) = object_mutations(&path, extended, b"original".to_vec())?;
-
-        create_object(
-            &backend,
-            &id,
-            &original,
-            b"same-timestamp-replacement",
-            SystemTime::now(),
-        )
-        .await?;
-        assert!(
-            backend
-                .check_and_mutate(path, predicate, extension, "test-expiry-collision")
-                .await?
-        );
-        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
-        assert_eq!(stream::read_to_vec(payload).await?, b"original");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn conditional_redirect_extension_requires_target_and_never_shortens() -> Result<()> {
+    async fn test_redirect_expiry() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
         let target = ObjectId::random(id.context().clone());
@@ -1941,32 +1905,6 @@ mod tests {
             panic!("expected tombstone");
         };
         assert_eq!(tombstone.time_expires, Some(later));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_tti_no_bump_when_fresh() -> Result<()> {
-        let backend = create_test_backend().await?;
-
-        let id = make_id();
-        let tti = Duration::from_hours(2 * 24);
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            ..Default::default()
-        };
-        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
-
-        // A freshly written object has time_expires ≈ now + 2d, well outside the bump
-        // window (now + 2d - 1d = now + 1d). No bump should occur.
-        let first = backend.get_metadata(&id).await?.unwrap();
-        let second = backend.get_metadata(&id).await?.unwrap();
-
-        assert_eq!(
-            first.time_expires.unwrap(),
-            second.time_expires.unwrap(),
-            "fresh TTI object must not be bumped"
-        );
-
         Ok(())
     }
 

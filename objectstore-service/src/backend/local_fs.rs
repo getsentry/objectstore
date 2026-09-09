@@ -811,11 +811,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_expiry_rewrites_metadata_and_preserves_payload() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+    async fn set_expiry() {
+        let (_tempdir, backend) = make_backend();
         let id = make_id();
         let old_expiry = SystemTime::now() + Duration::from_hours(1);
         let metadata = Metadata {
@@ -845,16 +842,13 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .all(|path| !path.to_string_lossy().contains("expiry-"))
+                .all(|path| !path.to_string_lossy().ends_with(".draft"))
         );
     }
 
     #[tokio::test]
-    async fn expired_objects_are_filtered_and_cannot_be_extended() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+    async fn expired_object() {
+        let (_tempdir, backend) = make_backend();
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),

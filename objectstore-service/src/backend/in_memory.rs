@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_expiry_extends_ttl_and_tti_without_changing_object() {
+    async fn set_expiry() {
         for policy in [
             ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_expiry_rejects_absent_manual_and_expired_objects() {
+    async fn set_expiry_rejected() {
         let backend = InMemoryBackend::new("test");
         let absent = make_id();
         assert!(
@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conditional_tombstone_extension_requires_exact_target() {
+    async fn redirect_expiry() {
         let backend = InMemoryBackend::new("test");
         let id = make_id();
         let target = make_id();
