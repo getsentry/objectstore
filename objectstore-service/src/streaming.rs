@@ -30,10 +30,11 @@ use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::Backend;
+use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
-use crate::service::{GetResponse, RenewalScheduler};
+use crate::service::GetResponse;
 
 /// An insert operation: stores an object at the given key.
 #[derive(Debug)]
@@ -291,7 +292,7 @@ impl StreamExecutor {
                         Err(e) => return (idx, Err(e)),
                     };
 
-                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, {
+                    let spawn = crate::concurrency::run_metered(op.kind(), permit, {
                         execute_operation(backend, renewals, context, op, access_time)
                     });
                     (idx, spawn.await.map_err(E::from))
@@ -312,8 +313,10 @@ async fn execute_operation(
         Operation::Get(get) => {
             let id = ObjectId::new(context, get.key);
             let response = backend.get_object(&id, None).await?;
-            if let Some((metadata, _, _)) = &response {
-                renewals.schedule(id.clone(), metadata, access_time);
+            if let Some((metadata, _, _)) = &response
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id.clone(), expire_at);
             }
             Ok(OpResponse::Got {
                 key: id.key,
@@ -334,8 +337,10 @@ async fn execute_operation(
         Operation::Head(head) => {
             let id = ObjectId::new(context, head.key);
             let metadata = backend.get_metadata(&id).await?;
-            if let Some(metadata) = &metadata {
-                renewals.schedule(id.clone(), metadata, access_time);
+            if let Some(metadata) = &metadata
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id.clone(), expire_at);
             }
             Ok(OpResponse::Head {
                 key: id.key,
@@ -429,8 +434,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let service =
+        let mut service =
             StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+        service.start();
         let outcomes = tokio::time::timeout(
             Duration::from_secs(1),
             service

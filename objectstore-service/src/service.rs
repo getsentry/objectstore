@@ -5,20 +5,18 @@
 //!
 //! See the [crate-level documentation](crate) for full architecture details.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::task::TaskTracker;
 
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
+use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::{ObjectContext, ObjectId};
@@ -45,113 +43,8 @@ pub type DeleteResponse = ();
 /// [`StorageService::with_concurrency`].
 pub const DEFAULT_CONCURRENCY_LIMIT: u32 = 500;
 
-const EXPIRY_RENEWAL_CONCURRENCY_LIMIT: usize = 32;
-
-#[derive(Debug)]
-struct RenewalGuard {
-    id: ObjectId,
-    in_flight: Arc<Mutex<HashSet<ObjectId>>>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Drop for RenewalGuard {
-    fn drop(&mut self) {
-        self.in_flight.lock().unwrap().remove(&self.id);
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct RenewalScheduler {
-    backend: Arc<dyn Backend>,
-    capacity: Arc<Semaphore>,
-    in_flight: Arc<Mutex<HashSet<ObjectId>>>,
-    tracker: TaskTracker,
-}
-
-impl RenewalScheduler {
-    fn new(backend: Arc<dyn Backend>) -> Self {
-        Self::with_limit(backend, EXPIRY_RENEWAL_CONCURRENCY_LIMIT)
-    }
-
-    fn with_limit(backend: Arc<dyn Backend>, limit: usize) -> Self {
-        Self {
-            backend,
-            capacity: Arc::new(Semaphore::new(limit)),
-            in_flight: Arc::new(Mutex::new(HashSet::new())),
-            tracker: TaskTracker::new(),
-        }
-    }
-
-    pub(crate) fn schedule(&self, id: ObjectId, metadata: &Metadata, access_time: SystemTime) {
-        let Some(expire_at) = metadata.check_tti_bump(access_time) else {
-            return;
-        };
-
-        {
-            let mut in_flight = self.in_flight.lock().unwrap();
-            if !in_flight.insert(id.clone()) {
-                objectstore_metrics::count!(
-                    "service.expiry_renewal",
-                    outcome = "skipped",
-                    reason = "duplicate"
-                );
-                return;
-            }
-        }
-
-        let permit = match Arc::clone(&self.capacity).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                self.in_flight.lock().unwrap().remove(&id);
-                objectstore_metrics::count!("service.expiry_renewal", outcome = "capacity_dropped");
-                return;
-            }
-        };
-
-        let guard = RenewalGuard {
-            id: id.clone(),
-            in_flight: Arc::clone(&self.in_flight),
-            _permit: permit,
-        };
-        let backend = Arc::clone(&self.backend);
-        self.tracker.spawn(async move {
-            // This ID-only operation can run after a replacement write. Its
-            // original read timestamp and requested deadline may therefore
-            // extend a replacement TTL/TTI object. Overload or process exit can
-            // also lose this opportunistic renewal; a later read may retry it.
-            let result = crate::concurrency::spawn_metered("set_expiry", guard, async move {
-                match backend.set_expiry(&id, expire_at).await {
-                    Ok(true) => {
-                        objectstore_metrics::count!(
-                            "service.expiry_renewal",
-                            outcome = "applied_or_already_sufficient"
-                        );
-                        Ok(())
-                    }
-                    Ok(false) => {
-                        objectstore_metrics::count!(
-                            "service.expiry_renewal",
-                            outcome = "skipped",
-                            reason = "backend_conflict"
-                        );
-                        Ok(())
-                    }
-                    Err(error) => {
-                        objectstore_metrics::count!("service.expiry_renewal", outcome = "failed");
-                        Err(error)
-                    }
-                }
-            })
-            .await;
-            let _ = result;
-        });
-    }
-
-    async fn join(&self) {
-        self.tracker.close();
-        self.tracker.wait().await;
-    }
-}
+/// Default number of TTI renewals that may wait for background processing.
+pub const DEFAULT_BACKGROUND_QUEUE_LIMIT: usize = 1_000;
 
 /// Asynchronous storage service wrapping a single [`Backend`].
 ///
@@ -203,10 +96,11 @@ impl StorageService {
     /// `resumable_token_encryption` protects tokens exposed by the resumable upload methods.
     pub fn new(backend: Box<dyn Backend>, resumable_token_encryption: Encryptor) -> Self {
         let inner: Arc<dyn Backend> = Arc::new(CountingBackend::new(backend));
+        let concurrency = ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT);
         Self {
-            renewals: RenewalScheduler::new(Arc::clone(&inner)),
-            inner,
-            concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
+            inner: Arc::clone(&inner),
+            concurrency: concurrency.clone(),
+            renewals: RenewalScheduler::new(inner, concurrency, DEFAULT_BACKGROUND_QUEUE_LIMIT),
             resumable_token_encryption: Arc::new(resumable_token_encryption),
         }
     }
@@ -217,7 +111,14 @@ impl StorageService {
     /// service uses a limiter with [`DEFAULT_CONCURRENCY_LIMIT`] permits
     /// and no queue.
     pub fn with_concurrency(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.renewals.set_concurrency(limiter.clone());
         self.concurrency = limiter;
+        self
+    }
+
+    /// Replaces the default background expiry-renewal queue capacity.
+    pub fn with_background_queue_limit(mut self, limit: usize) -> Self {
+        self.renewals.set_capacity(limit);
         self
     }
 
@@ -258,11 +159,14 @@ impl StorageService {
     ///  - `service.concurrency.queue_limit`: queue size for waiting tasks
     ///  - `service.concurrency.bulk_limit`: concurrent task execution slots for bulk operations
     ///
-    /// Also spawns a task that emits concurrency gauges once per second:
+    /// Also spawns tasks that emit runtime gauges once per second:
     ///  - `service.concurrency.in_use`: currently running tasks
     ///  - `service.concurrency.queued`: currently queued tasks
     ///  - `service.concurrency.bulk_in_use`: currently running bulk tasks
-    pub fn start(&self) {
+    ///  - `service.expiry_renewal.queued`: expiry renewals waiting for the background worker
+    pub fn start(&mut self) {
+        self.renewals.start();
+
         let concurrency = self.concurrency.clone();
         objectstore_metrics::gauge!("service.concurrency.limit" = concurrency.total_permits());
         objectstore_metrics::gauge!("service.concurrency.queue_limit" = concurrency.total_queue());
@@ -276,6 +180,15 @@ impl StorageService {
                     objectstore_metrics::gauge!(
                         "service.concurrency.bulk_in_use" = stats.bulk_in_use
                     );
+                })
+                .await;
+        });
+
+        let renewals = self.renewals.clone();
+        tokio::spawn(async move {
+            renewals
+                .run_emitter(|queued| async move {
+                    objectstore_metrics::gauge!("service.expiry_renewal.queued" = queued);
                 })
                 .await;
         });
@@ -310,7 +223,7 @@ impl StorageService {
         })?;
 
         timer.record();
-        crate::concurrency::spawn_metered(operation, permit, f).await
+        crate::concurrency::run_metered(operation, permit, f).await
     }
 
     /// Creates or overwrites an object.
@@ -348,8 +261,10 @@ impl StorageService {
         let renewals = self.renewals.clone();
         self.spawn("get_metadata", async move {
             let response = inner.get_metadata(&id).await?;
-            if let Some(metadata) = &response {
-                renewals.schedule(id, metadata, access_time);
+            if let Some(ref metadata) = response
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id, expire_at);
             }
             Ok(response)
         })
@@ -363,8 +278,10 @@ impl StorageService {
         let renewals = self.renewals.clone();
         self.spawn("get", async move {
             let response = inner.get_object(&id, range).await?;
-            if let Some((metadata, _, _)) = &response {
-                renewals.schedule(id, metadata, access_time);
+            if let Some((ref metadata, _, _)) = response
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id, expire_at);
             }
             Ok(response)
         })
@@ -964,8 +881,9 @@ mod tests {
             .put_object(&id, &metadata, stream::single("payload"))
             .await
             .unwrap();
-        let service =
+        let mut service =
             StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+        service.start();
 
         let response = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1006,8 +924,9 @@ mod tests {
             .put_object(&id, &stale_tti_metadata(), stream::single("payload"))
             .await
             .unwrap();
-        let service =
+        let mut service =
             StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+        service.start();
 
         service.get_metadata(id.clone()).await.unwrap();
         backend.hooks.started.notified().await;
@@ -1033,8 +952,9 @@ mod tests {
             .put_object(&id, &metadata, stream::single("payload"))
             .await
             .unwrap();
-        let service =
+        let mut service =
             StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+        service.start();
 
         service.get_metadata(id).await.unwrap();
         tokio::task::yield_now().await;
@@ -1043,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renewal_scheduler_uses_captured_access_time_and_drops_at_capacity() {
+    async fn renewal_scheduler_uses_captured_access_time_and_queues_at_capacity() {
         let backend = TestBackend::new(GateOnExpiry::default());
         let first = ObjectId::new(make_context(), "first-renewal".into());
         let second = ObjectId::new(make_context(), "capacity-dropped-renewal".into());
@@ -1061,15 +981,19 @@ mod tests {
                 .unwrap();
         }
 
-        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
-        scheduler.schedule(first, &metadata, access_time);
+        let concurrency = ConcurrencyLimiter::new(1);
+        let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
+        scheduler.start();
+        scheduler.start();
+        let expire_at = metadata.check_tti_bump(access_time).unwrap();
+        scheduler.schedule(first, expire_at);
         backend.hooks.started.notified().await;
         assert_eq!(
             backend.hooks.requested.lock().unwrap().as_slice(),
             &[access_time + Duration::from_hours(1)]
         );
 
-        scheduler.schedule(second.clone(), &metadata, access_time);
+        scheduler.schedule(second.clone(), expire_at);
         tokio::task::yield_now().await;
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1078,7 +1002,17 @@ mod tests {
         );
 
         backend.hooks.resume.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.hooks.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued renewal did not start");
+        backend.hooks.resume.notify_waiters();
         scheduler.join().await;
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
+        assert!(backend.inner.get(&second).expect_object().0.time_expires > metadata.time_expires);
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1111,18 +1045,21 @@ mod tests {
             .put_object(&id, &metadata, stream::single("payload"))
             .await
             .unwrap();
-        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
+        let concurrency = ConcurrencyLimiter::new(1);
+        let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
+        scheduler.start();
+        let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
 
-        scheduler.schedule(id.clone(), &metadata, SystemTime::now());
+        scheduler.schedule(id.clone(), expire_at);
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !scheduler.in_flight.lock().unwrap().is_empty() {
+            while scheduler.pending() != 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("panic did not release renewal guards");
 
-        scheduler.schedule(id, &metadata, SystemTime::now());
+        scheduler.schedule(id, expire_at);
         scheduler.join().await;
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
     }
@@ -1157,18 +1094,21 @@ mod tests {
             .put_object(&id, &metadata, stream::single("payload"))
             .await
             .unwrap();
-        let scheduler = RenewalScheduler::with_limit(Arc::new(backend.clone()), 1);
+        let concurrency = ConcurrencyLimiter::new(1);
+        let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
+        scheduler.start();
+        let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
 
-        scheduler.schedule(id.clone(), &metadata, SystemTime::now());
+        scheduler.schedule(id.clone(), expire_at);
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !scheduler.in_flight.lock().unwrap().is_empty() {
+            while scheduler.pending() != 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("error did not release renewal guards");
 
-        scheduler.schedule(id, &metadata, SystemTime::now());
+        scheduler.schedule(id, expire_at);
         scheduler.join().await;
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
     }

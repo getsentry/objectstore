@@ -223,9 +223,10 @@ collection.
 Backend reads are side-effect-free. After a successful GET or HEAD of a TTI
 object, the service may schedule a best-effort background deadline extension.
 The extension is debounced by `min(tti / 4, 24h)`, deduplicated per object, and
-limited to 32 concurrent tasks without a waiting queue. The read returns the
-metadata it observed and does not wait for the extension. Graceful shutdown
-drains scheduled extensions.
+placed into a bounded queue without making the read wait. A background worker
+drains the queue using the service's bulk concurrency budget. The queue capacity
+defaults to 1,000 and is configurable by the server through
+`service.background_queue`. Graceful shutdown drains all accepted extensions.
 
 Apart from the expiration policy, metadata during object creation must carry a
 `time_expires` field with the correct expiration timestamp. This is ensured

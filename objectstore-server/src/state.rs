@@ -80,8 +80,9 @@ impl Services {
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
             .with_bulk(config.service.bulk_concurrency_pct);
-        let service =
-            StorageService::new(backend, resumable_token_encryption).with_concurrency(concurrency);
+        let mut service = StorageService::new(backend, resumable_token_encryption)
+            .with_concurrency(concurrency)
+            .with_background_queue_limit(config.service.background_queue);
         service.start();
 
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await?);
