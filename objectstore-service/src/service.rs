@@ -472,7 +472,7 @@ impl StorageService {
         let session: SessionToken = self
             .cipher
             .decrypt(token.as_bytes())
-            .ok_or(ErrorKind::UnknownUploadSession)?;
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
         if session.object_id != *expected_id {
             return Err(ErrorKind::UnknownUploadSession.into());
         }
@@ -536,6 +536,7 @@ impl StorageService {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1389,7 +1390,10 @@ mod tests {
         let result = service
             .upload_offset(id, EncryptedSessionToken::new(b"backend token"))
             .await;
-        assert!(result.is_err_and(|error| error.kind() == ErrorKind::UnknownUploadSession));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownUploadSession);
+        assert_eq!(error.to_string(), "unknown upload session");
+        assert!(error.source().is_none());
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());
     }
 }

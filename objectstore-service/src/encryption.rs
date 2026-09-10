@@ -16,6 +16,21 @@ const TAG_LENGTH: usize = 16;
 /// Encrypted envelope format version.
 const FORMAT_VERSION: u8 = 0;
 
+/// Errors produced while decrypting an encrypted value.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CipherError {
+    #[error("encrypted value is malformed")]
+    MalformedEnvelope,
+    #[error("unsupported encrypted value format version {0}")]
+    UnsupportedVersion(u8),
+    #[error("encrypted value has an invalid key ID")]
+    InvalidKeyId,
+    #[error("encrypted value could not be authenticated")]
+    Authentication,
+    #[error("encrypted value could not be deserialized")]
+    Deserialization(#[source] serde_json::Error),
+}
+
 /// Encrypts and decrypts serializable values with AES-256-GCM.
 ///
 /// The active key encrypts new values, while the key ID embedded in an existing envelope selects
@@ -134,40 +149,45 @@ impl Cipher {
     }
 
     /// Decrypts and deserializes an encrypted value.
-    ///
-    /// Returns `None` if the envelope is malformed, cannot be authenticated, or does not contain
-    /// the requested type.
-    pub(crate) fn decrypt<T>(&self, envelope: &[u8]) -> Option<T>
+    pub(crate) fn decrypt<T>(&self, envelope: &[u8]) -> std::result::Result<T, CipherError>
     where
         T: DeserializeOwned,
     {
-        let (&version, rest) = envelope.split_first()?;
+        let (&version, rest) = envelope
+            .split_first()
+            .ok_or(CipherError::MalformedEnvelope)?;
         if version != FORMAT_VERSION {
-            return None;
+            return Err(CipherError::UnsupportedVersion(version));
         }
 
         // Parse the plaintext header and nonce.
         // They remain untrusted until AES-GCM verifies the authentication tag below.
-        let (&key_id_length, rest) = rest.split_first()?;
+        let (&key_id_length, rest) = rest.split_first().ok_or(CipherError::MalformedEnvelope)?;
         let key_id_length = usize::from(key_id_length);
         if key_id_length == 0 {
-            return None;
+            return Err(CipherError::MalformedEnvelope);
         }
-        let (key_id, rest) = rest.split_at_checked(key_id_length)?;
-        let (nonce, ciphertext) = rest.split_at_checked(NONCE_LENGTH)?;
+        let (key_id, rest) = rest
+            .split_at_checked(key_id_length)
+            .ok_or(CipherError::MalformedEnvelope)?;
+        let (nonce, ciphertext) = rest
+            .split_at_checked(NONCE_LENGTH)
+            .ok_or(CipherError::MalformedEnvelope)?;
 
         // Use the plaintext key ID to select a key, without trusting the ID until authentication.
-        let key_id = std::str::from_utf8(key_id).ok()?;
+        let key_id = std::str::from_utf8(key_id).map_err(|_| CipherError::InvalidKeyId)?;
         let key = if key_id == self.active_key_id {
             &self.active_key
         } else {
-            self.decryption_keys.get(key_id)?
+            self.decryption_keys
+                .get(key_id)
+                .ok_or(CipherError::InvalidKeyId)?
         };
         let header_length = 2 + key_id_length;
         let header = &envelope[..header_length];
-        let nonce: [u8; NONCE_LENGTH] = nonce.try_into().ok()?;
+        let nonce: [u8; NONCE_LENGTH] = nonce.try_into().expect("nonce length was checked");
         if ciphertext.len() < TAG_LENGTH {
-            return None;
+            return Err(CipherError::MalformedEnvelope);
         }
 
         // Verify the tag over the ciphertext and original header.
@@ -178,9 +198,9 @@ impl Cipher {
                 Aad::from(header),
                 &mut ciphertext,
             )
-            .ok()?;
+            .map_err(|_| CipherError::Authentication)?;
 
-        serde_json::from_slice(plaintext).ok()
+        serde_json::from_slice(plaintext).map_err(CipherError::Deserialization)
     }
 }
 
@@ -239,10 +259,10 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(first[0], FORMAT_VERSION);
-        assert_eq!(cipher.decrypt::<Vec<String>>(&first), Some(value));
+        assert_eq!(cipher.decrypt::<Vec<String>>(&first).unwrap(), value);
 
         let number = cipher.encrypt(&42_u64).unwrap();
-        assert_eq!(cipher.decrypt::<u64>(&number), Some(42));
+        assert_eq!(cipher.decrypt::<u64>(&number).unwrap(), 42);
     }
 
     #[test]
@@ -252,13 +272,22 @@ mod tests {
 
         let mut tampered = token.clone();
         *tampered.last_mut().unwrap() ^= 1;
-        assert_eq!(cipher.decrypt::<String>(&tampered), None);
+        assert!(matches!(
+            cipher.decrypt::<String>(&tampered),
+            Err(CipherError::Authentication)
+        ));
 
         let mut unsupported_version = token.clone();
         unsupported_version[0] = FORMAT_VERSION + 1;
-        assert_eq!(cipher.decrypt::<String>(&unsupported_version), None);
-        assert_eq!(cipher.decrypt::<String>(b"plaintext"), None);
-        assert_eq!(cipher.decrypt::<u64>(&token), None);
+        assert!(matches!(
+            cipher.decrypt::<String>(&unsupported_version),
+            Err(CipherError::UnsupportedVersion(_))
+        ));
+        assert!(cipher.decrypt::<String>(b"plaintext").is_err());
+        assert!(matches!(
+            cipher.decrypt::<u64>(&token),
+            Err(CipherError::Deserialization(_))
+        ));
     }
 
     #[test]
@@ -267,15 +296,15 @@ mod tests {
         let old_value = old.encrypt("old value").unwrap();
 
         let rotated = cipher("v2", &[("v1", 1), ("v2", 2)]);
-        assert_eq!(
-            rotated.decrypt::<String>(&old_value).as_deref(),
-            Some("old value")
-        );
+        assert_eq!(rotated.decrypt::<String>(&old_value).unwrap(), "old value");
         let new_value = rotated.encrypt("new value").unwrap();
         assert_eq!(new_value[2..4], *b"v2");
 
         let removed = cipher("v2", &[("v2", 2)]);
-        assert_eq!(removed.decrypt::<String>(&old_value), None);
+        assert!(matches!(
+            removed.decrypt::<String>(&old_value),
+            Err(CipherError::InvalidKeyId)
+        ));
     }
 
     #[test]
