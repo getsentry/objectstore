@@ -289,8 +289,8 @@ pub trait HighVolumeBackend: Backend {
     /// of an absent row.
     ///
     /// Returns `true` when the update was applied or its requested state was
-    /// already satisfied. Returns `false` for an absent, expired, manual-policy,
-    /// or conflicting entry.
+    /// already satisfied. Returns `false` for an absent, expired, or conflicting
+    /// entry.
     async fn compare_and_update(
         &self,
         id: &ObjectId,

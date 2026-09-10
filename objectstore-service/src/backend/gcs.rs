@@ -751,7 +751,7 @@ impl GcsBackend {
                 .reqwest_context("updating GCS custom time")?;
 
             // A concurrent metadata writer won the CAS race. Leave its update
-            // intact; automatic renewal can be retried by a later read.
+            // intact.
             if matches!(
                 response.status(),
                 StatusCode::NOT_FOUND | StatusCode::PRECONDITION_FAILED

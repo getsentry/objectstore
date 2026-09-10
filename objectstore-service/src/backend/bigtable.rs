@@ -491,10 +491,6 @@ fn exact_expiry_filter(expire_at: SystemTime) -> Result<v2::RowFilter> {
 }
 
 /// Matches an inline row whose metadata cell has the observed expiry timestamp.
-///
-/// Millisecond expiry timestamps are not unique revisions. A replacement inline
-/// object with the same row kind and expiry can therefore still be overwritten
-/// by this rewrite. A dedicated persisted revision token is deferred.
 fn inline_expiry_predicate(observed_expiry: SystemTime) -> Result<MutatePredicate> {
     let inline_at_expiry = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
