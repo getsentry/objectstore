@@ -645,17 +645,16 @@ pub struct Service {
     /// `1000`
     pub background_queue: usize,
 
-    /// Persistent encryption keys for resumable-upload session tokens returned to clients.
+    /// Persistent symmetric encryption keys.
     ///
-    /// This is used to instantiate [`Cipher`] which can encrypt/decrypt arbitrary payloads for
-    /// data that should remain confidential when crossing the service boundary.
-    /// Currently, this is only used for session tokens of the Resumable Uploads API.
+    /// Currently, the keys are used for encryption and decryption of session tokens
+    /// of the Resumable Uploads API.
+    /// If keys are not explicitly configured, session token encryption will use an ephemeral key
+    /// generated at startup, which means that resumable upload sessions won't work in a
+    /// multi-instance deployment or survive a restart.
+    /// Configure a persistent keyring in production.
     ///
-    /// When this config is absent, Objectstore generates a fresh in-memory key at startup.
-    /// This might not work for requests that need to survive a deployment or multi-instance
-    /// deployments, so make sure to configure a persistent keyring.
-    ///
-    /// Keys must contain exactly 32 raw bytes. This is validated at startup.
+    /// Keys must contain exactly 32 raw bytes.
     ///
     /// ```yaml
     /// service:
@@ -677,7 +676,7 @@ impl Service {
         let keys = config
             .keys
             .iter()
-            .map(|(key_id, key)| (key_id.clone(), key.to_vec()))
+            .map(|(key_id, key)| (key_id.clone(), key.0.to_vec()))
             .collect();
 
         Cipher::new(config.active_key_id.clone(), keys).map(Some)
@@ -694,7 +693,47 @@ pub struct EncryptionConfig {
     /// File-backed secrets should use `${file:PATH}` so they are loaded during configuration
     /// deserialization.
     #[serde(default)]
-    pub keys: BTreeMap<String, Bytes>,
+    pub keys: BTreeMap<String, EncryptionKey>,
+}
+
+/// A raw 256-bit encryption key.
+#[derive(Clone)]
+pub struct EncryptionKey([u8; 32]);
+
+impl From<[u8; 32]> for EncryptionKey {
+    fn from(key: [u8; 32]) -> Self {
+        Self(key)
+    }
+}
+
+impl fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EncryptionKey")
+    }
+}
+
+impl<'de> Deserialize<'de> for EncryptionKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Bytes::deserialize(deserializer)?;
+        let length = bytes.len();
+        let key = bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom(format!("expected 32 bytes, got {length}")))?;
+        Ok(Self(key))
+    }
+}
+
+impl Serialize for EncryptionKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
 }
 
 impl fmt::Debug for EncryptionConfig {
@@ -952,8 +991,6 @@ mod tests {
     fn encryption_rejects_invalid_configuration() {
         let mut valid = tempfile::NamedTempFile::new().unwrap();
         valid.write_all(&[7; 32]).unwrap();
-        let mut short = tempfile::NamedTempFile::new().unwrap();
-        short.write_all(&[7; 31]).unwrap();
         for yaml in [
             "service:\n  encryption:\n    active_key_id: v1\n".to_owned(),
             format!(
@@ -964,10 +1001,6 @@ mod tests {
                 "service:\n  encryption:\n    active_key_id: bad_key\n    keys:\n      'bad key': ${{file:{}}}\n",
                 valid.path().display(),
             ),
-            format!(
-                "service:\n  encryption:\n    active_key_id: v1\n    keys:\n      v1: ${{file:{}}}\n",
-                short.path().display(),
-            ),
         ] {
             let mut tempfile = tempfile::NamedTempFile::new().unwrap();
             tempfile.write_all(yaml.as_bytes()).unwrap();
@@ -977,6 +1010,24 @@ mod tests {
                 Ok(())
             });
         }
+    }
+
+    #[test]
+    fn encryption_rejects_wrong_key_length() {
+        let mut short = tempfile::NamedTempFile::new().unwrap();
+        short.write_all(&[7; 31]).unwrap();
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            config,
+            "service:\n  encryption:\n    active_key_id: v1\n    keys:\n      v1: ${{file:{}}}\n",
+            short.path().display(),
+        )
+        .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            assert!(Config::load(Some(config.path())).is_err());
+            Ok(())
+        });
     }
 
     #[test]

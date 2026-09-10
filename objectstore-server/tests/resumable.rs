@@ -41,7 +41,7 @@ async fn test_server_with_protected_session() -> Result<TestServer> {
         service: Service {
             encryption: Some(EncryptionConfig {
                 active_key_id: "test".into(),
-                keys: BTreeMap::from([("test".into(), vec![7; 32].into())]),
+                keys: BTreeMap::from([("test".into(), [7; 32].into())]),
             }),
             ..Default::default()
         },
