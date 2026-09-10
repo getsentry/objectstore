@@ -118,7 +118,7 @@ impl ResumableUpload {
         }
     }
 
-    /// Builds a request to write `body` starting at `offset`.
+    /// Builds a request to write `chunk` starting at `offset`.
     ///
     /// `put_chunk` doesn't perform any automatic compression of the payload, so the caller is
     /// responsible for applying compression to the entire payload beforehand and passing chunks
@@ -126,11 +126,11 @@ impl ResumableUpload {
     ///
     /// The returned progress contains the authoritative server offset, which should be used for
     /// subsequent requests.
-    pub fn put_chunk(&self, offset: u64, body: impl Into<Bytes>) -> PutChunkBuilder {
+    pub fn put_chunk(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
-            body: body.into(),
+            chunk: chunk.into(),
         }
     }
 
@@ -270,7 +270,7 @@ impl UploadProgressBuilder {
 pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
-    body: Bytes,
+    chunk: Bytes,
 }
 
 impl fmt::Debug for PutChunkBuilder {
@@ -278,7 +278,7 @@ impl fmt::Debug for PutChunkBuilder {
         f.debug_struct("PutChunkBuilder")
             .field("upload", &self.upload)
             .field("offset", &self.offset)
-            .field("content_length", &self.body.len())
+            .field("content_length", &self.chunk.len())
             .finish()
     }
 }
@@ -286,7 +286,7 @@ impl fmt::Debug for PutChunkBuilder {
 impl PutChunkBuilder {
     /// Writes this chunk and returns the server's authoritative progress.
     pub async fn send(self) -> crate::Result<UploadProgress> {
-        let content_length = self.body.len();
+        let content_length = self.chunk.len();
         let response = self
             .upload
             .session
@@ -297,7 +297,7 @@ impl PutChunkBuilder {
             )?
             .header(HEADER_UPLOAD_OFFSET, self.offset.to_string())
             .header(reqwest::header::CONTENT_LENGTH, content_length)
-            .body(self.body)
+            .body(self.chunk)
             .send()
             .await?;
         parse_progress_response(response).await
