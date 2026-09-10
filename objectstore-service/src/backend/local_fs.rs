@@ -2,7 +2,7 @@
 //!
 //! Mutations are serialized within a backend instance and publish complete object files by
 //! atomically renaming same-directory drafts. Readers therefore observe either the previous or
-//! next complete object file.
+//! next complete object file. Unpublished drafts are removed automatically when dropped.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -119,7 +119,7 @@ impl Backend for LocalFsBackend {
 
         let mut draft = Draft::create(&path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
-        let result = tokio::io::copy(&mut reader, draft.writer())
+        tokio::io::copy(&mut reader, draft.writer())
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::from(ce),
@@ -128,18 +128,9 @@ impl Backend for LocalFsBackend {
                     "writing local-fs object payload",
                     e,
                 ),
-            });
+            })?;
 
-        match result {
-            Ok(_) => {
-                draft.publish().await?;
-                Ok(())
-            }
-            Err(error) => {
-                draft.discard().await;
-                Err(error)
-            }
-        }
+        draft.publish().await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -201,21 +192,13 @@ impl Backend for LocalFsBackend {
         metadata.time_expires = Some(expire_at);
 
         let mut draft = Draft::create(&path, &metadata).await?;
-        let result = tokio::io::copy(&mut reader, draft.writer()).await.context(
+        tokio::io::copy(&mut reader, draft.writer()).await.context(
             ErrorKind::BackendFailure,
             "copying local-fs object payload for expiry extension",
-        );
+        )?;
 
-        match result {
-            Ok(_) => {
-                draft.publish().await?;
-                Ok(true)
-            }
-            Err(error) => {
-                draft.discard().await;
-                Err(error)
-            }
-        }
+        draft.publish().await?;
+        Ok(true)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -522,30 +505,21 @@ impl MultipartUploadBackend for LocalFsBackend {
         let path = self.path(id);
         Self::create_dir_all(&path).await?;
         let mut draft = Draft::create(&path, &metadata).await?;
-        let assembly: Result<()> = async {
-            for completed in &parts {
-                let part_path = dir.join(format!("{}.part", completed.part_number));
-                let file = tokio::fs::File::open(&part_path)
-                    .await
-                    .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
-                let mut reader = BufReader::new(file);
-                let mut header_line = String::new();
-                reader
-                    .read_line(&mut header_line)
-                    .await
-                    .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-                tokio::io::copy(&mut reader, draft.writer()).await.context(
-                    ErrorKind::BackendFailure,
-                    "assembling local-fs object payload",
-                )?;
-            }
-            Ok(())
-        }
-        .await;
-
-        if let Err(error) = assembly {
-            draft.discard().await;
-            return Err(error);
+        for completed in &parts {
+            let part_path = dir.join(format!("{}.part", completed.part_number));
+            let file = tokio::fs::File::open(&part_path)
+                .await
+                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
+            let mut reader = BufReader::new(file);
+            let mut header_line = String::new();
+            reader
+                .read_line(&mut header_line)
+                .await
+                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
+            tokio::io::copy(&mut reader, draft.writer()).await.context(
+                ErrorKind::BackendFailure,
+                "assembling local-fs object payload",
+            )?;
         }
 
         draft.publish().await?;
@@ -622,31 +596,30 @@ impl ObjectFile {
 }
 
 struct Draft {
-    path: PathBuf,
-    target: PathBuf,
     writer: BufWriter<tokio::fs::File>,
+    path: tempfile::TempPath,
+    target: PathBuf,
 }
 
 impl Draft {
     async fn create(target: &Path, metadata: &Metadata) -> Result<Self> {
-        let path = target.with_extension(format!("{}.draft", uuid::Uuid::now_v7()));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
+        let parent = target.parent().unwrap().to_path_buf();
+        let tempfile = tokio::task::spawn_blocking(move || create_tempfile(&parent))
             .await
+            .context(
+                ErrorKind::Internal,
+                "waiting for local-fs object draft creation",
+            )?
             .context(ErrorKind::BackendFailure, "creating local-fs object draft")?;
+        let (file, path) = tempfile.into_parts();
 
         let mut draft = Self {
+            writer: BufWriter::new(tokio::fs::File::from_std(file)),
             path,
             target: target.to_path_buf(),
-            writer: BufWriter::new(file),
         };
 
-        if let Err(error) = draft.write_preamble(metadata).await {
-            draft.discard().await;
-            return Err(error);
-        }
+        draft.write_preamble(metadata).await?;
 
         Ok(draft)
     }
@@ -673,40 +646,45 @@ impl Draft {
 
     async fn publish(self) -> Result<()> {
         let Self {
+            mut writer,
             path,
             target,
-            mut writer,
         } = self;
 
-        let result: Result<()> = async {
-            writer
-                .flush()
-                .await
-                .context(ErrorKind::BackendFailure, "flushing local-fs object draft")?;
-            let file = writer.into_inner();
-            file.sync_data()
-                .await
-                .context(ErrorKind::BackendFailure, "syncing local-fs object draft")?;
-            drop(file);
-            tokio::fs::rename(&path, target).await.context(
+        writer
+            .flush()
+            .await
+            .context(ErrorKind::BackendFailure, "flushing local-fs object draft")?;
+        let file = writer.into_inner();
+        file.sync_data()
+            .await
+            .context(ErrorKind::BackendFailure, "syncing local-fs object draft")?;
+        drop(file);
+        tokio::task::spawn_blocking(move || path.persist(target))
+            .await
+            .context(
+                ErrorKind::Internal,
+                "waiting to publish local-fs object draft",
+            )?
+            .context(
                 ErrorKind::BackendFailure,
                 "publishing local-fs object draft",
-            )?;
-            Ok(())
-        }
-        .await;
+            )
+    }
+}
 
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(path).await;
-        }
-        result
+fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.suffix(".draft");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
 
-    async fn discard(self) {
-        let Self { path, writer, .. } = self;
-        drop(writer);
-        let _ = tokio::fs::remove_file(path).await;
-    }
+    builder.tempfile_in(parent)
 }
 
 #[cfg(test)]
@@ -798,16 +776,46 @@ mod tests {
         assert_eq!(metadata.content_type, original_metadata.content_type);
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
 
-        let object_path = backend.path(&id);
-        let entries = std::fs::read_dir(object_path.parent().unwrap())
-            .unwrap()
-            .flat_map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Vec<_>>();
-        assert!(
-            entries
-                .iter()
-                .all(|path| !path.to_string_lossy().ends_with(".draft"))
-        );
+        assert_eq!(draft_count(&backend, &id), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_put_removes_draft() {
+        let (_tempdir, backend) = make_backend();
+        let backend = Arc::new(backend);
+        let id = make_id();
+        backend
+            .put_object(&id, &Metadata::default(), stream::single("original"))
+            .await
+            .unwrap();
+
+        let (writing, writing_started) = tokio::sync::oneshot::channel();
+        let replacement = futures_stream::once(async move {
+            let _ = writing.send(());
+            Ok(Bytes::from_static(b"partial"))
+        })
+        .chain(futures_stream::pending())
+        .boxed();
+
+        let task = tokio::spawn({
+            let backend = Arc::clone(&backend);
+            let id = id.clone();
+            async move {
+                backend
+                    .put_object(&id, &Metadata::default(), replacement)
+                    .await
+            }
+        });
+
+        writing_started.await.unwrap();
+        assert_eq!(draft_count(&backend, &id), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let (_, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
+
+        assert_eq!(draft_count(&backend, &id), 0);
     }
 
     #[tokio::test]
@@ -834,16 +842,7 @@ mod tests {
         assert_eq!(updated.time_expires, Some(requested));
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
 
-        let object_path = backend.path(&id);
-        let entries = std::fs::read_dir(object_path.parent().unwrap())
-            .unwrap()
-            .flat_map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Vec<_>>();
-        assert!(
-            entries
-                .iter()
-                .all(|path| !path.to_string_lossy().ends_with(".draft"))
-        );
+        assert_eq!(draft_count(&backend, &id), 0);
     }
 
     #[tokio::test]
@@ -932,6 +931,15 @@ mod tests {
             path: tempdir.path().to_path_buf(),
         });
         (tempdir, backend)
+    }
+
+    fn draft_count(backend: &LocalFsBackend, id: &ObjectId) -> usize {
+        let object_path = backend.path(id);
+        std::fs::read_dir(object_path.parent().unwrap())
+            .unwrap()
+            .flat_map(|entry| entry.map(|entry| entry.path()))
+            .filter(|path| path.to_string_lossy().ends_with(".draft"))
+            .count()
     }
 
     #[tokio::test]

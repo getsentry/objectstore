@@ -32,6 +32,7 @@ ring = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["io", "rt"] }
@@ -49,6 +50,5 @@ storage-cogs = ["dep:objectstore-inventory-tracker"]
 [dev-dependencies]
 futures = { workspace = true }
 objectstore-inventory-tracker = { workspace = true, features = ["test-utils"] }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 zstd = { workspace = true }
