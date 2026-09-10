@@ -36,6 +36,7 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
@@ -45,7 +46,8 @@ use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredWrite, Tombstone,
+    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
@@ -102,6 +104,16 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
     ) -> Result<MetadataResponse> {
         inner.get_metadata(id).await
+    }
+
+    /// Intercepts [`Backend::set_expiry`]. Default delegates to `inner`.
+    async fn set_expiry(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        expire_at: SystemTime,
+    ) -> Result<bool> {
+        inner.set_expiry(id, expire_at).await
     }
 
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
@@ -168,6 +180,17 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         write: TieredWrite,
     ) -> Result<bool> {
         inner.compare_and_write(id, current, write).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::compare_and_update`]. Default delegates to `inner`.
+    async fn compare_and_update(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
+    ) -> Result<bool> {
+        inner.compare_and_update(id, current, update).await
     }
 
     // --- MultipartUploadBackend methods ---
@@ -357,6 +380,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.get_metadata(&self.inner, id).await
     }
 
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        self.hooks.set_expiry(&self.inner, id, expire_at).await
+    }
+
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         self.hooks.delete_object(&self.inner, id).await
     }
@@ -435,6 +462,17 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
     ) -> Result<bool> {
         self.hooks
             .compare_and_write(&self.inner, id, current, write)
+            .await
+    }
+
+    async fn compare_and_update(
+        &self,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
+    ) -> Result<bool> {
+        self.hooks
+            .compare_and_update(&self.inner, id, current, update)
             .await
     }
 }

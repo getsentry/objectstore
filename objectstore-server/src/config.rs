@@ -577,6 +577,7 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_QUEUE`
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
+/// - `OS__SERVICE__BACKGROUND_QUEUE`
 /// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
 /// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEYS`
 #[derive(Debug, Deserialize, Serialize)]
@@ -634,7 +635,17 @@ pub struct Service {
     /// `60`
     pub bulk_concurrency_pct: u32,
 
-    /// Persistent encryption keys.
+    /// Maximum number of deduplicated TTI renewals waiting for background processing.
+    ///
+    /// Scheduling never waits for space. A renewal is dropped when this queue is full.
+    /// Values below one are clamped to one.
+    ///
+    /// # Default
+    ///
+    /// `1000`
+    pub background_queue: usize,
+
+    /// Persistent encryption keys for resumable-upload session tokens returned to clients.
     ///
     /// This is used to instantiate [`Cipher`] which can encrypt/decrypt arbitrary payloads for
     /// data that should remain confidential when crossing the service boundary.
@@ -702,6 +713,7 @@ impl Default for Service {
             concurrency_queue: 0,
             concurrency_timeout: Duration::from_secs(1),
             bulk_concurrency_pct: 60,
+            background_queue: objectstore_service::service::DEFAULT_BACKGROUND_QUEUE_LIMIT,
             encryption: None,
         }
     }
@@ -860,6 +872,7 @@ mod tests {
             jail.set_env("OS__SENTRY__SERVER_NAME", "objectstore-deadbeef");
             jail.set_env("OS__SENTRY__TRACES_SAMPLE_RATE", "0.5");
             jail.set_env("OS__SENTRY__ATTACH_STACKTRACE", "true");
+            jail.set_env("OS__SERVICE__BACKGROUND_QUEUE", "2048");
 
             let config = Config::load(None).unwrap();
 
@@ -882,6 +895,7 @@ mod tests {
             assert_eq!(config.sentry.sample_rate, 0.5);
             assert_eq!(config.sentry.traces_sample_rate, 0.5);
             assert!(config.sentry.attach_stacktrace);
+            assert_eq!(config.service.background_queue, 2048);
 
             Ok(())
         });
@@ -904,6 +918,8 @@ mod tests {
                 sample_rate: 0.5
                 traces_sample_rate: 0.5
                 attach_stacktrace: true
+            service:
+                background_queue: 2048
             "#,
             )
             .unwrap();
@@ -926,6 +942,7 @@ mod tests {
             assert_eq!(config.sentry.sample_rate, 0.5);
             assert_eq!(config.sentry.traces_sample_rate, 0.5);
             assert!(config.sentry.attach_stacktrace);
+            assert_eq!(config.service.background_queue, 2048);
 
             Ok(())
         });

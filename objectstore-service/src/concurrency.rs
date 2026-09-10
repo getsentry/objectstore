@@ -5,7 +5,8 @@
 //! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
 //! all permits have been returned.
 //!
-//! [`spawn_metered`] spawns an arbitrary future as an isolated task with panic
+//! [`run_metered`] runs an isolated task and waits for its result, while
+//! [`spawn_metered`] starts the same task without waiting. Both provide panic
 //! recovery and `service.task.*` metric emission.
 
 use std::future::Future;
@@ -310,7 +311,7 @@ impl Drop for ConcurrencyPermit {
     }
 }
 
-/// Spawns a future on a dedicated task with panic isolation and timing metrics.
+/// Runs a future on a dedicated task with panic isolation and timing metrics.
 ///
 /// The `guard` is moved into the spawned task and dropped after the future
 /// completes, ensuring any resource it represents (e.g. a concurrency permit)
@@ -320,7 +321,38 @@ impl Drop for ConcurrencyPermit {
 /// `service.task.duration` (distribution) when the task completes, both tagged
 /// with the given `operation` name. The duration tag includes an `outcome` of
 /// `"success"` or `"error"`.
-pub async fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
+pub async fn run_metered<T, G, F>(operation: &'static str, guard: G, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    let receiver = spawn_metered_inner(operation, guard, f);
+    receiver.await.map_err(|_| {
+        let error = Error::new(ErrorKind::Internal, "service task dropped");
+        objectstore_log::error!(!!&error, operation, "Task failed");
+        error
+    })?
+}
+
+/// Spawns a metered future without waiting for its result.
+///
+/// The task has the same panic isolation, metrics, and guard lifetime as
+/// [`run_metered`], but its result is discarded.
+pub fn spawn_metered<T, G, F>(operation: &'static str, guard: G, f: F)
+where
+    T: Send + 'static,
+    G: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    drop(spawn_metered_inner(operation, guard, f));
+}
+
+fn spawn_metered_inner<T, G, F>(
+    operation: &'static str,
+    guard: G,
+    f: F,
+) -> tokio::sync::oneshot::Receiver<Result<T>>
 where
     T: Send + 'static,
     G: Send + 'static,
@@ -369,11 +401,7 @@ where
         .bind_hub(new_hub),
     );
 
-    rx.await.map_err(|_| {
-        let error = Error::new(ErrorKind::Internal, "service task dropped");
-        objectstore_log::error!(!!&error, operation, "Task failed");
-        error
-    })?
+    rx
 }
 
 #[cfg(test)]

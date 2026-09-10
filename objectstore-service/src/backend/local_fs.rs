@@ -1,8 +1,13 @@
 //! Local filesystem backend for development and testing.
+//!
+//! Mutations are serialized within a backend instance and publish complete object files by
+//! atomically renaming same-directory drafts. Readers therefore observe either the previous or
+//! next complete object file.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt;
@@ -10,6 +15,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::Mutex;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
@@ -57,12 +63,34 @@ pub struct FileSystemConfig {
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
+    // This lock coordinates mutations only within this backend instance. It
+    // does not serialize another backend instance or another process using the
+    // same directory.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
     pub fn new(config: FileSystemConfig) -> Self {
-        Self { path: config.path }
+        Self {
+            path: config.path,
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Returns the filesystem path for the given object ID.
+    fn path(&self, id: &ObjectId) -> PathBuf {
+        self.path.join(id.as_storage_path().to_string())
+    }
+
+    /// Ensures that an object file can be created at the given path.
+    async fn create_dir_all(path: &Path) -> Result<()> {
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object directory",
+            )
     }
 }
 
@@ -83,40 +111,15 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        let path = self.path.join(id.as_storage_path().to_string());
+        let _guard = self.write_lock.lock().await;
+
+        let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
-        tokio::fs::create_dir_all(path.parent().unwrap())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object directory",
-            )?;
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "opening local-fs object for writing",
-            )?;
+        Self::create_dir_all(&path).await?;
 
+        let mut draft = Draft::create(&path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
-        let mut writer = BufWriter::new(file);
-
-        let metadata_json = serde_json::to_string(metadata)
-            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
-        writer.write_all(metadata_json.as_bytes()).await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-        writer.write_all(b"\n").await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-
-        tokio::io::copy(&mut reader, &mut writer)
+        let result = tokio::io::copy(&mut reader, draft.writer())
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::from(ce),
@@ -125,58 +128,34 @@ impl Backend for LocalFsBackend {
                     "writing local-fs object payload",
                     e,
                 ),
-            })?;
+            });
 
-        writer
-            .flush()
-            .await
-            .context(ErrorKind::BackendFailure, "flushing local-fs object")?;
-        let file = writer.into_inner();
-        file.sync_data()
-            .await
-            .context(ErrorKind::BackendFailure, "syncing local-fs object")?;
-        drop(file);
-
-        Ok(())
+        match result {
+            Ok(_) => {
+                draft.publish().await?;
+                Ok(())
+            }
+            Err(error) => {
+                draft.discard().await;
+                Err(error)
+            }
+        }
     }
 
-    // TODO: Return `Ok(None)` if object is found but past expiry
     #[tracing::instrument(level = "debug", skip(self))]
     async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from local_fs backend");
-        let path = self.path.join(id.as_storage_path().to_string());
-        let file = match OpenOptions::new().read(true).open(path).await {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                objectstore_log::debug!("Object not found");
-                return Ok(None);
-            }
-            err => err.context(
-                ErrorKind::BackendFailure,
-                "opening local-fs object for reading",
-            )?,
+        let path = self.path(id);
+        let Some(object) = ObjectFile::try_open(&path).await? else {
+            objectstore_log::debug!("Object not found");
+            return Ok(None);
         };
-
-        let mut reader = BufReader::new(file);
-        let mut metadata_line = String::new();
-        reader.read_line(&mut metadata_line).await.context(
-            ErrorKind::BackendFailure,
-            "reading local-fs object metadata",
-        )?;
-        let file_len = reader
-            .get_ref()
-            .metadata()
-            .await
-            .context(ErrorKind::BackendFailure, "reading local-fs object size")?
-            .len();
-        let mut metadata: Metadata = serde_json::from_str(metadata_line.trim_end())
-            .context(ErrorKind::CorruptData, "decoding local-fs object metadata")?;
-        let payload_size = file_len
-            .checked_sub(metadata_line.len() as u64)
-            .ok_or_else(|| {
-                Error::new(ErrorKind::CorruptData, "reading truncated local-fs object")
-            })?;
-        metadata.size = Some(payload_size as usize);
+        let ObjectFile {
+            metadata,
+            preamble_len,
+            payload_size,
+            mut reader,
+        } = object;
 
         let (content_range, stream) = match range {
             Some(byte_range) => {
@@ -186,7 +165,7 @@ impl Backend for LocalFsBackend {
                         .ok_or(ErrorKind::RangeNotSatisfiable {
                             total: payload_size,
                         })?;
-                let payload_start = metadata_line.len() as u64 + content_range.start;
+                let payload_start = preamble_len + content_range.start;
                 reader
                     .seek(std::io::SeekFrom::Start(payload_start))
                     .await
@@ -200,9 +179,51 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let _guard = self.write_lock.lock().await;
+
+        let path = self.path(id);
+        let Some(object) = ObjectFile::try_open(&path).await? else {
+            return Ok(false);
+        };
+        let ObjectFile {
+            mut metadata,
+            mut reader,
+            ..
+        } = object;
+
+        let Some(current_expiry) = metadata.time_expires else {
+            return Ok(false);
+        };
+        if current_expiry >= expire_at {
+            return Ok(true); // already satisfied
+        }
+        metadata.time_expires = Some(expire_at);
+
+        let mut draft = Draft::create(&path, &metadata).await?;
+        let result = tokio::io::copy(&mut reader, draft.writer()).await.context(
+            ErrorKind::BackendFailure,
+            "copying local-fs object payload for expiry extension",
+        );
+
+        match result {
+            Ok(_) => {
+                draft.publish().await?;
+                Ok(true)
+            }
+            Err(error) => {
+                draft.discard().await;
+                Err(error)
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+        let _guard = self.write_lock.lock().await;
+
         objectstore_log::debug!("Deleting from local_fs backend");
-        let path = self.path.join(id.as_storage_path().to_string());
+        let path = self.path(id);
         let result = tokio::fs::remove_file(path).await;
         if let Err(e) = &result
             && e.kind() == io::ErrorKind::NotFound
@@ -496,63 +517,38 @@ impl MultipartUploadBackend for LocalFsBackend {
             }
         }
 
-        // Stream parts directly to the final object file
-        let path = self.path.join(id.as_storage_path().to_string());
-        tokio::fs::create_dir_all(path.parent().unwrap())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object directory",
-            )?;
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "opening local-fs object for writing",
-            )?;
-        let mut writer = BufWriter::new(file);
+        // Assemble the parts into a draft before publishing the object.
+        let _guard = self.write_lock.lock().await;
+        let path = self.path(id);
+        Self::create_dir_all(&path).await?;
+        let mut draft = Draft::create(&path, &metadata).await?;
+        let assembly: Result<()> = async {
+            for completed in &parts {
+                let part_path = dir.join(format!("{}.part", completed.part_number));
+                let file = tokio::fs::File::open(&part_path)
+                    .await
+                    .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
+                let mut reader = BufReader::new(file);
+                let mut header_line = String::new();
+                reader
+                    .read_line(&mut header_line)
+                    .await
+                    .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
+                tokio::io::copy(&mut reader, draft.writer()).await.context(
+                    ErrorKind::BackendFailure,
+                    "assembling local-fs object payload",
+                )?;
+            }
+            Ok(())
+        }
+        .await;
 
-        let metadata_json = serde_json::to_string(&metadata)
-            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
-        writer.write_all(metadata_json.as_bytes()).await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-        writer.write_all(b"\n").await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-
-        for completed in &parts {
-            let part_path = dir.join(format!("{}.part", completed.part_number));
-            let file = tokio::fs::File::open(&part_path)
-                .await
-                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
-            let mut reader = BufReader::new(file);
-            let mut header_line = String::new();
-            reader
-                .read_line(&mut header_line)
-                .await
-                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-            tokio::io::copy(&mut reader, &mut writer).await.context(
-                ErrorKind::BackendFailure,
-                "assembling local-fs object payload",
-            )?;
+        if let Err(error) = assembly {
+            draft.discard().await;
+            return Err(error);
         }
 
-        writer
-            .flush()
-            .await
-            .context(ErrorKind::BackendFailure, "flushing local-fs object")?;
-        let file = writer.into_inner();
-        file.sync_data()
-            .await
-            .context(ErrorKind::BackendFailure, "syncing local-fs object")?;
-        drop(file);
+        draft.publish().await?;
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await.context(
@@ -564,13 +560,162 @@ impl MultipartUploadBackend for LocalFsBackend {
     }
 }
 
+struct ObjectFile {
+    metadata: Metadata,
+    preamble_len: u64,
+    payload_size: u64,
+    reader: BufReader<tokio::fs::File>,
+}
+
+async fn read_metadata_preamble<R>(reader: &mut R) -> Result<(Metadata, usize)>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut metadata_line = String::new();
+    let preamble_len = reader.read_line(&mut metadata_line).await.context(
+        ErrorKind::BackendFailure,
+        "reading local-fs object metadata",
+    )?;
+    let metadata = serde_json::from_str(metadata_line.trim_end())
+        .context(ErrorKind::CorruptData, "decoding local-fs object metadata")?;
+    Ok((metadata, preamble_len))
+}
+
+impl ObjectFile {
+    /// Opens an object file, returning `None` when it does not exist.
+    async fn try_open(path: &Path) -> Result<Option<Self>> {
+        let file = match OpenOptions::new().read(true).open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            result => result.context(ErrorKind::BackendFailure, "opening local-fs object")?,
+        };
+
+        let mut reader = BufReader::new(file);
+        let (mut metadata, preamble_len) = read_metadata_preamble(&mut reader).await?;
+
+        if metadata.is_expired(SystemTime::now()) {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        let preamble_len = preamble_len as u64;
+        let file_len = reader
+            .get_ref()
+            .metadata()
+            .await
+            .context(ErrorKind::BackendFailure, "reading local-fs object size")?
+            .len();
+
+        let payload_size = file_len.checked_sub(preamble_len).ok_or_else(|| {
+            Error::new(ErrorKind::CorruptData, "reading truncated local-fs object")
+        })?;
+
+        metadata.size = Some(payload_size as usize);
+
+        Ok(Some(Self {
+            metadata,
+            preamble_len,
+            payload_size,
+            reader,
+        }))
+    }
+}
+
+struct Draft {
+    path: PathBuf,
+    target: PathBuf,
+    writer: BufWriter<tokio::fs::File>,
+}
+
+impl Draft {
+    async fn create(target: &Path, metadata: &Metadata) -> Result<Self> {
+        let path = target.with_extension(format!("{}.draft", uuid::Uuid::now_v7()));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await
+            .context(ErrorKind::BackendFailure, "creating local-fs object draft")?;
+
+        let mut draft = Self {
+            path,
+            target: target.to_path_buf(),
+            writer: BufWriter::new(file),
+        };
+
+        if let Err(error) = draft.write_preamble(metadata).await {
+            draft.discard().await;
+            return Err(error);
+        }
+
+        Ok(draft)
+    }
+
+    async fn write_preamble(&mut self, metadata: &Metadata) -> Result<()> {
+        let metadata_json = serde_json::to_string(metadata)
+            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+        self.writer
+            .write_all(metadata_json.as_bytes())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "writing local-fs object metadata",
+            )?;
+        self.writer.write_all(b"\n").await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )
+    }
+
+    fn writer(&mut self) -> &mut BufWriter<tokio::fs::File> {
+        &mut self.writer
+    }
+
+    async fn publish(self) -> Result<()> {
+        let Self {
+            path,
+            target,
+            mut writer,
+        } = self;
+
+        let result: Result<()> = async {
+            writer
+                .flush()
+                .await
+                .context(ErrorKind::BackendFailure, "flushing local-fs object draft")?;
+            let file = writer.into_inner();
+            file.sync_data()
+                .await
+                .context(ErrorKind::BackendFailure, "syncing local-fs object draft")?;
+            drop(file);
+            tokio::fs::rename(&path, target).await.context(
+                ErrorKind::BackendFailure,
+                "publishing local-fs object draft",
+            )?;
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        result
+    }
+
+    async fn discard(self) {
+        let Self { path, writer, .. } = self;
+        drop(writer);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime};
 
-    use bytes::BytesMut;
-    use futures_util::TryStreamExt;
+    use bytes::{Bytes, BytesMut};
+    use futures_util::{TryStreamExt, stream as futures_stream};
     use objectstore_types::metadata::{Compression, ExpirationPolicy};
     use objectstore_types::scope::{Scope, Scopes};
 
@@ -617,6 +762,111 @@ mod tests {
             }
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+    }
+
+    #[tokio::test]
+    async fn failed_put_preserves_published_object() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let original_metadata = Metadata {
+            content_type: "text/original".into(),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &original_metadata, stream::single("original"))
+            .await
+            .unwrap();
+
+        let replacement_metadata = Metadata {
+            content_type: "text/replacement".into(),
+            ..Default::default()
+        };
+        let replacement = futures_stream::iter([
+            Ok(Bytes::from_static(b"partial")),
+            Err(stream::ClientError::new(io::Error::other(
+                "replacement stream failed",
+            ))),
+        ])
+        .boxed();
+        let error = backend
+            .put_object(&id, &replacement_metadata, replacement)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ClientStream);
+
+        let (metadata, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        assert_eq!(metadata.content_type, original_metadata.content_type);
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
+
+        let object_path = backend.path(&id);
+        let entries = std::fs::read_dir(object_path.parent().unwrap())
+            .unwrap()
+            .flat_map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|path| !path.to_string_lossy().ends_with(".draft"))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_expiry() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(old_expiry),
+            custom: [("preserved".into(), "yes".into())].into(),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"))
+            .await
+            .unwrap();
+
+        let requested = old_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
+        assert!(backend.set_expiry(&id, requested).await.unwrap());
+        let (updated, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        assert_eq!(updated.expiration_policy, metadata.expiration_policy);
+        assert_eq!(updated.custom, metadata.custom);
+        assert_eq!(updated.time_expires, Some(requested));
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
+
+        let object_path = backend.path(&id);
+        let entries = std::fs::read_dir(object_path.parent().unwrap())
+            .unwrap()
+            .flat_map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|path| !path.to_string_lossy().ends_with(".draft"))
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_object() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("expired"))
+            .await
+            .unwrap();
+
+        assert!(backend.get_object(&id, None).await.unwrap().is_none());
+        assert!(
+            !backend
+                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
