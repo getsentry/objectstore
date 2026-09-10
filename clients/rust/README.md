@@ -152,7 +152,8 @@ If the request fails midway, it will be possible to resume it from the persisted
 requires appropriate manual handling of different states and error scenarios.
 Therefore, this API should only be used for advanced use cases that demand it.
 In a future release of `objectstore-client`, the resumable uploads API will be used
-under the hood for eligible `put` calls.
+internally for eligible `put` calls without the need for this feature flag or direct
+interaction with this API.
 
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
