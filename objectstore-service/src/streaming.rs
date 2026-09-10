@@ -24,11 +24,13 @@
 //! the others.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::Backend;
+use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::{Error, Result};
 use crate::id::{ObjectContext, ObjectId, ObjectKey};
@@ -206,14 +208,20 @@ impl std::fmt::Debug for OpResponse {
 pub struct StreamExecutor {
     backend: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
+    renewals: RenewalScheduler,
 }
 
 impl StreamExecutor {
     /// Creates a new `StreamExecutor` with the given backend and limiter.
-    pub fn new(backend: Arc<dyn Backend>, concurrency: ConcurrencyLimiter) -> Self {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        concurrency: ConcurrencyLimiter,
+        renewals: RenewalScheduler,
+    ) -> Self {
         Self {
             backend,
             concurrency,
+            renewals,
         }
     }
 
@@ -243,6 +251,7 @@ impl StreamExecutor {
         let StreamExecutor {
             backend,
             concurrency,
+            renewals,
         } = self;
 
         let buffer = concurrency.total_bulk().max(1) as usize;
@@ -255,12 +264,13 @@ impl StreamExecutor {
             .then(move |(idx, item)| {
                 let concurrency = concurrency.clone();
                 async move {
+                    let access_time = SystemTime::now();
                     let op = match item {
                         Ok(op) => op,
                         Err(e) => return (idx, Err(e)),
                     };
                     match concurrency.acquire_bulk().await {
-                        Ok(permit) => (idx, Ok((op, permit))),
+                        Ok(permit) => (idx, Ok((op, permit, access_time))),
                         Err(e) => {
                             objectstore_metrics::count!(
                                 "service.concurrency.rejected",
@@ -275,14 +285,15 @@ impl StreamExecutor {
             .map(move |(idx, result)| {
                 let backend = Arc::clone(&backend);
                 let context = context.clone();
+                let renewals = renewals.clone();
                 async move {
-                    let (op, permit) = match result {
+                    let (op, permit, access_time) = match result {
                         Ok(pair) => pair,
                         Err(e) => return (idx, Err(e)),
                     };
 
-                    let spawn = crate::concurrency::spawn_metered(op.kind(), permit, {
-                        execute_operation(backend, context, op)
+                    let spawn = crate::concurrency::run_metered(op.kind(), permit, {
+                        execute_operation(backend, renewals, context, op, access_time)
                     });
                     (idx, spawn.await.map_err(E::from))
                 }
@@ -293,13 +304,20 @@ impl StreamExecutor {
 
 async fn execute_operation(
     backend: Arc<dyn Backend>,
+    renewals: RenewalScheduler,
     context: ObjectContext,
     op: Operation,
+    access_time: SystemTime,
 ) -> Result<OpResponse> {
     match op {
         Operation::Get(get) => {
             let id = ObjectId::new(context, get.key);
             let response = backend.get_object(&id, None).await?;
+            if let Some((metadata, _, _)) = &response
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id.clone(), expire_at);
+            }
             Ok(OpResponse::Got {
                 key: id.key,
                 response,
@@ -319,6 +337,11 @@ async fn execute_operation(
         Operation::Head(head) => {
             let id = ObjectId::new(context, head.key);
             let metadata = backend.get_metadata(&id).await?;
+            if let Some(metadata) = &metadata
+                && let Some(expire_at) = metadata.check_tti_bump(access_time)
+            {
+                renewals.schedule(id.clone(), expire_at);
+            }
             Ok(OpResponse::Head {
                 key: id.key,
                 metadata,
@@ -331,11 +354,11 @@ async fn execute_operation(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use bytes::Bytes;
     use futures_util::StreamExt;
-    use objectstore_types::metadata::Metadata;
+    use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -370,6 +393,77 @@ mod tests {
     // Wraps a plain `Vec<Operation>` as an indexed `Ok`-stream for `execute`.
     fn indexed_ok(ops: Vec<Operation>) -> impl Stream<Item = (usize, Result<Operation, Error>)> {
         futures_util::stream::iter(ops.into_iter().enumerate().map(|(i, op)| (i, Ok(op))))
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct GateOnExpiry {
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for GateOnExpiry {
+        async fn set_expiry(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            expire_at: SystemTime,
+        ) -> Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.resume.notified().await;
+            inner.set_expiry(id, expire_at).await
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_renewal() {
+        let backend = TestBackend::new(GateOnExpiry::default());
+        let context = make_context();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            ..Default::default()
+        };
+        for key in ["get", "head"] {
+            let id = ObjectId::new(context.clone(), key.into());
+            backend
+                .inner
+                .put_object(&id, &metadata, stream::single("payload"))
+                .await
+                .unwrap();
+        }
+        let mut service =
+            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+        service.start();
+        let outcomes = tokio::time::timeout(
+            Duration::from_secs(1),
+            service
+                .stream()
+                .execute(
+                    context,
+                    indexed_ok(vec![
+                        Operation::Get(Get { key: "get".into() }),
+                        Operation::Head(Head { key: "head".into() }),
+                    ]),
+                )
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("batch reads waited for background renewal");
+        assert_eq!(outcomes.len(), 2);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.hooks.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("renewals did not start");
+        assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 2);
+
+        backend.hooks.resume.notify_waiters();
+        service.join().await;
     }
 
     // --- StreamExecutor correctness tests ---

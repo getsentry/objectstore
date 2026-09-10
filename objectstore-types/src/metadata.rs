@@ -382,7 +382,17 @@ impl Metadata {
                 "expiration policy requires a resolved expiration time",
             ));
         }
+        if self.expiration_policy.is_manual() && self.time_expires.is_some() {
+            return Err(Error::Invariant(
+                "manual expiration policy must not have a resolved expiration time",
+            ));
+        }
         Ok(())
+    }
+
+    /// Returns whether the object has expired at the given time.
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        self.time_expires.is_some_and(|deadline| deadline < now)
     }
 
     /// Checks whether this object's TTI deadline needs bumping.

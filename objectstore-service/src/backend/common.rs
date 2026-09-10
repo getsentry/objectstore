@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::time::SystemTime;
 
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
@@ -57,6 +58,16 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
             .await?
             .map(|(metadata, _range, _stream)| metadata))
     }
+
+    /// Extends the deadline of an existing object with expiration policy.
+    ///
+    /// This only changes the stored deadline: the expiration policy, duration,
+    /// payload, and all other metadata remain unchanged.
+    ///
+    /// Returns `true` when the deadline was extended or was already at least as
+    /// late as `expire_at`. Returns `false` when the object is absent, expired,
+    /// manually expired, or changed concurrently.
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
@@ -270,6 +281,22 @@ pub trait HighVolumeBackend: Backend {
         current: Option<&ObjectId>,
         write: TieredWrite,
     ) -> Result<bool>;
+
+    /// Atomically updates an existing row if its kind and redirect target match.
+    ///
+    /// `current = None` requires a live inline object. `Some(target)` requires
+    /// a live redirect to exactly that target. Updates never authorize creation
+    /// of an absent row.
+    ///
+    /// Returns `true` when the update was applied or its requested state was
+    /// already satisfied. Returns `false` for an absent, expired, or conflicting
+    /// entry.
+    async fn compare_and_update(
+        &self,
+        id: &ObjectId,
+        current: Option<&ObjectId>,
+        update: TieredUpdate,
+    ) -> Result<bool>;
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
@@ -283,6 +310,16 @@ pub struct Tombstone {
 
     /// The expiration policy copied from the original object.
     pub expiration_policy: ExpirationPolicy,
+
+    /// The concrete deadline stored on the redirect.
+    pub time_expires: Option<SystemTime>,
+}
+
+impl Tombstone {
+    /// Returns whether the tombstone has expired at the given time.
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        self.time_expires.is_some_and(|deadline| deadline < now)
+    }
 }
 
 /// Typed response from [`HighVolumeBackend::get_tiered_object`].
@@ -339,6 +376,13 @@ impl TieredWrite {
             _ => None,
         }
     }
+}
+
+/// The in-place operation performed by [`HighVolumeBackend::compare_and_update`].
+#[derive(Clone, Debug)]
+pub enum TieredUpdate {
+    /// Extend the deadline while preserving the policy, payload, and other metadata.
+    SetExpiry(SystemTime),
 }
 
 /// Creates a reqwest client with required defaults.

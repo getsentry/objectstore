@@ -3,6 +3,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod backend;
+mod background;
 pub mod change_stream;
 pub mod concurrency;
 pub mod error;

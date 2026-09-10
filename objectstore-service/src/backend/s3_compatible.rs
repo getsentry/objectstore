@@ -8,7 +8,7 @@ use std::{fmt, io};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{HEADER_SIZE, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
@@ -169,9 +169,8 @@ where
         Ok(builder)
     }
 
-    /// Fetches object metadata using the given HTTP method (GET or HEAD),
-    /// bumps TTI if needed, and returns the parsed metadata along with the
-    /// response (so `get_object` can read the body from a GET).
+    /// Fetches object metadata using the given HTTP method (GET or HEAD) and
+    /// returns it with the response without modifying the object.
     async fn request_object(
         &self,
         method: Method,
@@ -243,52 +242,57 @@ where
             None
         };
 
-        // TODO: Inject the access time from the request.
         let access_time = SystemTime::now();
 
         // Filter already expired objects but leave them to garbage collection
-        if metadata.expiration_policy.is_timeout()
-            && metadata.time_expires.is_some_and(|ts| ts < access_time)
-        {
+        if metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             response.drain_body().await;
             return Ok(None);
-        }
-
-        // TODO: extract into dedicated call from service
-        // TODO: Schedule into background persistently so this doesn't get lost on restarts
-        if let Some(new_expire_at) = metadata.check_tti_bump(access_time) {
-            let mut bumped = metadata.clone();
-            bumped.time_expires = Some(new_expire_at);
-            self.update_metadata(id, &bumped).await?;
         }
 
         Ok(Some((metadata, content_range, response)))
     }
 
     /// Issues a request to update the metadata for the given object.
-    async fn update_metadata(&self, id: &ObjectId, metadata: &Metadata) -> Result<()> {
-        // NB: Meta updates require copy + REPLACE along with *all* metadata. See
-        // https://cloud.google.com/storage/docs/xml-api/put-object-copy
-        self.request(Method::PUT, self.object_url(id))
+    async fn update_metadata(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        etag: &HeaderValue,
+    ) -> Result<bool> {
+        // NB: Meta updates require CopyObject + REPLACE along with *all* metadata. See
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
+        let request = self
+            .request(Method::PUT, self.object_url(id))
             .await?
             .header(
-                "x-goog-copy-source",
+                "x-amz-copy-source",
                 format!("/{}/{}", self.bucket, id.as_storage_path()),
             )
-            .header("x-goog-metadata-directive", "REPLACE")
+            .header("x-amz-metadata-directive", "REPLACE")
+            .header("x-amz-copy-source-if-match", etag.clone())
             .headers(
                 metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
                     .context(ErrorKind::InvalidMetadata, "encoding S3 object metadata")?,
-            )
-            .send_traced()
-            .await
+            );
+
+        let response = request.send_traced().await;
+        let response = response.reqwest_context("updating S3 expiration")?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED
+        ) {
+            response.drain_body().await;
+            return Ok(false);
+        }
+        response
             .check_error("updating S3 expiration")
             .await?
             .drain_body()
             .await;
 
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -367,6 +371,31 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+        let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
+        else {
+            return Ok(false);
+        };
+        let Some(current_expiry) = metadata.time_expires else {
+            response.drain_body().await;
+            return Ok(false);
+        };
+        if current_expiry >= expire_at {
+            response.drain_body().await;
+            return Ok(true); // already satisfied
+        }
+
+        let etag = response.headers().get(reqwest::header::ETAG).cloned();
+        response.drain_body().await;
+        let etag = etag.ok_or_else(|| {
+            Error::new(ErrorKind::BackendFailure, "S3 HEAD response missing ETag")
+        })?;
+
+        metadata.time_expires = Some(expire_at);
+        self.update_metadata(id, &metadata, &etag).await
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
         let response = self
@@ -395,6 +424,10 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     use anyhow::Result;
@@ -425,6 +458,67 @@ mod tests {
         })
     }
 
+    fn read_http_request(connection: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut byte = [0];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            connection.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn start_copy_server(
+        copy_status: &'static str,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut copy, _) = listener.accept().unwrap();
+            request_tx.send(read_http_request(&mut copy)).unwrap();
+            write!(
+                copy,
+                "HTTP/1.1 {copy_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        (endpoint, request_rx, server)
+    }
+
+    #[tokio::test]
+    async fn update_metadata_uses_conditional_s3_copy() {
+        for (status, expected) in [
+            ("200 OK", true),
+            ("404 Not Found", false),
+            ("409 Conflict", false),
+            ("412 Precondition Failed", false),
+        ] {
+            let (endpoint, request_rx, server) = start_copy_server(status);
+            let backend = S3CompatibleBackend::without_token(S3CompatibleConfig {
+                endpoint,
+                bucket: "bucket".into(),
+            });
+
+            assert_eq!(
+                backend
+                    .update_metadata(
+                        &make_id(),
+                        &Metadata::default(),
+                        &HeaderValue::from_static("\"etag\""),
+                    )
+                    .await
+                    .unwrap(),
+                expected
+            );
+            let request = request_rx.recv().unwrap().to_ascii_lowercase();
+            assert!(request.contains("x-amz-copy-source: /bucket/"));
+            assert!(request.contains("x-amz-metadata-directive: replace"));
+            assert!(request.contains("x-amz-copy-source-if-match: \"etag\""));
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn metadata_to_gcs_headers_omits_size() {
         let metadata = Metadata {
@@ -448,8 +542,6 @@ mod tests {
         };
 
         let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
-
-        // The lifecycle custom-time is the server-resolved expiry (second precision).
         let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
         let expected = humantime::format_rfc3339_seconds(expires).to_string();
         assert_eq!(custom_time, expected);

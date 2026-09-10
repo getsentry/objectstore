@@ -2999,6 +2999,7 @@ dependencies = [
  "objectstore-log",
  "objectstore-metrics",
  "objectstore-types",
+ "papaya",
  "quick-xml",
  "regex",
  "reqwest 0.13.4",
