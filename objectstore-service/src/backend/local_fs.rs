@@ -72,16 +72,16 @@ pub struct FileSystemConfig {
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
-    object_locks: ObjectLocks,
+    locks: ObjectLocks,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
     pub fn new(config: FileSystemConfig) -> Self {
-        let object_locks = ObjectLocks::new(&config.path);
+        let locks = ObjectLocks::new(&config.path);
         Self {
             path: config.path,
-            object_locks,
+            locks,
         }
     }
 
@@ -136,7 +136,7 @@ impl Backend for LocalFsBackend {
             })?;
 
         draft.prepare().await?;
-        let _guard = self.object_locks.acquire(id).await?;
+        let _guard = self.locks.acquire(id).await?;
         draft.publish().await
     }
 
@@ -178,7 +178,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let _guard = self.object_locks.acquire(id).await?;
+        let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path).await? else {
@@ -211,7 +211,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        let guard = self.object_locks.acquire(id).await?;
+        let guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
@@ -536,7 +536,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         }
 
         draft.prepare().await?;
-        let guard = self.object_locks.acquire(id).await?;
+        let guard = self.locks.acquire(id).await?;
         draft.publish().await?;
         drop(guard);
 
