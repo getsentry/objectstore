@@ -69,6 +69,10 @@ pub enum Error {
         /// The error message.
         message: String,
     },
+    /// Error returned by the low-level resumable uploads API.
+    #[cfg(feature = "resumable-upload-api")]
+    #[error(transparent)]
+    ResumableUpload(#[from] crate::ResumableUploadError),
 }
 
 /// A convenience alias that defaults our [`Error`] type.

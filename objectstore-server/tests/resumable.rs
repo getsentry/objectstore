@@ -261,6 +261,36 @@ async fn session_token_requires_base64url() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn unknown_session_returns_not_found() -> Result<()> {
+    let server = test_server().await;
+
+    let response = reqwest::Client::new()
+        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn object_mismatched_session_returns_not_found() -> Result<()> {
+    let server = test_server_with_protected_session().await?;
+
+    let response = reqwest::Client::new()
+        .put(server.url(&format!(
+            "/v1/objects/test/org=1/other-key?session={PROTECTED_SESSION}"
+        )))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
 // --- Cancellation ---
 
 #[tokio::test]
