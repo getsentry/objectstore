@@ -134,7 +134,7 @@ impl ResumableUpload {
         }
     }
 
-    /// Builds a request to cancel this upload and discard uploaded bytes.
+    /// Builds a request to cancel this upload session, discarding any uploaded bytes.
     pub fn cancel(&self) -> CancelUploadBuilder {
         CancelUploadBuilder {
             upload: self.clone(),
