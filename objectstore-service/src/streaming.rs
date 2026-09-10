@@ -435,7 +435,7 @@ mod tests {
                 .unwrap();
         }
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
         let outcomes = tokio::time::timeout(
             Duration::from_secs(1),

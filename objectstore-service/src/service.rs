@@ -94,9 +94,11 @@ impl StorageService {
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
     pub fn new(backend: Box<dyn Backend>, cipher: Cipher) -> Self {
+        let inner: Arc<dyn Backend> = Arc::new(CountingBackend::new(backend));
+        let concurrency = ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT);
         Self {
-            inner: Arc::new(CountingBackend::new(backend)),
-            concurrency: ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT),
+            inner: Arc::clone(&inner),
+            concurrency: concurrency.clone(),
             renewals: RenewalScheduler::new(inner, concurrency, DEFAULT_BACKGROUND_QUEUE_LIMIT),
             cipher: Arc::new(cipher),
         }
@@ -882,7 +884,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         let response = tokio::time::timeout(
@@ -925,7 +927,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         service.get_metadata(id.clone()).await.unwrap();
@@ -953,7 +955,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         service.get_metadata(id).await.unwrap();
