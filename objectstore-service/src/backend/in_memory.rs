@@ -244,7 +244,9 @@ impl HighVolumeBackend for InMemoryBackend {
 
     async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned() {
+        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
+            && !tombstone.is_expired(SystemTime::now())
+        {
             return Ok(Some(tombstone));
         }
 
