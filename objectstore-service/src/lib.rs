@@ -6,6 +6,7 @@ pub mod backend;
 mod background;
 pub mod change_stream;
 pub mod concurrency;
+pub mod encryption;
 pub mod error;
 mod gcp_auth;
 pub mod id;

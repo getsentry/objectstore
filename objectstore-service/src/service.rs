@@ -18,13 +18,14 @@ use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
 use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
+use crate::encryption::Cipher;
 use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::{ObjectContext, ObjectId};
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, Encryptor, SessionToken};
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -82,7 +83,7 @@ pub struct StorageService {
     inner: Arc<dyn Backend>,
     concurrency: ConcurrencyLimiter,
     renewals: RenewalScheduler,
-    resumable_token_encryption: Arc<Encryptor>,
+    cipher: Arc<Cipher>,
 }
 
 impl StorageService {
@@ -92,16 +93,14 @@ impl StorageService {
     /// each operation run. Single-object operations served directly by `StorageService` are covered
     /// as we batched operations served by [`StreamExecutor`]. See
     /// [`backend::counting`](crate::backend::counting) for details.
-    ///
-    /// `resumable_token_encryption` protects tokens exposed by the resumable upload methods.
-    pub fn new(backend: Box<dyn Backend>, resumable_token_encryption: Encryptor) -> Self {
+    pub fn new(backend: Box<dyn Backend>, cipher: Cipher) -> Self {
         let inner: Arc<dyn Backend> = Arc::new(CountingBackend::new(backend));
         let concurrency = ConcurrencyLimiter::new(DEFAULT_CONCURRENCY_LIMIT);
         Self {
             inner: Arc::clone(&inner),
             concurrency: concurrency.clone(),
             renewals: RenewalScheduler::new(inner, concurrency, DEFAULT_BACKGROUND_QUEUE_LIMIT),
-            resumable_token_encryption: Arc::new(resumable_token_encryption),
+            cipher: Arc::new(cipher),
         }
     }
 
@@ -446,17 +445,19 @@ impl StorageService {
         };
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let inner = Arc::clone(&self.inner);
-        let encryption = self.resumable_token_encryption.clone();
+        let cipher = Arc::clone(&self.cipher);
         self.spawn("create_upload_session", async move {
             let session = inner
                 .create_upload_session(&id, &metadata, total_length)
                 .await?;
             session
                 .map(|backend_token| {
-                    encryption.encrypt(SessionToken {
-                        object_id: id,
-                        backend_token,
-                    })
+                    cipher
+                        .encrypt(&SessionToken {
+                            object_id: id,
+                            backend_token,
+                        })
+                        .map(EncryptedSessionToken::new)
                 })
                 .transpose()
         })
@@ -468,7 +469,10 @@ impl StorageService {
         expected_id: &ObjectId,
         token: EncryptedSessionToken,
     ) -> Result<BackendToken> {
-        let session = self.resumable_token_encryption.decrypt(token)?;
+        let session: SessionToken = self
+            .cipher
+            .decrypt(token.as_bytes())
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
         if session.object_id != *expected_id {
             return Err(ErrorKind::UnknownUploadSession.into());
         }
@@ -532,6 +536,7 @@ impl StorageService {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -591,7 +596,7 @@ mod tests {
     fn make_service() -> StorageService {
         StorageService::new(
             Box::new(InMemoryBackend::new("in-memory")),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         )
     }
 
@@ -643,7 +648,7 @@ mod tests {
         let backend = GcsBackend::new(config, &ChangeStreamFactory::default())
             .await
             .unwrap();
-        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
+        let service = StorageService::new(Box::new(backend), Cipher::ephemeral().unwrap());
 
         let key = service
             .insert_object(
@@ -689,7 +694,7 @@ mod tests {
                 .unwrap(),
         );
         let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
+        let service = StorageService::new(Box::new(backend), Cipher::ephemeral().unwrap());
 
         // A separate GCS backend to directly inspect the long-term storage.
         let gcs_backend = GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
@@ -822,7 +827,7 @@ mod tests {
     async fn panic_in_backend_returns_task_failed() {
         let service = StorageService::new(
             Box::new(TestBackend::new(PanicOnGet)),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         );
 
         let id = ObjectId::new(make_context(), "panic-test".into());
@@ -880,7 +885,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         let response = tokio::time::timeout(
@@ -923,7 +928,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         service.get_metadata(id.clone()).await.unwrap();
@@ -951,7 +956,7 @@ mod tests {
             .await
             .unwrap();
         let mut service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap());
+            StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
         service.get_metadata(id).await.unwrap();
@@ -1121,7 +1126,7 @@ mod tests {
         let hv = Box::new(TestBackend::new(GateOnPut::default()));
         let lt = Box::new(TestBackend::new(GateOnPut::with_pause()));
         let backend = TieredStorage::new(hv.clone(), lt.clone(), Box::new(NoopChangeLog));
-        let service = StorageService::new(Box::new(backend), Encryptor::ephemeral().unwrap());
+        let service = StorageService::new(Box::new(backend), Cipher::ephemeral().unwrap());
 
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB → long-term path
         let request = service.insert_object(
@@ -1163,9 +1168,8 @@ mod tests {
 
     fn make_limited_service(limit: u32) -> (StorageService, TestBackend<GateOnPut>) {
         let backend = TestBackend::new(GateOnPut::with_pause());
-        let service =
-            StorageService::new(Box::new(backend.clone()), Encryptor::ephemeral().unwrap())
-                .with_concurrency(ConcurrencyLimiter::new(limit));
+        let service = StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap())
+            .with_concurrency(ConcurrencyLimiter::new(limit));
         (service, backend)
     }
 
@@ -1219,7 +1223,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
         let backend = Box::new(InMemoryBackend::new("cap"));
-        let service = StorageService::new(backend, Encryptor::ephemeral().unwrap())
+        let service = StorageService::new(backend, Cipher::ephemeral().unwrap())
             .with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
     }
@@ -1252,7 +1256,7 @@ mod tests {
     async fn permits_released_after_panic() {
         let service = StorageService::new(
             Box::new(TestBackend::new(PanicOnGet)),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         )
         .with_concurrency(ConcurrencyLimiter::new(1));
 
@@ -1287,7 +1291,7 @@ mod tests {
     async fn resumable_create_declines_zero_length() {
         let service = StorageService::new(
             Box::new(TestBackend::new(ResumableTokenHooks::default())),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         );
         let id = ObjectId::new(make_context(), "resumable".into());
 
@@ -1319,7 +1323,7 @@ mod tests {
         let hooks = ResumableTokenHooks::default();
         let service = StorageService::new(
             Box::new(TestBackend::new(hooks.clone())),
-            Encryptor::ephemeral().unwrap(),
+            Cipher::ephemeral().unwrap(),
         );
         let id = ObjectId::new(make_context(), "resumable".into());
 
@@ -1351,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn configured_encryption_only_crosses_the_service_boundary() -> Result<()> {
         let hooks = ResumableTokenHooks::default();
-        let encryption = Encryptor::new(
+        let encryption = Cipher::new(
             "v1",
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
@@ -1375,7 +1379,7 @@ mod tests {
     #[tokio::test]
     async fn configured_encryption_rejects_plaintext_tokens() {
         let hooks = ResumableTokenHooks::default();
-        let encryption = Encryptor::new(
+        let encryption = Cipher::new(
             "v1",
             std::collections::BTreeMap::from([("v1".into(), vec![7; 32])]),
         )
@@ -1386,7 +1390,10 @@ mod tests {
         let result = service
             .upload_offset(id, EncryptedSessionToken::new(b"backend token"))
             .await;
-        assert!(result.is_err_and(|error| error.kind() == ErrorKind::UnknownUploadSession));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownUploadSession);
+        assert_eq!(error.to_string(), "unknown upload session");
+        assert!(error.source().is_none());
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());
     }
 }
