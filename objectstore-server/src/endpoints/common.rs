@@ -148,6 +148,7 @@ impl ApiError {
                 ServiceErrorKind::BackendFailure
                 | ServiceErrorKind::CorruptData
                 | ServiceErrorKind::Panic
+                | ServiceErrorKind::UnexpectedTombstone
                 | ServiceErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             },
 

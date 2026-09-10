@@ -84,6 +84,8 @@ pub enum ErrorKind {
     BackendUnavailable,
     /// A service task panicked.
     Panic,
+    /// A redirect tombstone was encountered by a read that does not support tombstones.
+    UnexpectedTombstone,
     /// Persisted or remote data is corrupt.
     CorruptData,
     /// An unexpected internal service failure occurred.
@@ -120,6 +122,7 @@ impl fmt::Display for ErrorKind {
             Self::BackendUnavailable => f.write_str("backend unavailable"),
             Self::CorruptData => f.write_str("corrupt stored data"),
             Self::Panic => f.write_str("service task panicked"),
+            Self::UnexpectedTombstone => f.write_str("unexpected tombstone"),
             Self::Internal => f.write_str("internal service error"),
         }
     }
@@ -201,6 +204,7 @@ impl Error {
             // All other errors are service or backend failures. These become Sentry errors.
             ErrorKind::BackendFailure => Level::ERROR,
             ErrorKind::Panic => Level::ERROR,
+            ErrorKind::UnexpectedTombstone => Level::ERROR,
             ErrorKind::CorruptData => Level::ERROR,
             ErrorKind::Internal => Level::ERROR,
         }
