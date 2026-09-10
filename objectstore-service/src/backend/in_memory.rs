@@ -138,10 +138,7 @@ impl super::common::Backend for InMemoryBackend {
         match entry {
             None => Ok(None),
             Some(entry) if entry.is_expired(SystemTime::now()) => Ok(None),
-            Some(StoreEntry::Tombstone(_)) => Err(Error::new(
-                ErrorKind::Internal,
-                "unexpected in-memory tombstone",
-            )),
+            Some(StoreEntry::Tombstone(_)) => Err(ErrorKind::UnexpectedTombstone.into()),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
                 metadata.size = Some(bytes.len());
@@ -695,6 +692,19 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert!(
+            backend
+                .get_object(&id, None)
+                .await
+                .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
+        );
+        assert!(
+            backend
+                .get_metadata(&id)
+                .await
+                .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
+        );
 
         let new_expiry = old_expiry + Duration::from_hours(1);
         assert!(

@@ -1020,10 +1020,7 @@ impl Backend for BigTableBackend {
             TieredGet::Object(metadata, content_range, payload) => {
                 Ok(Some((metadata, content_range, payload)))
             }
-            TieredGet::Tombstone(_) => Err(Error::new(
-                ErrorKind::Internal,
-                "unexpected Bigtable tombstone",
-            )),
+            TieredGet::Tombstone(_) => Err(ErrorKind::UnexpectedTombstone.into()),
             TieredGet::NotFound => Ok(None),
         }
     }
@@ -1032,10 +1029,7 @@ impl Backend for BigTableBackend {
     async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
         match self.get_tiered_metadata(id).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
-            TieredMetadata::Tombstone(_) => Err(Error::new(
-                ErrorKind::Internal,
-                "unexpected Bigtable tombstone",
-            )),
+            TieredMetadata::Tombstone(_) => Err(ErrorKind::UnexpectedTombstone.into()),
             TieredMetadata::NotFound => Ok(None),
         }
     }
@@ -2155,13 +2149,13 @@ mod tests {
             backend
                 .get_object(&hv_id, None)
                 .await
-                .is_err_and(|error| error.kind() == ErrorKind::Internal)
+                .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
         assert!(
             backend
                 .get_metadata(&hv_id)
                 .await
-                .is_err_and(|error| error.kind() == ErrorKind::Internal)
+                .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
 
         // Idempotent retry: retry with the same target succeeds
