@@ -140,6 +140,12 @@ impl ResumableUpload {
             upload: self.clone(),
         }
     }
+
+    fn request(&self, method: Method) -> crate::Result<reqwest::RequestBuilder> {
+        let token = self.token.to_base64url();
+        self.session
+            .resumable_request(method, &self.key, ("session", &token))
+    }
 }
 
 /// A builder for [`Session::create_upload`].
@@ -221,7 +227,7 @@ impl CreateResumableUploadBuilder {
         };
         let request = self
             .session
-            .resumable_request_url(
+            .resumable_request(
                 method,
                 self.key.as_deref().unwrap_or_default(),
                 ("upload_type", "resumable"),
@@ -253,12 +259,7 @@ impl UploadProgressBuilder {
     pub async fn send(self) -> crate::Result<UploadProgress> {
         let response = self
             .upload
-            .session
-            .resumable_request_url(
-                Method::PUT,
-                &self.upload.key,
-                ("session", &self.upload.token.to_base64url()),
-            )?
+            .request(Method::PUT)?
             .header(HEADER_UPLOAD_OFFSET, "*")
             .send()
             .await?;
@@ -289,12 +290,7 @@ impl PutChunkBuilder {
         let content_length = self.chunk.len();
         let response = self
             .upload
-            .session
-            .resumable_request_url(
-                Method::PUT,
-                &self.upload.key,
-                ("session", &self.upload.token.to_base64url()),
-            )?
+            .request(Method::PUT)?
             .header(HEADER_UPLOAD_OFFSET, self.offset.to_string())
             .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(self.chunk)
@@ -313,16 +309,7 @@ pub struct CancelUploadBuilder {
 impl CancelUploadBuilder {
     /// Cancels this upload and discards any bytes already uploaded.
     pub async fn send(self) -> crate::Result<()> {
-        let response = self
-            .upload
-            .session
-            .resumable_request_url(
-                Method::DELETE,
-                &self.upload.key,
-                ("session", &self.upload.token.to_base64url()),
-            )?
-            .send()
-            .await?;
+        let response = self.upload.request(Method::DELETE)?.send().await?;
         if response.status() == StatusCode::NO_CONTENT {
             Ok(())
         } else {

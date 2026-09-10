@@ -584,7 +584,7 @@ impl Session {
     }
 
     #[cfg(feature = "resumable-upload-api")]
-    pub(crate) fn resumable_request_url(
+    pub(crate) fn resumable_request(
         &self,
         method: reqwest::Method,
         object_key: &str,
