@@ -368,16 +368,19 @@ fn parse_error_response(response: Response, operation: &str) -> Error {
         return ResumableUploadError::OffsetMismatch { offset }.into();
     }
 
+    match response.status() {
+        StatusCode::GONE => return ResumableUploadError::Gone.into(),
+        StatusCode::NOT_FOUND => return ResumableUploadError::NotFound.into(),
+        StatusCode::NOT_IMPLEMENTED => return ResumableUploadError::Declined.into(),
+        _ => {}
+    }
+
     if let Err(err) = response.error_for_status_ref() {
         return Error::Reqwest(err);
     }
 
-    match response.status() {
-        StatusCode::GONE => ResumableUploadError::Gone.into(),
-        StatusCode::NOT_FOUND => ResumableUploadError::NotFound.into(),
-        StatusCode::NOT_IMPLEMENTED => ResumableUploadError::Declined.into(),
-        status => crate::Error::MalformedResponse(format!(
-            "unexpected HTTP status {status} while {operation}"
-        )),
-    }
+    crate::Error::MalformedResponse(format!(
+        "unexpected HTTP status {} while {operation}",
+        response.status()
+    ))
 }

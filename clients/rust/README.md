@@ -150,9 +150,9 @@ If the request fails midway, it will be possible to resume it from the persisted
 
 **Note:** This feature flag exposes a low-level API that maps directly to the server API and
 requires appropriate manual handling of different states and error scenarios.
-Therefore, this API should only be used for advanced usecases that demand it.
-In a future release of `objectstore-client`, the resumable uplods API will be used
-under the hood for elegible `put` calls.
+Therefore, this API should only be used for advanced use cases that demand it.
+In a future release of `objectstore-client`, the resumable uploads API will be used
+under the hood for eligible `put` calls.
 
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
@@ -239,7 +239,7 @@ Use `upload.key()` and `upload.token()` to resume after a process restart:
 ```rust,ignore
 let upload = session.resume_upload(saved_key, saved_token);
 
-let offset = upload.progress().send().await?;
+let progress = upload.progress().send().await?;
 ```
 
 or cancel the upload:
