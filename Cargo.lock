@@ -3004,6 +3004,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "ring",
+ "same-file",
  "sentry",
  "serde",
  "serde_json",
