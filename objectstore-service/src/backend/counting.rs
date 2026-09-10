@@ -91,8 +91,7 @@ impl Backend for CountingBackend {
     }
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        // Renewal is an implementation detail of the original client read and
-        // must not add another client-operation COGS unit.
+        count(&id.context.usecase);
         self.inner.set_expiry(id, expire_at).await
     }
 
