@@ -1,18 +1,16 @@
 //! Local filesystem backend for development and testing.
 //!
-//! Mutations of the same object are coordinated across backend instances and cooperating processes
-//! by advisory lock files under `.locks`. Complete object files are published by atomically
-//! renaming same-directory drafts, so readers observe either the previous or next complete file.
-//! Unpublished drafts are removed automatically when dropped.
+//! Complete object files are published by atomically renaming same-directory drafts, so readers
+//! observe either the previous or next complete file. Unpublished drafts are removed automatically
+//! when dropped.
 //!
-//! The first two bytes of the BLAKE3 hash of an object's storage path select one of 65,536
-//! permanent lock slots under `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
-//! Files are created lazily; unrelated objects that hash to the same slot serialize mutations.
-//! Slot files must never be removed while writers are running. All cooperating writers must use
-//! the same mapping; stop writers using the old per-object layout before upgrading.
+//! To avoid races on metadata and expiry updates, this backend uses locks placed under `.locks/` to
+//! synchronize mutations across backend instances and cooperating processes. The first two bytes of
+//! the BLAKE3 hash of an object's storage path select one of 65,536 permanent lock slots under
+//! `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
+//!
 //! Shared filesystems are supported only when locks propagate across the cluster, pathname
-//! visibility is coherent, and rename is atomic. Locks are advisory, so all writers must cooperate.
-//! Each backend instance caps its contribution to blocking-pool occupancy from lock waiters.
+//! visibility is coherent, and rename is atomic.
 
 use std::fs::File;
 use std::io;
