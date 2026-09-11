@@ -5,14 +5,16 @@
 //! renaming same-directory drafts, so readers observe either the previous or next complete file.
 //! Unpublished drafts are removed automatically when dropped.
 //!
-//! Lock files normally remain for the lifetime of their object. Deletion optimistically unlinks a
-//! lock while its handle remains locked; a waiter on that retired file detects that its identity no
-//! longer matches the pathname and retries. This retirement scheme relies on Linux and macOS
-//! allowing an open file to be unlinked. Shared filesystems are supported only when locks propagate
-//! across the cluster, file identities are stable, pathname visibility is coherent, and rename is
-//! atomic. Locks are advisory, so all writers must cooperate. Each backend instance caps its
-//! contribution to blocking-pool occupancy from lock waiters.
+//! The first two bytes of the BLAKE3 hash of an object's storage path select one of 65,536
+//! permanent lock slots under `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
+//! Files are created lazily; unrelated objects that hash to the same slot serialize mutations.
+//! Slot files must never be removed while writers are running. All cooperating writers must use
+//! the same mapping; stop writers using the old per-object layout before upgrading.
+//! Shared filesystems are supported only when locks propagate across the cluster, pathname
+//! visibility is coherent, and rename is atomic. Locks are advisory, so all writers must cooperate.
+//! Each backend instance caps its contribution to blocking-pool occupancy from lock waiters.
 
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -211,7 +213,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        let guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
@@ -225,9 +227,6 @@ impl Backend for LocalFsBackend {
             }
         }
 
-        if let Err(error) = guard.retire().await {
-            objectstore_log::warn!(!!&error, "Failed to retire local-fs object lock");
-        }
         Ok(())
     }
 }
@@ -559,11 +558,6 @@ struct ObjectLocks {
     blocking_waiters: Arc<Semaphore>,
 }
 
-struct ObjectGuard {
-    handle: same_file::Handle,
-    path: PathBuf,
-}
-
 impl ObjectLocks {
     pub fn new(storage_root: &Path) -> Self {
         Self {
@@ -572,8 +566,17 @@ impl ObjectLocks {
         }
     }
 
-    pub async fn acquire(&self, id: &ObjectId) -> Result<ObjectGuard> {
-        let path = self.root.join(id.as_storage_path().to_string());
+    fn path(&self, id: &ObjectId) -> PathBuf {
+        let hash = blake3::hash(id.as_storage_path().to_string().as_bytes());
+        let bytes = hash.as_bytes();
+        self.root
+            .join(format!("{:02x}", bytes[0]))
+            .join(format!("{:02x}", bytes[1]))
+    }
+
+    /// Acquires a slot lock, released when the returned file is dropped.
+    pub async fn acquire(&self, id: &ObjectId) -> Result<File> {
+        let path = self.path(id);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .context(
@@ -581,71 +584,26 @@ impl ObjectLocks {
                 "creating local-fs object lock directory",
             )?;
 
-        loop {
-            let path = path.clone();
-
-            // Limit how many spawn_blocking calls can wait on a lock concurrently. This prevents
-            // deadlocks if all blocking tasks are waiting on the lock.
-            let permit = Arc::clone(&self.blocking_waiters)
-                .acquire_owned()
-                .await
-                .expect("local-fs lock semaphore is never closed");
-
-            let guard = tokio::task::spawn_blocking(move || -> io::Result<Option<ObjectGuard>> {
-                let _permit = permit;
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(&path)?;
-                file.lock()?;
-
-                let guard = ObjectGuard {
-                    handle: same_file::Handle::from_file(file)?,
-                    path,
-                };
-                if guard.is_current()? {
-                    Ok(Some(guard))
-                } else {
-                    Ok(None)
-                }
-            })
+        // Leave blocking-pool capacity available for the current lock holder's filesystem work.
+        let permit = Arc::clone(&self.blocking_waiters)
+            .acquire_owned()
             .await
-            .context(ErrorKind::Internal, "waiting for local-fs object lock")?
-            .context(ErrorKind::BackendFailure, "acquiring local-fs object lock")?;
+            .expect("local-fs lock semaphore is never closed");
 
-            if let Some(guard) = guard {
-                return Ok(guard);
-            }
-        }
-    }
-}
-
-impl ObjectGuard {
-    fn is_current(&self) -> io::Result<bool> {
-        match same_file::Handle::from_path(&self.path) {
-            Ok(current) => Ok(self.handle == current),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub async fn retire(self) -> Result<()> {
-        tokio::task::spawn_blocking(move || {
-            if !self.is_current()? {
-                return Err(io::Error::other(
-                    "local-fs object lock pathname has changed",
-                ));
-            }
-            std::fs::remove_file(&self.path)
+        tokio::task::spawn_blocking(move || -> io::Result<File> {
+            let _permit = permit;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            file.lock()?;
+            Ok(file)
         })
         .await
-        .context(
-            ErrorKind::Internal,
-            "waiting to retire local-fs object lock",
-        )?
-        .context(ErrorKind::BackendFailure, "retiring local-fs object lock")
+        .context(ErrorKind::Internal, "waiting for local-fs object lock")?
+        .context(ErrorKind::BackendFailure, "acquiring local-fs object lock")
     }
 }
 
@@ -808,6 +766,7 @@ fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -861,61 +820,77 @@ mod tests {
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
 
-        let lock_path = tempdir
-            .path()
-            .join(".locks")
-            .join(id.as_storage_path().to_string());
+        let lock_path = backend.locks.path(&id);
         assert!(lock_path.exists());
         backend.delete_object(&id).await.unwrap();
-        assert!(!lock_path.exists());
+        assert!(lock_path.exists());
     }
 
     #[tokio::test]
-    async fn object_locks_coordinate_by_object_and_reject_retired_files() {
+    async fn object_locks_coordinate_by_slot() {
         let tempdir = tempfile::tempdir().unwrap();
         let first_locks = ObjectLocks::new(tempdir.path());
         let second_locks = ObjectLocks::new(tempdir.path());
-        let first_id = make_id();
-        let second_id = make_id();
+        let mut slots = HashMap::new();
+        let (first_id, colliding_id) = (0..=65_536)
+            .find_map(|key| {
+                let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
+                let path = first_locks.path(&id);
+                slots.insert(path, id.clone()).map(|first| (first, id))
+            })
+            .expect("65,537 keys must collide in 65,536 slots");
+        let lock_path = first_locks.path(&first_id);
+        let other_id = slots
+            .values()
+            .find(|id| first_locks.path(id) != lock_path)
+            .unwrap();
+        assert_eq!(second_locks.path(&colliding_id), lock_path);
 
         let first_guard = first_locks.acquire(&first_id).await.unwrap();
-        let lock_path = tempdir
-            .path()
-            .join(".locks")
-            .join(first_id.as_storage_path().to_string());
-        let stale_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-
-        let mut same_object_waiter =
-            tokio::spawn(async move { second_locks.acquire(&first_id).await.unwrap() });
+        let mut waiter =
+            tokio::spawn(async move { second_locks.acquire(&colliding_id).await.unwrap() });
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut same_object_waiter)
+            tokio::time::timeout(Duration::from_millis(50), &mut waiter)
                 .await
                 .is_err()
         );
 
-        let second_guard =
-            tokio::time::timeout(Duration::from_secs(1), first_locks.acquire(&second_id))
+        let other_guard =
+            tokio::time::timeout(Duration::from_secs(1), first_locks.acquire(other_id))
                 .await
                 .unwrap()
                 .unwrap();
-        drop(second_guard);
-
-        first_guard.retire().await.unwrap();
-        let stale_guard = ObjectGuard {
-            handle: same_file::Handle::from_file(stale_file).unwrap(),
-            path: lock_path,
-        };
-
-        let current_guard = tokio::time::timeout(Duration::from_secs(1), same_object_waiter)
+        drop(other_guard);
+        drop(first_guard);
+        let guard = tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .unwrap()
             .unwrap();
-        assert!(!stale_guard.is_current().unwrap());
-        assert!(current_guard.is_current().unwrap());
+        drop(guard);
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn missing_object_expiry_does_not_block_descendant() {
+        let (_tempdir, backend) = make_backend();
+        let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
+        assert!(
+            !backend
+                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+        let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
+        backend
+            .put_object(&descendant, &Metadata::default(), stream::single("payload"))
+            .await
+            .unwrap();
+        let (_, _, payload) = backend
+            .get_object(&descendant, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
     }
 
     #[tokio::test]

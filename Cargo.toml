@@ -82,7 +82,6 @@ regex = "1.12.4"
 reqwest = { version = "0.13.4", default-features = false }
 ring = "0.17.14"
 rustls = { version = "0.23.40", default-features = false }
-same-file = "1.0.6"
 secrecy = "0.10.3"
 sentry = "0.48.3"
 sentry-options = "1.2.4"
