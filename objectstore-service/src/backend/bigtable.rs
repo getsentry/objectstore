@@ -749,7 +749,7 @@ impl RowData {
 
     /// Returns `true` if this row is expired as of the given `time`.
     ///
-    /// Only applies to rows with an expiration policy set.
+    /// Only applies to rows with an expiration deadline.
     fn expires_before(&self, time: SystemTime) -> bool {
         self.time_expires().is_some_and(|ts| ts < time)
     }

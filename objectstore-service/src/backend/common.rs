@@ -378,7 +378,7 @@ impl TieredWrite {
 /// The in-place operation performed by [`HighVolumeBackend::compare_and_update`].
 #[derive(Clone, Debug)]
 pub enum TieredUpdate {
-    /// Extend the deadline while preserving the policy, payload, and other metadata.
+    /// Extend the deadline while preserving all other stored data.
     SetExpiry(SystemTime),
 }
 

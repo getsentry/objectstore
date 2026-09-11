@@ -530,17 +530,14 @@ impl Backend for TieredStorage {
                 // NOTE: If this fails, LT may remain extended while the redirect
                 // becomes unreachable earlier. Rolling LT back could interfere
                 // with another renewal that succeeded concurrently.
-                let extended = self
-                    .inner
+                self.inner
                     .high_volume
                     .compare_and_update(
                         id,
                         Some(&tombstone.target),
                         TieredUpdate::SetExpiry(expire_at),
                     )
-                    .await?;
-
-                Ok(extended)
+                    .await
             }
         }
     }
@@ -882,7 +879,7 @@ impl MultipartUploadBackend for TieredStorage {
         };
 
         // 3. Retrieve the metadata of the object, which was determined at initiation time, to
-        //    get the expiration policy.
+        //    get its expiration deadline and size.
         //
         //    This also serves as an existence check to understand if the LT revision was actually
         //    created successfully in this or a previous attempt, in which case we just need to
