@@ -572,7 +572,7 @@ mod tests {
             _metadata: &Metadata,
             _total_length: NonZeroU64,
         ) -> Result<Option<BackendToken>> {
-            Ok(Some("backend token".to_owned()))
+            Ok(Some(BackendToken::new("backend token".to_owned())))
         }
 
         async fn upload_offset(
@@ -581,7 +581,10 @@ mod tests {
             _id: &ObjectId,
             token: &BackendToken,
         ) -> Result<UploadProgress> {
-            self.seen_tokens.lock().unwrap().push(token.to_owned());
+            self.seen_tokens
+                .lock()
+                .unwrap()
+                .push(token.as_str().to_owned());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }

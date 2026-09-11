@@ -382,6 +382,8 @@ impl TieredStorage {
 
 #[async_trait::async_trait]
 impl Backend for TieredStorage {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         "tiered"
     }

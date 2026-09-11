@@ -320,6 +320,8 @@ impl S3CompatibleBackend<NoToken> {
 
 #[async_trait::async_trait]
 impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         "s3-compatible"
     }

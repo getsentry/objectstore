@@ -103,6 +103,8 @@ impl LocalFsBackend {
 
 #[async_trait::async_trait]
 impl Backend for LocalFsBackend {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         "local-fs"
     }

@@ -66,6 +66,8 @@ impl CountingBackend {
 
 #[async_trait::async_trait]
 impl Backend for CountingBackend {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }

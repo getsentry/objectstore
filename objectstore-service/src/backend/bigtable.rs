@@ -987,6 +987,8 @@ impl BigTableBackend {
 
 #[async_trait::async_trait]
 impl Backend for BigTableBackend {
+    type SessionToken = ();
+
     fn name(&self) -> &'static str {
         "bigtable"
     }
