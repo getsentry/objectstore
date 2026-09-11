@@ -11,22 +11,23 @@
 //! | `p`    | `fg`/`fm` | Compressed payload bytes    | Object row only    |
 //! | `m`    | `fg`/`fm` | [`Metadata`] JSON           | Object row only    |
 //! | `r`    | `fg`/`fm` | Redirect path to LT storage | Tombstone row only |
-//! | `t`    | `fg`/`fm` | [`Tombstone`] metadata JSON | Tombstone row only |
 //!
 //! The `r` column signals a tombstone row: its **value** is the long-term `ObjectId`
 //! serialized via `as_storage_path()`. Callers can resolve the LT object directly from the
-//! `r` value without reconstructing it from the row key.
+//! `r` value without reconstructing it from the row key. Its column family and timestamp
+//! carry the tombstone's concrete expiration deadline.
 //!
-//! `p`/`m` and `r`/`t` are mutually exclusive. Every write begins with a `DeleteFromRow`
+//! `p`/`m` and `r` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
 //!
 //! ## Legacy Tombstone Format
 //!
-//! Tombstones written before the `r`/`t` column layout used the object-row format with an
+//! Tombstones written before the `r` column layout used the object-row format with an
 //! empty `p` column and `"is_redirect_tombstone": true` in the `m` JSON. Both formats are
 //! supported for reading. A `bigtable.legacy_tombstone_read` metric is emitted on each legacy
 //! read. Legacy tombstones expire naturally by TTL/GC; a successful conditional
-//! expiry extension upgrades them to the new format.
+//! expiry extension upgrades them to the `r` format. Tombstone metadata in the historical `t`
+//! column is ignored; the corresponding `r` cell contains all information needed by readers.
 
 use std::fmt;
 use std::future::Future;
@@ -37,7 +38,7 @@ use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell}
 use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
-use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use serde::{Deserialize, Serialize};
 use tonic::Code;
@@ -181,10 +182,8 @@ const COLUMN_PAYLOAD: &[u8] = b"p";
 const COLUMN_METADATA: &[u8] = b"m";
 /// Column that stores the redirect path for tombstone rows.
 const COLUMN_REDIRECT: &[u8] = b"r";
-/// Column that stores [`TombstoneMeta`] JSON for tombstone rows.
-const COLUMN_TOMBSTONE_META: &[u8] = b"t";
-/// Regex to match all non-payload columns (`m`, `r`, `t`) for metadata-only reads.
-const FILTER_META: &[u8] = b"^[mrt]$";
+/// Regex to match all non-payload columns (`m`, `r`) for metadata-only reads.
+const FILTER_META: &[u8] = b"^[mr]$";
 
 /// Column family that uses timestamp-based garbage collection.
 ///
@@ -545,7 +544,7 @@ enum MutatePredicate {
     Exclude(v2::RowFilter),
 }
 
-/// Creates a row filter that reads all non-payload columns (`m`, `r`, `t`).
+/// Creates a row filter that reads all non-payload columns (`m`, `r`).
 ///
 /// Used by metadata-only reads to avoid fetching the (potentially large) payload column
 /// while still being able to detect both new- and legacy-format tombstones.
@@ -628,39 +627,14 @@ fn row_size(path: &[u8], mutations: &[v2::Mutation]) -> u64 {
     (path.len() + cells) as u64
 }
 
-/// The moment a row written now under `policy` is expected to be reclaimed.
-///
-/// Returns `None` for [`ExpirationPolicy::Manual`], which never expires on its own.
-#[cfg(test)]
-fn expiry_from_policy(policy: ExpirationPolicy, now: SystemTime) -> Option<SystemTime> {
-    policy.expires_in().map(|ttl| now + ttl)
-}
-
-/// Metadata carried by tombstone rows in the `t` (tombstone-meta) column.
-///
-/// Tombstone-specific metadata evolves independently of object [`Metadata`]. Only fields
-/// that are meaningful on tombstones are included here.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct TombstoneMeta {
-    /// Expiration policy for this tombstone.
-    ///
-    /// Skipped during serialization when set to [`ExpirationPolicy::Manual`].
-    #[serde(default, skip_serializing_if = "ExpirationPolicy::is_manual")]
-    expiration_policy: ExpirationPolicy,
-}
-
-/// Builds the three mutations that write a tombstone row: clear existing data,
-/// then set the redirect sentinel and tombstone-meta cells.
+/// Builds the two mutations that write a tombstone row: clear existing data,
+/// then set the redirect cell.
 ///
 /// Used by both unconditional tombstone writes and the conditional expiry-extension paths.
-fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 3]> {
+fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 2]> {
     let (family, timestamp_micros) = match tombstone.time_expires {
         None => (FAMILY_MANUAL, -1),
         Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
-    };
-
-    let tombstone_meta = TombstoneMeta {
-        expiration_policy: tombstone.expiration_policy,
     };
 
     Ok([
@@ -670,13 +644,6 @@ fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 3]> {
             column_qualifier: COLUMN_REDIRECT.to_owned(),
             timestamp_micros,
             value: tombstone.target.as_storage_path().to_string().into_bytes(),
-        })),
-        mutation(mutation::Mutation::SetCell(mutation::SetCell {
-            family_name: family.to_owned(),
-            column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
-            timestamp_micros,
-            value: serde_json::to_vec(&tombstone_meta)
-                .context(ErrorKind::Internal, "encoding Bigtable tombstone metadata")?,
         })),
     ])
 }
@@ -690,14 +657,10 @@ struct LegacyTombstoneMeta {
     ///
     /// When `true`, this object is a legacy tombstone. This implies:
     ///  - the payload is empty
-    ///  - metadata other than the expiration policy is not meaningful
-    ///  - the `r` and `t` columns are not present
+    ///  - metadata is not meaningful
+    ///  - the `r` column is not present
     #[serde(default)]
     is_redirect_tombstone: bool,
-
-    /// Expiration policy for this tombstone.
-    #[serde(default)]
-    expiration_policy: ExpirationPolicy,
 }
 
 /// Parsed data from a BigTable row's cells.
@@ -710,7 +673,6 @@ enum RowData {
     /// A tombstone row indicating the real payload lives on the long-term backend.
     Tombstone {
         target: Vec<u8>,
-        meta: TombstoneMeta,
         time_expires: Option<SystemTime>,
     },
 }
@@ -724,7 +686,6 @@ impl RowData {
     /// `bigtable.legacy_tombstone_read` metric is emitted on each such read.
     fn from_cells(cells: Vec<RowCell>) -> Result<Self> {
         let mut metadata_opt: Option<Metadata> = None;
-        let mut tombstone_meta_opt: Option<TombstoneMeta> = None;
         let mut redirect_detected = false;
         let mut redirect_target = Vec::new();
         let mut expire_at = None;
@@ -747,12 +708,6 @@ impl RowData {
                 COLUMN_PAYLOAD => {
                     payload = cell.value;
                 }
-                COLUMN_TOMBSTONE_META => {
-                    tombstone_meta_opt = Some(serde_json::from_slice(&cell.value).context(
-                        ErrorKind::CorruptData,
-                        "decoding Bigtable tombstone metadata",
-                    )?);
-                }
                 COLUMN_METADATA => {
                     if let Ok(legacy_meta) =
                         serde_json::from_slice::<LegacyTombstoneMeta>(&cell.value)
@@ -760,9 +715,6 @@ impl RowData {
                     {
                         redirect_detected = true;
                         objectstore_metrics::count!("bigtable.legacy_tombstone_read");
-                        tombstone_meta_opt = Some(TombstoneMeta {
-                            expiration_policy: legacy_meta.expiration_policy,
-                        });
                     } else {
                         metadata_opt = Some(serde_json::from_slice(&cell.value).context(
                             ErrorKind::CorruptData,
@@ -777,7 +729,6 @@ impl RowData {
         Ok(if redirect_detected {
             RowData::Tombstone {
                 target: redirect_target,
-                meta: tombstone_meta_opt.unwrap_or_default(),
                 time_expires: expire_at,
             }
         } else {
@@ -1092,12 +1043,10 @@ impl HighVolumeBackend for BigTableBackend {
             match row {
                 Some(RowData::Tombstone {
                     target,
-                    meta,
                     time_expires,
                 }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
-                        expiration_policy: meta.expiration_policy,
                         time_expires,
                     }));
                 }
@@ -1129,12 +1078,10 @@ impl HighVolumeBackend for BigTableBackend {
 
         Ok(match row {
             RowData::Tombstone {
-                meta,
                 target,
                 time_expires,
             } => TieredGet::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
-                expiration_policy: meta.expiration_policy,
                 time_expires,
             }),
             RowData::Object { metadata, payload } => {
@@ -1168,12 +1115,10 @@ impl HighVolumeBackend for BigTableBackend {
 
         Ok(match row {
             RowData::Tombstone {
-                meta,
                 target,
                 time_expires,
             } => TieredMetadata::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
-                expiration_policy: meta.expiration_policy,
                 time_expires,
             }),
             RowData::Object { metadata, .. } => TieredMetadata::Object(metadata),
@@ -1223,7 +1168,6 @@ impl HighVolumeBackend for BigTableBackend {
             }
             RowData::Tombstone {
                 target,
-                meta,
                 time_expires,
             } => {
                 let Some(expected) = current else {
@@ -1243,7 +1187,6 @@ impl HighVolumeBackend for BigTableBackend {
                 let predicate = redirect_expiry_predicate(expected, id, old_expiry)?;
                 let tombstone = Tombstone {
                     target,
-                    expiration_policy: meta.expiration_policy,
                     time_expires: Some(expire_at),
                 };
                 (predicate, tombstone_mutations(&tombstone)?.into())
@@ -1291,12 +1234,10 @@ impl HighVolumeBackend for BigTableBackend {
             match row {
                 Some(RowData::Tombstone {
                     target,
-                    meta,
                     time_expires,
                 }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
-                        expiration_policy: meta.expiration_policy,
                         time_expires,
                     }));
                 }
@@ -1507,6 +1448,7 @@ mod tests {
     #[cfg(feature = "storage-cogs")]
     use objectstore_inventory_tracker::test_utils::DummyProducer;
 
+    use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
@@ -1582,14 +1524,9 @@ mod tests {
         backend: &BigTableBackend,
         id: &ObjectId,
         tombstone: &Tombstone,
-        now: SystemTime,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mut tombstone = tombstone.clone();
-        if tombstone.time_expires.is_none() {
-            tombstone.time_expires = expiry_from_policy(tombstone.expiration_policy, now);
-        }
-        let mutations = tombstone_mutations(&tombstone)?;
+        let mutations = tombstone_mutations(tombstone)?;
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -1629,8 +1566,7 @@ mod tests {
         Ok(())
     }
 
-    /// Writes a new-format tombstone row with an empty `r` value directly,
-    /// simulating rows written by code before this change.
+    /// Writes a historical `r`/`t` tombstone row with an empty `r` value directly.
     async fn write_empty_redirect_tombstone(
         backend: &BigTableBackend,
         id: &ObjectId,
@@ -1645,7 +1581,7 @@ mod tests {
             })),
             mutation(mutation::Mutation::SetCell(mutation::SetCell {
                 family_name: FAMILY_MANUAL.to_owned(),
-                column_qualifier: COLUMN_TOMBSTONE_META.to_owned(),
+                column_qualifier: b"t".to_vec(),
                 timestamp_micros: -1,
                 value: b"{}".to_vec(),
             })),
@@ -1864,10 +1800,8 @@ mod tests {
             &id,
             &Tombstone {
                 target: target.clone(),
-                expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
                 time_expires: Some(old_expiry),
             },
-            SystemTime::now(),
         )
         .await?;
 
@@ -1991,10 +1925,9 @@ mod tests {
         let lt_id = ObjectId::random(hv_id.context().clone());
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &hv_id, &tombstone).await?;
 
         match backend.get_tiered_object(&hv_id, None).await? {
             TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id),
@@ -2042,10 +1975,9 @@ mod tests {
         let lt_id = ObjectId::random(hv_id.context().clone());
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &hv_id, &tombstone).await?;
         let result = backend
             .put_non_tombstone(&hv_id, &metadata, Bytes::new())
             .await?;
@@ -2089,10 +2021,9 @@ mod tests {
         let id = make_id();
         let tombstone = Tombstone {
             target: id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &tombstone).await?;
         let tombstone = backend
             .delete_non_tombstone(&id)
             .await?
@@ -2120,11 +2051,12 @@ mod tests {
 
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let expiration_policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        let time_expires = Some(persisted_expiry(
+            SystemTime::now() + Duration::from_hours(1),
+        ));
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy,
-            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            time_expires,
         };
 
         // First create succeeds.
@@ -2133,12 +2065,12 @@ mod tests {
             .await?;
         assert!(committed, "expected CAS success on empty row");
 
-        // Tiered reads must see the tombstone with correct target and policy.
+        // Tiered reads must see the tombstone with the correct target and deadline.
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
             panic!("expected TieredMetadata::Tombstone");
         };
         assert_eq!(t.target, lt_id, "target must round-trip via r column");
-        assert_eq!(t.expiration_policy, expiration_policy);
+        assert_eq!(t.time_expires, time_expires);
         match backend.get_tiered_object(&hv_id, None).await? {
             TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "round-trip via r column"),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
@@ -2179,15 +2111,13 @@ mod tests {
 
         let tombstone = Tombstone {
             target: old_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &hv_id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &hv_id, &tombstone).await?;
 
         // Wrong target: CAS fails, tombstone unchanged.
         let write = TieredWrite::Tombstone(Tombstone {
             target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         });
         let swapped = backend
@@ -2229,10 +2159,9 @@ mod tests {
 
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &tombstone).await?;
 
         // Wrong target: CAS fails, tombstone intact.
         let write = TieredWrite::Object(Metadata::default(), Bytes::new());
@@ -2294,10 +2223,9 @@ mod tests {
 
         let tombstone = Tombstone {
             target: lt_id.clone(),
-            expiration_policy: ExpirationPolicy::Manual,
             time_expires: None,
         };
-        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &tombstone).await?;
 
         // Wrong target: fails, row preserved.
         let deleted = backend
@@ -2348,20 +2276,20 @@ mod tests {
     async fn test_legacy_tombstone_reads() -> Result<()> {
         let backend = create_test_backend().await?;
 
-        // Manual policy: get_tiered_metadata returns Tombstone(Manual), get_tiered_object returns Tombstone.
+        // Manual policy: get_tiered_metadata returns a non-expiring tombstone.
         let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
 
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
             panic!("expected tombstone");
         };
-        assert_eq!(t.expiration_policy, ExpirationPolicy::Manual);
+        assert_eq!(t.time_expires, None);
         assert!(matches!(
             backend.get_tiered_object(&id, None).await?,
             TieredGet::Tombstone(_)
         ));
 
-        // TTL policy: get_tiered_metadata returns Tombstone with the correct TTL policy.
+        // TTL policy: get_tiered_metadata reconstructs the concrete deadline.
         //
         // A future cell timestamp (now + TTL) is required so `expires_before` does not
         // immediately filter the row.
@@ -2372,12 +2300,12 @@ mod tests {
         let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
             panic!("expected TieredMetadata::Tombstone");
         };
-        assert_eq!(t.expiration_policy, ExpirationPolicy::TimeToLive(ttl));
+        assert!(t.time_expires.is_some());
 
         Ok(())
     }
 
-    /// A conditional extension upgrades a legacy TTI tombstone to `r`/`t`.
+    /// A conditional extension upgrades a legacy TTI tombstone to `r`.
     #[tokio::test]
     async fn test_legacy_tombstone_tti_upgrade() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2511,15 +2439,13 @@ mod tests {
         let old_lt_id = ObjectId::random(id.context().clone());
         let old_tombstone = Tombstone {
             target: old_lt_id,
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: None,
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
         };
-        create_tombstone(&backend, &id, &old_tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &old_tombstone).await?;
 
         let new_lt_id = ObjectId::random(id.context().clone());
         let new_tombstone = Tombstone {
             target: new_lt_id.clone(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
         };
         let committed = backend
@@ -2548,10 +2474,9 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let tombstone = Tombstone {
             target: lt_id,
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: None,
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
         };
-        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &tombstone).await?;
 
         let result = backend
             .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"data"))
@@ -2692,29 +2617,25 @@ mod tests {
     #[test]
     fn row_size_is_nonzero_for_tombstones() {
         let path = b"attachments/org.1/objects/abc";
+        let time_expires = SystemTime::now() + Duration::from_secs(60);
         let tombstone = Tombstone {
             target: ObjectId::from_storage_path("attachments/org.1/objects/abc/0199").unwrap(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(60)),
+            time_expires: Some(time_expires),
         };
         let mutations = tombstone_mutations(&tombstone).unwrap();
 
+        assert_eq!(mutations.len(), 2);
+        let set_cell = mutations[1].mutation.as_ref().unwrap();
+        let mutation::Mutation::SetCell(set_cell) = set_cell else {
+            panic!("expected redirect SetCell mutation");
+        };
+        assert_eq!(set_cell.family_name, FAMILY_GC);
+        assert_eq!(set_cell.column_qualifier, COLUMN_REDIRECT);
+        assert_eq!(
+            set_cell.timestamp_micros,
+            system_time_to_micros(time_expires).unwrap()
+        );
         assert!(row_size(path, &mutations) > path.len() as u64);
-    }
-
-    #[test]
-    fn expiry_from_policy_resolves_only_timeout_policies() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-
-        assert_eq!(expiry_from_policy(ExpirationPolicy::Manual, now), None);
-        assert_eq!(
-            expiry_from_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(30)), now),
-            Some(now + Duration::from_secs(30))
-        );
-        assert_eq!(
-            expiry_from_policy(ExpirationPolicy::TimeToIdle(Duration::from_secs(30)), now),
-            Some(now + Duration::from_secs(30))
-        );
     }
 
     #[cfg(feature = "storage-cogs")]
@@ -2764,10 +2685,9 @@ mod tests {
         let id = make_id();
         let tombstone = Tombstone {
             target: ObjectId::random(id.context().clone()),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: None,
+            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
         };
-        create_tombstone(&backend, &id, &tombstone, SystemTime::now()).await?;
+        create_tombstone(&backend, &id, &tombstone).await?;
         assert_eq!(
             backend.delete_non_tombstone(&id).await?,
             None,
@@ -2802,7 +2722,6 @@ mod tests {
 
         let tombstone = Tombstone {
             target: target.clone(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
             time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
         };
         let written = backend

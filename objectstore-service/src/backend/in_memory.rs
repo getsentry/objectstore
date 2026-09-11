@@ -686,7 +686,6 @@ mod tests {
                 None,
                 TieredWrite::Tombstone(Tombstone {
                     target: target.clone(),
-                    expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
                     time_expires: Some(old_expiry),
                 }),
             )

@@ -4,7 +4,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::time::SystemTime;
 
-use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::UploadProgress;
 
@@ -307,9 +307,6 @@ pub struct Tombstone {
     /// For legacy tombstones with an empty `r` column, the HV backend resolves
     /// this to the HV `ObjectId` itself before surfacing the tombstone to callers.
     pub target: ObjectId,
-
-    /// The expiration policy copied from the original object.
-    pub expiration_policy: ExpirationPolicy,
 
     /// The concrete deadline stored on the redirect.
     pub time_expires: Option<SystemTime>,
