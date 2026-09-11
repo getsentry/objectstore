@@ -56,6 +56,9 @@ pub enum ResumableUploadError {
 }
 
 /// A handle bound to one resumable upload session.
+///
+/// See the [module-level documentation](crate::resumable) for more information about using this
+/// API.
 #[derive(Clone, Debug)]
 pub struct ResumableUpload {
     session: Session,
