@@ -42,6 +42,7 @@ zstd = { workspace = true }
 [features]
 default = ["native-tls", "hickory-dns"]
 multipart = ["dep:base64"]
+resumable-upload-api = []
 
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]

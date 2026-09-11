@@ -583,6 +583,20 @@ impl Session {
         self.prepare_builder(builder)
     }
 
+    #[cfg(feature = "resumable-upload-api")]
+    pub(crate) fn resumable_request(
+        &self,
+        method: reqwest::Method,
+        object_key: &str,
+        query_pair: (&str, &str),
+    ) -> crate::Result<RequestBuilder> {
+        let mut url = self.object_url(object_key);
+        url.query_pairs_mut()
+            .append_pair(query_pair.0, query_pair.1);
+        let builder = self.client.reqwest.request(method, url);
+        self.prepare_builder(builder)
+    }
+
     pub(crate) fn batch_request(&self) -> crate::Result<RequestBuilder> {
         let url = self.batch_url();
         let builder = self.client.reqwest.post(url);

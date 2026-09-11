@@ -943,3 +943,5 @@ async fn batch_head_operations() {
         .unwrap();
     assert!(head_missing.is_none());
 }
+
+// TODO: Add end-to-end coverage for resumable uploads once the local_fs backend supports it.

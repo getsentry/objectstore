@@ -133,6 +133,121 @@ session.put("payload")
     .send().await?;
 ```
 
+### Resumable Upload API
+
+> **Feature flag required:** Enable `resumable-upload-api` to use this API.
+>
+> ```toml
+> objectstore-client = { version = "...", features = ["resumable-upload-api"] }
+> ```
+
+The resumable upload API allows you to upload an object across multiple requests.
+It's suitable for use for particularly large objects, where restarting an upload
+from scratch would be expensive.
+It's recommended to always try to upload the whole object in a single request if
+possible, as that's always the more efficient approach.
+If the request fails midway, it will be possible to resume it from the persisted offset.
+
+**Note:** This feature flag exposes a low-level API that maps directly to the server API and
+requires appropriate manual handling of different states and error scenarios.
+Therefore, this API should only be used for advanced use cases that demand it.
+In a future release of `objectstore-client`, the resumable uploads API will be used
+internally for eligible `put` calls without the need for this feature flag or direct
+interaction with this API.
+
+**Important:** resumable uploads do not automatically compress chunk contents. The `compression`
+setting only records how the object is encoded; the caller must compress the payload accordingly.
+The object length and all offsets refer to the bytes after compression.
+
+```rust,no_run
+#[cfg(feature = "resumable-upload-api")]
+mod example {
+    use bytes::Bytes;
+    use objectstore_client::{Error, ResumableUploadError, Result, Session, UploadProgress};
+
+    async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
+        const KEY: &str = "my-large-object";
+
+        let upload = match session
+            .create_upload(object.len() as u64)
+            .key(KEY)
+            .content_type("application/octet-stream")
+            .compression(None)
+            .send()
+            .await
+        {
+            Ok(upload) => upload,
+            Err(Error::ResumableUpload(ResumableUploadError::Declined)) => {
+                // Objectstore refused the upload creation request for this object.
+                // Fall back to a normal PUT.
+                session
+                    .put(object)
+                    .key(KEY)
+                    .content_type("application/octet-stream")
+                    .compress(None)
+                    .send()
+                    .await?;
+                return Ok(());
+            }
+            // Something else went wrong. Handle the error and retry if appropriate.
+            Err(_error) => todo!(),
+        };
+
+        let mut offset = 0;
+        loop {
+            // Send everything after the authoritative offset.
+            // The first request therefore attempts to upload the whole object in one request.
+            let result = upload
+                .put_chunk(offset, object.slice(offset as usize..))
+                .send()
+                .await;
+
+            offset = match result {
+                Ok(UploadProgress::Complete) => return Ok(()),
+
+                Err(Error::ResumableUpload(error @ ResumableUploadError::Gone))
+                | Err(Error::ResumableUpload(
+                    error @ ResumableUploadError::NotFound,
+                )) => {
+                    // The upload session doesn't exist (anymore).
+                    // The whole upload must be retried.
+                    return Err(error.into());
+                }
+
+                Ok(UploadProgress::Incomplete { offset: next })
+                | Err(Error::ResumableUpload(
+                    ResumableUploadError::OffsetMismatch { offset: next },
+                )) => next,
+
+                // A network error happened, or an unexpected HTTP error status was returned.
+                Err(Error::Reqwest(_)) => {
+                    // You may wish to retry this a bounded amount of times.
+                    match upload.progress().send().await? {
+                        UploadProgress::Complete => return Ok(()),
+                        UploadProgress::Incomplete { offset: next } => next,
+                    }
+                }
+                // Something else went wrong. Handle the error and retry if appropriate.
+                Err(_) => todo!(),
+            };
+        }
+    }
+}
+```
+
+Use `upload.key()` and `upload.token()` to resume after a process restart:
+
+```rust,ignore
+let upload = session.resume_upload(saved_key, saved_token);
+
+let progress = upload.progress().send().await?;
+```
+
+or cancel the upload:
+```rust,ignore
+upload.cancel().send().await?
+```
+
 ### Multipart Upload API
 
 > **Feature flag required:** Enable the `multipart` Cargo feature to use this API.
