@@ -2988,6 +2988,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bigtable_rs",
+ "blake3",
  "bytes",
  "chrono",
  "futures",

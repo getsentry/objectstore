@@ -1,9 +1,18 @@
 //! Local filesystem backend for development and testing.
 //!
-//! Mutations are serialized within a backend instance and publish complete object files by
-//! atomically renaming same-directory drafts. Readers therefore observe either the previous or
-//! next complete object file. Unpublished drafts are removed automatically when dropped.
+//! Complete object files are published by atomically renaming same-directory drafts, so readers
+//! observe either the previous or next complete file. Unpublished drafts are removed automatically
+//! when dropped.
+//!
+//! To avoid races on metadata and expiry updates, this backend uses locks placed under `.locks/` to
+//! synchronize mutations across backend instances and cooperating processes. The first two bytes of
+//! the BLAKE3 hash of an object's storage path select one of 65,536 permanent lock slots under
+//! `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
+//!
+//! Shared filesystems are supported only when locks propagate across the cluster, pathname
+//! visibility is coherent, and rename is atomic.
 
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -15,7 +24,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
@@ -63,18 +72,16 @@ pub struct FileSystemConfig {
 #[derive(Debug)]
 pub struct LocalFsBackend {
     path: PathBuf,
-    // This lock coordinates mutations only within this backend instance. It
-    // does not serialize another backend instance or another process using the
-    // same directory.
-    write_lock: Arc<Mutex<()>>,
+    locks: ObjectLocks,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
     pub fn new(config: FileSystemConfig) -> Self {
+        let locks = ObjectLocks::new(&config.path);
         Self {
             path: config.path,
-            write_lock: Arc::new(Mutex::new(())),
+            locks,
         }
     }
 
@@ -111,8 +118,6 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         stream: ClientStream,
     ) -> Result<PutResponse> {
-        let _guard = self.write_lock.lock().await;
-
         let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
         Self::create_dir_all(&path).await?;
@@ -130,6 +135,8 @@ impl Backend for LocalFsBackend {
                 ),
             })?;
 
+        draft.prepare().await?;
+        let _guard = self.locks.acquire(id).await?;
         draft.publish().await
     }
 
@@ -171,7 +178,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
-        let _guard = self.write_lock.lock().await;
+        let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path).await? else {
@@ -197,23 +204,27 @@ impl Backend for LocalFsBackend {
             "copying local-fs object payload for expiry extension",
         )?;
 
+        draft.prepare().await?;
         draft.publish().await?;
         Ok(true)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        let _guard = self.write_lock.lock().await;
+        let _guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
-        let result = tokio::fs::remove_file(path).await;
-        if let Err(e) = &result
-            && e.kind() == io::ErrorKind::NotFound
-        {
-            objectstore_log::debug!("Object not found");
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                objectstore_log::debug!("Object not found");
+            }
+            result => {
+                result.context(ErrorKind::BackendFailure, "deleting local-fs object")?;
+            }
         }
-        result.context(ErrorKind::BackendFailure, "deleting local-fs object")?;
+
         Ok(())
     }
 }
@@ -501,7 +512,6 @@ impl MultipartUploadBackend for LocalFsBackend {
         }
 
         // Assemble the parts into a draft before publishing the object.
-        let _guard = self.write_lock.lock().await;
         let path = self.path(id);
         Self::create_dir_all(&path).await?;
         let mut draft = Draft::create(&path, &metadata).await?;
@@ -522,7 +532,10 @@ impl MultipartUploadBackend for LocalFsBackend {
             )?;
         }
 
+        draft.prepare().await?;
+        let guard = self.locks.acquire(id).await?;
         draft.publish().await?;
+        drop(guard);
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await.context(
@@ -531,6 +544,64 @@ impl MultipartUploadBackend for LocalFsBackend {
         )?;
 
         Ok(None)
+    }
+}
+
+// Must be lower than the tokio runtime `max_blocking_threads` setting.
+const MAX_BLOCKING_LOCK_WAITERS: usize = 256;
+
+#[derive(Debug)]
+struct ObjectLocks {
+    root: PathBuf,
+    blocking_waiters: Arc<Semaphore>,
+}
+
+impl ObjectLocks {
+    pub fn new(storage_root: &Path) -> Self {
+        Self {
+            root: storage_root.join(".locks"),
+            blocking_waiters: Arc::new(Semaphore::new(MAX_BLOCKING_LOCK_WAITERS)),
+        }
+    }
+
+    fn path(&self, id: &ObjectId) -> PathBuf {
+        let hash = blake3::hash(id.as_storage_path().to_string().as_bytes());
+        let bytes = hash.as_bytes();
+        self.root
+            .join(format!("{:02x}", bytes[0]))
+            .join(format!("{:02x}", bytes[1]))
+    }
+
+    /// Acquires a slot lock, released when the returned file is dropped.
+    pub async fn acquire(&self, id: &ObjectId) -> Result<File> {
+        let path = self.path(id);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object lock directory",
+            )?;
+
+        // Leave blocking-pool capacity available for the current lock holder's filesystem work.
+        let permit = Arc::clone(&self.blocking_waiters)
+            .acquire_owned()
+            .await
+            .expect("local-fs lock semaphore is never closed");
+
+        tokio::task::spawn_blocking(move || -> io::Result<File> {
+            let _permit = permit;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            file.lock()?;
+            Ok(file)
+        })
+        .await
+        .context(ErrorKind::Internal, "waiting for local-fs object lock")?
+        .context(ErrorKind::BackendFailure, "acquiring local-fs object lock")
     }
 }
 
@@ -644,22 +715,26 @@ impl Draft {
         &mut self.writer
     }
 
+    async fn prepare(&mut self) -> Result<()> {
+        self.writer
+            .flush()
+            .await
+            .context(ErrorKind::BackendFailure, "flushing local-fs object draft")?;
+        self.writer
+            .get_ref()
+            .sync_data()
+            .await
+            .context(ErrorKind::BackendFailure, "syncing local-fs object draft")
+    }
+
     async fn publish(self) -> Result<()> {
         let Self {
-            mut writer,
+            writer,
             path,
             target,
         } = self;
 
-        writer
-            .flush()
-            .await
-            .context(ErrorKind::BackendFailure, "flushing local-fs object draft")?;
-        let file = writer.into_inner();
-        file.sync_data()
-            .await
-            .context(ErrorKind::BackendFailure, "syncing local-fs object draft")?;
-        drop(file);
+        drop(writer);
         tokio::task::spawn_blocking(move || path.persist(target))
             .await
             .context(
@@ -689,7 +764,9 @@ fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::num::NonZeroU32;
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
     use bytes::{Bytes, BytesMut};
@@ -740,6 +817,78 @@ mod tests {
             }
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
+
+        let lock_path = backend.locks.path(&id);
+        assert!(lock_path.exists());
+        backend.delete_object(&id).await.unwrap();
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn object_locks_coordinate_by_slot() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let first_locks = ObjectLocks::new(tempdir.path());
+        let second_locks = ObjectLocks::new(tempdir.path());
+        let mut slots = HashMap::new();
+        let (first_id, colliding_id) = (0..=65_536)
+            .find_map(|key| {
+                let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
+                let path = first_locks.path(&id);
+                slots.insert(path, id.clone()).map(|first| (first, id))
+            })
+            .expect("65,537 keys must collide in 65,536 slots");
+        let lock_path = first_locks.path(&first_id);
+        let other_id = slots
+            .values()
+            .find(|id| first_locks.path(id) != lock_path)
+            .unwrap();
+        assert_eq!(second_locks.path(&colliding_id), lock_path);
+
+        let first_guard = first_locks.acquire(&first_id).await.unwrap();
+        let mut waiter =
+            tokio::spawn(async move { second_locks.acquire(&colliding_id).await.unwrap() });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+                .await
+                .is_err()
+        );
+
+        let other_guard =
+            tokio::time::timeout(Duration::from_secs(1), first_locks.acquire(other_id))
+                .await
+                .unwrap()
+                .unwrap();
+        drop(other_guard);
+        drop(first_guard);
+        let guard = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(guard);
+        assert!(lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn missing_object_expiry_does_not_block_descendant() {
+        let (_tempdir, backend) = make_backend();
+        let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
+        assert!(
+            !backend
+                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .await
+                .unwrap()
+        );
+        let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
+        backend
+            .put_object(&descendant, &Metadata::default(), stream::single("payload"))
+            .await
+            .unwrap();
+        let (_, _, payload) = backend
+            .get_object(&descendant, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
     }
 
     #[tokio::test]
