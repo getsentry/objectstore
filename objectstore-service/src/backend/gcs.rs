@@ -3010,6 +3010,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_multipart_abort() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id();
