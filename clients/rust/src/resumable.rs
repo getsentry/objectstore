@@ -273,6 +273,18 @@ impl PutChunkBuilder {
     ///
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
+    ///
+    /// ```rust,ignore
+    /// let offset = match upload.put(offset, chunk).send().await {
+    ///     Ok(UploadProgress::Complete) => return Ok(()),
+    ///     Ok(UploadProgress::Incomplete { offset }) => offset,
+    ///     Err(error @ Error::ResumableUploadUnavailable) => {
+    ///         // The caller must start the entire upload again with a new session.
+    ///         return Err(error);
+    ///     }
+    ///     Err(error) => return Err(error),
+    /// };
+    /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
         let content_length = self.chunk.len();
         let response = self

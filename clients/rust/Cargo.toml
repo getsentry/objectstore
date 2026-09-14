@@ -30,6 +30,7 @@ url = { workspace = true }
 zstd-safe = { workspace = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }

@@ -148,13 +148,6 @@ It's recommended to always try to upload the whole object in a single request if
 possible, as that's always the more efficient approach.
 If the request fails midway, it will be possible to resume it from the persisted offset.
 
-**Note:** This feature flag exposes a low-level API that maps directly to the server API and
-requires appropriate manual handling of different states and error scenarios.
-Therefore, this API should only be used for advanced use cases that demand it.
-In a future release of `objectstore-client`, the resumable uploads API will be used
-internally for eligible `put` calls without the need for this feature flag or direct
-interaction with this API.
-
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
 The object length and all offsets refer to the bytes after compression.
@@ -163,81 +156,33 @@ The object length and all offsets refer to the bytes after compression.
 #![cfg(feature = "resumable-upload-api")]
 
 use bytes::Bytes;
-use objectstore_client::{Error, Result, Session, UploadProgress};
+use anyhow::{Context as _, Result};
+use objectstore_client::{Session, UploadProgress};
 
 async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
-    const KEY: &str = "my-large-object";
-
-    let upload = match session
+    let upload = session
         .create_upload(object.len() as u64)
-        .key(KEY)
+        .key("my-large-object")
         .content_type("application/octet-stream")
-        .compression(None)
         .send()
-        .await
-    {
-        Ok(Some(upload)) => upload,
-        Ok(None) => {
-            // Objectstore declined resumable uploads for this object.
-            // Fall back to a normal PUT.
-            session
-                .put(object)
-                .key(KEY)
-                .content_type("application/octet-stream")
-                .compress(None)
-                .send()
-                .await?;
-            return Ok(());
-        }
-        // Something else went wrong. Handle the error and retry if appropriate.
-        Err(_error) => todo!(),
-    };
+        .await?
+        // Fall back to a regular [`Session:;put`].
+        .context("resumable upload declined for this object")?;
 
     let mut offset = 0;
     loop {
         // Send everything after the authoritative offset.
         // The first request therefore attempts to upload the whole object in one request.
-        let result = upload
+        offset = match upload
             .put(offset, object.slice(offset as usize..))
             .send()
-            .await;
-
-        offset = match result {
-            Ok(UploadProgress::Complete) => return Ok(()),
-
-            Err(error @ Error::ResumableUploadUnavailable) => {
-                // A terminal error occurred. The whole session must be retried.
-                return Err(error);
-            }
-
-            Ok(UploadProgress::Incomplete { offset: next }) => next,
-
-            // A network error happened, or an unexpected HTTP error status was returned.
-            Err(Error::Reqwest(_)) => {
-                // You may wish to retry this a bounded amount of times.
-                match upload.progress().send().await? {
-                    UploadProgress::Complete => return Ok(()),
-                    UploadProgress::Incomplete { offset: next } => next,
-                }
-            }
-            // Something else went wrong. Handle the error and retry if appropriate.
-            Err(_) => todo!(),
+            .await?
+        {
+            UploadProgress::Complete => return Ok(()),
+            UploadProgress::Incomplete { offset: next } => next,
         };
     }
 }
-```
-
-Use `upload.key()` and `upload.token()` to resume after a process restart:
-
-```rust,ignore
-let upload = session.resume_upload(saved_key, saved_token);
-
-let progress = upload.progress().send().await?;
-```
-
-or cancel the upload:
-```rust,ignore
-upload.cancel().send().await?
 ```
 
 ### Multipart Upload API
